@@ -8,6 +8,14 @@ pub type DB_ID = i64;
 pub type EXTRA_ID = u8;
 pub type VEH_TYPE_CD = u32;
 pub type ARENA_UNIQUE_ID = u64;
+pub type NETWORK_ID = u32;
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct PERK_EFFECTS {
+        pub equipment: Vec<AutoString>,
+    }
+}
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
@@ -166,6 +174,7 @@ wgtk::__struct_simple_codec! {
         pub floatArg1: f64,
         pub strArg1: AutoString,
         pub strArg2: AutoString,
+        pub int8Arg1: i8,
     }
 }
 
@@ -225,6 +234,7 @@ wgtk::__struct_simple_codec! {
         pub name: AutoString,
         pub compDescr: AutoString,
         pub outfit: AutoString,
+        pub outfitLevel: u8,
         pub index: u8,
         pub team: u8,
         pub prebattleID: OBJECT_ID,
@@ -232,6 +242,8 @@ wgtk::__struct_simple_codec! {
         pub crewGroups: Vec<u16>,
         pub commanderSkinID: u16,
         pub maxHealth: u16,
+        pub respawnID: u32,
+        pub stFrags: u32,
     }
 }
 
@@ -261,6 +273,7 @@ wgtk::__struct_simple_codec! {
         pub prestigeLevel: i32,
         pub anonymizedPrestigeLevel: i32,
         pub prestigeGradeMarkID: i32,
+        pub stFrags: u32,
     }
 }
 
@@ -282,6 +295,7 @@ wgtk::__struct_simple_codec! {
         pub crewPerks: BOOL,
         pub mapsInDevelopment: BOOL,
         pub postmortemMode: u8,
+        pub commendationsFeedbackEnabled: BOOL,
     }
 }
 
@@ -291,7 +305,6 @@ wgtk::__struct_simple_codec! {
         pub name: AutoString,
         pub attrs: u64,
         pub databaseID: DB_ID,
-        pub centerID: i32,
         pub clanAbbrev: AutoString,
         pub clanDBID: DB_ID,
         pub prebattle: Mailbox,
@@ -300,7 +313,6 @@ wgtk::__struct_simple_codec! {
         pub arenaUniqueID: ARENA_UNIQUE_ID,
         pub team: u8,
         pub tkillRating: f32,
-        pub cybersportRating: Vec<f32>,
         pub globalRating: f32,
         pub igrType: i8,
         pub potapovQuestIDs: Vec<u16>,
@@ -613,7 +625,6 @@ wgtk::__struct_simple_codec! {
     #[derive(Debug)]
     pub struct RESPAWN_INFO {
         pub compDescr: AutoString,
-        pub respawnType: u8,
         pub autoRespawnPiT: f32,
         pub manualRespawnPiT: f32,
         pub respawnZones: Vec<RESPAWN_ZONE>,
@@ -654,6 +665,7 @@ wgtk::__struct_simple_codec! {
         pub vehDisabledSetupSwitches: Vec<u8>,
         pub prestigeLevel: i32,
         pub prestigeGradeMarkID: i32,
+        pub stFrags: u32,
     }
 }
 
@@ -888,6 +900,24 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
+    pub struct VEHICLE_HIT_POINT {
+        pub networkID: NETWORK_ID,
+        pub segment: u64,
+        pub params: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct DYN_ATTACHMENTS_INFO {
+        pub activeSequenceLayer: u8,
+        pub sequenceTime: f32,
+        pub attachmentState: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
     pub struct KILL_CAM_ATTACKER_SPOTTED {
         pub position: Vec3,
         pub rotation: Vec3,
@@ -911,6 +941,7 @@ wgtk::__struct_simple_codec! {
         pub attackerID: OBJECT_ID,
         pub spottedData: KILL_CAM_ATTACKER_SPOTTED,
         pub unspottedData: KILL_CAM_ATTACKER_UNSPOTTED,
+        pub mechanicsInfo: Python,
     }
 }
 
@@ -923,8 +954,9 @@ wgtk::__struct_simple_codec! {
         pub relativeArmor: f32,
         pub victimIsNotSpotted: BOOL,
         pub siegeState: u16,
-        pub damageStickers: Vec<u64>,
+        pub damageStickers: Vec<VEHICLE_HIT_POINT>,
         pub causeOfDeath: AutoString,
+        pub mechanicsInfo: Python,
     }
 }
 
@@ -953,9 +985,11 @@ wgtk::__struct_simple_codec! {
         pub maxPenetrationAngle: f32,
         pub armorProtectionHE: f32,
         pub spallLinerProtectionHE: f32,
+        pub gunInstallationIndex: u8,
+        pub gunIndex: u8,
         pub velocity: Vec3,
         pub shellCompDescr: i32,
-        pub segments: Vec<u64>,
+        pub segments: Vec<VEHICLE_HIT_POINT>,
         pub piercingPower: f32,
         pub nominalPiercingPower: f32,
         pub shellDamageBurstHE: f32,
@@ -1116,6 +1150,7 @@ wgtk::__struct_simple_codec! {
         pub chassisShotDispersionFactorsMovement: f32,
         pub chassisShotDispersionFactorsRotation: f32,
         pub aimingTime: f32,
+        pub gunShotDispersionFactorsAfterShot: f32,
     }
 }
 
@@ -1192,13 +1227,61 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
+    pub struct RECHARGEABLE_NITRO_STATE_STATUS {
+        pub status: u8,
+        pub endTime: f32,
+        pub remainingTime: f32,
+        pub isCharged: BOOL,
+        pub isEmpty: BOOL,
+        pub isBelowThreshold: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
     pub struct AUTO_SHOOT_GUN_STATE_STATUS {
         pub state: u8,
-        pub stateActivationTime: f32,
+        pub rateMultFactor: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct AUTO_SHOOT_GUN_DISPERSION_STATUS {
         pub dispersionFactor: f32,
         pub updateTime: f32,
         pub shotDispersionPerSec: f32,
         pub maxShotDispersion: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct TEMPERATURE_GUN_STATE_STATUS {
+        pub state: u8,
+        pub thermalStateID: u8,
+        pub updateTime: f32,
+        pub directionFactor: f32,
+        pub currentTemperature: f32,
+        pub coolingPerSecFactor: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct POWER_MODE_STATE_STATUS {
+        pub state: u8,
+        pub powerProgress: f32,
+        pub stateActivationTime: f32,
+        pub directionFactor: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct POWER_MODE_TIME_INFO {
+        pub modeThreshold: f32,
+        pub modeDuration: f32,
     }
 }
 
@@ -1274,6 +1357,7 @@ wgtk::__struct_simple_codec! {
         pub totalTime: f32,
         pub prevStage: u8,
         pub stage: u8,
+        pub locked: BOOL,
     }
 }
 
@@ -1316,23 +1400,6 @@ wgtk::__struct_simple_codec! {
         pub vehID: OBJECT_ID,
         pub guid: AutoString,
         pub placed: BOOL,
-    }
-}
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct GAME_OBJECT_STATE {
-        pub id: AutoString,
-        pub state: BOOL,
-    }
-}
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct GAME_OBJECT_ACTIVATION {
-        pub id: AutoString,
-        pub start: f32,
-        pub end: f32,
     }
 }
 
@@ -1410,6 +1477,12 @@ wgtk::__struct_simple_codec! {
         pub badges: Python,
         pub ranked: Vec<u16>,
         pub deathInfo: DEATH_INFO,
+        pub respawnID: u32,
+        pub stFrags: u32,
+        pub frags: i16,
+        pub tkills: i16,
+        pub fogOfWar: u8,
+        pub position: Box<[i16; 2]>,
         pub __generation: u32,
     }
 }
@@ -1543,14 +1616,261 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON79 {
-        pub equipment: Vec<AutoString>,
+    pub struct HEALTH_INFO {
+        pub vehicleID: OBJECT_ID,
+        pub health: u16,
     }
 }
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON172 {
+    pub struct IMPACT_AREA_INFO {
+        pub timeBeforeDamage: f32,
+        pub isVisible: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct LIVE_TAG_INFO {
+        pub tag: u8,
+        pub vehicles: Vec<OBJECT_ID>,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct COMMENDATIONS_STATE {
+        pub vehID: OBJECT_ID,
+        pub messageState: i8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct COMMENDATIONS_BATTLE_STATISTICS {
+        pub vehID: OBJECT_ID,
+        pub commendationsReceived: i8,
+        pub commendationsSent: i8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct FALL_TANKS_EVACUATION_INFO {
+        pub endTime: f32,
+        pub baseTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct GAME_OBJECT_STATE_INFO {
+        pub prefabPath: AutoString,
+        pub recreateMethod: u8,
+        pub networkID: u32,
+        pub parentID: u32,
+        pub active: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct VEHICLE_HIERARCHY_INFO {
+        pub slotName: AutoString,
+        pub networkID: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct BATTLE_FURY_STATE {
+        pub currentLevel: u8,
+        pub maxLevel: u8,
+        pub timeInterval: TIME_INTERVAL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct CONCENTRATION_MODE_STATUS {
+        pub state: u8,
+        pub baseTime: f32,
+        pub endTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct WHEELED_DASH_STATUS {
+        pub state: u8,
+        pub baseTime: f32,
+        pub endTime: f32,
+        pub isReducedCooldown: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ACCURACY_STACKS_STATE {
+        pub curLevel: u8,
+        pub maxLevel: u8,
+        pub timeElapsed: f32,
+        pub timeNextGain: TIME_INTERVAL,
+        pub gainMaxSpdKmh: f32,
+        pub gainTime: f32,
+        pub aimLevelBonus: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct SUPPORT_WEAPON_STATUS {
+        pub state: u8,
+        pub baseTime: f32,
+        pub endTime: f32,
+        pub gunInstallationIndex: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct CLIENT_SHOT_RESULT_DATA {
+        pub vehicleID: u32,
+        pub hitFlags: u32,
+        pub gunInstallationIndex: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct PILLBOX_SIEGE_PUBLIC_STATUS {
+        pub state: u8,
+        pub nextState: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct PILLBOX_SIEGE_STATUS {
+        pub baseTime: f32,
+        pub endTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct CHARGE_SHOT_PUBLIC_STATE {
+        pub flags: u8,
+        pub level: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct CHARGE_SHOT_PRIVATE_STATE {
+        pub flags: u16,
+        pub level: u8,
+        pub endTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct LOW_CHARGE_SHOT_STATE {
+        pub reloadingState: u8,
+        pub baseTime: f32,
+        pub timeLeft: f32,
+        pub endTime: f32,
+        pub lowChargeTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct LOW_CHARGE_SHOT_PUBLIC_STATE {
+        pub visualState: u8,
+        pub fullShotChangeTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct STANCE_DANCE_STATE {
+        pub state: u8,
+        pub energyFight: f32,
+        pub energyTurbo: f32,
+        pub timePassive: TIME_INTERVAL,
+        pub timeSwitch: TIME_INTERVAL,
+        pub timeActiveTurbo: TIME_INTERVAL,
+        pub timeActiveFight: TIME_INTERVAL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct TARGET_DESIGNATOR_STATE {
+        pub state: u8,
+        pub startTime: f32,
+        pub endTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct TARGET_DESIGNATOR_SPOTTED_MARKER {
+        pub creatorID: OBJECT_ID,
+        pub startTime: f32,
+        pub endTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct TARGET_DESIGNATOR_UNSPOTTED_MARKER {
+        pub creatorID: OBJECT_ID,
+        pub targetID: OBJECT_ID,
+        pub point: Vec4,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct GUN_ROTATOR_FIX_ANGLES {
+        pub turretYaw: f32,
+        pub gunPitch: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct STATIONARY_RELOAD_STATUS {
+        pub state: u8,
+        pub baseTime: f32,
+        pub timeLeft: f32,
+        pub gunLockMask: u8,
+        pub sequenceEndTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct PROPELLANT_GUN_STATUS {
+        pub state: u8,
+        pub chargeStageID: u8,
+        pub chargeProgress: f32,
+        pub isOverchargeEnabled: BOOL,
+        pub isSwitchCooldownActive: BOOL,
+        pub updateTimestamp: f32,
+        pub isForbiddenShell: BOOL,
+        pub lastShotTimestamp: f32,
+        pub lastShotCharge: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON155 {
         pub points: Vec<Vec3>,
         pub width: f32,
     }
@@ -1558,15 +1878,16 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON174 {
+    pub struct ANON157 {
         pub position: Vec3,
         pub size: Vec3,
+        pub rotation: Vec3,
     }
 }
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON176 {
+    pub struct ANON159 {
         pub position: Vec3,
         pub radius: Vec3,
     }
@@ -1574,7 +1895,7 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON178 {
+    pub struct ANON161 {
         pub position: Vec3,
         pub text: AutoString,
         pub color: Vec4,
@@ -1584,13 +1905,13 @@ wgtk::__struct_simple_codec! {
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
-    pub struct ANON180 {
+    pub struct ANON163 {
         pub name: AutoString,
         pub version: u32,
         pub destroyTime: f32,
-        pub lines: Vec<ANON172>,
-        pub cubes: Vec<ANON174>,
-        pub spheres: Vec<ANON176>,
-        pub texts: Vec<ANON178>,
+        pub lines: Vec<ANON155>,
+        pub boxes: Vec<ANON157>,
+        pub spheres: Vec<ANON159>,
+        pub texts: Vec<ANON161>,
     }
 }

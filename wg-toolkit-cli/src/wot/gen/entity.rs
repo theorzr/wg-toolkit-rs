@@ -511,7 +511,7 @@ wgtk::__struct_simple_codec! {  // Methods on client
 
     #[derive(Debug)]
     pub struct Avatar_showShotResults {
-        pub a0: Vec<u64>,
+        pub a0: Vec<CLIENT_SHOT_RESULT_DATA>,
     }
 
     #[derive(Debug)]
@@ -542,11 +542,15 @@ wgtk::__struct_simple_codec! {  // Methods on client
         pub a1: SHOT_ID,
         pub a2: BOOL,
         pub a3: u8,
-        pub a4: Vec3,
-        pub a5: Vec3,
+        pub a4: u8,
+        pub a5: u8,
         pub a6: f32,
-        pub a7: f32,
-        pub a8: u8,
+        pub a7: Vec3,
+        pub a8: Vec3,
+        pub a9: f32,
+        pub a10: f32,
+        pub a11: u8,
+        pub a12: u8,
     }
 
     #[derive(Debug)]
@@ -560,9 +564,13 @@ wgtk::__struct_simple_codec! {  // Methods on client
         pub a0: SHOT_ID,
         pub a1: u8,
         pub a2: u8,
-        pub a3: Vec3,
-        pub a4: Vec3,
-        pub a5: Vec<u32>,
+        pub a3: u8,
+        pub a4: u8,
+        pub a5: f32,
+        pub a6: Vec3,
+        pub a7: Vec3,
+        pub a8: f32,
+        pub a9: Vec<u32>,
     }
 
     #[derive(Debug)]
@@ -590,12 +598,6 @@ wgtk::__struct_simple_codec! {  // Methods on client
     pub struct Avatar_updateArena {
         pub a0: u8,
         pub a1: AutoString,
-    }
-
-    #[derive(Debug)]
-    pub struct Avatar_updatePositions {
-        pub a0: Vec<u16>,
-        pub a1: Vec<i16>,
     }
 
     #[derive(Debug)]
@@ -911,128 +913,114 @@ wgtk::__enum_entity_methods! {  // Entity methods on client
     pub enum Avatar_Client {
         RecoveryMechanic_Avatar_notifyCannotStartRecovering(0x00, 0),
         RecoveryMechanic_Avatar_notifyCancelled(0x01, 0),
-        RespawnController_Avatar_updatePlayerLives(0x02, 1),
-        AvatarEpic_enteringProtectionZone(0x03, 1),
-        AvatarEpic_leavingProtectionZone(0x04, 1),
-        AvatarEpic_protectionZoneShooting(0x05, 1),
-        AvatarEpic_onSectorShooting(0x06, 1),
-        AvatarEpic_onRankUpdate(0x07, 1),
-        Avatar_onAutoAimVehicleLost(0x08, 1),
-        Avatar_onKickedFromArena(0x09, 1),
-        AvatarEpic_onXPUpdated(0x0A, 2),
-        Avatar_onRoundFinished(0x0B, 2),
-        RespawnController_Avatar_explodeVehicleBeforeRespawn(0x0C, 4),
-        VehicleRemovalController_Avatar_removeVehicle(0x0D, 4),
-        Avatar_updateTargetVehicleID(0x0E, 4),
-        AvatarEpic_onDestructibleDestroyed(0x0F, 5),
-        Avatar_updateResourceAmount(0x10, 5),
-        Avatar_updateVehicleQuickShellChanger(0x11, 5),
-        AvatarEpic_onSectorBaseAction(0x12, 6),
-        Avatar_onRepairPointAction(0x13, 6),
-        Avatar_updateVehicleHealth(0x14, 9),
-        Avatar_updateVehicleSetting(0x15, 9),
-        AvatarEpic_onStepRepairPointAction(0x16, 11),
-        VehicleHealthBroadcastListenerComponent_Avatar_onVehicleHealthChanged(0x17, 12),
-        AvatarEpic_welcomeToSector(0x18, 12),
-        Avatar_enemySPGHit(0x19, 12),
-        RecoveryMechanic_Avatar_updateState(0x1A, 13),
-        AvatarEpic_onCrewRoleFactorAndRankUpdate(0x1B, 13),
-        Avatar_onCombatEquipmentShotLaunched(0x1C, 14),
-        Avatar_onSwitchViewpoint(0x1D, 16),
-        Avatar_stopTracer(0x1E, 16),
-        Avatar_onCollisionWithVehicle(0x1F, 16),
-        Avatar_onSmoke(0x20, 16),
-        Avatar_onFrictionWithVehicle(0x21, 17),
-        Avatar_updateVehicleAmmo(0x22, 18),
-        Avatar_showOwnVehicleHitDirection(0x23, 21),
-        Avatar_enemySPGShotSound(0x24, 24),
-        Avatar_showHittingArea(0x25, 34),
-        Avatar_showCarpetBombing(0x26, 34),
-        Avatar_battleEventsSummary(0x27, 34),
-        Avatar_updateTargetingInfo(0x28, 36),
-        Avatar_showTracer(0x29, 43),
-        Chat_onChatAction(0x2A, var8),
-        PlayerMessenger_chat2_messenger_onActionByServer_chat2(0x2B, var8),
-        ClientCommandsPort_onCmdResponse(0x2C, var8),
-        ClientCommandsPort_onCmdResponseExt(0x2D, var8),
-        InvitationsClient_processInvitations(0x2E, var8),
-        AccountAuthTokenProviderClient_onTokenReceived(0x2F, var8),
-        TeamHealthBar_Avatar_updateTeamsHealthPercentage(0x30, var8),
-        RespawnController_Avatar_redrawVehicleOnRespawn(0x31, var8),
-        RespawnController_Avatar_updateRespawnVehicles(0x32, var8),
-        RespawnController_Avatar_updateRespawnCooldowns(0x33, var8),
-        RespawnController_Avatar_updateRespawnInfo(0x34, var8),
-        RespawnController_Avatar_updateVehicleLimits(0x35, var8),
-        RespawnController_Avatar_onTeamLivesRestored(0x36, var8),
-        TriggersController_Avatar_externalTrigger(0x37, var8),
-        AvatarEpic_syncPurchasedAbilities(0x38, var8),
-        AvatarEpic_onRandomReserveOffer(0x39, var8),
-        AvatarEpic_showDestructibleShotResults(0x3A, var8),
-        Avatar_update(0x3B, var8),
-        Avatar_onKickedFromServer(0x3C, var8),
-        Avatar_onIGRTypeChanged(0x3D, var8),
-        Avatar_receiveAccountStats(0x3E, var8),
-        Avatar_showOtherVehicleDamagedDevices(0x3F, var8),
-        Avatar_showShotResults(0x40, var8),
-        Avatar_showDevelopmentInfo(0x41, var8),
-        Avatar_explodeProjectile(0x42, var8),
-        Avatar_onBattleEvents(0x43, var8),
-        Avatar_updateArena(0x44, var8),
-        Avatar_updatePositions(0x45, var8),
-        Avatar_receivePhysicsDebugInfo(0x46, var8),
-        Avatar_updateCarriedFlagPositions(0x47, var8),
-        Avatar_receiveNotification(0x48, var8),
-        Avatar_updateAvatarPrivateStats(0x49, var8),
-        Avatar_updateQuestProgress(0x4A, var8),
-        Avatar_handleScriptEventFromServer(0x4B, var8),
-        Avatar_setUpdatedGoodiesSnapshot(0x4C, var8),
-        Avatar_onRandomEvent(0x4D, var8),
-        VehiclesSpawnListStorage_Avatar_updateSpawnList(0x4E, var16),
+        AvatarEpic_enteringProtectionZone(0x02, 1),
+        AvatarEpic_leavingProtectionZone(0x03, 1),
+        AvatarEpic_protectionZoneShooting(0x04, 1),
+        AvatarEpic_onSectorShooting(0x05, 1),
+        AvatarEpic_onRankUpdate(0x06, 1),
+        Avatar_onAutoAimVehicleLost(0x07, 1),
+        Avatar_onKickedFromArena(0x08, 1),
+        AvatarEpic_onXPUpdated(0x09, 2),
+        Avatar_onRoundFinished(0x0A, 2),
+        VehicleRemovalController_Avatar_removeVehicle(0x0B, 4),
+        Avatar_updateTargetVehicleID(0x0C, 4),
+        AvatarEpic_onDestructibleDestroyed(0x0D, 5),
+        Avatar_updateResourceAmount(0x0E, 5),
+        Avatar_updateVehicleQuickShellChanger(0x0F, 5),
+        AvatarEpic_onSectorBaseAction(0x10, 6),
+        Avatar_onRepairPointAction(0x11, 6),
+        Avatar_updateVehicleHealth(0x12, 9),
+        Avatar_updateVehicleSetting(0x13, 9),
+        AvatarEpic_onStepRepairPointAction(0x14, 11),
+        VehicleHealthBroadcastListenerComponent_Avatar_onVehicleHealthChanged(0x15, 12),
+        AvatarEpic_welcomeToSector(0x16, 12),
+        Avatar_enemySPGHit(0x17, 12),
+        RecoveryMechanic_Avatar_updateState(0x18, 13),
+        AvatarEpic_onCrewRoleFactorAndRankUpdate(0x19, 13),
+        Avatar_onCombatEquipmentShotLaunched(0x1A, 14),
+        Avatar_onSwitchViewpoint(0x1B, 16),
+        Avatar_stopTracer(0x1C, 16),
+        Avatar_onCollisionWithVehicle(0x1D, 16),
+        Avatar_onSmoke(0x1E, 16),
+        Avatar_onFrictionWithVehicle(0x1F, 17),
+        Avatar_updateVehicleAmmo(0x20, 18),
+        Avatar_showOwnVehicleHitDirection(0x21, 21),
+        Avatar_enemySPGShotSound(0x22, 24),
+        Avatar_showHittingArea(0x23, 34),
+        Avatar_showCarpetBombing(0x24, 34),
+        Avatar_battleEventsSummary(0x25, 34),
+        Avatar_updateTargetingInfo(0x26, 36),
+        Avatar_showTracer(0x27, 50),
+        Chat_onChatAction(0x28, var8),
+        PlayerMessenger_chat2_messenger_onActionByServer_chat2(0x29, var8),
+        ClientCommandsPort_onCmdResponse(0x2A, var8),
+        ClientCommandsPort_onCmdResponseExt(0x2B, var8),
+        InvitationsClient_processInvitations(0x2C, var8),
+        AccountAuthTokenProviderClient_onTokenReceived(0x2D, var8),
+        TeamHealthBar_Avatar_updateTeamsHealthPercentage(0x2E, var8),
+        TriggersController_Avatar_externalTrigger(0x2F, var8),
+        AvatarEpic_syncPurchasedAbilities(0x30, var8),
+        AvatarEpic_onRandomReserveOffer(0x31, var8),
+        AvatarEpic_showDestructibleShotResults(0x32, var8),
+        Avatar_update(0x33, var8),
+        Avatar_onKickedFromServer(0x34, var8),
+        Avatar_onIGRTypeChanged(0x35, var8),
+        Avatar_receiveAccountStats(0x36, var8),
+        Avatar_showOtherVehicleDamagedDevices(0x37, var8),
+        Avatar_showShotResults(0x38, var8),
+        Avatar_showDevelopmentInfo(0x39, var8),
+        Avatar_explodeProjectile(0x3A, var8),
+        Avatar_onBattleEvents(0x3B, var8),
+        Avatar_updateArena(0x3C, var8),
+        Avatar_receivePhysicsDebugInfo(0x3D, var8),
+        Avatar_updateCarriedFlagPositions(0x3E, var8),
+        Avatar_receiveNotification(0x3F, var8),
+        Avatar_updateAvatarPrivateStats(0x40, var8),
+        Avatar_updateQuestProgress(0x41, var8),
+        Avatar_handleScriptEventFromServer(0x42, var8),
+        Avatar_setUpdatedGoodiesSnapshot(0x43, var8),
+        Avatar_onRandomEvent(0x44, var8),
+        VehiclesSpawnListStorage_Avatar_updateSpawnList(0x45, var16),
     }
 }
 
 wgtk::__enum_entity_methods! {  // Entity methods on base
     pub enum Avatar_Base {
-        RespawnController_Avatar_respawnController_performRespawn(0x00, 0),
-        Avatar_logLag(0x01, 0),
-        Avatar_setClientReady(0x02, 0),
-        Avatar_leaveArena(0x03, 0),
-        Avatar_onLoginToCellFailed(0x04, 0),
-        Avatar_confirmBattleResultsReceiving(0x05, 0),
-        Avatar_vehicle_replenishAmmo(0x06, 0),
-        RespawnController_Avatar_respawnController_requestRespawnGroupChange(0x07, 1),
-        AvatarEpic_enableFrontLineDevInfo(0x08, 1),
-        Chat_onStreamComplete(0x09, 3),
-        Avatar_requestToken(0x0A, 3),
-        ClientCommandsPort_doCmdNoArgs(0x0B, 4),
-        RespawnController_Avatar_respawnController_chooseVehicleForRespawn(0x0C, 4),
-        RespawnController_Avatar_respawnController_switchSetup(0x0D, 6),
-        Avatar_makeDenunciation(0x0E, 9),
-        ClientCommandsPort_doCmdInt(0x0F, 12),
-        RespawnController_Avatar_respawnController_chooseRespawnZone(0x10, 12),
-        Avatar_vehicle_teleport(0x11, 16),
-        Avatar_logStreamCorruption(0x12, 18),
-        ClientCommandsPort_doCmdInt2(0x13, 20),
-        ClientCommandsPort_doCmdInt3(0x14, 28),
-        Chat_ackCommand(0x15, 33),
-        Avatar_receiveFakeShot(0x16, 33),
-        ClientCommandsPort_doCmdInt4(0x17, 36),
-        Chat_chatCommandFromClient(0x18, var8),
-        Chat_inviteCommand(0x19, var8),
-        PlayerMessenger_chat2_messenger_onActionByClient_chat2(0x1A, var8),
-        ClientCommandsPort_doCmdStr(0x1B, var8),
-        ClientCommandsPort_doCmdInt2Str(0x1C, var8),
-        ClientCommandsPort_doCmdInt3Str(0x1D, var8),
-        ClientCommandsPort_doCmdIntArr(0x1E, var8),
-        ClientCommandsPort_doCmdIntStr(0x1F, var8),
-        ClientCommandsPort_doCmdIntStrArr(0x20, var8),
-        ClientCommandsPort_doCmdIntArrStrArr(0x21, var8),
-        ClientCommandsPort_doCmdStrArr(0x22, var8),
-        Avatar_banUnbanUser(0x23, var8),
-        Avatar_sendAccountStats(0x24, var8),
-        Avatar_setClientCtx(0x25, var8),
-        Avatar_setDevelopmentFeature(0x26, var8),
-        Avatar_addBotToArena(0x27, var8),
+        Avatar_logLag(0x00, 0),
+        Avatar_setClientReady(0x01, 0),
+        Avatar_leaveArena(0x02, 0),
+        Avatar_onLoginToCellFailed(0x03, 0),
+        Avatar_confirmBattleResultsReceiving(0x04, 0),
+        Avatar_vehicle_replenishAmmo(0x05, 0),
+        AvatarEpic_enableFrontLineDevInfo(0x06, 1),
+        Chat_onStreamComplete(0x07, 3),
+        Avatar_requestToken(0x08, 3),
+        ClientCommandsPort_doCmdNoArgs(0x09, 4),
+        Avatar_makeDenunciation(0x0A, 9),
+        ClientCommandsPort_doCmdInt(0x0B, 12),
+        Avatar_vehicle_teleport(0x0C, 16),
+        Avatar_logStreamCorruption(0x0D, 18),
+        ClientCommandsPort_doCmdInt2(0x0E, 20),
+        ClientCommandsPort_doCmdInt3(0x0F, 28),
+        Chat_ackCommand(0x10, 33),
+        Avatar_receiveFakeShot(0x11, 33),
+        ClientCommandsPort_doCmdInt4(0x12, 36),
+        Chat_chatCommandFromClient(0x13, var8),
+        Chat_inviteCommand(0x14, var8),
+        PlayerMessenger_chat2_messenger_onActionByClient_chat2(0x15, var8),
+        ClientCommandsPort_doCmdStr(0x16, var8),
+        ClientCommandsPort_doCmdInt2Str(0x17, var8),
+        ClientCommandsPort_doCmdInt3Str(0x18, var8),
+        ClientCommandsPort_doCmdIntArr(0x19, var8),
+        ClientCommandsPort_doCmdIntStr(0x1A, var8),
+        ClientCommandsPort_doCmdIntStrArr(0x1B, var8),
+        ClientCommandsPort_doCmdIntArrStrArr(0x1C, var8),
+        ClientCommandsPort_doCmdStrArr(0x1D, var8),
+        Avatar_banUnbanUser(0x1E, var8),
+        Avatar_sendAccountStats(0x1F, var8),
+        Avatar_setClientCtx(0x20, var8),
+        Avatar_setDevelopmentFeature(0x21, var8),
+        Avatar_addBotToArena(0x22, var8),
     }
 }
 
@@ -1249,7 +1237,7 @@ wgtk::__struct_simple_codec! {
         pub health: i16,
         pub isCrewActive: BOOL,
         pub engineMode: Box<[u8; 2]>,
-        pub damageStickers: Vec<u64>,
+        pub damageStickers: Vec<VEHICLE_HIT_POINT>,
         pub publicStateModifiers: Vec<EXTRA_ID>,
         pub stunInfo: STUN_INFO,
         pub crewCompactDescrs: Vec<AutoString>,
@@ -1309,6 +1297,7 @@ wgtk::__struct_simple_codec! {  // Methods on client
     pub struct Vehicle_showShooting {
         pub a0: u8,
         pub a1: i8,
+        pub a2: u8,
     }
 
     #[derive(Debug)]
@@ -1321,11 +1310,14 @@ wgtk::__struct_simple_codec! {  // Methods on client
     #[derive(Debug)]
     pub struct Vehicle_showDamageFromShot {
         pub a0: OBJECT_ID,
-        pub a1: Vec<u64>,
+        pub a1: Vec<VEHICLE_HIT_POINT>,
         pub a2: u8,
-        pub a3: i32,
-        pub a4: u8,
-        pub a5: BOOL,
+        pub a3: u8,
+        pub a4: i32,
+        pub a5: u8,
+        pub a6: BOOL,
+        pub a7: f32,
+        pub a8: u8,
     }
 
     #[derive(Debug)]
@@ -1335,6 +1327,7 @@ wgtk::__struct_simple_codec! {  // Methods on client
         pub a2: u8,
         pub a3: i32,
         pub a4: u8,
+        pub a5: u8,
     }
 
     #[derive(Debug)]
@@ -1364,7 +1357,8 @@ wgtk::__struct_simple_codec! {  // Methods on client
     #[derive(Debug)]
     pub struct Vehicle_showRammingEffect {
         pub a0: f32,
-        pub a1: Vec3,
+        pub a1: f32,
+        pub a2: Vec3,
     }
 
 }
@@ -1423,13 +1417,13 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 wgtk::__enum_entity_methods! {  // Entity methods on client
     pub enum Vehicle_Client {
         Vehicle_onVehiclePickup(0x00, 0),
-        Vehicle_showShooting(0x01, 2),
+        Vehicle_showShooting(0x01, 3),
         Vehicle_onPushed(0x02, 8),
         Vehicle_showAmmoBayEffect(0x03, 9),
         Vehicle_onHealthChanged(0x04, 10),
         Vehicle_onExtraHitted(0x05, 14),
-        Vehicle_showRammingEffect(0x06, 16),
-        Vehicle_showDamageFromExplosion(0x07, 22),
+        Vehicle_showRammingEffect(0x06, 20),
+        Vehicle_showDamageFromExplosion(0x07, 23),
         Vehicle_onStaticCollision(0x08, 36),
         Vehicle_updateLaserSight(0x09, var8),
         Vehicle_showDamageFromShot(0x0A, var8),
@@ -1788,7 +1782,7 @@ wgtk::__struct_simple_codec! {  // Methods on client
 
     #[derive(Debug)]
     pub struct DetachedTurret_showDamageFromShot {
-        pub a0: Vec<u64>,
+        pub a0: Vec<VEHICLE_HIT_POINT>,
         pub a1: u8,
     }
 
@@ -1836,7 +1830,7 @@ impl SimpleEntity for DetachedTurret {
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
     pub struct DebugDrawEntity {
-        pub drawObjects: Vec<ANON180>,
+        pub drawObjects: Vec<ANON163>,
     }
 }
 
@@ -2451,7 +2445,7 @@ wgtk::__struct_simple_codec! {
         pub isDestructibleDestroyed: BOOL,
         pub typeID: u8,
         pub linkedMapActivities: AutoString,
-        pub damageStickers: Vec<u64>,
+        pub damageStickers: Vec<VEHICLE_HIT_POINT>,
     }
 }
 
@@ -2470,12 +2464,14 @@ wgtk::__struct_simple_codec! {  // Methods on client
         pub a0: OBJECT_ID,
         pub a1: u8,
         pub a2: i32,
+        pub a3: u8,
     }
 
     #[derive(Debug)]
     pub struct DestructibleEntity_showDamageFromExplosion {
         pub a0: OBJECT_ID,
         pub a1: i32,
+        pub a2: u8,
     }
 
 }
@@ -2490,8 +2486,8 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 
 wgtk::__enum_entity_methods! {  // Entity methods on client
     pub enum DestructibleEntity_Client {
-        DestructibleEntity_showDamageFromExplosion(0x00, 8),
-        DestructibleEntity_showDamageFromShot(0x01, 9),
+        DestructibleEntity_showDamageFromExplosion(0x00, 9),
+        DestructibleEntity_showDamageFromShot(0x01, 10),
         DestructibleEntity_onHealthChanged(0x02, 11),
     }
 }
@@ -2618,55 +2614,6 @@ impl SimpleEntity for ProtectionZone {
 }
 
 // ============================================== //
-// ======           HangarPoster           ====== //
-// ============================================== //
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct HangarPoster {
-        pub minAlpha: f32,
-        pub maxAlphaDistance: f32,
-    }
-}
-
-wgtk::__struct_simple_codec! {  // Methods on client
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on base
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on cell
-
-}
-
-wgtk::__enum_entity_methods! {  // Entity methods on client
-    pub enum HangarPoster_Client {
-    }
-}
-
-wgtk::__enum_entity_methods! {  // Entity methods on base
-    pub enum HangarPoster_Base {
-    }
-}
-
-wgtk::__enum_entity_methods! {  // Entity methods on cell
-    pub enum HangarPoster_Cell {
-    }
-}
-
-impl HangarPoster {
-    const TYPE_ID: u16 = 0x1C;
-}
-
-impl SimpleEntity for HangarPoster {
-    type ClientMethod = HangarPoster_Client;
-    type BaseMethod = HangarPoster_Base;
-    type CellMethod = HangarPoster_Cell;
-}
-
-// ============================================== //
 // ======             TeamInfo             ====== //
 // ============================================== //
 
@@ -2721,7 +2668,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl TeamInfo {
-    const TYPE_ID: u16 = 0x1D;
+    const TYPE_ID: u16 = 0x1C;
 }
 
 impl SimpleEntity for TeamInfo {
@@ -2769,7 +2716,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl AvatarInfo {
-    const TYPE_ID: u16 = 0x1E;
+    const TYPE_ID: u16 = 0x1D;
 }
 
 impl SimpleEntity for AvatarInfo {
@@ -2816,7 +2763,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl ArenaObserverInfo {
-    const TYPE_ID: u16 = 0x1F;
+    const TYPE_ID: u16 = 0x1E;
 }
 
 impl SimpleEntity for ArenaObserverInfo {
@@ -2875,7 +2822,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl AreaOfEffect {
-    const TYPE_ID: u16 = 0x20;
+    const TYPE_ID: u16 = 0x1F;
 }
 
 impl SimpleEntity for AreaOfEffect {
@@ -2922,7 +2869,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl AttackBomber {
-    const TYPE_ID: u16 = 0x21;
+    const TYPE_ID: u16 = 0x20;
 }
 
 impl SimpleEntity for AttackBomber {
@@ -2970,7 +2917,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl AttackArtilleryFort {
-    const TYPE_ID: u16 = 0x22;
+    const TYPE_ID: u16 = 0x21;
 }
 
 impl SimpleEntity for AttackArtilleryFort {
@@ -3017,7 +2964,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl PersonalDeathZone {
-    const TYPE_ID: u16 = 0x23;
+    const TYPE_ID: u16 = 0x22;
 }
 
 impl SimpleEntity for PersonalDeathZone {
@@ -3064,7 +3011,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl ClientSelectableRankedObject {
-    const TYPE_ID: u16 = 0x24;
+    const TYPE_ID: u16 = 0x23;
 }
 
 impl SimpleEntity for ClientSelectableRankedObject {
@@ -3084,6 +3031,7 @@ wgtk::__struct_simple_codec! {
         pub isPlayerVehicle: BOOL,
         pub realVehicleID: OBJECT_ID,
         pub simulationData_position: Vec3,
+        pub simulationData_dynAttachmentsInfo: DYN_ATTACHMENTS_INFO,
         pub simulationData_rotation: Vec3,
         pub simulationData_velocity: Vec3,
         pub simulationData_angVelocity: Vec3,
@@ -3092,7 +3040,7 @@ wgtk::__struct_simple_codec! {
         pub simulationData_engineMode: Box<[u8; 2]>,
         pub simulationData_gunAngles: Vec2,
         pub simulationData_turretAndGunSpeed: Vec2,
-        pub simulationData_damageStickers: Vec<u64>,
+        pub simulationData_damageStickers: Vec<VEHICLE_HIT_POINT>,
         pub simulationData_brokenTracks: Vec<TRACK_STATE>,
         pub simulationData_siegeState: BOOL,
         pub simulationData_wheelsState: u16,
@@ -3129,7 +3077,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl SimulatedVehicle {
-    const TYPE_ID: u16 = 0x25;
+    const TYPE_ID: u16 = 0x24;
 }
 
 impl SimpleEntity for SimulatedVehicle {
@@ -3177,7 +3125,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl ClientSelectableHangarsSwitcher {
-    const TYPE_ID: u16 = 0x26;
+    const TYPE_ID: u16 = 0x25;
 }
 
 impl SimpleEntity for ClientSelectableHangarsSwitcher {
@@ -3257,7 +3205,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl StaticDeathZone {
-    const TYPE_ID: u16 = 0x27;
+    const TYPE_ID: u16 = 0x26;
 }
 
 impl SimpleEntity for StaticDeathZone {
@@ -3311,7 +3259,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl BasicMine {
-    const TYPE_ID: u16 = 0x28;
+    const TYPE_ID: u16 = 0x27;
 }
 
 impl SimpleEntity for BasicMine {
@@ -3330,40 +3278,11 @@ wgtk::__struct_simple_codec! {
         pub unique_id: AutoString,
         pub prefab_path: AutoString,
         pub scale: Vec3,
-        pub goState: Vec<GAME_OBJECT_STATE>,
         pub name: AutoString,
     }
 }
 
 wgtk::__struct_simple_codec! {  // Methods on client
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_activateGameObject {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_activateGameObjectUnique {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_deactivateGameObject {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_deactivateGameObjectUnique {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_createGameObject {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_removeGameObject {
-    }
-
-    #[derive(Debug)]
-    pub struct NetworkEntity_removeGameObjectUnique {
-    }
 
 }
 
@@ -3377,13 +3296,6 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 
 wgtk::__enum_entity_methods! {  // Entity methods on client
     pub enum NetworkEntity_Client {
-        NetworkEntity_activateGameObject(0x00, 0),
-        NetworkEntity_activateGameObjectUnique(0x01, 0),
-        NetworkEntity_deactivateGameObject(0x02, 0),
-        NetworkEntity_deactivateGameObjectUnique(0x03, 0),
-        NetworkEntity_createGameObject(0x04, 0),
-        NetworkEntity_removeGameObject(0x05, 0),
-        NetworkEntity_removeGameObjectUnique(0x06, 0),
     }
 }
 
@@ -3398,7 +3310,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 impl NetworkEntity {
-    const TYPE_ID: u16 = 0x29;
+    const TYPE_ID: u16 = 0x28;
 }
 
 impl SimpleEntity for NetworkEntity {
@@ -3427,7 +3339,7 @@ pub trait EntityTypeCollection {
 
 /// Visit all entity types in order.
 pub fn collect_entity_types<C: EntityTypeCollection>() -> C {
-    let mut c = C::new(41);
+    let mut c = C::new(40);
     c.add::<Account>();
     c.add::<Avatar>();
     c.add::<ArenaInfo>();
@@ -3455,7 +3367,6 @@ pub fn collect_entity_types<C: EntityTypeCollection>() -> C {
     c.add::<DestructibleEntity>();
     c.add::<StepRepairPoint>();
     c.add::<ProtectionZone>();
-    c.add::<HangarPoster>();
     c.add::<TeamInfo>();
     c.add::<AvatarInfo>();
     c.add::<ArenaObserverInfo>();

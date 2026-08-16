@@ -415,118 +415,6 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 }
 
 // ============================================== //
-// ======    RespawnController_Vehicle     ====== //
-// ============================================== //
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct RespawnController_Vehicle {
-    }
-}
-
-wgtk::__struct_simple_codec! {  // Methods on client
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on base
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on cell
-
-}
-
-// ============================================== //
-// ======     RespawnController_Avatar     ====== //
-// ============================================== //
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar {
-    }
-}
-
-wgtk::__struct_simple_codec! {  // Methods on client
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_redrawVehicleOnRespawn {
-        pub vehicle_id: OBJECT_ID,
-        pub new_vehicle_compact_description: AutoString,
-        pub new_vehicle_outfit_compact_description: AutoString,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_explodeVehicleBeforeRespawn {
-        pub vehicle_id: OBJECT_ID,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_updateRespawnVehicles {
-        pub vehicles: Vec<RESPAWN_AVAILABLE_VEHICLE>,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_updateRespawnCooldowns {
-        pub cooldowns: Vec<RESPAWN_COOLDOWN_ITEM>,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_updateRespawnInfo {
-        pub info: RESPAWN_INFO,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_updateVehicleLimits {
-        pub limits: Vec<RESPAWN_LIMITED_VEHICLES>,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_updatePlayerLives {
-        pub lives: u8,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_onTeamLivesRestored {
-        pub teams: Vec<u8>,
-    }
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on base
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_respawnController_requestRespawnGroupChange {
-        pub lane_id: u8,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_respawnController_chooseVehicleForRespawn {
-        pub int_cd: u32,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_respawnController_performRespawn {
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_respawnController_chooseRespawnZone {
-        pub respawn_zone: Vec3,
-    }
-
-    #[derive(Debug)]
-    pub struct RespawnController_Avatar_respawnController_switchSetup {
-        pub vehicle_id: u32,
-        pub group_id: u8,
-        pub layout_index: u8,
-    }
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on cell
-
-}
-
-// ============================================== //
 // ======        RepairBase_Vehicle        ====== //
 // ============================================== //
 
@@ -770,7 +658,7 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
     pub struct Perks_Vehicle {
-        pub perkEffects: ANON79,
+        pub perkEffects: PERK_EFFECTS,
         pub perks: Vec<PERK_INFO_HUD>,
         pub perksRibbonNotify: Vec<PERK_INFO_RIBBON>,
     }
@@ -844,28 +732,6 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
     pub struct Invitations {
-    }
-}
-
-wgtk::__struct_simple_codec! {  // Methods on client
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on base
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on cell
-
-}
-
-// ============================================== //
-// ======        InterclusterSender        ====== //
-// ============================================== //
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct InterclusterSender {
     }
 }
 
@@ -1429,35 +1295,13 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 }
 
 // ============================================== //
-// ======          AvatarCreator           ====== //
-// ============================================== //
-
-wgtk::__struct_simple_codec! {
-    #[derive(Debug)]
-    pub struct AvatarCreator {
-    }
-}
-
-wgtk::__struct_simple_codec! {  // Methods on client
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on base
-
-}
-
-wgtk::__struct_simple_codec! {  // Methods on cell
-
-}
-
-// ============================================== //
 // ======          AccountVersion          ====== //
 // ============================================== //
 
 wgtk::__struct_simple_codec! {
     #[derive(Debug)]
     pub struct AccountVersion {
-        pub requiredVersion_12800: AutoString,
+        pub requiredVersion_2310: AutoString,
     }
 }
 

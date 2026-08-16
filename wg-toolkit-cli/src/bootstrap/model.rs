@@ -16,7 +16,10 @@ impl TySystem {
     pub fn register(&mut self, name: Option<String>, kind: TyKind) -> Ty {
         
         if let Some(name) = name.as_deref() {
-            assert!(self.find(name).is_none(), "type already exists");
+            if let Some(ty) = self.find(name)
+            && ty.kind() != &kind {
+                panic!("type already exists: {name}\ncurrent: {:#?}\nnew: {:#?}", ty.kind(), kind);
+            }
         }
 
         let name = match name {
@@ -81,7 +84,7 @@ impl TySystem {
 
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Ty {
     inner: Arc<(Box<str>, TyKind)>,
 }
@@ -115,7 +118,7 @@ impl Debug for Ty {
 }
 
 /// Define the actual kind of a type, maybe a "meta type" containing other types.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum TyKind {
     Int8,
     Int16,
@@ -139,12 +142,12 @@ pub enum TyKind {
     Tuple(TySeq),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, PartialEq, Default)]
 pub struct TyDict {
     pub properties: Vec<TyDictProp>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TyDictProp {
     pub name: String,
     pub ty: Ty,
@@ -152,14 +155,14 @@ pub struct TyDictProp {
     pub default: Option<TyDefault>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TySeq {
     pub ty: Ty,
     pub size: Option<u32>,
 }
 
 /// Defines the default value for every type category.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[allow(unused)]  // Not used for generation
 pub enum TyDefault {
     Int8(i8),
