@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::ffi::OsStr;
 
-use fuser::{
-    AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request, SessionACL,
-};
+use fuser::{AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, 
+    FopenFlags, Generation, INodeNo, MountOption, OpenAccMode, OpenFlags, ReplyAttr, 
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request};
 
 use wgtk::res::{ResFilesystem, ResReadDir, ResReadFile, ResStat};
 
