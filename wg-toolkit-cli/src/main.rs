@@ -110,8 +110,10 @@ pub enum ResCommand {
     List(ResListArgs),
     #[command(name = "cp")]
     Copy(ResCopyArgs),
-    #[cfg(feature = "dokan")]
+    #[cfg(all(windows, feature = "dokan"))]
     Dokan(ResDokanArgs),
+    #[cfg(all(unix, feature = "fuse"))]
+    Fuse(ResFuseArgs),
 }
 
 /// Read a file and write its content on the standard output.
@@ -164,6 +166,13 @@ pub struct ResCopyArgs {
 /// accessible as a regular filesystem to the OS, to later mounted.
 #[derive(Debug, Args)]
 pub struct ResDokanArgs {
+    pub mount_path: String,
+}
+
+/// Start a FUSE (filesystem in userspace) that will make the virtual resource filesystem
+/// accessible as a regular filesystem to the OS, to later mounted.
+#[derive(Debug, Args)]
+pub struct ResFuseArgs {
     pub mount_path: String,
 }
 

@@ -69,7 +69,7 @@ impl<R: Read + Seek> PackageReader<R> {
         // Here we try to find the position of the End of Central Directory.
         let file_length = reader.seek(SeekFrom::End(0))?;
         let mut eocd_pos = file_length.checked_sub(HEADER_MIN_SIZE)
-            .ok_or(io::Error::from(io::ErrorKind::InvalidData))?;
+            .ok_or(io::Error::new(io::ErrorKind::InvalidData, "cannot find end of central directory, file too short"))?;
         let eocd_pos_bound = file_length.saturating_sub(HEADER_MAX_SIZE);
 
         // A successful return from this loop means we found the EoCD position.
@@ -82,11 +82,11 @@ impl<R: Read + Seek> PackageReader<R> {
 
             if eocd_pos == eocd_pos_bound {
                 // If we didn't find signature on the lower bound.
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "cannot find end of central directory, reached lower bound"));
             }
 
             eocd_pos = eocd_pos.checked_sub(1)
-                .ok_or(io::Error::from(io::ErrorKind::InvalidData))?;
+                .ok_or(io::Error::new(io::ErrorKind::InvalidData, "cannot find end of central directory, underflow position"))?;
 
         }
 
@@ -96,7 +96,7 @@ impl<R: Read + Seek> PackageReader<R> {
 
         if disk_number != disk_with_central_directory {
             // Multi-disk ZIP files are not valid packages.
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "multi-disk is not supported for packages zip"));
         }
 
         let number_of_files_on_this_disk = reader.read_u16()?;
@@ -104,7 +104,7 @@ impl<R: Read + Seek> PackageReader<R> {
 
         if number_of_files_on_this_disk != number_of_files {
             // Same as above, no multi-disk, so the number of files must be coherent.
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "multi-disk is not supported for packages zip"));
         }
 
         let _central_directory_size = reader.read_u32()?;
@@ -113,7 +113,7 @@ impl<R: Read + Seek> PackageReader<R> {
         let comment_length = reader.read_u16()?;
         if comment_length != 0 {
             // Not expecting comments on packages.
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "comments are not supported for packages zip"));
         }
 
         // Now we can start parsing all Central Directory Headers.
@@ -134,7 +134,7 @@ impl<R: Read + Seek> PackageReader<R> {
         for _ in 0..number_of_files {
 
             if reader.read_u32()? != CENTRAL_DIRECTORY_HEADER_SIGNATURE {
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid central directory header signature"));
             }
 
             // Skip most of the header that we don't care at this point.
@@ -152,7 +152,7 @@ impl<R: Read + Seek> PackageReader<R> {
 
             // Extra field and comment are not supported nor used by Wargaming.
             if extra_field_file_comment_len != 0 {
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "comments on files are not supported for packages zip"));
             }
             
             // Start by increasing the buffer capacity.
@@ -255,7 +255,7 @@ impl<R: Read + Seek> PackageReader<R> {
         // Start to the start of the header.
         self.inner.seek(SeekFrom::Start(info.header_offset as u64))?;
         if self.inner.read_u32()? != LOCAL_FILE_HEADER_SIGNATURE {
-            return Err(io::ErrorKind::InvalidData.into());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid local file header signature"));
         }
 
         // Skip version needed to extract.
@@ -271,17 +271,19 @@ impl<R: Read + Seek> PackageReader<R> {
 
         // Incoherent uncompressed size, different from central directory header!
         if uncompressed_size != info.size {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
-
-        // Packages has no flag, no delayed crc32/size, no compression, no encryption.
-        if flags != 0 {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("incoherent size in local file header vs central directory header: {uncompressed_size} != {}", info.size)));
         }
 
         // Packages don't compress files.
         if compression_method != 0 || compressed_size != uncompressed_size {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("compressed files are not valid for packages zip: {compressed_size} (compressed) != {uncompressed_size} (uncompressed)")));
+        }
+
+        // Packages has no flag, no delayed crc32/size, no compression, no encryption.
+        // We mask the bit 11, we don't know why it is used but apparently it can mean
+        // to decode the filename/comment using UTF-8. So yes, we already do that.
+        if flags & !2048 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("flags on files are not valid for packages zip: {flags:016b}")));
         }
         
         // Now the reader's cursor is at data start, return the file reader.

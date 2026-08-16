@@ -1,5 +1,7 @@
-#[cfg(feature = "dokan")]
+#[cfg(all(windows, feature = "dokan"))]
 mod dokan;
+#[cfg(all(unix, feature = "fuse"))]
+mod fuse;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -21,8 +23,10 @@ pub fn cmd_res(opts: CliOptions, args: ResArgs) -> CliResult<()> {
         ResCommand::List(args) => cmd_res_list(opts, args, &fs),
         ResCommand::Read(args) => cmd_res_read(opts, args, &fs),
         ResCommand::Copy(args) => cmd_res_copy(opts, args, &fs),
-        #[cfg(feature = "dokan")]
+        #[cfg(all(windows, feature = "dokan"))]
         ResCommand::Dokan(args) => dokan::cmd_res_dokan(opts, args, &fs),
+        #[cfg(all(unix, feature = "fuse"))]
+        ResCommand::Fuse(args) => fuse::cmd_res_fuse(opts, args, &fs),
     }
 
 }
