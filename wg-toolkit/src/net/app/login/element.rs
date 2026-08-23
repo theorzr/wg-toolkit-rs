@@ -15,16 +15,22 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use blowfish::Blowfish;
 
 use crate::net::filter::{RsaWriter, RsaReader, BlowfishWriter, BlowfishReader};
-use crate::net::element::{ElementLength, SimpleElement};
+use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, SimpleElement};
 use crate::net::codec::{Codec, SimpleCodec};
 use crate::util::io::*;
 
 
 /// Internal module containing all raw elements numerical ids.
+///
+/// All ids below were confirmed empirically by attaching to a live game process
+/// (v2.3.1.3, 2026-08-24) and reading the actual registration order out of
+/// `LoginInterface`'s `Mercury::InterfaceMinder` in memory.
 pub mod id {
     pub const LOGIN_REQUEST: u8         = 0x00;
+    pub const PROBE: u8                 = 0x01;
     pub const PING: u8                  = 0x02;
     pub const CHALLENGE_RESPONSE: u8    = 0x03;
+    pub const MTU_PROBE: u8             = 0x04;
 }
 
 
@@ -43,6 +49,16 @@ impl SimpleElement for Ping {
     const ID: u8 = id::PING;
     const LEN: ElementLength = ElementLength::Fixed(1);
 }
+
+
+/// Sent from the client to the login app to request basic server info (host name,
+/// owner name, users count) without going through the full login process. Not yet
+/// given a proper structured codec.
+pub type Probe = DebugElementFixed<{ id::PROBE }, 0>;
+
+/// Presumably used to probe path MTU before/during login. Not yet given a proper
+/// structured codec.
+pub type MtuProbe = DebugElementVariable16<{ id::MTU_PROBE }>;
 
 
 /// A login request to be sent with [`LoginCodec`], sent from client to 

@@ -428,10 +428,10 @@ impl BaseHandler {
                     reset_entities: sba.element.reset_entities,
                 });
 
-                // peer.off_channel(proxy::PacketDirection::In)
-                //     .prepare(&mut bundle, false);
+                peer.channel(proxy::PacketDirection::In, None)
+                    .prepare(&mut bundle, true);
 
-                // peer.send_bundle(proxy::PacketDirection::In, &bundle)?;
+                peer.send_bundle(proxy::PacketDirection::In, &bundle)?;
 
             }
             ResourceHeader::ID => {

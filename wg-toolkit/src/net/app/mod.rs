@@ -23,6 +23,7 @@ pub mod login_proxy;
 pub mod common;
 pub mod client;
 pub mod base;
+pub mod cell;
 
 use std::{fmt, io};
 
