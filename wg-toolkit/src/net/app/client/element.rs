@@ -520,12 +520,12 @@ impl<M: Method> Element<()> for EntityMethod<M> {
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
-        Ok(M::read_length((id - id::ENTITY_METHOD.first) as u16))
+        M::read_length((id - id::ENTITY_METHOD.first) as u16)
     }
 
     fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
         if !id::ENTITY_METHOD.contains(id) {
-            panic!("unexpected entity method element id: {id:02X}");
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
         let inner = M::read(read, (id - id::ENTITY_METHOD.first) as u16)?;
         Ok(Self {

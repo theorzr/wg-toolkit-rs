@@ -15,7 +15,7 @@ use tracing::{trace, trace_span};
 
 use crate::util::thread::{ThreadPoll, ThreadWorker};
 use crate::net::proto::{Channel, ChannelIndex, Protocol};
-use crate::net::socket::{PacketSocket, decrypt_packet};
+use crate::net::socket::{PacketSocket, decrypt_packet, encrypt_packet};
 use crate::net::packet::Packet;
 use crate::net::bundle::Bundle;
 
@@ -120,7 +120,6 @@ impl App {
 
         let peer;
         let direction;
-        let res;
 
         if let Some(peer_addr) = &socket_poll_ret.peer {
 
@@ -131,11 +130,10 @@ impl App {
                 None => return Ok(()),  // Receiving event from a no longer existing peer.
             };
             direction = PacketDirection::In;
-            res = self.inner.socket.send_without_encryption(&cipher_packet, peer.addr);
 
         } else {
 
-            // The packet has been received from the peer and should be forwarded to the 
+            // The packet has been received from the peer and should be forwarded to the
             // real login application.
             peer = match self.peers.entry(addr) {
                 hash_map::Entry::Occupied(o) => o.into_mut(),
@@ -168,89 +166,160 @@ impl App {
                 }
             };
             direction = PacketDirection::Out;
-            res = peer.socket.send_without_encryption(&cipher_packet, peer.real_addr);
 
         }
 
-        // Just ignore the length sent...
-        match res {
-            Ok(_len) => {}
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
-                // When forwarding to a local peer, this means that the local client no
-                // longer has a listening socket to send to! Ignore this peer.
-                trace!("Dropped peer due to connection reset: {addr}");
-                // Unwrap because we have this peer and it exists.
-                self.peers.remove(&addr).unwrap();
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
+        // Whether the raw packet received should still be forwarded verbatim to its
+        // destination once the processing below completes. A handler can clear this
+        // (via `Peer::suppress_forward`) after inspecting a decoded bundle, e.g. to
+        // withhold it entirely and substitute a wholly different packet of its own.
+        let mut forward_raw = true;
 
-        // Now decrypt packet if the peer has symmetric encryption...
-        let packet;
-        if let Some(blowfish) = peer.blowfish.as_deref() {
-            packet = match decrypt_packet(cipher_packet, blowfish) {
-                Ok(ret) => ret,
+        // Set by `Peer::patch_raw` to a modified copy of the decrypted packet that
+        // should be forwarded (re-encrypted if applicable) instead of the pristine
+        // original, keeping the same framing (prefix, flags, sequence number, channel)
+        // — e.g. to rewrite an embedded address in an in-flight SwitchBaseApp so the
+        // client stays pointed at the proxy, while still letting the real application
+        // see (and acknowledge, and retransmit if needed) the packet completely as-is.
+        let mut patch: Option<Packet> = None;
+
+        // Now decrypt packet if the peer has symmetric encryption, otherwise use as-is.
+        // On decryption failure we still forward the raw packet below, as before.
+        let packet = match peer.blowfish.as_deref() {
+            Some(blowfish) => match decrypt_packet(cipher_packet.clone(), blowfish) {
+                Ok(packet) => Some(packet),
                 Err(cipher_packet) => {
-                    let peer_ref = Peer { 
+                    let peer_ref = Peer {
                         app: &mut self.inner,
                         peer: &mut *peer,
+                        forward_raw: &mut forward_raw,
+                        plain: &cipher_packet,
+                        patch: &mut patch,
                     };
-                    handler.receive_invalid_packet_encryption(peer_ref, cipher_packet, direction)?;
-                    return Ok(());
+                    handler.receive_invalid_packet_encryption(peer_ref, cipher_packet.clone(), direction)?;
+                    None
                 }
-            };
-        } else {
-            packet = cipher_packet;
-        }
-
-        let (
-            accept_protocol, 
-            accept_protocol_span,
-            accept_out_protocol,
-            accept_out_protocol_span,
-        ) = match direction {
-            PacketDirection::Out => (
-                &mut self.inner.out_protocol, trace_span!("out"), 
-                &mut self.inner.in_protocol, trace_span!("in"),
-            ),
-            PacketDirection::In => (
-                &mut self.inner.in_protocol, trace_span!("in"), 
-                &mut self.inner.out_protocol, trace_span!("out"),
-            ),
+            },
+            None => Some(cipher_packet.clone()),
         };
 
-        {
-            let _span = accept_protocol_span.enter();
-            trace!(real_addr = %peer.real_addr, "{:width$?}", packet, width = 0);
-        }
-        
-        {
-            let _span = accept_out_protocol_span.enter();
-            if !accept_out_protocol.accept_out(&packet, peer.addr) {
-                return Ok(());
+        if let Some(packet) = packet {
+
+            // Keep a copy of the decrypted content around for `Peer::patch_raw` to read
+            // from, since `packet` itself is about to be consumed by `accept` below.
+            let packet_plain = packet.clone();
+
+            let (
+                accept_protocol,
+                accept_protocol_span,
+                accept_out_protocol,
+                accept_out_protocol_span,
+            ) = match direction {
+                PacketDirection::Out => (
+                    &mut self.inner.out_protocol, trace_span!("out"),
+                    &mut self.inner.in_protocol, trace_span!("in"),
+                ),
+                PacketDirection::In => (
+                    &mut self.inner.in_protocol, trace_span!("in"),
+                    &mut self.inner.out_protocol, trace_span!("out"),
+                ),
+            };
+
+            {
+                let _span = accept_protocol_span.enter();
+                trace!(real_addr = %peer.real_addr, "{:width$?}", packet, width = 0);
             }
-        }
-        
-        let _span = accept_protocol_span.enter();
-        
-        let mut channel = match accept_protocol.accept(packet, peer.addr) {
-            Ok(channel) => channel,
-            Err(_packet) => return Ok(()),
-        };
 
-        let packet_channel = channel.is_on().then(|| PacketChannel {
-            index: channel.index(),
-        });
-
-        for bundle in channel.pop_bundles() {
-            let peer_ref = Peer { 
-                app: &mut self.inner,
-                peer: &mut *peer,
+            let accept_out_ok = {
+                let _span = accept_out_protocol_span.enter();
+                accept_out_protocol.accept_out(&packet, peer.addr)
             };
-            handler.receive_bundle(peer_ref, bundle, direction, packet_channel.clone())?;
+
+            if accept_out_ok {
+
+                let _span = accept_protocol_span.enter();
+
+                if let Ok(mut channel) = accept_protocol.accept(packet, peer.addr) {
+
+                    // A peer commonly resends a still-unacknowledged reliable packet by
+                    // piggybacking it onto a later, unrelated packet rather than as a
+                    // new standalone datagram. If that's what just happened, this outer
+                    // packet's raw bytes carry that (possibly withheld, see
+                    // `Peer::suppress_forward`) content too, and forwarding it verbatim
+                    // would leak it just the same. Default to not forwarding it raw in
+                    // that case: the remote peer's own equivalent deduplication would
+                    // discard the piggybacked content anyway, so nothing legitimate is
+                    // lost by withholding the rest of this packet along with it.
+                    if channel.take_duplicate_reliable_found() {
+                        forward_raw = false;
+                    }
+
+                    let packet_channel = channel.is_on().then(|| PacketChannel {
+                        index: channel.index(),
+                    });
+
+                    for bundle in channel.pop_bundles() {
+                        let peer_ref = Peer {
+                            app: &mut self.inner,
+                            peer: &mut *peer,
+                            forward_raw: &mut forward_raw,
+                            plain: &packet_plain,
+                            patch: &mut patch,
+                        };
+                        handler.receive_bundle(peer_ref, bundle, direction, packet_channel.clone())?;
+                    }
+
+                }
+
+            }
+
+        }
+
+        if let Some(patched) = patch {
+
+            let to_send = match peer.blowfish.as_deref() {
+                Some(blowfish) => encrypt_packet(patched, blowfish),
+                None => patched,
+            };
+
+            let res = match direction {
+                PacketDirection::Out => peer.socket.send_without_encryption(&to_send, peer.real_addr),
+                PacketDirection::In => self.inner.socket.send_without_encryption(&to_send, peer.addr),
+            };
+
+            match res {
+                Ok(_len) => {}
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                    trace!("Dropped peer due to connection reset: {addr}");
+                    self.peers.remove(&addr).unwrap();
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+
+        } else if forward_raw {
+
+            let res = match direction {
+                PacketDirection::Out => peer.socket.send_without_encryption(&cipher_packet, peer.real_addr),
+                PacketDirection::In => self.inner.socket.send_without_encryption(&cipher_packet, peer.addr),
+            };
+
+            // Just ignore the length sent...
+            match res {
+                Ok(_len) => {}
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                    // When forwarding to a local peer, this means that the local client no
+                    // longer has a listening socket to send to! Ignore this peer.
+                    trace!("Dropped peer due to connection reset: {addr}");
+                    // Unwrap because we have this peer and it exists.
+                    self.peers.remove(&addr).unwrap();
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+
         }
 
         Ok(())
@@ -332,6 +401,17 @@ pub struct PeerConfig {
 pub struct Peer<'a> {
     app: &'a mut AppInner,
     peer: &'a mut PeerInner,
+    /// Cleared by `suppress_forward` to prevent the packet currently being processed
+    /// from being forwarded verbatim to its destination once handling completes.
+    forward_raw: &'a mut bool,
+    /// The decrypted content of the packet currently being processed (or the raw
+    /// packet as-is if this peer has no encryption), for [`Self::patch_raw`] to read
+    /// from when building a modified copy to forward instead.
+    plain: &'a Packet,
+    /// Set by [`Self::patch_raw`] to a modified copy of `plain` that should be
+    /// forwarded (re-encrypted if applicable) in place of the original raw packet,
+    /// keeping the same framing (prefix, flags, sequence number, channel).
+    patch: &'a mut Option<Packet>,
 }
 
 impl<'a> Peer<'a> {
@@ -354,11 +434,59 @@ impl<'a> Peer<'a> {
         self.peer.real_addr = real_addr;
     }
 
+    /// Prevent the raw packet currently being processed from being forwarded verbatim
+    /// to its destination once handling of it completes. Use this when substituting a
+    /// packet of your own instead (e.g. rewriting an in-flight SwitchBaseApp so the
+    /// client stays pointed at the proxy instead of the real address it names).
+    #[inline]
+    pub fn suppress_forward(&mut self) {
+        *self.forward_raw = false;
+    }
+
+    /// Replace the first occurrence of `find` with `replace` (which must be the same
+    /// length) within the packet currently being processed, and arrange for this
+    /// modified copy — re-encrypted if this peer uses encryption — to be forwarded in
+    /// place of the original, keeping the original framing (prefix, flags, sequence
+    /// number, channel) completely untouched.
+    ///
+    /// Useful when a message needs to be forwarded as-is from the real application's
+    /// point of view (so it gets acknowledged normally, retransmitted normally, etc.)
+    /// but a specific field within it (e.g. an embedded address) needs to be rewritten
+    /// before the local peer sees it.
+    ///
+    /// Returns `false` (leaving any previous patch untouched) if `find` could not be
+    /// located in the packet's content.
+    pub fn patch_raw(&mut self, find: &[u8], replace: &[u8]) -> bool {
+
+        assert_eq!(find.len(), replace.len(), "patch_raw: find and replace must have the same length");
+
+        let mut patched = self.plain.clone();
+        let slice = patched.slice_mut();
+
+        if let Some(pos) = slice.windows(find.len().max(1)).position(|w| w == find) {
+            slice[pos..pos + find.len()].copy_from_slice(replace);
+            *self.patch = Some(patched);
+            true
+        } else {
+            false
+        }
+
+    }
+
     /// Get the currently configured blowfish encryption key for this peer, none if no
     /// encryption is currently used.
     #[inline]
     pub fn blowfish(&self) -> Option<&Blowfish> {
         self.peer.blowfish.as_deref()
+    }
+
+    /// Get the currently configured blowfish encryption key for this peer as a cloned
+    /// `Arc`, none if no encryption is currently used. Useful to carry the key forward
+    /// for a peer that isn't registered yet (e.g. pre-registering an expected future
+    /// reconnection from the same logical session under a new local port/address).
+    #[inline]
+    pub fn blowfish_arc(&self) -> Option<Arc<Blowfish>> {
+        self.peer.blowfish.clone()
     }
 
     /// Set the blowfish encryption key to be used for this peer, none if encryption
@@ -386,7 +514,7 @@ impl<'a> Peer<'a> {
 
     /// Immediately send a bundle to the given direction.
     pub fn send_bundle(&self, direction: PacketDirection, bundle: &Bundle) -> io::Result<usize> {
-        
+
         let (socket, addr) = match direction {
             PacketDirection::Out => (&self.peer.socket, self.peer.real_addr),
             PacketDirection::In => (&self.app.socket, self.peer.addr),

@@ -1,6 +1,6 @@
 //! Proxy login and base app used for debugging exchanged messages.
 
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use std::{fmt, fs, io, thread};
 use std::collections::HashMap;
@@ -55,6 +55,7 @@ pub fn run(
         login_app_addr,
         dump_dir,
         pending_clients: Mutex::new(HashMap::new()),
+        pending_switches: Mutex::new(HashMap::new()),
     });
 
     let login_handler = LoginHandler {
@@ -69,6 +70,7 @@ pub fn run(
         selected_entity_id: None,
         player_entity_id: None,
         partial_resources: HashMap::new(),
+        session_keys: HashMap::new(),
     };
     
     thread::scope(move |scope| {
@@ -108,6 +110,12 @@ struct BaseHandler {
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
     partial_resources: HashMap<u16, PartialResource>,
+    /// The session key last sent by each client, as observed on the initial handshake
+    /// with the base app. When a SwitchBaseApp is intercepted and rewritten to keep the
+    /// client pointed at this proxy (see below), the client itself has no reason to redo
+    /// this handshake since its own view of the base app's address never changed, so the
+    /// proxy replays it on the client's behalf toward the new real address instead.
+    session_keys: HashMap<SocketAddr, u32>,
 }
 
 #[derive(Debug)]
@@ -117,6 +125,12 @@ struct Shared {
     login_app_addr: SocketAddrV4,
     dump_dir: PathBuf,
     pending_clients: Mutex<HashMap<SocketAddr, PendingClient>>,
+    /// Same idea as `pending_clients`, but keyed by IP only: after a SwitchBaseApp, the
+    /// client tears down its whole connection and reconnects with a fresh, unpredictable
+    /// local port (matching the real BigWorld client's own disconnect + reconnect
+    /// behavior on this message, confirmed live), so we can't know the exact address to
+    /// expect in advance the way a normal post-login connection lets us.
+    pending_switches: Mutex<HashMap<IpAddr, PendingClient>>,
 }
 
 #[derive(Debug)]
@@ -185,20 +199,32 @@ impl proxy::Handler for BaseHandler {
 
     type Error = io::Error;
     
-    fn accept_peer(&mut self, 
+    fn accept_peer(&mut self,
         addr: SocketAddr,
     ) -> Result<Option<proxy::PeerConfig>, Self::Error> {
 
         if let Some(pending_client) = self.shared.pending_clients.lock().unwrap().remove(&addr) {
             info!(%addr, "Forwarding new peer to {}", pending_client.base_app_addr);
-            Ok(Some(proxy::PeerConfig {
+            return Ok(Some(proxy::PeerConfig {
                 real_addr: SocketAddr::V4(pending_client.base_app_addr),
                 blowfish: Some(pending_client.blowfish),
-            }))
-        } else {
-            warn!(%addr, "Rejected an unknown peer");
-            Ok(None)
+            }));
         }
+
+        // The client tears down and reconnects from a fresh, unpredictable local port
+        // after a SwitchBaseApp (confirmed live), so we can't know the exact address to
+        // expect in advance -- only match by IP, keyed at switch time (see the
+        // SwitchBaseApp element handling below).
+        if let Some(pending_client) = self.shared.pending_switches.lock().unwrap().remove(&addr.ip()) {
+            info!(%addr, "Forwarding reconnected peer (post-switch) to {}", pending_client.base_app_addr);
+            return Ok(Some(proxy::PeerConfig {
+                real_addr: SocketAddr::V4(pending_client.base_app_addr),
+                blowfish: Some(pending_client.blowfish),
+            }));
+        }
+
+        warn!(%addr, "Rejected an unknown peer");
+        Ok(None)
 
     }
     
@@ -211,13 +237,13 @@ impl proxy::Handler for BaseHandler {
         Ok(())
     }
     
-    fn receive_bundle(&mut self, 
-        peer: proxy::Peer, 
-        bundle: Bundle, 
-        direction: proxy::PacketDirection, 
+    fn receive_bundle(&mut self,
+        peer: proxy::Peer,
+        bundle: Bundle,
+        direction: proxy::PacketDirection,
         _channel: Option<proxy::PacketChannel>,
     ) -> Result<(), Self::Error> {
-        
+
         let addr = peer.addr();
 
         match direction {
@@ -275,6 +301,7 @@ impl BaseHandler {
             SessionKey::ID => {
                 let elt = elt.read_simple::<SessionKey>()?;
                 info!(%addr, "-> Session key: 0x{:08X}", elt.element.session_key);
+                self.session_keys.insert(addr, elt.element.session_key);
             }
             EnableEntities::ID => {
                 let _ee = elt.read_simple::<EnableEntities>()?;
@@ -416,22 +443,39 @@ impl BaseHandler {
 
                 let sba = elt.read_simple::<SwitchBaseApp>()?;
                 info!(%addr, "<- Switch base app to: {:?} (reset entities: {})", sba.element.base_addr, sba.element.reset_entities);
-                
-                // Change the real base address for this peer.
+
+                // Change the real base address for this peer, so our own forwarding
+                // starts targeting it -- but let the packet itself reach the client
+                // completely as-is otherwise (same framing, same sequence number, same
+                // channel), just with the embedded address patched to point back at
+                // this proxy instead. This way the real application still sees (and
+                // acknowledges, and retransmits if needed) the exact packet it sent,
+                // while the client only ever learns about our own address.
                 peer.set_real_addr(sba.element.base_addr.into());
-                
-                // Immediately send a new switch element to change back the client to use
-                // this proxy instead of the forwarded one.
-                let mut bundle = Bundle::new();
-                bundle.element_writer().write_simple(SwitchBaseApp {
-                    base_addr: self.shared.base_app_addr,
-                    reset_entities: sba.element.reset_entities,
-                });
 
-                peer.channel(proxy::PacketDirection::In, None)
-                    .prepare(&mut bundle, true);
+                // The client tears down its whole connection and reconnects fresh after
+                // this (confirmed live), from an unpredictable new local port, so
+                // pre-register the session by IP alone for `accept_peer` to pick up.
+                if let Some(blowfish) = peer.blowfish_arc() {
+                    self.shared.pending_switches.lock().unwrap().insert(addr.ip(), PendingClient {
+                        base_app_addr: sba.element.base_addr,
+                        blowfish,
+                    });
+                } else {
+                    warn!(%addr, "<- Switch base app: no blowfish key available, cannot pre-register the reconnection");
+                }
 
-                peer.send_bundle(proxy::PacketDirection::In, &bundle)?;
+                let mut real_addr_bytes = [0u8; 6];
+                real_addr_bytes[..4].copy_from_slice(&sba.element.base_addr.ip().octets());
+                real_addr_bytes[4..6].copy_from_slice(&sba.element.base_addr.port().to_be_bytes());
+
+                let mut our_addr_bytes = [0u8; 6];
+                our_addr_bytes[..4].copy_from_slice(&self.shared.base_app_addr.ip().octets());
+                our_addr_bytes[4..6].copy_from_slice(&self.shared.base_app_addr.port().to_be_bytes());
+
+                if !peer.patch_raw(&real_addr_bytes, &our_addr_bytes) {
+                    warn!(%addr, "<- Switch base app: could not locate the address bytes to patch in the raw packet");
+                }
 
             }
             ResourceHeader::ID => {

@@ -38,6 +38,19 @@ struct ProtocolShared {
     last_accepted_prefix: u32,
     /// The current prefix offset being used for updating all packets' prefixes.
     prefix_offset: u32,
+    /// Set during the most recent [`Protocol::accept`] call if it turned out that the
+    /// accepted packet — or, importantly, any of its piggybacked packets, which are
+    /// how a peer commonly resends an unacknowledged reliable packet without a whole
+    /// new standalone datagram — carried a reliable sequence number already seen
+    /// before. Piggybacks are otherwise processed transparently inside `accept`, with
+    /// no other visible effect on its return value, so a caller that ever chooses to
+    /// withhold a specific reliable packet from a third party (instead of forwarding
+    /// it verbatim) needs this to notice when that same packet's content resurfaces
+    /// bundled inside a later, otherwise unrelated packet, and avoid leaking it that
+    /// way too. Read via [`Channel::take_duplicate_reliable_found`] on the channel
+    /// handle returned by the `accept` call in question (since by the time this is
+    /// interesting to know, that handle is the only thing still borrowed from here).
+    duplicate_reliable_found: bool,
 }
 
 impl Protocol {
@@ -48,6 +61,7 @@ impl Protocol {
                 off_seq_alloc: SeqAlloc::new(Seq::ZERO + 1),
                 last_accepted_prefix: 0,
                 prefix_offset: 0,
+                duplicate_reliable_found: false,
             },
             off_channels: HashMap::new(),
             channels: HashMap::new(),
@@ -87,12 +101,12 @@ impl Protocol {
                     Some(index) => OnChannelData::new_with_index(index),
                 },
             });
-        
+
         Channel {
             inner: GenericChannel {
                 shared: &mut self.shared,
                 off: &mut channel.off,
-                on: None,
+                on: Some(&mut channel.on),
             }
         }
 
@@ -118,13 +132,16 @@ impl Protocol {
         // self.shared.prefix_offset = 0x7A11751F;
     }
 
-    /// Accept a new incoming packet and return the associated channel where the packet 
+    /// Accept a new incoming packet and return the associated channel where the packet
     /// has been accepted. If any error in packet's decoding happens, then it's returned
     /// as an error and this packet, this packet cannot be accepted as-is. Any piggyback
     /// packet is still registered but errors are not forwarded.
     #[instrument(name = "accept", level = "trace", skip(self, packet))]
     #[inline(always)]
     pub fn accept(&mut self, packet: Packet, addr: SocketAddr) -> Result<Channel<'_>, Packet> {
+        // Reset here (rather than in `accept_inner`, which recurses for piggybacks) so
+        // that the flag reflects the *whole* call, top-level packet and piggybacks alike.
+        self.shared.duplicate_reliable_found = false;
         self.accept_inner(packet, addr)
     }
 
@@ -230,16 +247,25 @@ impl Protocol {
                 return Err(packet.destruct().0);
             }
 
-            channel.off.add_in_reliable_packet(packet.config().sequence_num());
+            let sequence_num = packet.config().sequence_num();
+            channel.off.add_in_reliable_packet(sequence_num);
 
             // When on-channel with reliable packets, we must track the cumulative ack
             // and buffer any packet that is received out-of-order!
             if let Some(on) = channel.on.as_deref_mut() {
-                on.add_in_reliable_packet(packet);
+                // Keep this channel's own sequence allocator in sync with numbers we
+                // merely observe passing through (as opposed to allocating ourselves),
+                // so that if we ever need to inject a packet of our own on this channel
+                // (e.g. a proxy substituting a rewritten packet) it continues seamlessly
+                // from here instead of colliding with or lagging behind this stream.
+                on.seq_alloc.observe(sequence_num);
+                if on.add_in_reliable_packet(packet) {
+                    channel.shared.duplicate_reliable_found = true;
+                }
                 while let Some(bundle) = on.pop_in_reliable_bundle() {
                     channel.off.in_bundles.push_back(bundle);
                 }
-                // Shortcut to 
+                // Shortcut to
                 return Ok(Channel { inner: channel });
             }
 
@@ -377,6 +403,18 @@ impl Channel<'_> {
     /// it has and index (and version) then it's returned.
     pub fn index(&self) -> Option<ChannelIndex> {
         self.inner.on.as_deref().and_then(|on| on.index)
+    }
+
+    /// Read and reset the flag set by the [`Protocol::accept`] call that produced this
+    /// channel handle, indicating that the accepted packet — or one of its piggybacked
+    /// packets — carried a reliable sequence number already seen before. See the field
+    /// doc on `ProtocolShared::duplicate_reliable_found` for why this matters: a peer
+    /// commonly resends a still-unacknowledged reliable packet by piggybacking it onto
+    /// a later, otherwise unrelated packet, rather than as a new standalone datagram,
+    /// so a caller that withholds a specific reliable packet from a third party needs
+    /// this to notice its content resurfacing that way and avoid leaking it regardless.
+    pub fn take_duplicate_reliable_found(&mut self) -> bool {
+        std::mem::replace(&mut self.inner.shared.duplicate_reliable_found, false)
     }
 
     /// Pop the next bundle able to be received, if any, this ensures that bundles are
@@ -732,13 +770,18 @@ impl OnChannelData {
         Self::new_with_index_version(index, NonZero::new(1).unwrap())
     }
 
-    /// Add a received (in) reliable packet to the internal re-ordering logic of this 
+    /// Add a received (in) reliable packet to the internal re-ordering logic of this
     /// channel, this will automatically construct an ordered bundle when completed.
     /// This also updates the cumulative ack that can be sent back.
-    /// 
+    ///
     /// After this function has filled contiguous and buffered packets, you may want to
     /// user [`Self::pop_in_reliable_bundle`] to pop any completed contiguous bundle.
-    fn add_in_reliable_packet(&mut self, packet: PacketLocked) {
+    ///
+    /// Returns `true` if this sequence number had already been fully processed or was
+    /// already buffered — i.e. this call carried no new information. This commonly
+    /// happens when a peer piggybacks a still-unacknowledged reliable packet onto a
+    /// later, unrelated one: from here it looks identical to a plain retransmission.
+    fn add_in_reliable_packet(&mut self, packet: PacketLocked) -> bool {
 
         debug_assert!(packet.config().reliable(), "given packet should be reliable");
 
@@ -767,11 +810,12 @@ impl OnChannelData {
             }
             Ordering::Less => {
                 // Do nothing, the sequence number may have been already received...
+                return true;
             }
             Ordering::Greater => {
 
                 // Warning if we get many buffered packets which indicate that we probably
-                // lost track of one of the 
+                // lost track of one of the
                 if self.in_reliable_packets.len() > 50 {
                     warn!("Buffered too many in reliable packets: {}", self.in_reliable_packets.len());
                 }
@@ -781,7 +825,7 @@ impl OnChannelData {
                 let mut insert_index = 0;
                 for (i, buffered_packet) in self.in_reliable_packets.iter().enumerate().rev() {
                     match sequence_num.wrapping_cmp(buffered_packet.config().sequence_num()) {
-                        Ordering::Equal => return,  // Duplicate packet, just abort.
+                        Ordering::Equal => return true,  // Duplicate packet, just abort.
                         Ordering::Less => continue,
                         Ordering::Greater => {
                             insert_index = i + 1;
@@ -801,11 +845,13 @@ impl OnChannelData {
             }
         }
 
-        trace!("Received reliable packet cumulative: {}, contiguous: {}, buffered: {} (first: {:?})", 
-            self.in_reliable_expected_seq, 
+        trace!("Received reliable packet cumulative: {}, contiguous: {}, buffered: {} (first: {:?})",
+            self.in_reliable_expected_seq,
             self.in_reliable_contiguous_packets.len(),
             self.in_reliable_packets.len(),
             self.in_reliable_packets.front().map(|packet| packet.config().sequence_num().get()));
+
+        false
 
     }
 

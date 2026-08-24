@@ -61,8 +61,10 @@ pub trait Method: Sized {
     /// Encode the method call into the given writer.
     fn write(&self, write: &mut dyn Write) -> io::Result<u16>;
 
-    /// Return the decode length for the given exposed method id.
-    fn read_length(exposed_id: u16) -> ElementLength;
+    /// Return the decode length for the given exposed method id, or an error if this
+    /// exposed id isn't known (e.g. a mismatch between the generated method tables and
+    /// what the live game actually sends, rather than something to ever crash on).
+    fn read_length(exposed_id: u16) -> io::Result<ElementLength>;
 
     /// Decode the given method from the given reader and its exposed id.
     fn read(read: &mut dyn Read, exposed_id: u16) -> io::Result<Self>;
@@ -108,11 +110,11 @@ macro_rules! __enum_entity_methods {
                         _ => unreachable!()
                     }
                 }
-                fn read_length(exposed_id: u16) -> $crate::net::element::ElementLength {
-                    match exposed_id {
+                fn read_length(exposed_id: u16) -> std::io::Result<$crate::net::element::ElementLength> {
+                    Ok(match exposed_id {
                         $( $method_exposed_id => $crate::__enum_entity_methods!(__length; $method_length), )*
-                        _ => panic!()
-                    }
+                        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid method exposed id: 0x{exposed_id:02X}"))),
+                    })
                 }
                 fn read(read: &mut dyn std::io::Read, exposed_id: u16) -> std::io::Result<Self> {
                     use $crate::net::codec::Codec;

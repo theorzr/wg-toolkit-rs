@@ -140,6 +140,20 @@ impl SeqAlloc {
         ret
     }
 
+    /// Ensure that the next allocated sequence number will be strictly after the given
+    /// one, without moving it backward if it's already ahead. Used to keep an allocator
+    /// that isn't the sole writer of a sequence space (e.g. a proxy that mostly forwards
+    /// a peer's own sequence numbers verbatim) in sync with numbers observed passing
+    /// through, so that an on-demand allocation continues seamlessly from whatever the
+    /// remote end has already seen instead of colliding or lagging behind it.
+    #[inline]
+    pub fn observe(&mut self, seq: Seq) {
+        let candidate = seq + 1;
+        if candidate.wrapping_cmp(self.next) == Ordering::Greater {
+            self.next = candidate;
+        }
+    }
+
 }
 
 
