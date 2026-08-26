@@ -59,6 +59,18 @@ pub fn parse_interface(elt: &Element, tys: &mut TySystem, name: String) -> Inter
 
 }
 
+/// Parse the `<ofEntity>` element of a component def, returning the names of the
+/// entities this component targets (usually exactly one).
+pub fn parse_of_entity(elt: &Element) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(Value::Element(elt)) = elt.get_child("ofEntity") {
+        for (name, _) in elt.iter_children_all() {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
 pub fn parse_entity(elt: &Element, tys: &mut TySystem, id: usize, name: String) -> Entity {
 
     let interface = parse_interface(elt, tys, name);

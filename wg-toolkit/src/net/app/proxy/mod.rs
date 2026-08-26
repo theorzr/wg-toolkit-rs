@@ -241,19 +241,6 @@ impl App {
 
                 if let Ok(mut channel) = accept_protocol.accept(packet, peer.addr) {
 
-                    // A peer commonly resends a still-unacknowledged reliable packet by
-                    // piggybacking it onto a later, unrelated packet rather than as a
-                    // new standalone datagram. If that's what just happened, this outer
-                    // packet's raw bytes carry that (possibly withheld, see
-                    // `Peer::suppress_forward`) content too, and forwarding it verbatim
-                    // would leak it just the same. Default to not forwarding it raw in
-                    // that case: the remote peer's own equivalent deduplication would
-                    // discard the piggybacked content anyway, so nothing legitimate is
-                    // lost by withholding the rest of this packet along with it.
-                    if channel.take_duplicate_reliable_found() {
-                        forward_raw = false;
-                    }
-
                     let packet_channel = channel.is_on().then(|| PacketChannel {
                         index: channel.index(),
                     });

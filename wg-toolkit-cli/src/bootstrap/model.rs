@@ -189,6 +189,35 @@ pub struct Model {
     pub interfaces: Vec<Interface>,
     /// The list of all entities available.
     pub entities: Vec<Entity>,
+    /// The list of all "static" extension components available, in a stable order
+    /// (extension directories in alphabetical order, then declaration order within
+    /// each extension's `StaticComponents`). See [`Component`] for why order matters.
+    pub components: Vec<Component>,
+}
+
+/// A "static" component from a WoT extension package (`res/<ext>/extension.xml`'s
+/// `Components/StaticComponents`), whose methods/properties are folded into the
+/// method table of every entity it targets (its `<ofEntity>` list) -- e.g.
+/// `la_pinger`'s `LaPingerComponent` folds into `Account`. Confirmed live (see
+/// `re-work/HANGAR_LOADING.md`) that these are appended *after* the entity's own
+/// interface-derived, size-sorted method table, keeping their own relative order
+/// (component order, then declared method order) rather than being merged back
+/// into that sort -- this is why existing exposed ids never shift when an
+/// unrelated extension is added or removed.
+///
+/// "Dynamic" components (`DynamicComponents`) are deliberately NOT modeled here:
+/// they're attached to specific entity *instances* at runtime (e.g. only during a
+/// specific battle mode), not baked into every instance's static method table.
+#[derive(Debug)]
+pub struct Component {
+    /// The component's name (e.g. `LaPingerComponent`), also used as its
+    /// `Interface::name`.
+    pub name: String,
+    /// The entities this component's methods/properties fold into (`<ofEntity>`).
+    pub of_entities: Vec<String>,
+    /// The component's own properties/methods, parsed the same way as a regular
+    /// interface.
+    pub interface: Interface,
 }
 
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/entity_description.cpp

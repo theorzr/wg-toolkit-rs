@@ -2,4 +2,5 @@
 /.idea
 Cargo.lock
 /proxy-dump*
+/proxy-trace.jsonl*
 /re-work

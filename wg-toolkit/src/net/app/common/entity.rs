@@ -54,6 +54,20 @@ impl<E: SimpleEntity> Entity for E {
 /// Abstract type representing a method for an entity.
 pub trait Method: Sized {
 
+    /// Return the exposed id of this specific method value, without writing anything.
+    /// Callers that need to know the id ahead of writing (e.g. to decide whether a
+    /// sub-id byte must be written before the method itself, see [`ElementIdRange`])
+    /// can use this instead of [`Method::write`]'s return value.
+    ///
+    /// [`ElementIdRange`]: crate::net::element::ElementIdRange
+    fn exposed_id(&self) -> u16;
+
+    /// Return the total number of exposed methods for this type, used together with
+    /// [`ElementIdRange`] to translate between exposed ids and wire ids (and sub-ids).
+    ///
+    /// [`ElementIdRange`]: crate::net::element::ElementIdRange
+    fn count() -> u16;
+
     /// Return the preferred encoding length of this method, when sub message id is used
     /// this is just ignored.
     fn write_length(&self) -> ElementLength;
@@ -97,6 +111,17 @@ macro_rules! __enum_entity_methods {
             }
 
             impl $crate::net::app::common::entity::Method for $enum_name {
+                fn exposed_id(&self) -> u16 {
+                    match self {
+                        $( Self::$method_name (_) => $method_exposed_id, )*
+                        _ => unreachable!()
+                    }
+                }
+                fn count() -> u16 {
+                    // Counts repetitions without relying on array element type inference,
+                    // which breaks on an empty (zero-method) enum with `[$(...),*].len()`.
+                    0u16 $(+ { $method_exposed_id; 1u16 })*
+                }
                 fn write_length(&self) -> $crate::net::element::ElementLength {
                     match self {
                         $( Self::$method_name (_) => $crate::__enum_entity_methods!(__length; $method_length), )*

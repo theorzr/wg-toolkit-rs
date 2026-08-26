@@ -309,6 +309,9 @@ wgtk::__enum_entity_methods! {  // Entity methods on client
         Account_receiveNotification(0x26, var8),
         Account_receiveConversionResults(0x27, var8),
         Account_showGUI(0x28, var16),
+        AccountBattleRoyaleTournamentComponent_setTournamentToken(0x29, var8),
+        AccountBattleRoyaleTournamentComponent_setParticipants(0x2A, var16),
+        LaPingerComponent_pingMeAndThenJustTouchMe(0x2B, var8),
     }
 }
 
@@ -354,6 +357,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on base
         AccountDebugger_accountDebugger_sendDebugTaskResultChunk(0x25, var8),
         Account_banUnbanUser(0x26, var8),
         Account_setKickAtTime(0x27, var8),
+        StoryModeAccountComponent_setDevelopmentFeature(0x28, var8),
     }
 }
 
@@ -1021,6 +1025,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on base
         Avatar_setClientCtx(0x20, var8),
         Avatar_setDevelopmentFeature(0x21, var8),
         Avatar_addBotToArena(0x22, var8),
+        StoryModeAvatarComponent_setDevelopmentFeature(0x23, var8),
     }
 }
 
@@ -1046,6 +1051,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
         Avatar_vehicle_trackRelativePointWithGun(0x11, 12),
         Avatar_setEquipmentApplicationPoint(0x12, 22),
         Avatar_reportClientStats(0x13, 24),
+        StoryModeAvatarComponent_checkPositionForEquipment(0x14, 16),
     }
 }
 

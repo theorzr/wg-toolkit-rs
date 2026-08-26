@@ -38,19 +38,6 @@ struct ProtocolShared {
     last_accepted_prefix: u32,
     /// The current prefix offset being used for updating all packets' prefixes.
     prefix_offset: u32,
-    /// Set during the most recent [`Protocol::accept`] call if it turned out that the
-    /// accepted packet — or, importantly, any of its piggybacked packets, which are
-    /// how a peer commonly resends an unacknowledged reliable packet without a whole
-    /// new standalone datagram — carried a reliable sequence number already seen
-    /// before. Piggybacks are otherwise processed transparently inside `accept`, with
-    /// no other visible effect on its return value, so a caller that ever chooses to
-    /// withhold a specific reliable packet from a third party (instead of forwarding
-    /// it verbatim) needs this to notice when that same packet's content resurfaces
-    /// bundled inside a later, otherwise unrelated packet, and avoid leaking it that
-    /// way too. Read via [`Channel::take_duplicate_reliable_found`] on the channel
-    /// handle returned by the `accept` call in question (since by the time this is
-    /// interesting to know, that handle is the only thing still borrowed from here).
-    duplicate_reliable_found: bool,
 }
 
 impl Protocol {
@@ -61,7 +48,6 @@ impl Protocol {
                 off_seq_alloc: SeqAlloc::new(Seq::ZERO + 1),
                 last_accepted_prefix: 0,
                 prefix_offset: 0,
-                duplicate_reliable_found: false,
             },
             off_channels: HashMap::new(),
             channels: HashMap::new(),
@@ -139,9 +125,6 @@ impl Protocol {
     #[instrument(name = "accept", level = "trace", skip(self, packet))]
     #[inline(always)]
     pub fn accept(&mut self, packet: Packet, addr: SocketAddr) -> Result<Channel<'_>, Packet> {
-        // Reset here (rather than in `accept_inner`, which recurses for piggybacks) so
-        // that the flag reflects the *whole* call, top-level packet and piggybacks alike.
-        self.shared.duplicate_reliable_found = false;
         self.accept_inner(packet, addr)
     }
 
@@ -259,9 +242,7 @@ impl Protocol {
                 // (e.g. a proxy substituting a rewritten packet) it continues seamlessly
                 // from here instead of colliding with or lagging behind this stream.
                 on.seq_alloc.observe(sequence_num);
-                if on.add_in_reliable_packet(packet) {
-                    channel.shared.duplicate_reliable_found = true;
-                }
+                on.add_in_reliable_packet(packet);
                 while let Some(bundle) = on.pop_in_reliable_bundle() {
                     channel.off.in_bundles.push_back(bundle);
                 }
@@ -403,18 +384,6 @@ impl Channel<'_> {
     /// it has and index (and version) then it's returned.
     pub fn index(&self) -> Option<ChannelIndex> {
         self.inner.on.as_deref().and_then(|on| on.index)
-    }
-
-    /// Read and reset the flag set by the [`Protocol::accept`] call that produced this
-    /// channel handle, indicating that the accepted packet — or one of its piggybacked
-    /// packets — carried a reliable sequence number already seen before. See the field
-    /// doc on `ProtocolShared::duplicate_reliable_found` for why this matters: a peer
-    /// commonly resends a still-unacknowledged reliable packet by piggybacking it onto
-    /// a later, otherwise unrelated packet, rather than as a new standalone datagram,
-    /// so a caller that withholds a specific reliable packet from a third party needs
-    /// this to notice its content resurfacing that way and avoid leaking it regardless.
-    pub fn take_duplicate_reliable_found(&mut self) -> bool {
-        std::mem::replace(&mut self.inner.shared.duplicate_reliable_found, false)
     }
 
     /// Pop the next bundle able to be received, if any, this ensures that bundles are

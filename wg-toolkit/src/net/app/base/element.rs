@@ -7,6 +7,7 @@ use std::io::{self, Read, Write};
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
 use crate::net::app::common::entity::Method;
+use crate::util::io::{WgReadExt, WgWriteExt};
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -140,11 +141,26 @@ pub type SendToCell = DebugElementFixed<{ id::SEND_TO_CELL }, 0>;
 
 
 /// Codec for a base entity method call.
-///
-/// FIXME: For now, this doesn't support sub message id.
 #[derive(Debug, Clone)]
 pub struct BaseEntityMethod<M: Method> {
-    pub inner: M,
+    pub inner: BaseEntityMethodInner<M>,
+}
+
+/// The decoded (or not) payload of a [`BaseEntityMethod`].
+#[derive(Debug, Clone)]
+pub enum BaseEntityMethodInner<M> {
+    /// A method call whose exposed id is present in `M`'s generated table.
+    Known(M),
+    /// An exposed id missing from `M`'s generated table (e.g. a mismatch between the
+    /// generated method tables and what the live game actually sends). Unlike
+    /// client-directed `EntityMethod`, this element's length is always Variable16
+    /// regardless of id, so framing was never at risk here -- this variant only avoids
+    /// erroring out of `M::read` and losing bundle synchronization over a method we
+    /// simply don't have a decoder for yet.
+    Unknown {
+        exposed_id: u16,
+        data: Vec<u8>,
+    },
 }
 
 impl<M: Method> Element<()> for BaseEntityMethod<M> {
@@ -154,22 +170,53 @@ impl<M: Method> Element<()> for BaseEntityMethod<M> {
     }
 
     fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let exposed_id = self.inner.write(write)?;
-        if exposed_id >= id::BASE_ENTITY_METHOD.slots_count() as u16 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "missing support for sub-id"));
+        let exposed_id = match &self.inner {
+            BaseEntityMethodInner::Known(inner) => inner.exposed_id(),
+            BaseEntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
+        };
+        let (element_id, sub_id) = id::BASE_ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        if let Some(sub_id) = sub_id {
+            write.write_u8(sub_id)?;
         }
-        Ok(id::BASE_ENTITY_METHOD.first + exposed_id as u8)
+        match &self.inner {
+            BaseEntityMethodInner::Known(inner) => { inner.write(write)?; }
+            BaseEntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
+        }
+        Ok(element_id)
     }
 
     fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
         if !id::BASE_ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected base entity method element id: {id:02X}")));
         }
-        let inner = M::read(read, (id - id::BASE_ENTITY_METHOD.first) as u16)?;
+
+        let mut len = len;
+        let mut sub_id_err = None;
+        let exposed_id = id::BASE_ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+            len = len.saturating_sub(1);
+            match read.read_u8() {
+                Ok(n) => n,
+                Err(e) => {
+                    sub_id_err = Some(e);
+                    0 // Unused, we bail out right after via sub_id_err.
+                }
+            }
+        });
+        if let Some(e) = sub_id_err {
+            return Err(e);
+        }
+
+        let inner = if M::read_length(exposed_id).is_ok() {
+            BaseEntityMethodInner::Known(M::read(read, exposed_id)?)
+        } else {
+            let mut data = vec![0; len];
+            read.read_exact(&mut data)?;
+            BaseEntityMethodInner::Unknown { exposed_id, data }
+        };
         Ok(Self {
             inner,
         })

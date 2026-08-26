@@ -494,40 +494,102 @@ pub type LastProxyMessageAfterDirectCellAppConnection = DebugElementVariable16<{
 
 /// Codec for a method call on an entity, the given method type should be the one of
 /// the entity being called.
-/// FIXME: For now, this doesn't support sub message id, but it's not a problem with
-/// the current version of the game which don't use it!
 #[derive(Debug, Clone)]
 pub struct EntityMethod<M: Method> {
-    pub inner: M,
+    pub inner: EntityMethodInner<M>,
+}
+
+/// The decoded (or not) payload of an [`EntityMethod`].
+#[derive(Debug, Clone)]
+pub enum EntityMethodInner<M> {
+    /// A method call whose exposed id is present in `M`'s generated table.
+    Known(M),
+    /// An exposed id missing from `M`'s generated table (e.g. a mismatch between the
+    /// generated method tables and what the live game actually sends). The real client
+    /// falls back to treating such a call as Variable8-framed instead of erroring --
+    /// confirmed by hooking `getEntityMethodStreamSize` on a live client instance, which
+    /// returns Mercury's `DEFAULT_VARIABLE_LENGTH_HEADER_SIZE` sentinel (-1, i.e. "read
+    /// 1 more header byte") for an id it doesn't recognize either. We mirror that framing
+    /// here and keep the raw, undecoded body instead of losing bundle synchronization.
+    Unknown {
+        exposed_id: u16,
+        data: Vec<u8>,
+    },
 }
 
 impl<M: Method> Element<()> for EntityMethod<M> {
 
     fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        // TODO: Support for sub-id
-        Ok(self.inner.write_length())
+        let (exposed_id, preferred_len) = match &self.inner {
+            EntityMethodInner::Known(inner) => (inner.exposed_id(), inner.write_length()),
+            EntityMethodInner::Unknown { exposed_id, .. } => (*exposed_id, ElementLength::Variable8),
+        };
+        // A sub-id is written as an extra byte ahead of the method's own payload (see
+        // `write` below), so the preferred length only applies to full-slot ids; ids
+        // requiring a sub-id always frame as Variable16, matching `read_length` below.
+        let (_, sub_id) = id::ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        Ok(if sub_id.is_some() { ElementLength::Variable16 } else { preferred_len })
     }
 
     fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let exposed_id = self.inner.write(write)?;
-        if exposed_id >= id::ENTITY_METHOD.slots_count() as u16 {
-            todo!("support for sub-id");
+        let exposed_id = match &self.inner {
+            EntityMethodInner::Known(inner) => inner.exposed_id(),
+            EntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
+        };
+        let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        if let Some(sub_id) = sub_id {
+            write.write_u8(sub_id)?;
         }
-        Ok(id::ENTITY_METHOD.first + exposed_id as u8)
+        match &self.inner {
+            EntityMethodInner::Known(inner) => { inner.write(write)?; }
+            EntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
+        }
+        Ok(element_id)
     }
 
     fn read_length(_config: &(), id: u8) -> io::Result<ElementLength> {
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
-        M::read_length((id - id::ENTITY_METHOD.first) as u16)
+        Ok(match id::ENTITY_METHOD.to_exposed_id_checked(M::count(), id) {
+            // See `EntityMethodInner::Unknown` for why an unrecognized exposed id falls
+            // back to Variable8 here instead of erroring.
+            Some(exposed_id) => M::read_length(exposed_id).unwrap_or(ElementLength::Variable8),
+            // A sub-id slot: the actual exposed id (and so its preferred length) can only
+            // be known once the sub-id byte prefixing the payload has been read, so the
+            // whole payload is always Variable16-framed instead.
+            None => ElementLength::Variable16,
+        })
     }
 
-    fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
-        let inner = M::read(read, (id - id::ENTITY_METHOD.first) as u16)?;
+
+        let mut len = len;
+        let mut sub_id_err = None;
+        let exposed_id = id::ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+            len = len.saturating_sub(1);
+            match read.read_u8() {
+                Ok(n) => n,
+                Err(e) => {
+                    sub_id_err = Some(e);
+                    0 // Unused, we bail out right after via sub_id_err.
+                }
+            }
+        });
+        if let Some(e) = sub_id_err {
+            return Err(e);
+        }
+
+        let inner = if M::read_length(exposed_id).is_ok() {
+            EntityMethodInner::Known(M::read(read, exposed_id)?)
+        } else {
+            let mut data = vec![0; len];
+            read.read_exact(&mut data)?;
+            EntityMethodInner::Unknown { exposed_id, data }
+        };
         Ok(Self {
             inner,
         })

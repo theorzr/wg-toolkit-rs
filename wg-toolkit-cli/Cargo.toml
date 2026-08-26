@@ -28,7 +28,7 @@ serde.workspace = true
 serde-pickle.workspace = true
 
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [target.'cfg(windows)'.dependencies]
 dokan = { version = "0.3.1", optional = true }

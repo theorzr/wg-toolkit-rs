@@ -6,14 +6,14 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use wgtk::res::ResFilesystem;
-use wgtk::pxml;
+use wgtk::pxml::{self, Value};
 
 use crate::{BootstrapArgs, CliResult};
 
 mod parse;
 mod model;
 
-use model::{Entity, Interface, Method, Model, PropertyFlags, Ty, TyKind, VariableHeaderSize};
+use model::{Component, Entity, Interface, Method, Model, PropertyFlags, Ty, TyKind, VariableHeaderSize};
 
 // NOTE: For the future, if python bytecode interpretation is needed to automatically
 // generate enumeration or try to gather function arguments' names, see:
@@ -90,6 +90,68 @@ fn load(fs: ResFilesystem, version: String) -> io::Result<Model> {
         let entity_elt = pxml::from_reader(entity_reader).unwrap();
         let entity = parse::parse_entity(&entity_elt, &mut model.tys, index + 1, entity_name.to_string());
         model.entities.push(entity);
+
+    }
+
+    println!("== Reading extension components...");
+    // WoT extensions (feature packages such as "la_pinger" or "battle_royale") each sit
+    // at the root of the resource filesystem and, if active, carry an "extension.xml"
+    // declaring a set of "static" components. Each static component is a def file (same
+    // shape as an interface) under "<ext>/scripts/component_defs/" that also declares
+    // which entity/entities it folds its methods/properties into via "<ofEntity>". This
+    // is a WG-specific build step (no trace of it in vanilla BigWorld's entity_description
+    // parsing), so its exact folding rule isn't authoritatively documented -- the order
+    // used here (extensions in alphabetical directory order, static components in
+    // declaration order within each extension) was empirically confirmed against a live
+    // capture: la_pinger's "LaPingerComponent.pingMeAndThenJustTouchMe" lands exactly on
+    // Account's exposed client method id 0x2B, right after battle_royale's
+    // "AccountBattleRoyaleTournamentComponent" 2 client methods (0x29, 0x2A) and Account's
+    // own last interface-derived method (0x28) -- see re-work/HANGAR_LOADING.md.
+    let mut ext_names: Vec<String> = fs.read_dir("")?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.stat().is_dir())
+        .map(|entry| entry.name().to_string())
+        .collect();
+    ext_names.sort();
+
+    for ext_name in ext_names {
+
+        let Ok(ext_reader) = fs.read(format!("{ext_name}/extension.xml")) else {
+            continue;
+        };
+
+        let ext_elt = pxml::from_reader(ext_reader).unwrap();
+
+        // Only "StaticComponents" fold into every instance's static method table.
+        // "DynamicComponents" are attached to specific entity instances at runtime
+        // (e.g. only for the duration of a particular battle mode) and don't claim a
+        // fixed exposed id the way static ones do, so they're intentionally skipped.
+        let Some(Value::Element(components_elt)) = ext_elt.get_child("Components") else {
+            continue;
+        };
+
+        let Some(Value::Element(static_elt)) = components_elt.get_child("StaticComponents") else {
+            continue;
+        };
+
+        for (component_name, _) in static_elt.iter_children_all() {
+
+            println!(" = {ext_name}/{component_name}");
+
+            let component_path = format!("{ext_name}/scripts/component_defs/{component_name}.def");
+            let component_reader = fs.read(&component_path)?;
+            let component_elt = pxml::from_reader(component_reader).unwrap();
+
+            let of_entities = parse::parse_of_entity(&component_elt);
+            let interface = parse::parse_interface(&component_elt, &mut model.tys, component_name.clone());
+
+            model.components.push(Component {
+                name: component_name.clone(),
+                of_entities,
+                interface,
+            });
+
+        }
 
     }
 
@@ -234,6 +296,16 @@ fn generate_interfaces(mod_dir: &Path, model: &Model, state: &mut State) -> io::
 
     for interface in &model.interfaces {
         generate_interface(&mut writer, model, interface, &mut *state)?;
+    }
+
+    // Extension components are folded into entities' method tables (see
+    // `generate_entity_methods`), but -- unlike regular interfaces -- they're never
+    // `pub i_xxx: ComponentName` composed into an entity's property struct, so we only
+    // need their method argument structs here, not a full `generate_interface` pass.
+    for component in &model.components {
+        for app_state in &mut state.apps {
+            generate_interface_methods(&mut writer, model, &component.interface, app_state)?;
+        }
     }
 
     Ok(())
@@ -387,7 +459,7 @@ fn generate_entity_methods(
     // their configured fixed or variable size.
     methods.sort_by(|a, b| {
         match (a.stream_size, b.stream_size) {
-            (StreamSize::Variable(a_size), StreamSize::Variable(b_size)) => 
+            (StreamSize::Variable(a_size), StreamSize::Variable(b_size)) =>
                 a_size.cmp(&b_size),
             (StreamSize::Fixed(a_size), StreamSize::Fixed(b_size)) =>
                 a_size.cmp(&b_size),
@@ -397,6 +469,30 @@ fn generate_entity_methods(
                 Ordering::Greater,
         }
     });
+
+    // Extension "static" components fold their methods in *after* the entity's own
+    // interface-derived, size-sorted table -- confirmed live (see the Component doc
+    // comment and re-work/HANGAR_LOADING.md): unlike the sort above, these are NOT
+    // resorted by stream size, they simply keep claiming the next exposed ids in
+    // component order (then declared-method order within a component). This is why
+    // adding/removing an unrelated extension never shifts any other exposed id.
+    for component in &model.components {
+
+        if !component.of_entities.iter().any(|e| e == &entity.interface.name) {
+            continue;
+        }
+
+        for method in (app_state.interface_methods)(&component.interface) {
+            if is_method_exposed(method) {
+                methods.push(ExposedMethod {
+                    interface: &component.interface,
+                    method,
+                    stream_size: compute_method_stream_size(method),
+                });
+            }
+        }
+
+    }
 
     writeln!(writer, "wgtk::__enum_entity_methods! {{  // Entity methods on {}", app_state.name)?;
     writeln!(writer, "    pub enum {}_{} {{", 

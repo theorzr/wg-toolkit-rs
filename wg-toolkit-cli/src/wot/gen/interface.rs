@@ -1819,3 +1819,462 @@ wgtk::__struct_simple_codec! {  // Methods on cell
 
 }
 
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+    #[derive(Debug)]
+    pub struct AccountBattleRoyaleTournamentComponent_setTournamentToken {
+        pub a0: AutoString,
+    }
+
+    #[derive(Debug)]
+    pub struct AccountBattleRoyaleTournamentComponent_setParticipants {
+        pub a0: Vec<TOURNAMEMT_PARTICIPANT>,
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+    #[derive(Debug)]
+    pub struct LaPingerComponent_pingMeAndThenJustTouchMe {
+        pub a0: AutoString,
+        pub a1: u16,
+        pub a2: DB_ID,
+        pub a3: u16,
+        pub a4: u32,
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+    #[derive(Debug)]
+    pub struct StoryModeAccountComponent_setDevelopmentFeature {
+        pub a0: AutoString,
+        pub a1: i32,
+        pub a2: AutoString,
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+    #[derive(Debug)]
+    pub struct StoryModeAvatarComponent_setDevelopmentFeature {
+        pub a0: AutoString,
+        pub a1: i32,
+        pub a2: AutoString,
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+    #[derive(Debug)]
+    pub struct StoryModeAvatarComponent_checkPositionForEquipment {
+        pub a0: i32,
+        pub a1: Vec3,
+    }
+
+}
+
