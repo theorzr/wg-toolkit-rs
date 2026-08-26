@@ -78,13 +78,17 @@ pub struct PackedXmlArgs {
     #[arg(short, long, conflicts_with = "xml")]
     pub raw: bool,
     /// If needed, the packed XML can be modified before outputting it.
-    /// 
-    /// The filter is basically a sequence of statements, with an expression at the end
-    /// that dictates what value to output. Each statement must end with a semicolon ';'.
-    /// 
-    /// An expression is something that returns a packed XML value: Element, 
-    /// String ("hello world"), Integer (64-bit signed), Boolean (true, false),
-    /// Float (32-bit IEEE 754), Vec3, Affine3.
+    ///
+    /// The filter is a ';'-separated sequence of assignments 'path=value', applied in
+    /// order. A value is either another path, or a constructor: str(..), int(..),
+    /// true(), false().
+    ///
+    /// A path navigates children with 'key/key2/...'. Append '[N]' to select the N-th
+    /// occurrence of that key (negative counts from the end), or '[^]' to create and
+    /// append a new child ('[^N]' to insert at index N instead). Use '^' alone to
+    /// target the element's own value instead of a child. A path starting with
+    /// '$name' refers to a temporary variable rather than the root element, e.g.
+    /// '$tmp=login/host;$tmp/name=str(hello)'.
     pub filter: Option<String>,
 }
 
