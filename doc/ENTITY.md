@@ -244,7 +244,7 @@ actual data is NOT inline in this message -- it must arrive later via `ENTITY_PR
 update messages.
 
 This is corroborated directly: `Account`'s own static client-visible property table
-(now decoded via `Entity::ClientProperty`, see the "Client-visible properties" section
+(now decoded via `Entity::Property`, see the "Client-visible properties" section
 below) only spans exposed ids `0..3` (`incarnationID`, `requiredVersion_2310`, `name`,
 `initialServerSettings`), yet live battle traffic continuously sends property updates at
 exposed id `19` and others well outside that range. Per elimination, these must belong
@@ -260,7 +260,7 @@ Properties visible to the client (any of BigWorld's `ALL_CLIENTS`/`OWN_CLIENT`/
 `BASE_AND_CLIENT` flags -- confirmed against the same rationale as
 `DataDescription::isClientServerData()` in the leaked engine source, `entitydef/
 data_description.cpp`/`.ipp`) get their own flat, per-entity exposed-id table, generated
-via `Entity::ClientProperty` (`wg-toolkit/src/net/app/entity.rs`'s `AnyProperty` trait +
+via `Entity::Property` (`wg-toolkit/src/net/app/entity.rs`'s `AnyProperty` trait +
 `__enum_entity_properties!` macro, `wg-toolkit-cli/src/bootstrap/mod.rs`'s
 `generate_entity_properties`). Exposed ids are assigned by the **exact same stable-sort
 rule as methods** (fixed-size first ascending, then variable-size ascending, static

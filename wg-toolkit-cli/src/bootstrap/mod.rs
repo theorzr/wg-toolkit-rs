@@ -1,7 +1,6 @@
 use std::io::{self, Write, BufWriter};
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::cmp::Ordering;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -421,7 +420,7 @@ fn generate_entity(
     writeln!(writer, "    type ClientMethod = {}_Client;", entity.interface.name)?;
     writeln!(writer, "    type BaseMethod = {}_Base;", entity.interface.name)?;
     writeln!(writer, "    type CellMethod = {}_Cell;", entity.interface.name)?;
-    writeln!(writer, "    type ClientProperty = {}_ClientProperty;", entity.interface.name)?;
+    writeln!(writer, "    type Property = {}_Property;", entity.interface.name)?;
     writeln!(writer, "}}")?;
     writeln!(writer)?;
 
@@ -432,7 +431,7 @@ fn generate_entity(
 /// Generate the client-visible property table for an entity: one flat, exposed-id
 /// indexed list covering properties from either the entity's base or cell slice (both
 /// share one id space on the wire, see [`crate::wot::gen::entity`]'s generated
-/// `Entity::ClientProperty`), assigned by mirroring `generate_entity_methods`'s
+/// `Entity::Property`), assigned by mirroring `generate_entity_methods`'s
 /// stable-sort rule exactly (fixed-size first ascending, then variable-size ascending,
 /// static components appended afterward keeping their own order) -- confirmed to be the
 /// same rule BigWorld's engine itself uses for this
@@ -477,18 +476,7 @@ fn generate_entity_properties(
     let mut properties = Vec::new();
     add_internal_properties(&mut properties, model, &entity.interface);
 
-    properties.sort_by(|a, b| {
-        match (a.stream_size, b.stream_size) {
-            (StreamSize::Variable(a_size), StreamSize::Variable(b_size)) =>
-                a_size.cmp(&b_size),
-            (StreamSize::Fixed(a_size), StreamSize::Fixed(b_size)) =>
-                a_size.cmp(&b_size),
-            (StreamSize::Fixed(_), StreamSize::Variable(_)) =>
-                Ordering::Less,
-            (StreamSize::Variable(_), StreamSize::Fixed(_)) =>
-                Ordering::Greater,
-        }
-    });
+    properties.sort_by_key(|p| p.stream_size);
 
     for component in &model.static_components {
 
@@ -508,17 +496,11 @@ fn generate_entity_properties(
     }
 
     writeln!(writer, "wgtk::__enum_entity_properties! {{  // Client-visible properties")?;
-    writeln!(writer, "    pub enum {}_ClientProperty {{", entity.interface.name)?;
+    writeln!(writer, "    pub enum {}_Property {{", entity.interface.name)?;
 
     for (exposed_id, prop) in properties.iter().enumerate() {
 
-        let element_length = match prop.stream_size {
-            StreamSize::Fixed(length) => Cow::Owned(format!("{length}")),
-            StreamSize::Variable(VariableHeaderSize::Variable8) => Cow::Borrowed("var8"),
-            StreamSize::Variable(VariableHeaderSize::Variable16) => Cow::Borrowed("var16"),
-            StreamSize::Variable(VariableHeaderSize::Variable24) => Cow::Borrowed("var24"),
-            StreamSize::Variable(VariableHeaderSize::Variable32) => Cow::Borrowed("var32"),
-        };
+        let element_length = prop.stream_size.macro_element_length();
 
         let ty = generate_type_ref(&prop.property.ty);
 
@@ -533,27 +515,6 @@ fn generate_entity_properties(
 
     Ok(())
 
-}
-
-/// Same filter BigWorld's `DataDescription::isClientServerData()` uses (confirmed
-/// against `entitydef/data_description.cpp`/`.ipp`): any of `OTHER_CLIENT`/`OWN_CLIENT`/
-/// `BASE` flag bits reaches the client one way or another, `CellPublic`/`CellPrivate`
-/// alone (ghosted server-to-server replication only) does not.
-fn is_property_exposed(property: &Property) -> bool {
-    matches!(property.flags, PropertyFlags::AllClients | PropertyFlags::OwnClient | PropertyFlags::BaseAndClient)
-}
-
-/// Same rationale as `compute_method_stream_size`, but for a single property type
-/// instead of a method's summed args. `Property` has no `variable_header_size` field of
-/// its own (unlike `Method`) since WoT's entity defs never declare one for properties --
-/// defaulting to `Variable16` for anything without a fixed size, same as this codebase's
-/// existing `DebugElementVariable16` placeholder convention elsewhere. UNCONFIRMED
-/// against a live capture of an actually-oversized variable property.
-fn compute_property_stream_size(property: &Property) -> StreamSize {
-    match compute_type_stream_size(&property.ty) {
-        Some(size) => StreamSize::Fixed(size),
-        None => StreamSize::Variable(VariableHeaderSize::Variable16),
-    }
 }
 
 fn generate_entity_methods(
@@ -612,18 +573,7 @@ fn generate_entity_methods(
 
     // We want to sort fixed methods first and variable last, and then sort between
     // their configured fixed or variable size.
-    methods.sort_by(|a, b| {
-        match (a.stream_size, b.stream_size) {
-            (StreamSize::Variable(a_size), StreamSize::Variable(b_size)) =>
-                a_size.cmp(&b_size),
-            (StreamSize::Fixed(a_size), StreamSize::Fixed(b_size)) =>
-                a_size.cmp(&b_size),
-            (StreamSize::Fixed(_), StreamSize::Variable(_)) =>
-                Ordering::Less,
-            (StreamSize::Variable(_), StreamSize::Fixed(_)) =>
-                Ordering::Greater,
-        }
-    });
+    methods.sort_by_key(|m| m.stream_size);
 
     // Extension "static" components fold their methods in *after* the entity's own
     // interface-derived, size-sorted table -- confirmed live (see the Component doc
@@ -657,13 +607,7 @@ fn generate_entity_methods(
 
     for (exposed_id, method) in methods.iter().enumerate() {
 
-        let element_length = match method.stream_size {
-            StreamSize::Fixed(length) => Cow::Owned(format!("{length}")),
-            StreamSize::Variable(VariableHeaderSize::Variable8) => Cow::Borrowed("var8"),
-            StreamSize::Variable(VariableHeaderSize::Variable16) => Cow::Borrowed("var16"),
-            StreamSize::Variable(VariableHeaderSize::Variable24) => Cow::Borrowed("var24"),
-            StreamSize::Variable(VariableHeaderSize::Variable32) => Cow::Borrowed("var32"),
-        };
+        let element_length = method.stream_size.macro_element_length();
 
         writeln!(writer, "        {}_{}(0x{exposed_id:02X}, {element_length}),", 
             method.interface.name, method.method.name)?;
@@ -702,7 +646,7 @@ fn generate_interface(
 
     let mut count = 0;
     for property in &interface.properties {
-        if matches!(property.flags, PropertyFlags::AllClients | PropertyFlags::OwnClient | PropertyFlags::BaseAndClient) {
+        if is_property_exposed(property) {
 
             let mut name = Cow::Borrowed("");
             let mut ty = Cow::Borrowed("");
@@ -847,8 +791,58 @@ fn compute_method_stream_size(method: &Method) -> StreamSize {
 
 }
 
+/// Whether this method reaches the client at all -- either flag alone is enough
+/// (`exposed_to_all_clients` is always set for client methods, `exposed_to_own_client`
+/// is the base/cell-only equivalent restricted to the entity's own owning client).
 fn is_method_exposed(method: &Method) -> bool {
     method.exposed_to_all_clients || method.exposed_to_own_client
+}
+
+/// Same rationale as `compute_method_stream_size`, but for a single property type
+/// instead of a method's summed args. `Property` has no `variable_header_size` field of
+/// its own (unlike `Method`) since WoT's entity defs never declare one for properties --
+/// defaulting to `Variable16` for anything without a fixed size, same as this codebase's
+/// existing `DebugElementVariable16` placeholder convention elsewhere. UNCONFIRMED
+/// against a live capture of an actually-oversized variable property.
+fn compute_property_stream_size(property: &Property) -> StreamSize {
+    match compute_type_stream_size(&property.ty) {
+        Some(size) => StreamSize::Fixed(size),
+        None => StreamSize::Variable(VariableHeaderSize::Variable16),
+    }
+}
+
+/// Same filter BigWorld's `DataDescription::isClientServerData()` uses (confirmed
+/// against `entitydef/data_description.cpp`/`.ipp`): any of `OTHER_CLIENT`/`OWN_CLIENT`/
+/// `BASE` flag bits reaches the client one way or another, `CellPublic`/`CellPrivate`
+/// alone (ghosted server-to-server replication only) does not.
+fn is_property_exposed(property: &Property) -> bool {
+    matches!(property.flags, PropertyFlags::AllClients | PropertyFlags::OwnClient | PropertyFlags::BaseAndClient)
+}
+
+/// Derived order matches the desired sort exactly: `Fixed` is declared before
+/// `Variable` so any fixed size sorts before any variable one, and each variant's
+/// payload (`usize`, `VariableHeaderSize`) already orders the way we want within it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StreamSize {
+    Fixed(usize),
+    Variable(VariableHeaderSize),
+}
+
+impl StreamSize {
+
+    /// The element length token expected by `__enum_entity_methods!`/
+    /// `__enum_entity_properties!`: either the fixed byte length itself, or one of the
+    /// `var8`/`var16`/`var24`/`var32` markers.
+    fn macro_element_length(self) -> Cow<'static, str> {
+        match self {
+            StreamSize::Fixed(length) => Cow::Owned(format!("{length}")),
+            StreamSize::Variable(VariableHeaderSize::Variable8) => Cow::Borrowed("var8"),
+            StreamSize::Variable(VariableHeaderSize::Variable16) => Cow::Borrowed("var16"),
+            StreamSize::Variable(VariableHeaderSize::Variable24) => Cow::Borrowed("var24"),
+            StreamSize::Variable(VariableHeaderSize::Variable32) => Cow::Borrowed("var32"),
+        }
+    }
+
 }
 
 /// Internal state when bootstrapping.
@@ -889,13 +883,6 @@ impl AppState {
         }
     }
 }
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum StreamSize {
-    Fixed(usize),
-    Variable(VariableHeaderSize),
-}
-
 
 #[derive(Debug, Clone)]
 #[allow(unused)]

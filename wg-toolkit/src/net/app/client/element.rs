@@ -618,7 +618,7 @@ impl SimpleElement for LoggedOff {
 pub type DetailedPosition = DebugElementFixed<{ id::DETAILED_POSITION }, 24>;
 
 /// Codec for a property update on an entity (either its base or cell slice, both share
-/// one flat client-visible property list -- see [`super::super::entity::Entity::ClientProperty`]),
+/// one flat client-visible property list -- see [`super::super::entity::Entity::Property`]),
 /// the given property type should be the one of the entity being updated. Mirrors
 /// [`EntityMethod`] exactly (see its doc comment) -- a property update is framed and
 /// dispatched by exposed id the same way a method call is.

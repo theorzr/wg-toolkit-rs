@@ -367,7 +367,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Account_ClientProperty {
+    pub enum Account_Property {
         incarnationID(0x00, 8, u64),
         requiredVersion_2310(0x01, var16, AutoString),
         name(0x02, var16, AutoString),
@@ -380,7 +380,7 @@ impl Entity for Account {
     type ClientMethod = Account_Client;
     type BaseMethod = Account_Base;
     type CellMethod = Account_Cell;
-    type ClientProperty = Account_ClientProperty;
+    type Property = Account_Property;
 }
 
 // ============================================== //
@@ -1063,7 +1063,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Avatar_ClientProperty {
+    pub enum Avatar_Property {
         isObserverFPV(0x00, 1, BOOL),
         numOfObservers(0x01, 1, u8),
         arenaBonusType(0x02, 1, u8),
@@ -1102,7 +1102,7 @@ impl Entity for Avatar {
     type ClientMethod = Avatar_Client;
     type BaseMethod = Avatar_Base;
     type CellMethod = Avatar_Cell;
-    type ClientProperty = Avatar_ClientProperty;
+    type Property = Avatar_Property;
 }
 
 // ============================================== //
@@ -1153,7 +1153,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ArenaInfo_ClientProperty {
+    pub enum ArenaInfo_Property {
         planeTrajectory(0x00, 60, PLANE_TRAJECTORY),
     }
 }
@@ -1163,7 +1163,7 @@ impl Entity for ArenaInfo {
     type ClientMethod = ArenaInfo_Client;
     type BaseMethod = ArenaInfo_Base;
     type CellMethod = ArenaInfo_Cell;
-    type ClientProperty = ArenaInfo_ClientProperty;
+    type Property = ArenaInfo_Property;
 }
 
 // ============================================== //
@@ -1211,7 +1211,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableObject_ClientProperty {
+    pub enum ClientSelectableObject_Property {
         isOver3DSound(0x00, 1, BOOL),
         isClick3DSound(0x01, 1, BOOL),
         edgeMode(0x02, 1, u8),
@@ -1227,7 +1227,7 @@ impl Entity for ClientSelectableObject {
     type ClientMethod = ClientSelectableObject_Client;
     type BaseMethod = ClientSelectableObject_Base;
     type CellMethod = ClientSelectableObject_Cell;
-    type ClientProperty = ClientSelectableObject_ClientProperty;
+    type Property = ClientSelectableObject_Property;
 }
 
 // ============================================== //
@@ -1268,7 +1268,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum HangarVehicle_ClientProperty {
+    pub enum HangarVehicle_Property {
     }
 }
 
@@ -1277,7 +1277,7 @@ impl Entity for HangarVehicle {
     type ClientMethod = HangarVehicle_Client;
     type BaseMethod = HangarVehicle_Base;
     type CellMethod = HangarVehicle_Cell;
-    type ClientProperty = HangarVehicle_ClientProperty;
+    type Property = HangarVehicle_Property;
 }
 
 // ============================================== //
@@ -1515,7 +1515,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Vehicle_ClientProperty {
+    pub enum Vehicle_Property {
         burnoutLevel(0x00, 1, u8),
         isStrafing(0x01, 1, BOOL),
         isHidden(0x02, 1, BOOL),
@@ -1574,7 +1574,7 @@ impl Entity for Vehicle {
     type ClientMethod = Vehicle_Client;
     type BaseMethod = Vehicle_Base;
     type CellMethod = Vehicle_Cell;
-    type ClientProperty = Vehicle_ClientProperty;
+    type Property = Vehicle_Property;
 }
 
 // ============================================== //
@@ -1619,7 +1619,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum AreaDestructibles_ClientProperty {
+    pub enum AreaDestructibles_Property {
         destroyedModules(0x00, var16, Vec<Box<[u8; 3]>>),
         destroyedFragiles(0x01, var16, Vec<Box<[u8; 3]>>),
         fallenColumns(0x02, var16, Vec<Box<[u8; 3]>>),
@@ -1632,7 +1632,7 @@ impl Entity for AreaDestructibles {
     type ClientMethod = AreaDestructibles_Client;
     type BaseMethod = AreaDestructibles_Base;
     type CellMethod = AreaDestructibles_Cell;
-    type ClientProperty = AreaDestructibles_ClientProperty;
+    type Property = AreaDestructibles_Property;
 }
 
 // ============================================== //
@@ -1673,7 +1673,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum OfflineEntity_ClientProperty {
+    pub enum OfflineEntity_Property {
     }
 }
 
@@ -1682,7 +1682,7 @@ impl Entity for OfflineEntity {
     type ClientMethod = OfflineEntity_Client;
     type BaseMethod = OfflineEntity_Base;
     type CellMethod = OfflineEntity_Cell;
-    type ClientProperty = OfflineEntity_ClientProperty;
+    type Property = OfflineEntity_Property;
 }
 
 // ============================================== //
@@ -1738,7 +1738,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Flock_ClientProperty {
+    pub enum Flock_Property {
         modelCount(0x00, 1, u8),
         flyAroundCenter(0x01, 1, BOOL),
         yawSpeed(0x02, 4, f32),
@@ -1762,7 +1762,7 @@ impl Entity for Flock {
     type ClientMethod = Flock_Client;
     type BaseMethod = Flock_Base;
     type CellMethod = Flock_Cell;
-    type ClientProperty = Flock_ClientProperty;
+    type Property = Flock_Property;
 }
 
 // ============================================== //
@@ -1824,7 +1824,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum FlockExotic_ClientProperty {
+    pub enum FlockExotic_Property {
         modelCount(0x00, 1, u8),
         animSpeedMax(0x01, 4, f32),
         animSpeedMin(0x02, 4, f32),
@@ -1854,7 +1854,7 @@ impl Entity for FlockExotic {
     type ClientMethod = FlockExotic_Client;
     type BaseMethod = FlockExotic_Base;
     type CellMethod = FlockExotic_Cell;
-    type ClientProperty = FlockExotic_ClientProperty;
+    type Property = FlockExotic_Property;
 }
 
 // ============================================== //
@@ -1915,7 +1915,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Login_ClientProperty {
+    pub enum Login_Property {
         accountDBID_s(0x00, var16, AutoString),
     }
 }
@@ -1925,7 +1925,7 @@ impl Entity for Login {
     type ClientMethod = Login_Client;
     type BaseMethod = Login_Base;
     type CellMethod = Login_Cell;
-    type ClientProperty = Login_ClientProperty;
+    type Property = Login_Property;
 }
 
 // ============================================== //
@@ -1986,7 +1986,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum DetachedTurret_ClientProperty {
+    pub enum DetachedTurret_Property {
         isUnderWater(0x00, 1, BOOL),
         isCollidingWithWorld(0x01, 1, BOOL),
         vehicleID(0x02, 4, i32),
@@ -2000,7 +2000,7 @@ impl Entity for DetachedTurret {
     type ClientMethod = DetachedTurret_Client;
     type BaseMethod = DetachedTurret_Base;
     type CellMethod = DetachedTurret_Cell;
-    type ClientProperty = DetachedTurret_ClientProperty;
+    type Property = DetachedTurret_Property;
 }
 
 // ============================================== //
@@ -2042,7 +2042,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum DebugDrawEntity_ClientProperty {
+    pub enum DebugDrawEntity_Property {
         drawObjects(0x00, var16, Vec<ANON163>),
     }
 }
@@ -2052,7 +2052,7 @@ impl Entity for DebugDrawEntity {
     type ClientMethod = DebugDrawEntity_Client;
     type BaseMethod = DebugDrawEntity_Base;
     type CellMethod = DebugDrawEntity_Cell;
-    type ClientProperty = DebugDrawEntity_ClientProperty;
+    type Property = DebugDrawEntity_Property;
 }
 
 // ============================================== //
@@ -2093,7 +2093,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableCameraObject_ClientProperty {
+    pub enum ClientSelectableCameraObject_Property {
     }
 }
 
@@ -2102,7 +2102,7 @@ impl Entity for ClientSelectableCameraObject {
     type ClientMethod = ClientSelectableCameraObject_Client;
     type BaseMethod = ClientSelectableCameraObject_Base;
     type CellMethod = ClientSelectableCameraObject_Cell;
-    type ClientProperty = ClientSelectableCameraObject_ClientProperty;
+    type Property = ClientSelectableCameraObject_Property;
 }
 
 // ============================================== //
@@ -2144,7 +2144,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableCameraVehicle_ClientProperty {
+    pub enum ClientSelectableCameraVehicle_Property {
         modelName(0x00, var16, AutoString),
     }
 }
@@ -2154,7 +2154,7 @@ impl Entity for ClientSelectableCameraVehicle {
     type ClientMethod = ClientSelectableCameraVehicle_Client;
     type BaseMethod = ClientSelectableCameraVehicle_Base;
     type CellMethod = ClientSelectableCameraVehicle_Cell;
-    type ClientProperty = ClientSelectableCameraVehicle_ClientProperty;
+    type Property = ClientSelectableCameraVehicle_Property;
 }
 
 // ============================================== //
@@ -2196,7 +2196,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableWebLinksOpener_ClientProperty {
+    pub enum ClientSelectableWebLinksOpener_Property {
         url(0x00, var16, AutoString),
     }
 }
@@ -2206,7 +2206,7 @@ impl Entity for ClientSelectableWebLinksOpener {
     type ClientMethod = ClientSelectableWebLinksOpener_Client;
     type BaseMethod = ClientSelectableWebLinksOpener_Base;
     type CellMethod = ClientSelectableWebLinksOpener_Cell;
-    type ClientProperty = ClientSelectableWebLinksOpener_ClientProperty;
+    type Property = ClientSelectableWebLinksOpener_Property;
 }
 
 // ============================================== //
@@ -2251,7 +2251,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableEasterEgg_ClientProperty {
+    pub enum ClientSelectableEasterEgg_Property {
         multiLanguageSupport(0x00, 1, BOOL),
         imageName(0x01, var16, AutoString),
         outlineModelName(0x02, var16, AutoString),
@@ -2264,7 +2264,7 @@ impl Entity for ClientSelectableEasterEgg {
     type ClientMethod = ClientSelectableEasterEgg_Client;
     type BaseMethod = ClientSelectableEasterEgg_Base;
     type CellMethod = ClientSelectableEasterEgg_Cell;
-    type ClientProperty = ClientSelectableEasterEgg_ClientProperty;
+    type Property = ClientSelectableEasterEgg_Property;
 }
 
 // ============================================== //
@@ -2305,7 +2305,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum EmptyEntity_ClientProperty {
+    pub enum EmptyEntity_Property {
     }
 }
 
@@ -2314,7 +2314,7 @@ impl Entity for EmptyEntity {
     type ClientMethod = EmptyEntity_Client;
     type BaseMethod = EmptyEntity_Base;
     type CellMethod = EmptyEntity_Cell;
-    type ClientProperty = EmptyEntity_ClientProperty;
+    type Property = EmptyEntity_Property;
 }
 
 // ============================================== //
@@ -2355,7 +2355,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum LimitedVisibilityEntity_ClientProperty {
+    pub enum LimitedVisibilityEntity_Property {
     }
 }
 
@@ -2364,7 +2364,7 @@ impl Entity for LimitedVisibilityEntity {
     type ClientMethod = LimitedVisibilityEntity_Client;
     type BaseMethod = LimitedVisibilityEntity_Base;
     type CellMethod = LimitedVisibilityEntity_Cell;
-    type ClientProperty = LimitedVisibilityEntity_ClientProperty;
+    type Property = LimitedVisibilityEntity_Property;
 }
 
 // ============================================== //
@@ -2408,7 +2408,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum HeroTank_ClientProperty {
+    pub enum HeroTank_Property {
         markerHeightFactor(0x00, 4, f32),
         vehicleTurretYaw(0x01, 4, f32),
         vehicleGunPitch(0x02, 4, f32),
@@ -2420,7 +2420,7 @@ impl Entity for HeroTank {
     type ClientMethod = HeroTank_Client;
     type BaseMethod = HeroTank_Base;
     type CellMethod = HeroTank_Cell;
-    type ClientProperty = HeroTank_ClientProperty;
+    type Property = HeroTank_Property;
 }
 
 // ============================================== //
@@ -2465,7 +2465,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum PlatoonTank_ClientProperty {
+    pub enum PlatoonTank_Property {
         markerHeightFactor(0x00, 4, f32),
         vehicleTurretYaw(0x01, 4, f32),
         vehicleGunPitch(0x02, 4, f32),
@@ -2478,7 +2478,7 @@ impl Entity for PlatoonTank {
     type ClientMethod = PlatoonTank_Client;
     type BaseMethod = PlatoonTank_Base;
     type CellMethod = PlatoonTank_Cell;
-    type ClientProperty = PlatoonTank_ClientProperty;
+    type Property = PlatoonTank_Property;
 }
 
 // ============================================== //
@@ -2520,7 +2520,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum PlatoonLighting_ClientProperty {
+    pub enum PlatoonLighting_Property {
         animationStateMachine(0x00, var16, AutoString),
     }
 }
@@ -2530,7 +2530,7 @@ impl Entity for PlatoonLighting {
     type ClientMethod = PlatoonLighting_Client;
     type BaseMethod = PlatoonLighting_Base;
     type CellMethod = PlatoonLighting_Cell;
-    type ClientProperty = PlatoonLighting_ClientProperty;
+    type Property = PlatoonLighting_Property;
 }
 
 // ============================================== //
@@ -2583,7 +2583,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum SectorBase_ClientProperty {
+    pub enum SectorBase_Property {
         isActive(0x00, 1, BOOL),
         team(0x01, 1, u8),
         baseID(0x02, 1, u8),
@@ -2604,7 +2604,7 @@ impl Entity for SectorBase {
     type ClientMethod = SectorBase_Client;
     type BaseMethod = SectorBase_Base;
     type CellMethod = SectorBase_Cell;
-    type ClientProperty = SectorBase_ClientProperty;
+    type Property = SectorBase_Property;
 }
 
 // ============================================== //
@@ -2661,7 +2661,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Sector_ClientProperty {
+    pub enum Sector_Property {
         groupID(0x00, 1, u8),
         sectorID(0x01, 1, u8),
         playerGroup(0x02, 1, u8),
@@ -2680,7 +2680,7 @@ impl Entity for Sector {
     type ClientMethod = Sector_Client;
     type BaseMethod = Sector_Base;
     type CellMethod = Sector_Cell;
-    type ClientProperty = Sector_ClientProperty;
+    type Property = Sector_Property;
 }
 
 // ============================================== //
@@ -2756,7 +2756,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum DestructibleEntity_ClientProperty {
+    pub enum DestructibleEntity_Property {
         isActive(0x00, 1, BOOL),
         team(0x01, 1, u8),
         destructibleEntityID(0x02, 1, u8),
@@ -2774,7 +2774,7 @@ impl Entity for DestructibleEntity {
     type ClientMethod = DestructibleEntity_Client;
     type BaseMethod = DestructibleEntity_Base;
     type CellMethod = DestructibleEntity_Cell;
-    type ClientProperty = DestructibleEntity_ClientProperty;
+    type Property = DestructibleEntity_Property;
 }
 
 // ============================================== //
@@ -2817,7 +2817,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum StepRepairPoint_ClientProperty {
+    pub enum StepRepairPoint_Property {
         team(0x00, 1, u8),
         radius(0x01, 4, f32),
     }
@@ -2828,7 +2828,7 @@ impl Entity for StepRepairPoint {
     type ClientMethod = StepRepairPoint_Client;
     type BaseMethod = StepRepairPoint_Base;
     type CellMethod = StepRepairPoint_Cell;
-    type ClientProperty = StepRepairPoint_ClientProperty;
+    type Property = StepRepairPoint_Property;
 }
 
 // ============================================== //
@@ -2874,7 +2874,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ProtectionZone_ClientProperty {
+    pub enum ProtectionZone_Property {
         zoneID(0x00, 1, u8),
         team(0x01, 1, u8),
         isActive(0x02, 1, BOOL),
@@ -2888,7 +2888,7 @@ impl Entity for ProtectionZone {
     type ClientMethod = ProtectionZone_Client;
     type BaseMethod = ProtectionZone_Base;
     type CellMethod = ProtectionZone_Cell;
-    type ClientProperty = ProtectionZone_ClientProperty;
+    type Property = ProtectionZone_Property;
 }
 
 // ============================================== //
@@ -2946,7 +2946,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum TeamInfo_ClientProperty {
+    pub enum TeamInfo_Property {
         teamID(0x00, 4, i32),
     }
 }
@@ -2956,7 +2956,7 @@ impl Entity for TeamInfo {
     type ClientMethod = TeamInfo_Client;
     type BaseMethod = TeamInfo_Base;
     type CellMethod = TeamInfo_Cell;
-    type ClientProperty = TeamInfo_ClientProperty;
+    type Property = TeamInfo_Property;
 }
 
 // ============================================== //
@@ -2998,7 +2998,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum AvatarInfo_ClientProperty {
+    pub enum AvatarInfo_Property {
         avatarID(0x00, 4, OBJECT_ID),
     }
 }
@@ -3008,7 +3008,7 @@ impl Entity for AvatarInfo {
     type ClientMethod = AvatarInfo_Client;
     type BaseMethod = AvatarInfo_Base;
     type CellMethod = AvatarInfo_Cell;
-    type ClientProperty = AvatarInfo_ClientProperty;
+    type Property = AvatarInfo_Property;
 }
 
 // ============================================== //
@@ -3049,7 +3049,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ArenaObserverInfo_ClientProperty {
+    pub enum ArenaObserverInfo_Property {
     }
 }
 
@@ -3058,7 +3058,7 @@ impl Entity for ArenaObserverInfo {
     type ClientMethod = ArenaObserverInfo_Client;
     type BaseMethod = ArenaObserverInfo_Base;
     type CellMethod = ArenaObserverInfo_Cell;
-    type ClientProperty = ArenaObserverInfo_ClientProperty;
+    type Property = ArenaObserverInfo_Property;
 }
 
 // ============================================== //
@@ -3111,7 +3111,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum AreaOfEffect_ClientProperty {
+    pub enum AreaOfEffect_Property {
         vehicleID(0x00, 4, i32),
         equipmentID(0x01, 4, i32),
         launchTime(0x02, 8, f64),
@@ -3124,7 +3124,7 @@ impl Entity for AreaOfEffect {
     type ClientMethod = AreaOfEffect_Client;
     type BaseMethod = AreaOfEffect_Base;
     type CellMethod = AreaOfEffect_Cell;
-    type ClientProperty = AreaOfEffect_ClientProperty;
+    type Property = AreaOfEffect_Property;
 }
 
 // ============================================== //
@@ -3165,7 +3165,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum AttackBomber_ClientProperty {
+    pub enum AttackBomber_Property {
     }
 }
 
@@ -3174,7 +3174,7 @@ impl Entity for AttackBomber {
     type ClientMethod = AttackBomber_Client;
     type BaseMethod = AttackBomber_Base;
     type CellMethod = AttackBomber_Cell;
-    type ClientProperty = AttackBomber_ClientProperty;
+    type Property = AttackBomber_Property;
 }
 
 // ============================================== //
@@ -3216,7 +3216,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum AttackArtilleryFort_ClientProperty {
+    pub enum AttackArtilleryFort_Property {
         team(0x00, 4, i32),
     }
 }
@@ -3226,7 +3226,7 @@ impl Entity for AttackArtilleryFort {
     type ClientMethod = AttackArtilleryFort_Client;
     type BaseMethod = AttackArtilleryFort_Base;
     type CellMethod = AttackArtilleryFort_Cell;
-    type ClientProperty = AttackArtilleryFort_ClientProperty;
+    type Property = AttackArtilleryFort_Property;
 }
 
 // ============================================== //
@@ -3267,7 +3267,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum PersonalDeathZone_ClientProperty {
+    pub enum PersonalDeathZone_Property {
     }
 }
 
@@ -3276,7 +3276,7 @@ impl Entity for PersonalDeathZone {
     type ClientMethod = PersonalDeathZone_Client;
     type BaseMethod = PersonalDeathZone_Base;
     type CellMethod = PersonalDeathZone_Cell;
-    type ClientProperty = PersonalDeathZone_ClientProperty;
+    type Property = PersonalDeathZone_Property;
 }
 
 // ============================================== //
@@ -3317,7 +3317,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableRankedObject_ClientProperty {
+    pub enum ClientSelectableRankedObject_Property {
     }
 }
 
@@ -3326,7 +3326,7 @@ impl Entity for ClientSelectableRankedObject {
     type ClientMethod = ClientSelectableRankedObject_Client;
     type BaseMethod = ClientSelectableRankedObject_Base;
     type CellMethod = ClientSelectableRankedObject_Cell;
-    type ClientProperty = ClientSelectableRankedObject_ClientProperty;
+    type Property = ClientSelectableRankedObject_Property;
 }
 
 // ============================================== //
@@ -3386,7 +3386,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum SimulatedVehicle_ClientProperty {
+    pub enum SimulatedVehicle_Property {
         isPlayerVehicle(0x00, 1, BOOL),
         simulationData_siegeState(0x01, 1, BOOL),
         simulationData_health(0x02, 2, i16),
@@ -3414,7 +3414,7 @@ impl Entity for SimulatedVehicle {
     type ClientMethod = SimulatedVehicle_Client;
     type BaseMethod = SimulatedVehicle_Base;
     type CellMethod = SimulatedVehicle_Cell;
-    type ClientProperty = SimulatedVehicle_ClientProperty;
+    type Property = SimulatedVehicle_Property;
 }
 
 // ============================================== //
@@ -3456,7 +3456,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ClientSelectableHangarsSwitcher_ClientProperty {
+    pub enum ClientSelectableHangarsSwitcher_Property {
         destHangar(0x00, var16, AutoString),
     }
 }
@@ -3466,7 +3466,7 @@ impl Entity for ClientSelectableHangarsSwitcher {
     type ClientMethod = ClientSelectableHangarsSwitcher_Client;
     type BaseMethod = ClientSelectableHangarsSwitcher_Base;
     type CellMethod = ClientSelectableHangarsSwitcher_Cell;
-    type ClientProperty = ClientSelectableHangarsSwitcher_ClientProperty;
+    type Property = ClientSelectableHangarsSwitcher_Property;
 }
 
 // ============================================== //
@@ -3540,7 +3540,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum StaticDeathZone_ClientProperty {
+    pub enum StaticDeathZone_Property {
         isActive(0x00, 1, BOOL),
         maskingPolygonsCount(0x01, 1, u8),
         zoneId(0x02, var16, AutoString),
@@ -3554,7 +3554,7 @@ impl Entity for StaticDeathZone {
     type ClientMethod = StaticDeathZone_Client;
     type BaseMethod = StaticDeathZone_Base;
     type CellMethod = StaticDeathZone_Cell;
-    type ClientProperty = StaticDeathZone_ClientProperty;
+    type Property = StaticDeathZone_Property;
 }
 
 // ============================================== //
@@ -3602,7 +3602,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum BasicMine_ClientProperty {
+    pub enum BasicMine_Property {
         isDetonated(0x00, 1, BOOL),
         isActivated(0x01, 1, BOOL),
         mineNumber(0x02, 1, u8),
@@ -3618,7 +3618,7 @@ impl Entity for BasicMine {
     type ClientMethod = BasicMine_Client;
     type BaseMethod = BasicMine_Base;
     type CellMethod = BasicMine_Cell;
-    type ClientProperty = BasicMine_ClientProperty;
+    type Property = BasicMine_Property;
 }
 
 // ============================================== //
@@ -3663,7 +3663,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum NetworkEntity_ClientProperty {
+    pub enum NetworkEntity_Property {
         scale(0x00, 12, Vec3),
         unique_id(0x01, var16, AutoString),
         prefab_path(0x02, var16, AutoString),
@@ -3676,7 +3676,7 @@ impl Entity for NetworkEntity {
     type ClientMethod = NetworkEntity_Client;
     type BaseMethod = NetworkEntity_Base;
     type CellMethod = NetworkEntity_Cell;
-    type ClientProperty = NetworkEntity_ClientProperty;
+    type Property = NetworkEntity_Property;
 }
 
 // ============================================== //
@@ -3721,7 +3721,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Mine_ClientProperty {
+    pub enum Mine_Property {
         isDetonated(0x00, 1, BOOL),
         equipmentID(0x01, 4, u32),
         ownerVehicleID(0x02, 4, u32),
@@ -3739,7 +3739,7 @@ impl Entity for Mine {
     type ClientMethod = Mine_Client;
     type BaseMethod = Mine_Base;
     type CellMethod = Mine_Cell;
-    type ClientProperty = Mine_ClientProperty;
+    type Property = Mine_Property;
 }
 
 // ============================================== //
@@ -3784,7 +3784,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Loot_ClientProperty {
+    pub enum Loot_Property {
         typeID(0x00, 1, u8),
         pickupRange(0x01, 4, f32),
         pickupTime(0x02, 4, f32),
@@ -3802,7 +3802,7 @@ impl Entity for Loot {
     type ClientMethod = Loot_Client;
     type BaseMethod = Loot_Base;
     type CellMethod = Loot_Cell;
-    type ClientProperty = Loot_ClientProperty;
+    type Property = Loot_Property;
 }
 
 // ============================================== //
@@ -3847,7 +3847,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Placement_ClientProperty {
+    pub enum Placement_Property {
         typeID(0x00, 4, i32),
         dropTime(0x01, 4, f32),
         teamID(0x02, 4, i32),
@@ -3865,7 +3865,7 @@ impl Entity for Placement {
     type ClientMethod = Placement_Client;
     type BaseMethod = Placement_Base;
     type CellMethod = Placement_Cell;
-    type ClientProperty = Placement_ClientProperty;
+    type Property = Placement_Property;
 }
 
 // ============================================== //
@@ -3911,7 +3911,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum InfluenceZone_ClientProperty {
+    pub enum InfluenceZone_Property {
         team(0x00, 1, u8),
         equipmentID(0x01, 4, u32),
         dotCreatorId(0x02, 4, u32),
@@ -3930,7 +3930,7 @@ impl Entity for InfluenceZone {
     type ClientMethod = InfluenceZone_Client;
     type BaseMethod = InfluenceZone_Base;
     type CellMethod = InfluenceZone_Cell;
-    type ClientProperty = InfluenceZone_ClientProperty;
+    type Property = InfluenceZone_Property;
 }
 
 // ============================================== //
@@ -3971,7 +3971,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum BattleRoyaleRadio_ClientProperty {
+    pub enum BattleRoyaleRadio_Property {
     }
 }
 
@@ -3985,7 +3985,7 @@ impl Entity for BattleRoyaleRadio {
     type ClientMethod = BattleRoyaleRadio_Client;
     type BaseMethod = BattleRoyaleRadio_Base;
     type CellMethod = BattleRoyaleRadio_Cell;
-    type ClientProperty = BattleRoyaleRadio_ClientProperty;
+    type Property = BattleRoyaleRadio_Property;
 }
 
 // ============================================== //
@@ -4034,7 +4034,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ThunderStrike_ClientProperty {
+    pub enum ThunderStrike_Property {
         equipmentID(0x00, 2, u16),
         attackerID(0x01, 4, OBJECT_ID),
         delayEndTime(0x02, 4, f32),
@@ -4051,7 +4051,7 @@ impl Entity for ThunderStrike {
     type ClientMethod = ThunderStrike_Client;
     type BaseMethod = ThunderStrike_Base;
     type CellMethod = ThunderStrike_Cell;
-    type ClientProperty = ThunderStrike_ClientProperty;
+    type Property = ThunderStrike_Property;
 }
 
 // ============================================== //
@@ -4093,7 +4093,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum Comp7Lighting_ClientProperty {
+    pub enum Comp7Lighting_Property {
         animationStateMachine(0x00, var16, AutoString),
     }
 }
@@ -4108,7 +4108,7 @@ impl Entity for Comp7Lighting {
     type ClientMethod = Comp7Lighting_Client;
     type BaseMethod = Comp7Lighting_Base;
     type CellMethod = Comp7Lighting_Cell;
-    type ClientProperty = Comp7Lighting_ClientProperty;
+    type Property = Comp7Lighting_Property;
 }
 
 // ============================================== //
@@ -4153,7 +4153,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ApplicationPoint_ClientProperty {
+    pub enum ApplicationPoint_Property {
         vehicleID(0x00, 4, i32),
         equipmentID(0x01, 4, i32),
         launchTime(0x02, 4, f32),
@@ -4171,7 +4171,7 @@ impl Entity for ApplicationPoint {
     type ClientMethod = ApplicationPoint_Client;
     type BaseMethod = ApplicationPoint_Base;
     type CellMethod = ApplicationPoint_Cell;
-    type ClientProperty = ApplicationPoint_ClientProperty;
+    type Property = ApplicationPoint_Property;
 }
 
 // ============================================== //
@@ -4226,7 +4226,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum ReplayAccount_ClientProperty {
+    pub enum ReplayAccount_Property {
         filename(0x00, var16, AutoString),
     }
 }
@@ -4241,7 +4241,7 @@ impl Entity for ReplayAccount {
     type ClientMethod = ReplayAccount_Client;
     type BaseMethod = ReplayAccount_Base;
     type CellMethod = ReplayAccount_Cell;
-    type ClientProperty = ReplayAccount_ClientProperty;
+    type Property = ReplayAccount_Property;
 }
 
 // ============================================== //
@@ -4282,7 +4282,7 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
 }
 
 wgtk::__enum_entity_properties! {  // Client-visible properties
-    pub enum SPGZone_ClientProperty {
+    pub enum SPGZone_Property {
     }
 }
 
@@ -4296,7 +4296,7 @@ impl Entity for SPGZone {
     type ClientMethod = SPGZone_Client;
     type BaseMethod = SPGZone_Base;
     type CellMethod = SPGZone_Cell;
-    type ClientProperty = SPGZone_ClientProperty;
+    type Property = SPGZone_Property;
 }
 
 // ============================================== //

@@ -26,7 +26,7 @@ pub trait Entity: Codec<()> {
     /// keeping their own order) -- confirmed against the same BigWorld engine source
     /// (`entitydef/entity_description.cpp`'s `allocateClientServerFullIndexes` /
     /// `ClientServerPropertiesSortHelper`) that already justified the method ordering.
-    type ClientProperty: AnyProperty;
+    type Property: AnyProperty;
 }
 
 /// A runtime-typed entity value: one variant per entity type declared in
@@ -79,7 +79,7 @@ pub trait AnyEntity: Sized {
 
     /// Decode a property update targeting this entity from the bundle's element reader
     /// (server -> client, either the entity's base or cell slice, both share one flat
-    /// client-visible property list -- see [`Entity::ClientProperty`]). Unlike
+    /// client-visible property list -- see [`Entity::Property`]). Unlike
     /// [`AnyEntity::read_base_method`], there's no `Ok(None)` case: an unrecognized
     /// exposed id (e.g. one belonging to a *dynamic* component -- see
     /// [`EntityPropertyInner`](crate::net::app::client::element::EntityPropertyInner)'s
@@ -195,7 +195,7 @@ pub trait AnyMethod: Sized + fmt::Debug + Send {
 /// Abstract type representing a client-visible property value for an entity. Same shape
 /// as [`AnyMethod`] (a property update is framed and dispatched by exposed id exactly
 /// the same way a method call is, just carrying one bare value instead of an args
-/// struct) -- see [`Entity::ClientProperty`] for why the id assignment is the same too.
+/// struct) -- see [`Entity::Property`] for why the id assignment is the same too.
 pub trait AnyProperty: Sized + fmt::Debug + Send {
 
     /// Return the exposed id of this specific property value, without writing anything.
@@ -497,7 +497,7 @@ macro_rules! __enum_entities {
                     match self {
                         $(
                             Self::$entity_name (_) => {
-                                type P = <$entity_name as $crate::net::app::entity::Entity>::ClientProperty;
+                                type P = <$entity_name as $crate::net::app::entity::Entity>::Property;
                                 let EntityPropertyInner::Known(p) = reader.read::<EntityProperty<P>, ()>(&())?.element.inner;
                                 Ok(AnyPropertyValue::new(p))
                             }
