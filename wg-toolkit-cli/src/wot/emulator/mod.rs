@@ -15,6 +15,7 @@ use blowfish::Blowfish;
 use wgtk::net::app::{login, base};
 
 use crate::CliResult;
+use super::r#gen::entity::Entities;
 
 
 pub fn run(
@@ -30,7 +31,7 @@ pub fn run(
         login_app.set_encryption(encryption_key);
     }
 
-    let base_app = base::App::new(base_app_addr.into())
+    let base_app = base::App::<Entities>::new(base_app_addr.into())
         .map_err(|e| format!("Failed to bind base app: {e}"))?;
 
     let shared = Arc::new(Shared {
@@ -68,7 +69,7 @@ struct LoginThread {
 
 #[derive(Debug)]
 struct BaseThread {
-    app: base::App,
+    app: base::App<Entities>,
     shared: Arc<Shared>,
 }
 
@@ -188,22 +189,22 @@ impl BaseThread {
                     self.app.answer_login_success(login.addr, client.blowfish);
 
                 }
-                
+                base::Event::BaseMethod(event) => {
+                    info!(addr = %event.addr, "Base method call on entity {}", event.entity_id);
+                }
+                base::Event::CellMethod(event) => {
+                    info!(addr = %event.addr, "Cell method call on entity {}", event.entity_id);
+                }
+
             }
 
-            // // Proof of concept:
             // let entity: Handle<entity::Login> = self.app.create_base_player(addr, entity::Login {
             //     accountDBID_s: "09518858105".to_string(),
             //     loginPriority: 0,
             // });
 
-            // self.app.call_method(addr, entity, entity::Login_Client::setPeripheryRoutingGroup());
+            // self.app.call_method(entity, entity::Login_Client::setPeripheryRoutingGroup());
             // self.app.reset_entities(addr);
-
-            // let entity: Handle<entity::Account> = self.app.create_base_player(addr, entity::Account {
-            //     name: "Mindstorm38_".to_string(),
-
-            // });
 
         }
 

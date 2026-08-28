@@ -62,8 +62,17 @@ pub fn parse_interface(elt: &Element, tys: &mut TySystem, name: String) -> Inter
 /// Parse the `<ofEntity>` element of a component def, returning the names of the
 /// entities this component targets (usually exactly one).
 pub fn parse_of_entity(elt: &Element) -> Vec<String> {
+    parse_names(elt, "ofEntity")
+}
+
+/// Parse a list of plain child-tag names directly under `elt.get_child(tag)`, e.g.
+/// `<ServerOnlyEntities><Foo/><Bar/></ServerOnlyEntities>`. Returns an empty list if the
+/// tag is absent, or present but empty -- including a self-closing empty tag (e.g.
+/// `frontline`'s `<ClientServerEntities/>`), which parses as a blank string rather than
+/// an element.
+pub fn parse_names(elt: &Element, tag: &str) -> Vec<String> {
     let mut names = Vec::new();
-    if let Some(Value::Element(elt)) = elt.get_child("ofEntity") {
+    if let Some(Value::Element(elt)) = elt.get_child(tag) {
         for (name, _) in elt.iter_children_all() {
             names.push(name.clone());
         }
@@ -71,7 +80,7 @@ pub fn parse_of_entity(elt: &Element) -> Vec<String> {
     names
 }
 
-pub fn parse_entity(elt: &Element, tys: &mut TySystem, id: usize, name: String) -> Entity {
+pub fn parse_entity(elt: &Element, tys: &mut TySystem, id: usize, name: String, from_extension: Option<String>) -> Entity {
 
     let interface = parse_interface(elt, tys, name);
 
@@ -79,6 +88,7 @@ pub fn parse_entity(elt: &Element, tys: &mut TySystem, id: usize, name: String) 
         interface,
         id,
         parent: elt.get_child("Parent").and_then(Value::as_string).map(str::to_string),
+        from_extension,
     };
 
     entity

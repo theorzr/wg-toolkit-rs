@@ -1,10 +1,10 @@
 //! Proxy login and base app used for debugging exchanged messages.
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::time::Duration;
-use std::{fmt, io, thread};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{io, thread};
 
 use tracing::{error, info, warn, info_span, trace, trace_span};
 
@@ -12,17 +12,18 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use flate2::read::ZlibDecoder;
 use blowfish::Blowfish;
 
-use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, SimpleElement};
+use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, ElementLength, SimpleElement};
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
+use wgtk::net::codec::{SimpleCodec, WgSocketAddrV4};
 
 use wgtk::net::app::{proxy, login_proxy, base, client};
-use wgtk::net::app::common::entity::Entity;
+use wgtk::net::app::entity::AnyEntity;
 use wgtk::net::packet::Packet;
 
-use wgtk::util::io::serde_pickle_de_options;
+use wgtk::util::io::{serde_pickle_de_options, WgReadExt};
 
+use super::r#gen::entity::Entities;
 use crate::CliResult;
-use super::r#gen;
 
 
 /// Hex-encode bytes for embedding in a log line (used for raw payloads that failed to
@@ -85,7 +86,6 @@ pub fn run(
     let base_handler = BaseHandler {
         shared,
         next_tick: None,
-        entity_types: r#gen::entity::collect_entity_types::<EntityTypeVec>().0,
         entities: HashMap::new(),
         selected_entity_id: None,
         player_entity_id: None,
@@ -125,8 +125,11 @@ struct LoginHandler {
 struct BaseHandler {
     shared: Arc<Shared>,
     next_tick: Option<u8>,
-    entity_types: Vec<Arc<EntityType>>,
-    entities: HashMap<u32, Arc<EntityType>>,
+    /// Every entity created so far, keyed by its id, holding its actual decoded data --
+    /// this is what lets a base/client method call be decoded generically by just
+    /// looking up the entity id and dispatching on the stored `Entities` variant,
+    /// without this proxy needing to know any concrete entity type statically.
+    entities: HashMap<u32, Entities>,
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
     partial_resources: HashMap<u16, PartialResource>,
@@ -187,19 +190,19 @@ impl login_proxy::Handler for LoginHandler {
     fn receive_login_success(&mut self,
         addr: SocketAddr,
         blowfish: Arc<Blowfish>,
-        base_app_addr: SocketAddrV4,
+        base_app_addr: WgSocketAddrV4,
         _login_key: u32,
         _server_message: String,
-    ) -> Result<SocketAddrV4, Self::Error> {
+    ) -> Result<WgSocketAddrV4, Self::Error> {
 
         info!(%addr, %base_app_addr, "Login success");
         self.shared.pending_clients.lock().unwrap().insert(addr, PendingClient {
-            base_app_addr,
+            base_app_addr: base_app_addr.addr,
             blowfish,
         });
 
         // Return the proxy base app address instead of the expected one!
-        Ok(self.shared.base_app_addr)
+        Ok(self.shared.base_app_addr.into())
 
     }
 
@@ -361,8 +364,16 @@ impl BaseHandler {
 
                 if let Some(entity_id) = self.player_entity_id {
                     // Unwrap because selected entity should exist!
-                    let entity_type = self.entities.get(&entity_id).unwrap();
-                    return (entity_type.base_entity_method)(&mut *self, addr, entity_id, elt);
+                    let entity_data = self.entities.get(&entity_id).unwrap();
+                    // `Ok(None)` means a well-framed but unrecognized exposed id -- the
+                    // bundle reader still safely advanced, so it's fine to keep reading.
+                    // A genuine `Err` means it didn't, so it must be propagated instead
+                    // of continuing (or the next element read would loop on this one).
+                    match entity_data.read_base_method(elt)? {
+                        Some(m) => info!(%addr, id, "-> Base entity method: ({entity_id}) {m:?}"),
+                        None => warn!(%addr, id, "-> Base entity method (unrecognized exposed id): ({entity_id})"),
+                    }
+                    return Ok(true);
                 }
 
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
@@ -463,10 +474,23 @@ impl BaseHandler {
 
                 let cbp = elt.read_simple_stable::<CreateBasePlayerHeader>()?;
 
-                if let Some(entity_type) = cbp.element.entity_type_id.checked_sub(1).and_then(|i| self.entity_types.get(i as usize)) {
-                    self.entities.insert(cbp.element.entity_id, Arc::clone(&entity_type));
-                    self.player_entity_id = Some(cbp.element.entity_id);
-                    return (entity_type.create_base_player)(&mut *self, addr, elt);
+                if cbp.element.entity_type_id >= 1 && cbp.element.entity_type_id <= Entities::count() {
+
+                    let full = elt.read_simple::<CreateBasePlayerAny>()?;
+
+                    // The full entity data is logged as its own field (rather than a
+                    // separate `entity_<id>.txt` dump file) so it lands in the same
+                    // ordered trace while keeping the message itself a short one-liner.
+                    info!(%addr, id = CreateBasePlayerHeader::ID, request_id = ?full.request_id,
+                        entity_data = ?full.element.entity_data,
+                        "<- Create base player: ({}) entity_type_id={} entity_components_count={}",
+                        full.element.entity_id, full.element.entity_type_id, full.element.entity_components_count);
+
+                    self.entities.insert(full.element.entity_id, full.element.entity_data);
+                    self.player_entity_id = Some(full.element.entity_id);
+
+                    return Ok(true);
+
                 }
 
                 self.player_entity_id = None;
@@ -512,22 +536,23 @@ impl BaseHandler {
                 // pre-register the session by IP alone for `accept_peer` to pick up.
                 if let Some(blowfish) = peer.blowfish_arc() {
                     self.shared.pending_switches.lock().unwrap().insert(addr.ip(), PendingClient {
-                        base_app_addr: sba.element.base_addr,
+                        base_app_addr: sba.element.base_addr.addr,
                         blowfish,
                     });
                 } else {
                     warn!(%addr, "<- Switch base app: no blowfish key available, cannot pre-register the reconnection");
                 }
 
-                let mut real_addr_bytes = [0u8; 6];
-                real_addr_bytes[..4].copy_from_slice(&sba.element.base_addr.ip().octets());
-                real_addr_bytes[4..6].copy_from_slice(&sba.element.base_addr.port().to_be_bytes());
-
-                let mut our_addr_bytes = [0u8; 6];
-                our_addr_bytes[..4].copy_from_slice(&self.shared.base_app_addr.ip().octets());
-                our_addr_bytes[4..6].copy_from_slice(&self.shared.base_app_addr.port().to_be_bytes());
-
-                if !peer.patch_raw(&real_addr_bytes, &our_addr_bytes) {
+                // Patch the embedded address in place: same framing (prefix, flags,
+                // sequence number, channel), just pointing at us instead of the real
+                // base app, so the real application still sees (and acknowledges, and
+                // retransmits if needed) the exact packet it sent. Our own salt is
+                // always 0 (`WgSocketAddrV4::from<SocketAddrV4>`'s default), matching
+                // how we represent this address everywhere else (e.g. the login-time
+                // hand-off), rather than reusing whatever the real message carried --
+                // see `WgSocketAddrV4`'s doc comment for why that's correct here.
+                let our_addr = WgSocketAddrV4::from(self.shared.base_app_addr);
+                if !peer.patch_raw(&sba.element.base_addr.to_bytes(), &our_addr.to_bytes()) {
                     warn!(%addr, "<- Switch base app: could not locate the address bytes to patch in the raw packet");
                 }
 
@@ -708,8 +733,14 @@ impl BaseHandler {
 
                 if let Some(entity_id) = self.selected_entity_id {
                     // Unwrap because selected entity should exist!
-                    let entity_type = self.entities.get(&entity_id).unwrap();
-                    return (entity_type.entity_method)(&mut *self, addr, entity_id, elt);
+                    let entity_data = self.entities.get(&entity_id).unwrap();
+                    // See the `BASE_ENTITY_METHOD` arm in `read_out_element` for why
+                    // `Ok(None)` and `Err` are handled differently here.
+                    match entity_data.read_client_method(elt)? {
+                        Some(m) => info!(%addr, id, "<- Entity method: ({entity_id}) {m:?}"),
+                        None => warn!(%addr, id, "<- Entity method (unrecognized exposed id): ({entity_id})"),
+                    }
+                    return Ok(true);
                 }
 
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
@@ -719,9 +750,25 @@ impl BaseHandler {
 
             }
             id if id::ENTITY_PROPERTY.contains(id) => {
+
+                if let Some(entity_id) = self.selected_entity_id {
+                    let entity_data = self.entities.get(&entity_id).unwrap();
+                    // An `Err` here (propagated by `?`, caught by `receive_bundle`'s
+                    // outer catch-all) is expected for any property belonging to a
+                    // *dynamic* component (attached per-instance, see
+                    // `entity_components_count` -- this project's model can't predict
+                    // their exposed ids, see `doc/ENTITY.md`), not just a real mismatch.
+                    // Unlike entity methods, there's no safe fallback framing to guess
+                    // here (see `EntityPropertyInner`'s doc comment) -- reading must stop
+                    // rather than risk desyncing the rest of this bundle.
+                    let p = entity_data.read_client_property(elt)?;
+                    info!(%addr, id, "<- Entity property: ({entity_id}) {p:?}");
+                    return Ok(true);
+                }
+
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
                 warn!(%addr, id, request_id = ?elt.request_id,
-                    "<- Entity property: msg#{} {:?}", id - id::ENTITY_PROPERTY.first, elt.element);
+                    "<- Entity property (unknown selected entity): msg#{} {:?}", id - id::ENTITY_PROPERTY.first, elt.element);
                 return Ok(false);
             }
             id => {
@@ -735,114 +782,41 @@ impl BaseHandler {
 
     }
 
-    fn read_create_base_player<E>(&mut self, addr: SocketAddr, elt: ElementReader) -> io::Result<bool>
-    where
-        E: Entity + fmt::Debug,
-    {
+}
 
-        use client::element::{CreateBasePlayer, id::CREATE_BASE_PLAYER};
+/// Reads a full `CreateBasePlayer` element without knowing the concrete entity type
+/// statically: entity id, entity type id and the unknown blob are read directly (mirrors
+/// `client::element::CreateBasePlayer<E>::read`), then the entity's own data is decoded
+/// generically via [`AnyEntity::read`] using the just-read `entity_type_id`. Read-only,
+/// like the library's own `CreateBasePlayer<E, &E>` write-only sibling.
+struct CreateBasePlayerAny {
+    entity_id: u32,
+    entity_type_id: u16,
+    entity_data: Entities,
+    entity_components_count: u8,
+}
 
-        let cbp = elt.read_simple::<CreateBasePlayer<E>>()?;
+impl SimpleCodec for CreateBasePlayerAny {
 
-        // The full entity data is logged as its own field (rather than written to a
-        // separate `entity_<id>.txt` dump file) so it lands in the same ordered trace
-        // while keeping the message itself a short, scannable one-liner.
-        info!(%addr, id = CREATE_BASE_PLAYER, request_id = ?cbp.request_id, entity_data = ?cbp.element.entity_data,
-            "<- Create base player: ({}) entity_type_id={}", cbp.element.entity_id, cbp.element.entity_type_id);
-
-        Ok(true)
-
+    fn write(&self, _write: &mut dyn io::Write) -> io::Result<()> {
+        unreachable!("CreateBasePlayerAny is read-only")
     }
 
-    fn read_entity_method<E>(&mut self, addr: SocketAddr, entity_id: u32, elt: ElementReader) -> io::Result<bool>
-    where
-        E: Entity,
-        E::ClientMethod: fmt::Debug,
-    {
-        use client::element::{EntityMethod, EntityMethodInner};
-
-        let id = elt.id();
-        let em = elt.read_simple::<EntityMethod<E::ClientMethod>>()?;
-        match &em.element.inner {
-            EntityMethodInner::Known(inner) => {
-                info!(%addr, id, request_id = ?em.request_id, "<- Entity method: ({entity_id}) {:?}", inner);
-            }
-            EntityMethodInner::Unknown { exposed_id, data } => {
-                // The exposed id table we generated from the shipped entity_defs doesn't cover
-                // this one (see re-work/NOTES.md) -- `EntityMethod` still frames it correctly
-                // (var8, matching the live client's own fallback), so bundle reading can safely
-                // continue, we just can't decode its content.
-                warn!(%addr, id, exposed_id, request_id = ?em.request_id,
-                    "<- Entity method (unknown exposed id): ({entity_id}) raw: {}", hex(data));
-            }
+    fn read(read: &mut dyn io::Read) -> io::Result<Self> {
+        let entity_id = read.read_u32()?;
+        let entity_type_id = read.read_u16()?;
+        let unk = read.read_blob_variable()?;
+        if !unk.is_empty() {
+            warn!("Non empty unknown blob when decoding CreateBasePlayer: {unk:?}");
         }
-        Ok(true)
-    }
-
-    fn read_base_entity_method<E>(&mut self, addr: SocketAddr, entity_id: u32, elt: ElementReader) -> io::Result<bool>
-    where
-        E: Entity,
-        E::BaseMethod: fmt::Debug,
-    {
-        use base::element::{BaseEntityMethod, BaseEntityMethodInner};
-
-        let id = elt.id();
-        let em = elt.read_simple::<BaseEntityMethod<E::BaseMethod>>()?;
-        match &em.element.inner {
-            BaseEntityMethodInner::Known(inner) => {
-                info!(%addr, id, request_id = ?em.request_id, "-> Base entity method: ({entity_id}) {:?}", inner);
-            }
-            BaseEntityMethodInner::Unknown { exposed_id, data } => {
-                warn!(%addr, id, exposed_id, request_id = ?em.request_id,
-                    "-> Base entity method (unknown exposed id): ({entity_id}) raw: {}", hex(data));
-            }
-        }
-        Ok(true)
+        let entity_data = Entities::read(read, entity_type_id)?;
+        let entity_components_count = read.read_u8()?;
+        Ok(Self { entity_id, entity_type_id, entity_data, entity_components_count })
     }
 
 }
 
-/// Represent an entity type and its associated static functions.
-#[derive(Debug)]
-struct EntityType {
-    create_base_player: fn(&mut BaseHandler, SocketAddr, ElementReader) -> io::Result<bool>,
-    entity_method: fn(&mut BaseHandler, SocketAddr, u32, ElementReader) -> io::Result<bool>,
-    base_entity_method: fn(&mut BaseHandler, SocketAddr, u32, ElementReader) -> io::Result<bool>,
-}
-
-impl EntityType {
-
-    const fn new<E>() -> Self
-    where
-        E: Entity + fmt::Debug,
-        E::ClientMethod: fmt::Debug,
-        E::BaseMethod: fmt::Debug,
-    {
-        Self {
-            create_base_player: BaseHandler::read_create_base_player::<E>,
-            entity_method: BaseHandler::read_entity_method::<E>,
-            base_entity_method: BaseHandler::read_base_entity_method::<E>,
-        }
-    }
-
-}
-
-/// Internal entity type vector.
-struct EntityTypeVec(Vec<Arc<EntityType>>);
-impl r#gen::entity::EntityTypeCollection for EntityTypeVec {
-
-    fn new(len: usize) -> Self {
-        Self(Vec::with_capacity(len))
-    }
-
-    fn add<E: Entity>(&mut self)
-    where
-        E: std::fmt::Debug,
-        E::ClientMethod: std::fmt::Debug,
-        E::BaseMethod: std::fmt::Debug,
-        E::CellMethod: std::fmt::Debug,
-    {
-        self.0.push(Arc::new(EntityType::new::<E>()));
-    }
-
+impl SimpleElement for CreateBasePlayerAny {
+    const ID: u8 = client::element::id::CREATE_BASE_PLAYER;
+    const LEN: ElementLength = ElementLength::Variable16;
 }

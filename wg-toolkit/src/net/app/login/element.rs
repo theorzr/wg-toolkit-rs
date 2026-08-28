@@ -8,7 +8,6 @@
 //! This app also provides a way to ping test the server.
 
 use std::io::{self, Read, Write};
-use std::net::SocketAddrV4;
 use std::time::Duration;
 
 use rsa::{RsaPrivateKey, RsaPublicKey};
@@ -16,7 +15,7 @@ use blowfish::Blowfish;
 
 use crate::net::filter::{RsaWriter, RsaReader, BlowfishWriter, BlowfishReader};
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, SimpleElement};
-use crate::net::codec::{Codec, SimpleCodec};
+use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::util::io::*;
 
 
@@ -198,7 +197,7 @@ pub enum LoginResponse {
 pub struct LoginSuccess {
     /// The socket address of the base app server to connect after successful
     /// login.
-    pub addr: SocketAddrV4,
+    pub addr: WgSocketAddrV4,
     /// Session key, it's used to authenticate to the base app.
     pub login_key: u32,
     /// Server message for successful login.
@@ -374,7 +373,7 @@ impl Codec<Blowfish> for LoginResponse {
 /// Internal function for encoding login success. It is extracted here
 /// in order to be usable with optional encryption.
 fn write_login_success(write: &mut dyn Write, success: &LoginSuccess) -> io::Result<()> {
-    write.write_socket_addr_v4(success.addr)?;
+    SimpleCodec::write(&success.addr, write)?;
     write.write_u32(success.login_key)?;
     if !success.server_message.is_empty() {
         write.write_string_variable(&success.server_message)?;
@@ -385,9 +384,9 @@ fn write_login_success(write: &mut dyn Write, success: &LoginSuccess) -> io::Res
 /// Internal function for decoding login success. It is extracted here
 /// in order to be usable with optional encryption.
 fn read_login_success(read: &mut dyn Read) -> io::Result<LoginSuccess> {
-    Ok(LoginSuccess { 
-        addr: read.read_socket_addr_v4()?, 
-        login_key: read.read_u32()?, 
+    Ok(LoginSuccess {
+        addr: SimpleCodec::read(read)?,
+        login_key: read.read_u32()?,
         server_message: match read.read_string_variable() {
             Ok(msg) => msg,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => String::new(),

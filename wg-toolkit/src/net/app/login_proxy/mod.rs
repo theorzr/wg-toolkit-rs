@@ -1,7 +1,7 @@
 //! The login proxy application for intercepting and forwarding login requests.
 
 use std::collections::{hash_map, HashMap};
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::io;
@@ -16,6 +16,7 @@ use crate::net::bundle::{Bundle, NextElementReader, ReplyReader, ElementReader};
 use crate::net::socket::PacketSocket;
 use crate::net::proto::Protocol;
 use crate::net::packet::Packet;
+use crate::net::codec::WgSocketAddrV4;
 
 use crate::util::thread::{ThreadPoll, ThreadWorker};
 
@@ -474,10 +475,10 @@ pub trait Handler {
     fn receive_login_success(&mut self,
         addr: SocketAddr,
         blowfish: Arc<Blowfish>,
-        base_app_addr: SocketAddrV4,
+        base_app_addr: WgSocketAddrV4,
         login_key: u32,
         server_message: String,
-    ) -> Result<SocketAddrV4, Self::Error> {
+    ) -> Result<WgSocketAddrV4, Self::Error> {
         let _ = (addr, blowfish, login_key, server_message);
         Ok(base_app_addr)
     }

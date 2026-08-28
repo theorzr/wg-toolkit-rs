@@ -6,8 +6,8 @@
 use std::io::{self, Read, Write};
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::net::app::common::entity::Method;
 use crate::util::io::{WgReadExt, WgWriteExt};
+use crate::net::app::entity::AnyMethod;
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -142,7 +142,7 @@ pub type SendToCell = DebugElementFixed<{ id::SEND_TO_CELL }, 0>;
 
 /// Codec for a base entity method call.
 #[derive(Debug, Clone)]
-pub struct BaseEntityMethod<M: Method> {
+pub struct BaseEntityMethod<M: AnyMethod> {
     pub inner: BaseEntityMethodInner<M>,
 }
 
@@ -163,7 +163,7 @@ pub enum BaseEntityMethodInner<M> {
     },
 }
 
-impl<M: Method> Element<()> for BaseEntityMethod<M> {
+impl<M: AnyMethod> Element<()> for BaseEntityMethod<M> {
 
     fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
@@ -216,6 +216,88 @@ impl<M: Method> Element<()> for BaseEntityMethod<M> {
             let mut data = vec![0; len];
             read.read_exact(&mut data)?;
             BaseEntityMethodInner::Unknown { exposed_id, data }
+        };
+        Ok(Self {
+            inner,
+        })
+    }
+
+}
+
+
+/// Codec for a cell entity method call. The client sends these to the base app (there's
+/// no direct client-to-cell connection), which forwards them to the cell app in real
+/// BigWorld; this project has no `cell::App` yet, so decoding one only recovers the call
+/// itself, not anything about forwarding it.
+#[derive(Debug, Clone)]
+pub struct CellEntityMethod<M: AnyMethod> {
+    pub inner: CellEntityMethodInner<M>,
+}
+
+/// The decoded (or not) payload of a [`CellEntityMethod`], see [`BaseEntityMethodInner`]
+/// for why an `Unknown` variant exists.
+#[derive(Debug, Clone)]
+pub enum CellEntityMethodInner<M> {
+    Known(M),
+    Unknown {
+        exposed_id: u16,
+        data: Vec<u8>,
+    },
+}
+
+impl<M: AnyMethod> Element<()> for CellEntityMethod<M> {
+
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        let exposed_id = match &self.inner {
+            CellEntityMethodInner::Known(inner) => inner.exposed_id(),
+            CellEntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
+        };
+        let (element_id, sub_id) = id::CELL_ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        if let Some(sub_id) = sub_id {
+            write.write_u8(sub_id)?;
+        }
+        match &self.inner {
+            CellEntityMethodInner::Known(inner) => { inner.write(write)?; }
+            CellEntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
+        }
+        Ok(element_id)
+    }
+
+    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
+        if !id::CELL_ENTITY_METHOD.contains(id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected cell entity method element id: {id:02X}")));
+        }
+
+        let mut len = len;
+        let mut sub_id_err = None;
+        let exposed_id = id::CELL_ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+            len = len.saturating_sub(1);
+            match read.read_u8() {
+                Ok(n) => n,
+                Err(e) => {
+                    sub_id_err = Some(e);
+                    0 // Unused, we bail out right after via sub_id_err.
+                }
+            }
+        });
+        if let Some(e) = sub_id_err {
+            return Err(e);
+        }
+
+        let inner = if M::read_length(exposed_id).is_ok() {
+            CellEntityMethodInner::Known(M::read(read, exposed_id)?)
+        } else {
+            let mut data = vec![0; len];
+            read.read_exact(&mut data)?;
+            CellEntityMethodInner::Unknown { exposed_id, data }
         };
         Ok(Self {
             inner,

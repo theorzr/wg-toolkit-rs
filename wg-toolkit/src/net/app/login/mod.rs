@@ -257,7 +257,7 @@ impl App {
         server_message: String
     ) -> Option<Arc<Blowfish>> {
         self.answer_login_response(addr, LoginResponse::Success(LoginSuccess {
-            addr: app_addr,
+            addr: app_addr.into(),
             login_key,
             server_message,
         }))
@@ -343,6 +343,39 @@ impl App {
 
 }
 
+/// Describe a client trying to log into the server.
+#[derive(Debug)]
+struct PendingRequest {
+    /// This is the blowfish key as sent by the client when requesting login.
+    blowfish: Arc<Blowfish>,
+    /// Id of the last request the client sent and where replies should be sent.
+    request_id: u32,
+}
+
+/// Describe a response pending to be sent to an address.
+#[derive(Debug)]
+struct PendingResponse {
+    /// Initial request leading to this response.
+    request: PendingRequest,
+    /// The address of the client.
+    addr: SocketAddr,
+    /// Inner login response.
+    inner: LoginResponse,
+}
+
+/// Describe a challenge that have been issued, this is currently about a Cuckoo Cycle.
+#[derive(Debug)]
+struct PendingChallenge {
+    /// The key prefix expected for the answered key.
+    key_prefix: Vec<u8>,
+    /// The configured max nonce.
+    max_nonce: u32,
+}
+
+// ============ //
+//    EVENTS    //
+// ============ //
+
 /// An event that happened in the login app regarding the login process.
 #[derive(Debug)]
 pub enum Event {
@@ -389,33 +422,4 @@ pub struct LoginEvent {
 pub struct ChallengeEvent {
     /// The address of the client that request a login.
     pub addr: SocketAddr,
-}
-
-/// Describe a client trying to log into the server.
-#[derive(Debug)]
-struct PendingRequest {
-    /// This is the blowfish key as sent by the client when requesting login.
-    blowfish: Arc<Blowfish>,
-    /// Id of the last request the client sent and where replies should be sent.
-    request_id: u32,
-}
-
-/// Describe a response pending to be sent to an address.
-#[derive(Debug)]
-struct PendingResponse {
-    /// Initial request leading to this response.
-    request: PendingRequest,
-    /// The address of the client.
-    addr: SocketAddr,
-    /// Inner login response.
-    inner: LoginResponse,
-}
-
-/// Describe a challenge that have been issued, this is currently about a Cuckoo Cycle.
-#[derive(Debug)]
-struct PendingChallenge {
-    /// The key prefix expected for the answered key.
-    key_prefix: Vec<u8>,
-    /// The configured max nonce.
-    max_nonce: u32,
 }

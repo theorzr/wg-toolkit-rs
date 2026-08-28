@@ -1,4 +1,4 @@
-use wgtk::net::app::common::entity::{Entity, SimpleEntity};
+use wgtk::net::app::entity::Entity;
 
 use super::alias::*;
 use super::interface::*;
@@ -366,14 +366,21 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Account {
-    const TYPE_ID: u16 = 0x01;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Account_ClientProperty {
+        incarnationID(0x00, 8, u64),
+        requiredVersion_2310(0x01, var16, AutoString),
+        name(0x02, var16, AutoString),
+        initialServerSettings(0x03, var16, Python),
+    }
 }
 
-impl SimpleEntity for Account {
+impl Entity for Account {
+    const TYPE_ID: u16 = 0x01;
     type ClientMethod = Account_Client;
     type BaseMethod = Account_Base;
     type CellMethod = Account_Cell;
+    type ClientProperty = Account_ClientProperty;
 }
 
 // ============================================== //
@@ -1055,14 +1062,47 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Avatar {
-    const TYPE_ID: u16 = 0x02;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Avatar_ClientProperty {
+        isObserverFPV(0x00, 1, BOOL),
+        numOfObservers(0x01, 1, u8),
+        arenaBonusType(0x02, 1, u8),
+        arenaGuiType(0x03, 1, u8),
+        weatherPresetID(0x04, 1, u8),
+        tkillIsSuspected(0x05, 1, BOOL),
+        team(0x06, 1, u8),
+        isObserverBothTeams(0x07, 1, BOOL),
+        observableTeamID(0x08, 1, u8),
+        isGunLocked(0x09, 1, BOOL),
+        ownVehicleGear(0x0A, 1, u8),
+        customizationDisplayType(0x0B, 1, u8),
+        shouldSendKillcamSimulationData(0x0C, 1, BOOL),
+        denunciationsLeft(0x0D, 2, i16),
+        ownVehicleHullAimingPitchPacked(0x0E, 2, u16),
+        battleChatRestriction(0x0F, 2, BATTLE_CHAT_RESTRICTION),
+        arenaTypeID(0x10, 4, i32),
+        playerVehicleID(0x11, 4, OBJECT_ID),
+        arenaUniqueID(0x12, 8, ARENA_UNIQUE_ID),
+        ownVehicleAuxPhysicsData(0x13, 8, u64),
+        playLimits(0x14, 16, PLAY_LIMITS),
+        remoteCamera(0x15, 22, REMOTE_CAMERA_DATA),
+        name(0x16, var16, AutoString),
+        sessionID(0x17, var16, AutoString),
+        arenaExtraData(0x18, var16, Python),
+        clientCtx(0x19, var16, AutoString),
+        ammoViews(0x1A, var16, AVATAR_AMMO_VIEWS),
+        goodiesSnapshot(0x1B, var16, Vec<BATTLE_GOODIE_RECORD>),
+        wrongApplicationPoint(0x1C, 12, Vec3),
+        isPositionValid(0x1D, 1, BOOL),
+    }
 }
 
-impl SimpleEntity for Avatar {
+impl Entity for Avatar {
+    const TYPE_ID: u16 = 0x02;
     type ClientMethod = Avatar_Client;
     type BaseMethod = Avatar_Base;
     type CellMethod = Avatar_Cell;
+    type ClientProperty = Avatar_ClientProperty;
 }
 
 // ============================================== //
@@ -1112,14 +1152,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ArenaInfo {
-    const TYPE_ID: u16 = 0x03;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ArenaInfo_ClientProperty {
+        planeTrajectory(0x00, 60, PLANE_TRAJECTORY),
+    }
 }
 
-impl SimpleEntity for ArenaInfo {
+impl Entity for ArenaInfo {
+    const TYPE_ID: u16 = 0x03;
     type ClientMethod = ArenaInfo_Client;
     type BaseMethod = ArenaInfo_Base;
     type CellMethod = ArenaInfo_Cell;
+    type ClientProperty = ArenaInfo_ClientProperty;
 }
 
 // ============================================== //
@@ -1166,14 +1210,24 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableObject {
-    const TYPE_ID: u16 = 0x04;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableObject_ClientProperty {
+        isOver3DSound(0x00, 1, BOOL),
+        isClick3DSound(0x01, 1, BOOL),
+        edgeMode(0x02, 1, u8),
+        modelName(0x03, var16, AutoString),
+        selectionId(0x04, var16, AutoString),
+        mouseOverSoundName(0x05, var16, AutoString),
+        clickSoundName(0x06, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for ClientSelectableObject {
+impl Entity for ClientSelectableObject {
+    const TYPE_ID: u16 = 0x04;
     type ClientMethod = ClientSelectableObject_Client;
     type BaseMethod = ClientSelectableObject_Base;
     type CellMethod = ClientSelectableObject_Cell;
+    type ClientProperty = ClientSelectableObject_ClientProperty;
 }
 
 // ============================================== //
@@ -1213,14 +1267,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl HangarVehicle {
-    const TYPE_ID: u16 = 0x05;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum HangarVehicle_ClientProperty {
+    }
 }
 
-impl SimpleEntity for HangarVehicle {
+impl Entity for HangarVehicle {
+    const TYPE_ID: u16 = 0x05;
     type ClientMethod = HangarVehicle_Client;
     type BaseMethod = HangarVehicle_Base;
     type CellMethod = HangarVehicle_Cell;
+    type ClientProperty = HangarVehicle_ClientProperty;
 }
 
 // ============================================== //
@@ -1457,14 +1514,67 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Vehicle {
-    const TYPE_ID: u16 = 0x06;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Vehicle_ClientProperty {
+        burnoutLevel(0x00, 1, u8),
+        isStrafing(0x01, 1, BOOL),
+        isHidden(0x02, 1, BOOL),
+        physicsMode(0x03, 1, u8),
+        siegeState(0x04, 1, u8),
+        isCrewActive(0x05, 1, BOOL),
+        customRoleSlotTypeId(0x06, 1, u8),
+        arenaBonusType(0x07, 1, u8),
+        isSpeedCapturing(0x08, 1, BOOL),
+        isBlockingCapture(0x09, 1, BOOL),
+        isMyVehicle(0x0A, 1, BOOL),
+        enableExternalRespawn(0x0B, 1, BOOL),
+        botDisplayStatus(0x0C, 1, u8),
+        gunAnglesPacked(0x0D, 2, u16),
+        health(0x0E, 2, i16),
+        engineMode(0x0F, 2, Box<[u8; 2]>),
+        avatarID(0x10, 4, OBJECT_ID),
+        masterVehID(0x11, 4, u32),
+        arenaTypeID(0x12, 4, i32),
+        debuff(0x13, 4, i32),
+        quickShellChangerFactor(0x14, 4, f32),
+        onRespawnReloadTimeFactor(0x15, 4, f32),
+        wheelsState(0x16, 8, u64),
+        stunInfo(0x17, 8, STUN_INFO),
+        arenaUniqueID(0x18, 8, ARENA_UNIQUE_ID),
+        dotEffect(0x19, 14, DOT_EFFECT),
+        remoteCamera(0x1A, 22, REMOTE_CAMERA_DATA),
+        inspiringEffect(0x1B, 24, BUFF_EFFECT),
+        healingEffect(0x1C, 24, BUFF_EFFECT),
+        ownVehiclePosition(0x1D, 32, OWN_VEHICLE_POSITION),
+        inspired(0x1E, 36, INSPIRED_EFFECT),
+        steeringAngles(0x1F, var16, Vec<u8>),
+        wheelsScroll(0x20, var16, Vec<u8>),
+        perkEffects(0x21, var16, PERK_EFFECTS),
+        perks(0x22, var16, Vec<PERK_INFO_HUD>),
+        perksRibbonNotify(0x23, var16, Vec<PERK_INFO_RIBBON>),
+        postmortemViewPointName(0x24, var16, AutoString),
+        publicInfo(0x25, var16, PUBLIC_VEHICLE_INFO),
+        damageStickers(0x26, var16, Vec<VEHICLE_HIT_POINT>),
+        publicStateModifiers(0x27, var16, Vec<EXTRA_ID>),
+        crewCompactDescrs(0x28, var16, Vec<AutoString>),
+        enhancements(0x29, var16, Python),
+        setups(0x2A, var16, Python),
+        setupsIndexes(0x2B, var16, Python),
+        vehPerks(0x2C, var16, Python),
+        vehPostProgression(0x2D, var16, Vec<i32>),
+        disabledSwitches(0x2E, var16, Vec<i32>),
+        healing(0x2F, var16, BUFF_EFFECT_INACTIVATION),
+        healOverTime(0x30, var16, HOT_EFFECT),
+        dogTag(0x31, var16, BATTLE_DOG_TAG),
+    }
 }
 
-impl SimpleEntity for Vehicle {
+impl Entity for Vehicle {
+    const TYPE_ID: u16 = 0x06;
     type ClientMethod = Vehicle_Client;
     type BaseMethod = Vehicle_Base;
     type CellMethod = Vehicle_Cell;
+    type ClientProperty = Vehicle_ClientProperty;
 }
 
 // ============================================== //
@@ -1508,14 +1618,21 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl AreaDestructibles {
-    const TYPE_ID: u16 = 0x07;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum AreaDestructibles_ClientProperty {
+        destroyedModules(0x00, var16, Vec<Box<[u8; 3]>>),
+        destroyedFragiles(0x01, var16, Vec<Box<[u8; 3]>>),
+        fallenColumns(0x02, var16, Vec<Box<[u8; 3]>>),
+        fallenTrees(0x03, var16, Vec<Box<[u8; 5]>>),
+    }
 }
 
-impl SimpleEntity for AreaDestructibles {
+impl Entity for AreaDestructibles {
+    const TYPE_ID: u16 = 0x07;
     type ClientMethod = AreaDestructibles_Client;
     type BaseMethod = AreaDestructibles_Base;
     type CellMethod = AreaDestructibles_Cell;
+    type ClientProperty = AreaDestructibles_ClientProperty;
 }
 
 // ============================================== //
@@ -1555,14 +1672,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl OfflineEntity {
-    const TYPE_ID: u16 = 0x08;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum OfflineEntity_ClientProperty {
+    }
 }
 
-impl SimpleEntity for OfflineEntity {
+impl Entity for OfflineEntity {
+    const TYPE_ID: u16 = 0x08;
     type ClientMethod = OfflineEntity_Client;
     type BaseMethod = OfflineEntity_Base;
     type CellMethod = OfflineEntity_Cell;
+    type ClientProperty = OfflineEntity_ClientProperty;
 }
 
 // ============================================== //
@@ -1617,14 +1737,32 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Flock {
-    const TYPE_ID: u16 = 0x09;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Flock_ClientProperty {
+        modelCount(0x00, 1, u8),
+        flyAroundCenter(0x01, 1, BOOL),
+        yawSpeed(0x02, 4, f32),
+        pitchSpeed(0x03, 4, f32),
+        rollSpeed(0x04, 4, f32),
+        animSpeedMin(0x05, 4, f32),
+        animSpeedMax(0x06, 4, f32),
+        height(0x07, 4, f32),
+        radius(0x08, 4, f32),
+        deadZoneRadius(0x09, 4, f32),
+        speedAtBottom(0x0A, 4, f32),
+        speedAtTop(0x0B, 4, f32),
+        decisionTime(0x0C, 4, f32),
+        modelName(0x0D, var16, AutoString),
+        modelName2(0x0E, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for Flock {
+impl Entity for Flock {
+    const TYPE_ID: u16 = 0x09;
     type ClientMethod = Flock_Client;
     type BaseMethod = Flock_Base;
     type CellMethod = Flock_Cell;
+    type ClientProperty = Flock_ClientProperty;
 }
 
 // ============================================== //
@@ -1685,14 +1823,38 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl FlockExotic {
-    const TYPE_ID: u16 = 0x0A;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum FlockExotic_ClientProperty {
+        modelCount(0x00, 1, u8),
+        animSpeedMax(0x01, 4, f32),
+        animSpeedMin(0x02, 4, f32),
+        speed(0x03, 4, f32),
+        accelerationTime(0x04, 4, f32),
+        triggerRadius(0x05, 4, f32),
+        spawnRadius(0x06, 4, f32),
+        spawnHeight(0x07, 4, f32),
+        flightRadius(0x08, 4, f32),
+        flightHeight(0x09, 4, f32),
+        flightAngleMin(0x0A, 4, f32),
+        flightAngleMax(0x0B, 4, f32),
+        flightOffsetFromOrigin(0x0C, 4, f32),
+        lifeTime(0x0D, 4, f32),
+        respawnTime(0x0E, 4, f32),
+        initSpeedRandom(0x0F, 8, Vec2),
+        speedRandom(0x10, 8, Vec2),
+        explosionRadius(0x11, 8, Vec2),
+        modelName(0x12, var16, AutoString),
+        modelName2(0x13, var16, AutoString),
+        flightSound(0x14, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for FlockExotic {
+impl Entity for FlockExotic {
+    const TYPE_ID: u16 = 0x0A;
     type ClientMethod = FlockExotic_Client;
     type BaseMethod = FlockExotic_Base;
     type CellMethod = FlockExotic_Cell;
+    type ClientProperty = FlockExotic_ClientProperty;
 }
 
 // ============================================== //
@@ -1752,14 +1914,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Login {
-    const TYPE_ID: u16 = 0x0B;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Login_ClientProperty {
+        accountDBID_s(0x00, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for Login {
+impl Entity for Login {
+    const TYPE_ID: u16 = 0x0B;
     type ClientMethod = Login_Client;
     type BaseMethod = Login_Base;
     type CellMethod = Login_Cell;
+    type ClientProperty = Login_ClientProperty;
 }
 
 // ============================================== //
@@ -1819,14 +1985,22 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl DetachedTurret {
-    const TYPE_ID: u16 = 0x0C;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum DetachedTurret_ClientProperty {
+        isUnderWater(0x00, 1, BOOL),
+        isCollidingWithWorld(0x01, 1, BOOL),
+        vehicleID(0x02, 4, i32),
+        vehicleCompDescr(0x03, var16, AutoString),
+        outfitCD(0x04, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for DetachedTurret {
+impl Entity for DetachedTurret {
+    const TYPE_ID: u16 = 0x0C;
     type ClientMethod = DetachedTurret_Client;
     type BaseMethod = DetachedTurret_Base;
     type CellMethod = DetachedTurret_Cell;
+    type ClientProperty = DetachedTurret_ClientProperty;
 }
 
 // ============================================== //
@@ -1867,14 +2041,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl DebugDrawEntity {
-    const TYPE_ID: u16 = 0x0D;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum DebugDrawEntity_ClientProperty {
+        drawObjects(0x00, var16, Vec<ANON163>),
+    }
 }
 
-impl SimpleEntity for DebugDrawEntity {
+impl Entity for DebugDrawEntity {
+    const TYPE_ID: u16 = 0x0D;
     type ClientMethod = DebugDrawEntity_Client;
     type BaseMethod = DebugDrawEntity_Base;
     type CellMethod = DebugDrawEntity_Cell;
+    type ClientProperty = DebugDrawEntity_ClientProperty;
 }
 
 // ============================================== //
@@ -1914,14 +2092,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableCameraObject {
-    const TYPE_ID: u16 = 0x0E;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableCameraObject_ClientProperty {
+    }
 }
 
-impl SimpleEntity for ClientSelectableCameraObject {
+impl Entity for ClientSelectableCameraObject {
+    const TYPE_ID: u16 = 0x0E;
     type ClientMethod = ClientSelectableCameraObject_Client;
     type BaseMethod = ClientSelectableCameraObject_Base;
     type CellMethod = ClientSelectableCameraObject_Cell;
+    type ClientProperty = ClientSelectableCameraObject_ClientProperty;
 }
 
 // ============================================== //
@@ -1962,14 +2143,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableCameraVehicle {
-    const TYPE_ID: u16 = 0x0F;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableCameraVehicle_ClientProperty {
+        modelName(0x00, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for ClientSelectableCameraVehicle {
+impl Entity for ClientSelectableCameraVehicle {
+    const TYPE_ID: u16 = 0x0F;
     type ClientMethod = ClientSelectableCameraVehicle_Client;
     type BaseMethod = ClientSelectableCameraVehicle_Base;
     type CellMethod = ClientSelectableCameraVehicle_Cell;
+    type ClientProperty = ClientSelectableCameraVehicle_ClientProperty;
 }
 
 // ============================================== //
@@ -2010,14 +2195,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableWebLinksOpener {
-    const TYPE_ID: u16 = 0x10;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableWebLinksOpener_ClientProperty {
+        url(0x00, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for ClientSelectableWebLinksOpener {
+impl Entity for ClientSelectableWebLinksOpener {
+    const TYPE_ID: u16 = 0x10;
     type ClientMethod = ClientSelectableWebLinksOpener_Client;
     type BaseMethod = ClientSelectableWebLinksOpener_Base;
     type CellMethod = ClientSelectableWebLinksOpener_Cell;
+    type ClientProperty = ClientSelectableWebLinksOpener_ClientProperty;
 }
 
 // ============================================== //
@@ -2061,14 +2250,21 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableEasterEgg {
-    const TYPE_ID: u16 = 0x11;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableEasterEgg_ClientProperty {
+        multiLanguageSupport(0x00, 1, BOOL),
+        imageName(0x01, var16, AutoString),
+        outlineModelName(0x02, var16, AutoString),
+        animationSequence(0x03, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for ClientSelectableEasterEgg {
+impl Entity for ClientSelectableEasterEgg {
+    const TYPE_ID: u16 = 0x11;
     type ClientMethod = ClientSelectableEasterEgg_Client;
     type BaseMethod = ClientSelectableEasterEgg_Base;
     type CellMethod = ClientSelectableEasterEgg_Cell;
+    type ClientProperty = ClientSelectableEasterEgg_ClientProperty;
 }
 
 // ============================================== //
@@ -2108,14 +2304,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl EmptyEntity {
-    const TYPE_ID: u16 = 0x12;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum EmptyEntity_ClientProperty {
+    }
 }
 
-impl SimpleEntity for EmptyEntity {
+impl Entity for EmptyEntity {
+    const TYPE_ID: u16 = 0x12;
     type ClientMethod = EmptyEntity_Client;
     type BaseMethod = EmptyEntity_Base;
     type CellMethod = EmptyEntity_Cell;
+    type ClientProperty = EmptyEntity_ClientProperty;
 }
 
 // ============================================== //
@@ -2155,14 +2354,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl LimitedVisibilityEntity {
-    const TYPE_ID: u16 = 0x13;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum LimitedVisibilityEntity_ClientProperty {
+    }
 }
 
-impl SimpleEntity for LimitedVisibilityEntity {
+impl Entity for LimitedVisibilityEntity {
+    const TYPE_ID: u16 = 0x13;
     type ClientMethod = LimitedVisibilityEntity_Client;
     type BaseMethod = LimitedVisibilityEntity_Base;
     type CellMethod = LimitedVisibilityEntity_Cell;
+    type ClientProperty = LimitedVisibilityEntity_ClientProperty;
 }
 
 // ============================================== //
@@ -2205,14 +2407,20 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl HeroTank {
-    const TYPE_ID: u16 = 0x14;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum HeroTank_ClientProperty {
+        markerHeightFactor(0x00, 4, f32),
+        vehicleTurretYaw(0x01, 4, f32),
+        vehicleGunPitch(0x02, 4, f32),
+    }
 }
 
-impl SimpleEntity for HeroTank {
+impl Entity for HeroTank {
+    const TYPE_ID: u16 = 0x14;
     type ClientMethod = HeroTank_Client;
     type BaseMethod = HeroTank_Base;
     type CellMethod = HeroTank_Cell;
+    type ClientProperty = HeroTank_ClientProperty;
 }
 
 // ============================================== //
@@ -2256,14 +2464,21 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl PlatoonTank {
-    const TYPE_ID: u16 = 0x15;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum PlatoonTank_ClientProperty {
+        markerHeightFactor(0x00, 4, f32),
+        vehicleTurretYaw(0x01, 4, f32),
+        vehicleGunPitch(0x02, 4, f32),
+        slotIndex(0x03, 4, i32),
+    }
 }
 
-impl SimpleEntity for PlatoonTank {
+impl Entity for PlatoonTank {
+    const TYPE_ID: u16 = 0x15;
     type ClientMethod = PlatoonTank_Client;
     type BaseMethod = PlatoonTank_Base;
     type CellMethod = PlatoonTank_Cell;
+    type ClientProperty = PlatoonTank_ClientProperty;
 }
 
 // ============================================== //
@@ -2304,14 +2519,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl PlatoonLighting {
-    const TYPE_ID: u16 = 0x16;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum PlatoonLighting_ClientProperty {
+        animationStateMachine(0x00, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for PlatoonLighting {
+impl Entity for PlatoonLighting {
+    const TYPE_ID: u16 = 0x16;
     type ClientMethod = PlatoonLighting_Client;
     type BaseMethod = PlatoonLighting_Base;
     type CellMethod = PlatoonLighting_Cell;
+    type ClientProperty = PlatoonLighting_ClientProperty;
 }
 
 // ============================================== //
@@ -2363,14 +2582,29 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl SectorBase {
-    const TYPE_ID: u16 = 0x17;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum SectorBase_ClientProperty {
+        isActive(0x00, 1, BOOL),
+        team(0x01, 1, u8),
+        baseID(0x02, 1, u8),
+        sectorID(0x03, 1, u8),
+        pointsPercentage(0x04, 1, u8),
+        capturingStopped(0x05, 1, BOOL),
+        isCaptured(0x06, 1, BOOL),
+        invadersCount(0x07, 1, u8),
+        maxPoints(0x08, 4, f32),
+        onDamageCooldownTime(0x09, 4, f32),
+        radius(0x0A, 4, f32),
+        expectedCaptureTime(0x0B, 4, f32),
+    }
 }
 
-impl SimpleEntity for SectorBase {
+impl Entity for SectorBase {
+    const TYPE_ID: u16 = 0x17;
     type ClientMethod = SectorBase_Client;
     type BaseMethod = SectorBase_Base;
     type CellMethod = SectorBase_Cell;
+    type ClientProperty = SectorBase_ClientProperty;
 }
 
 // ============================================== //
@@ -2426,14 +2660,27 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl Sector {
-    const TYPE_ID: u16 = 0x18;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Sector_ClientProperty {
+        groupID(0x00, 1, u8),
+        sectorID(0x01, 1, u8),
+        playerGroup(0x02, 1, u8),
+        IDInPlayerGroup(0x03, 1, u8),
+        team(0x04, 1, u8),
+        state(0x05, 1, u8),
+        lengthX(0x06, 4, f32),
+        lengthZ(0x07, 4, f32),
+        transitionTime(0x08, 4, f32),
+        endOfTransitionPeriod(0x09, 4, f32),
+    }
 }
 
-impl SimpleEntity for Sector {
+impl Entity for Sector {
+    const TYPE_ID: u16 = 0x18;
     type ClientMethod = Sector_Client;
     type BaseMethod = Sector_Base;
     type CellMethod = Sector_Cell;
+    type ClientProperty = Sector_ClientProperty;
 }
 
 // ============================================== //
@@ -2508,14 +2755,26 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl DestructibleEntity {
-    const TYPE_ID: u16 = 0x19;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum DestructibleEntity_ClientProperty {
+        isActive(0x00, 1, BOOL),
+        team(0x01, 1, u8),
+        destructibleEntityID(0x02, 1, u8),
+        isDestructibleDestroyed(0x03, 1, BOOL),
+        typeID(0x04, 1, u8),
+        health(0x05, 4, f32),
+        maxHealth(0x06, 4, f32),
+        linkedMapActivities(0x07, var16, AutoString),
+        damageStickers(0x08, var16, Vec<VEHICLE_HIT_POINT>),
+    }
 }
 
-impl SimpleEntity for DestructibleEntity {
+impl Entity for DestructibleEntity {
+    const TYPE_ID: u16 = 0x19;
     type ClientMethod = DestructibleEntity_Client;
     type BaseMethod = DestructibleEntity_Base;
     type CellMethod = DestructibleEntity_Cell;
+    type ClientProperty = DestructibleEntity_ClientProperty;
 }
 
 // ============================================== //
@@ -2557,14 +2816,19 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl StepRepairPoint {
-    const TYPE_ID: u16 = 0x1A;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum StepRepairPoint_ClientProperty {
+        team(0x00, 1, u8),
+        radius(0x01, 4, f32),
+    }
 }
 
-impl SimpleEntity for StepRepairPoint {
+impl Entity for StepRepairPoint {
+    const TYPE_ID: u16 = 0x1A;
     type ClientMethod = StepRepairPoint_Client;
     type BaseMethod = StepRepairPoint_Base;
     type CellMethod = StepRepairPoint_Cell;
+    type ClientProperty = StepRepairPoint_ClientProperty;
 }
 
 // ============================================== //
@@ -2609,14 +2873,22 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ProtectionZone {
-    const TYPE_ID: u16 = 0x1B;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ProtectionZone_ClientProperty {
+        zoneID(0x00, 1, u8),
+        team(0x01, 1, u8),
+        isActive(0x02, 1, BOOL),
+        lengthX(0x03, 4, f32),
+        lengthZ(0x04, 4, f32),
+    }
 }
 
-impl SimpleEntity for ProtectionZone {
+impl Entity for ProtectionZone {
+    const TYPE_ID: u16 = 0x1B;
     type ClientMethod = ProtectionZone_Client;
     type BaseMethod = ProtectionZone_Base;
     type CellMethod = ProtectionZone_Cell;
+    type ClientProperty = ProtectionZone_ClientProperty;
 }
 
 // ============================================== //
@@ -2673,14 +2945,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl TeamInfo {
-    const TYPE_ID: u16 = 0x1C;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum TeamInfo_ClientProperty {
+        teamID(0x00, 4, i32),
+    }
 }
 
-impl SimpleEntity for TeamInfo {
+impl Entity for TeamInfo {
+    const TYPE_ID: u16 = 0x1C;
     type ClientMethod = TeamInfo_Client;
     type BaseMethod = TeamInfo_Base;
     type CellMethod = TeamInfo_Cell;
+    type ClientProperty = TeamInfo_ClientProperty;
 }
 
 // ============================================== //
@@ -2721,14 +2997,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl AvatarInfo {
-    const TYPE_ID: u16 = 0x1D;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum AvatarInfo_ClientProperty {
+        avatarID(0x00, 4, OBJECT_ID),
+    }
 }
 
-impl SimpleEntity for AvatarInfo {
+impl Entity for AvatarInfo {
+    const TYPE_ID: u16 = 0x1D;
     type ClientMethod = AvatarInfo_Client;
     type BaseMethod = AvatarInfo_Base;
     type CellMethod = AvatarInfo_Cell;
+    type ClientProperty = AvatarInfo_ClientProperty;
 }
 
 // ============================================== //
@@ -2768,14 +3048,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ArenaObserverInfo {
-    const TYPE_ID: u16 = 0x1E;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ArenaObserverInfo_ClientProperty {
+    }
 }
 
-impl SimpleEntity for ArenaObserverInfo {
+impl Entity for ArenaObserverInfo {
+    const TYPE_ID: u16 = 0x1E;
     type ClientMethod = ArenaObserverInfo_Client;
     type BaseMethod = ArenaObserverInfo_Base;
     type CellMethod = ArenaObserverInfo_Cell;
+    type ClientProperty = ArenaObserverInfo_ClientProperty;
 }
 
 // ============================================== //
@@ -2827,14 +3110,21 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl AreaOfEffect {
-    const TYPE_ID: u16 = 0x1F;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum AreaOfEffect_ClientProperty {
+        vehicleID(0x00, 4, i32),
+        equipmentID(0x01, 4, i32),
+        launchTime(0x02, 8, f64),
+        strikeTime(0x03, 8, f64),
+    }
 }
 
-impl SimpleEntity for AreaOfEffect {
+impl Entity for AreaOfEffect {
+    const TYPE_ID: u16 = 0x1F;
     type ClientMethod = AreaOfEffect_Client;
     type BaseMethod = AreaOfEffect_Base;
     type CellMethod = AreaOfEffect_Cell;
+    type ClientProperty = AreaOfEffect_ClientProperty;
 }
 
 // ============================================== //
@@ -2874,14 +3164,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl AttackBomber {
-    const TYPE_ID: u16 = 0x20;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum AttackBomber_ClientProperty {
+    }
 }
 
-impl SimpleEntity for AttackBomber {
+impl Entity for AttackBomber {
+    const TYPE_ID: u16 = 0x20;
     type ClientMethod = AttackBomber_Client;
     type BaseMethod = AttackBomber_Base;
     type CellMethod = AttackBomber_Cell;
+    type ClientProperty = AttackBomber_ClientProperty;
 }
 
 // ============================================== //
@@ -2922,14 +3215,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl AttackArtilleryFort {
-    const TYPE_ID: u16 = 0x21;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum AttackArtilleryFort_ClientProperty {
+        team(0x00, 4, i32),
+    }
 }
 
-impl SimpleEntity for AttackArtilleryFort {
+impl Entity for AttackArtilleryFort {
+    const TYPE_ID: u16 = 0x21;
     type ClientMethod = AttackArtilleryFort_Client;
     type BaseMethod = AttackArtilleryFort_Base;
     type CellMethod = AttackArtilleryFort_Cell;
+    type ClientProperty = AttackArtilleryFort_ClientProperty;
 }
 
 // ============================================== //
@@ -2969,14 +3266,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl PersonalDeathZone {
-    const TYPE_ID: u16 = 0x22;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum PersonalDeathZone_ClientProperty {
+    }
 }
 
-impl SimpleEntity for PersonalDeathZone {
+impl Entity for PersonalDeathZone {
+    const TYPE_ID: u16 = 0x22;
     type ClientMethod = PersonalDeathZone_Client;
     type BaseMethod = PersonalDeathZone_Base;
     type CellMethod = PersonalDeathZone_Cell;
+    type ClientProperty = PersonalDeathZone_ClientProperty;
 }
 
 // ============================================== //
@@ -3016,14 +3316,17 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableRankedObject {
-    const TYPE_ID: u16 = 0x23;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableRankedObject_ClientProperty {
+    }
 }
 
-impl SimpleEntity for ClientSelectableRankedObject {
+impl Entity for ClientSelectableRankedObject {
+    const TYPE_ID: u16 = 0x23;
     type ClientMethod = ClientSelectableRankedObject_Client;
     type BaseMethod = ClientSelectableRankedObject_Base;
     type CellMethod = ClientSelectableRankedObject_Cell;
+    type ClientProperty = ClientSelectableRankedObject_ClientProperty;
 }
 
 // ============================================== //
@@ -3082,14 +3385,36 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl SimulatedVehicle {
-    const TYPE_ID: u16 = 0x24;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum SimulatedVehicle_ClientProperty {
+        isPlayerVehicle(0x00, 1, BOOL),
+        simulationData_siegeState(0x01, 1, BOOL),
+        simulationData_health(0x02, 2, i16),
+        simulationData_engineMode(0x03, 2, Box<[u8; 2]>),
+        simulationData_wheelsState(0x04, 2, u16),
+        simulationData_tracksInAir(0x05, 2, Box<[BOOL; 2]>),
+        realVehicleID(0x06, 4, OBJECT_ID),
+        simulationData_dynAttachmentsInfo(0x07, 6, DYN_ATTACHMENTS_INFO),
+        simulationData_gunAngles(0x08, 8, Vec2),
+        simulationData_turretAndGunSpeed(0x09, 8, Vec2),
+        simulationData_position(0x0A, 12, Vec3),
+        simulationData_rotation(0x0B, 12, Vec3),
+        simulationData_velocity(0x0C, 12, Vec3),
+        simulationData_angVelocity(0x0D, 12, Vec3),
+        publicInfo(0x0E, var16, PUBLIC_VEHICLE_INFO),
+        simulationData_simulationType(0x0F, var16, AutoString),
+        simulationData_damageStickers(0x10, var16, Vec<VEHICLE_HIT_POINT>),
+        simulationData_brokenTracks(0x11, var16, Vec<TRACK_STATE>),
+        simulationData_wheelsSteering(0x12, var16, Vec<f32>),
+    }
 }
 
-impl SimpleEntity for SimulatedVehicle {
+impl Entity for SimulatedVehicle {
+    const TYPE_ID: u16 = 0x24;
     type ClientMethod = SimulatedVehicle_Client;
     type BaseMethod = SimulatedVehicle_Base;
     type CellMethod = SimulatedVehicle_Cell;
+    type ClientProperty = SimulatedVehicle_ClientProperty;
 }
 
 // ============================================== //
@@ -3130,14 +3455,18 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl ClientSelectableHangarsSwitcher {
-    const TYPE_ID: u16 = 0x25;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ClientSelectableHangarsSwitcher_ClientProperty {
+        destHangar(0x00, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for ClientSelectableHangarsSwitcher {
+impl Entity for ClientSelectableHangarsSwitcher {
+    const TYPE_ID: u16 = 0x25;
     type ClientMethod = ClientSelectableHangarsSwitcher_Client;
     type BaseMethod = ClientSelectableHangarsSwitcher_Base;
     type CellMethod = ClientSelectableHangarsSwitcher_Cell;
+    type ClientProperty = ClientSelectableHangarsSwitcher_ClientProperty;
 }
 
 // ============================================== //
@@ -3210,14 +3539,22 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl StaticDeathZone {
-    const TYPE_ID: u16 = 0x26;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum StaticDeathZone_ClientProperty {
+        isActive(0x00, 1, BOOL),
+        maskingPolygonsCount(0x01, 1, u8),
+        zoneId(0x02, var16, AutoString),
+        vehiclesUnderFire(0x03, var16, Vec<VEHICLE_IN_DEATHZONE>),
+        proximityMarkerStyle(0x04, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for StaticDeathZone {
+impl Entity for StaticDeathZone {
+    const TYPE_ID: u16 = 0x26;
     type ClientMethod = StaticDeathZone_Client;
     type BaseMethod = StaticDeathZone_Base;
     type CellMethod = StaticDeathZone_Cell;
+    type ClientProperty = StaticDeathZone_ClientProperty;
 }
 
 // ============================================== //
@@ -3264,14 +3601,24 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl BasicMine {
-    const TYPE_ID: u16 = 0x27;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum BasicMine_ClientProperty {
+        isDetonated(0x00, 1, BOOL),
+        isActivated(0x01, 1, BOOL),
+        mineNumber(0x02, 1, u8),
+        isMarkerEnabled(0x03, 1, BOOL),
+        equipmentID(0x04, 4, u32),
+        ownerVehicleID(0x05, 4, u32),
+        activationTimeDelay(0x06, 4, u32),
+    }
 }
 
-impl SimpleEntity for BasicMine {
+impl Entity for BasicMine {
+    const TYPE_ID: u16 = 0x27;
     type ClientMethod = BasicMine_Client;
     type BaseMethod = BasicMine_Base;
     type CellMethod = BasicMine_Cell;
+    type ClientProperty = BasicMine_ClientProperty;
 }
 
 // ============================================== //
@@ -3315,76 +3662,700 @@ wgtk::__enum_entity_methods! {  // Entity methods on cell
     }
 }
 
-impl NetworkEntity {
-    const TYPE_ID: u16 = 0x28;
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum NetworkEntity_ClientProperty {
+        scale(0x00, 12, Vec3),
+        unique_id(0x01, var16, AutoString),
+        prefab_path(0x02, var16, AutoString),
+        name(0x03, var16, AutoString),
+    }
 }
 
-impl SimpleEntity for NetworkEntity {
+impl Entity for NetworkEntity {
+    const TYPE_ID: u16 = 0x28;
     type ClientMethod = NetworkEntity_Client;
     type BaseMethod = NetworkEntity_Base;
     type CellMethod = NetworkEntity_Cell;
+    type ClientProperty = NetworkEntity_ClientProperty;
+}
+
+// ============================================== //
+// ======               Mine               ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct Mine {
+        pub equipmentID: u32,
+        pub ownerVehicleID: u32,
+        pub isDetonated: BOOL,
+        pub deployTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum Mine_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum Mine_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum Mine_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Mine_ClientProperty {
+        isDetonated(0x00, 1, BOOL),
+        equipmentID(0x01, 4, u32),
+        ownerVehicleID(0x02, 4, u32),
+        deployTime(0x03, 4, f32),
+    }
+}
+
+// UNCONFIRMED: `Mine` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for Mine {
+    const TYPE_ID: u16 = 0x29;
+    type ClientMethod = Mine_Client;
+    type BaseMethod = Mine_Base;
+    type CellMethod = Mine_Cell;
+    type ClientProperty = Mine_ClientProperty;
+}
+
+// ============================================== //
+// ======               Loot               ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct Loot {
+        pub pickupRange: f32,
+        pub pickupTime: f32,
+        pub pickedUpBy: OBJECT_ID,
+        pub typeID: u8,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum Loot_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum Loot_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum Loot_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Loot_ClientProperty {
+        typeID(0x00, 1, u8),
+        pickupRange(0x01, 4, f32),
+        pickupTime(0x02, 4, f32),
+        pickedUpBy(0x03, 4, OBJECT_ID),
+    }
+}
+
+// UNCONFIRMED: `Loot` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for Loot {
+    const TYPE_ID: u16 = 0x2A;
+    type ClientMethod = Loot_Client;
+    type BaseMethod = Loot_Base;
+    type CellMethod = Loot_Cell;
+    type ClientProperty = Loot_ClientProperty;
+}
+
+// ============================================== //
+// ======            Placement             ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct Placement {
+        pub typeID: i32,
+        pub dropTime: f32,
+        pub teamID: i32,
+        pub yawAxis: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum Placement_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum Placement_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum Placement_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Placement_ClientProperty {
+        typeID(0x00, 4, i32),
+        dropTime(0x01, 4, f32),
+        teamID(0x02, 4, i32),
+        yawAxis(0x03, 4, f32),
+    }
+}
+
+// UNCONFIRMED: `Placement` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for Placement {
+    const TYPE_ID: u16 = 0x2B;
+    type ClientMethod = Placement_Client;
+    type BaseMethod = Placement_Base;
+    type CellMethod = Placement_Cell;
+    type ClientProperty = Placement_ClientProperty;
+}
+
+// ============================================== //
+// ======          InfluenceZone           ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct InfluenceZone {
+        pub equipmentID: u32,
+        pub team: u8,
+        pub zonesPosition: Vec<Vec3>,
+        pub dotCreatorId: u32,
+        pub dropOffset: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum InfluenceZone_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum InfluenceZone_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum InfluenceZone_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum InfluenceZone_ClientProperty {
+        team(0x00, 1, u8),
+        equipmentID(0x01, 4, u32),
+        dotCreatorId(0x02, 4, u32),
+        dropOffset(0x03, 4, f32),
+        zonesPosition(0x04, var16, Vec<Vec3>),
+    }
+}
+
+// UNCONFIRMED: `InfluenceZone` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for InfluenceZone {
+    const TYPE_ID: u16 = 0x2C;
+    type ClientMethod = InfluenceZone_Client;
+    type BaseMethod = InfluenceZone_Base;
+    type CellMethod = InfluenceZone_Cell;
+    type ClientProperty = InfluenceZone_ClientProperty;
+}
+
+// ============================================== //
+// ======        BattleRoyaleRadio         ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct BattleRoyaleRadio {
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum BattleRoyaleRadio_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum BattleRoyaleRadio_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum BattleRoyaleRadio_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum BattleRoyaleRadio_ClientProperty {
+    }
+}
+
+// UNCONFIRMED: `BattleRoyaleRadio` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for BattleRoyaleRadio {
+    const TYPE_ID: u16 = 0x2D;
+    type ClientMethod = BattleRoyaleRadio_Client;
+    type BaseMethod = BattleRoyaleRadio_Base;
+    type CellMethod = BattleRoyaleRadio_Cell;
+    type ClientProperty = BattleRoyaleRadio_ClientProperty;
+}
+
+// ============================================== //
+// ======          ThunderStrike           ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ThunderStrike {
+        pub equipmentID: u16,
+        pub attackerID: OBJECT_ID,
+        pub delayEndTime: f32,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+    #[derive(Debug)]
+    pub struct ThunderStrike_hitThunderStrike {
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum ThunderStrike_Client {
+        ThunderStrike_hitThunderStrike(0x00, 0),
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum ThunderStrike_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum ThunderStrike_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ThunderStrike_ClientProperty {
+        equipmentID(0x00, 2, u16),
+        attackerID(0x01, 4, OBJECT_ID),
+        delayEndTime(0x02, 4, f32),
+    }
+}
+
+// UNCONFIRMED: `ThunderStrike` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for ThunderStrike {
+    const TYPE_ID: u16 = 0x2E;
+    type ClientMethod = ThunderStrike_Client;
+    type BaseMethod = ThunderStrike_Base;
+    type CellMethod = ThunderStrike_Cell;
+    type ClientProperty = ThunderStrike_ClientProperty;
+}
+
+// ============================================== //
+// ======          Comp7Lighting           ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct Comp7Lighting {
+        pub animationStateMachine: AutoString,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum Comp7Lighting_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum Comp7Lighting_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum Comp7Lighting_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum Comp7Lighting_ClientProperty {
+        animationStateMachine(0x00, var16, AutoString),
+    }
+}
+
+// UNCONFIRMED: `Comp7Lighting` is declared by the `comp7` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for Comp7Lighting {
+    const TYPE_ID: u16 = 0x2F;
+    type ClientMethod = Comp7Lighting_Client;
+    type BaseMethod = Comp7Lighting_Base;
+    type CellMethod = Comp7Lighting_Cell;
+    type ClientProperty = Comp7Lighting_ClientProperty;
+}
+
+// ============================================== //
+// ======         ApplicationPoint         ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ApplicationPoint {
+        pub vehicleID: i32,
+        pub equipmentID: i32,
+        pub launchTime: f32,
+        pub level: i32,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum ApplicationPoint_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum ApplicationPoint_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum ApplicationPoint_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ApplicationPoint_ClientProperty {
+        vehicleID(0x00, 4, i32),
+        equipmentID(0x01, 4, i32),
+        launchTime(0x02, 4, f32),
+        level(0x03, 4, i32),
+    }
+}
+
+// UNCONFIRMED: `ApplicationPoint` is declared by the `comp7_core` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for ApplicationPoint {
+    const TYPE_ID: u16 = 0x30;
+    type ClientMethod = ApplicationPoint_Client;
+    type BaseMethod = ApplicationPoint_Base;
+    type CellMethod = ApplicationPoint_Cell;
+    type ClientProperty = ApplicationPoint_ClientProperty;
+}
+
+// ============================================== //
+// ======          ReplayAccount           ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ReplayAccount {
+        pub filename: AutoString,
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+    #[derive(Debug)]
+    pub struct ReplayAccount_onKickedFromServer {
+        pub a0: AutoString,
+        pub a1: u8,
+        pub a2: u32,
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+    #[derive(Debug)]
+    pub struct ReplayAccount_stopReplay {
+    }
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum ReplayAccount_Client {
+        ReplayAccount_onKickedFromServer(0x00, var8),
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum ReplayAccount_Base {
+        ReplayAccount_stopReplay(0x00, 0),
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum ReplayAccount_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum ReplayAccount_ClientProperty {
+        filename(0x00, var16, AutoString),
+    }
+}
+
+// UNCONFIRMED: `ReplayAccount` is declared by the `server_side_replay` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for ReplayAccount {
+    const TYPE_ID: u16 = 0x31;
+    type ClientMethod = ReplayAccount_Client;
+    type BaseMethod = ReplayAccount_Base;
+    type CellMethod = ReplayAccount_Cell;
+    type ClientProperty = ReplayAccount_ClientProperty;
+}
+
+// ============================================== //
+// ======             SPGZone              ====== //
+// ============================================== //
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct SPGZone {
+    }
+}
+
+wgtk::__struct_simple_codec! {  // Methods on client
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on base
+
+}
+
+wgtk::__struct_simple_codec! {  // Methods on cell
+
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on client
+    pub enum SPGZone_Client {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on base
+    pub enum SPGZone_Base {
+    }
+}
+
+wgtk::__enum_entity_methods! {  // Entity methods on cell
+    pub enum SPGZone_Cell {
+    }
+}
+
+wgtk::__enum_entity_properties! {  // Client-visible properties
+    pub enum SPGZone_ClientProperty {
+    }
+}
+
+// UNCONFIRMED: `SPGZone` is declared by the `story_mode` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
+// numbering (extension-alphabetical, then declaration order) by analogy with
+// the already-confirmed static-component method-folding rule -- it has NOT
+// itself been checked against a live capture.
+impl Entity for SPGZone {
+    const TYPE_ID: u16 = 0x32;
+    type ClientMethod = SPGZone_Client;
+    type BaseMethod = SPGZone_Base;
+    type CellMethod = SPGZone_Cell;
+    type ClientProperty = SPGZone_ClientProperty;
 }
 
 // ============================================== //
 // ======           [COLLECTION]           ====== //
 // ============================================== //
 
-/// This internal trait can be used to visit each entity type in order.
-pub trait EntityTypeCollection {
-    /// Create a new instance of this collection that is expected to have the given
-    /// number of entity types.
-    fn new(len: usize) -> Self;
-    /// Visit the given entity type.
-    fn add<E: Entity>(&mut self)
-    where
-        E: std::fmt::Debug,
-        E::ClientMethod: std::fmt::Debug,
-        E::BaseMethod: std::fmt::Debug,
-        E::CellMethod: std::fmt::Debug;
+wgtk::__enum_entities! {
+    /// Generic entity type enumeration allowing decoding of any entity.
+    pub enum Entities {
+        Account(0x01),
+        Avatar(0x02),
+        ArenaInfo(0x03),
+        ClientSelectableObject(0x04),
+        HangarVehicle(0x05),
+        Vehicle(0x06),
+        AreaDestructibles(0x07),
+        OfflineEntity(0x08),
+        Flock(0x09),
+        FlockExotic(0x0A),
+        Login(0x0B),
+        DetachedTurret(0x0C),
+        DebugDrawEntity(0x0D),
+        ClientSelectableCameraObject(0x0E),
+        ClientSelectableCameraVehicle(0x0F),
+        ClientSelectableWebLinksOpener(0x10),
+        ClientSelectableEasterEgg(0x11),
+        EmptyEntity(0x12),
+        LimitedVisibilityEntity(0x13),
+        HeroTank(0x14),
+        PlatoonTank(0x15),
+        PlatoonLighting(0x16),
+        SectorBase(0x17),
+        Sector(0x18),
+        DestructibleEntity(0x19),
+        StepRepairPoint(0x1A),
+        ProtectionZone(0x1B),
+        TeamInfo(0x1C),
+        AvatarInfo(0x1D),
+        ArenaObserverInfo(0x1E),
+        AreaOfEffect(0x1F),
+        AttackBomber(0x20),
+        AttackArtilleryFort(0x21),
+        PersonalDeathZone(0x22),
+        ClientSelectableRankedObject(0x23),
+        SimulatedVehicle(0x24),
+        ClientSelectableHangarsSwitcher(0x25),
+        StaticDeathZone(0x26),
+        BasicMine(0x27),
+        NetworkEntity(0x28),
+        Mine(0x29),
+        Loot(0x2A),
+        Placement(0x2B),
+        InfluenceZone(0x2C),
+        BattleRoyaleRadio(0x2D),
+        ThunderStrike(0x2E),
+        Comp7Lighting(0x2F),
+        ApplicationPoint(0x30),
+        ReplayAccount(0x31),
+        SPGZone(0x32),
+    }
 }
 
-/// Visit all entity types in order.
-pub fn collect_entity_types<C: EntityTypeCollection>() -> C {
-    let mut c = C::new(40);
-    c.add::<Account>();
-    c.add::<Avatar>();
-    c.add::<ArenaInfo>();
-    c.add::<ClientSelectableObject>();
-    c.add::<HangarVehicle>();
-    c.add::<Vehicle>();
-    c.add::<AreaDestructibles>();
-    c.add::<OfflineEntity>();
-    c.add::<Flock>();
-    c.add::<FlockExotic>();
-    c.add::<Login>();
-    c.add::<DetachedTurret>();
-    c.add::<DebugDrawEntity>();
-    c.add::<ClientSelectableCameraObject>();
-    c.add::<ClientSelectableCameraVehicle>();
-    c.add::<ClientSelectableWebLinksOpener>();
-    c.add::<ClientSelectableEasterEgg>();
-    c.add::<EmptyEntity>();
-    c.add::<LimitedVisibilityEntity>();
-    c.add::<HeroTank>();
-    c.add::<PlatoonTank>();
-    c.add::<PlatoonLighting>();
-    c.add::<SectorBase>();
-    c.add::<Sector>();
-    c.add::<DestructibleEntity>();
-    c.add::<StepRepairPoint>();
-    c.add::<ProtectionZone>();
-    c.add::<TeamInfo>();
-    c.add::<AvatarInfo>();
-    c.add::<ArenaObserverInfo>();
-    c.add::<AreaOfEffect>();
-    c.add::<AttackBomber>();
-    c.add::<AttackArtilleryFort>();
-    c.add::<PersonalDeathZone>();
-    c.add::<ClientSelectableRankedObject>();
-    c.add::<SimulatedVehicle>();
-    c.add::<ClientSelectableHangarsSwitcher>();
-    c.add::<StaticDeathZone>();
-    c.add::<BasicMine>();
-    c.add::<NetworkEntity>();
-    c
-}

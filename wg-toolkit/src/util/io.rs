@@ -2,9 +2,8 @@
 //! supporting common formats used within the BigWorld engine.
 
 use std::io::{self, Read, Write, Cursor};
-use std::net::{SocketAddrV4, Ipv4Addr};
 
-use byteorder::{ReadBytesExt, WriteBytesExt, LE, BE};
+use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use glam::{Vec2, Vec3, Vec4};
 
 
@@ -215,14 +214,6 @@ pub trait WgReadExt: Read {
             buf.push(b);
         }
         String::from_utf8(buf).map_err(|_| io::ErrorKind::InvalidData.into())
-    }
-
-    fn read_socket_addr_v4(&mut self) -> io::Result<SocketAddrV4> {
-        let mut ip_raw = [0; 4];
-        self.read_exact(&mut ip_raw[..])?;
-        let port = ReadBytesExt::read_u16::<BE>(self)?;
-        let _salt = ReadBytesExt::read_u16::<LE>(self)?;
-        Ok(SocketAddrV4::new(Ipv4Addr::from(ip_raw), port))
     }
 
     #[inline]
@@ -438,13 +429,6 @@ pub trait WgWriteExt: Write {
     /// a vector, see `write_vector_head`.
     fn write_single_head(&mut self, n: usize) -> io::Result<()> {
         self.write_u32(n as u32)
-    }
-
-    fn write_socket_addr_v4(&mut self, addr: SocketAddrV4) -> io::Result<()> {
-        self.write_all(&addr.ip().octets()[..])?;
-        WriteBytesExt::write_u16::<BE>(self, addr.port())?;
-        WriteBytesExt::write_u16::<LE>(self, 0)?; // Salt
-        Ok(())
     }
 
     fn write_vec2(&mut self, vec: Vec2) -> io::Result<()> {

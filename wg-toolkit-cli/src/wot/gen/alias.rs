@@ -1915,3 +1915,81 @@ wgtk::__struct_simple_codec! {
         pub texts: Vec<ANON161>,
     }
 }
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON185 {
+        pub id: OBJECT_ID,
+        pub position: Vec3,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON201 {
+        pub id: OBJECT_ID,
+        pub value: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON203 {
+        pub id: OBJECT_ID,
+        pub value: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON205 {
+        pub id: OBJECT_ID,
+        pub value: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON207 {
+        pub id: OBJECT_ID,
+        pub value: u32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON212 {
+        pub aliveEnemies: u8,
+        pub totalEnemies: u8,
+        pub currentHealth: i32,
+        pub totalHealth: i32,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON214 {
+        pub role: AutoString,
+        pub isDead: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON216 {
+        pub vehicleID: i32,
+        pub isDead: BOOL,
+    }
+}
+
+wgtk::__struct_simple_codec! {
+    #[derive(Debug)]
+    pub struct ANON220 {
+        pub sourcePosition: Vec3,
+        pub sourceVehicleID: i32,
+        pub entIDs: Vec<i32>,
+        pub vehIDs: Vec<i32>,
+        pub beamName: AutoString,
+        pub dmgBeamName: AutoString,
+    }
+}

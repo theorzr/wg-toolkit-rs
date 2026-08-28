@@ -1,20 +1,20 @@
 //! Definition of the elements that can be sent from server to client
 //! once connected to the base application..
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::SocketAddrV4;
+use std::marker::PhantomData;
 
 use glam::Vec3;
 
 use tracing::warn;
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
+use crate::net::app::entity::{Entity, AnyMethod, AnyProperty};
 use crate::util::io::{WgReadExt, WgWriteExt};
-use crate::net::codec::SimpleCodec;
+use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::util::AsciiFmt;
-
-use crate::net::app::common::entity::{Entity, Method};
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -216,36 +216,60 @@ impl SimpleElement for CreateBasePlayerHeader {
 
 /// Sent from the base when a player should be created, the entity id
 /// is given with its type.
-/// 
+///
 /// The remaining data will later be decoded properly depending on the
 /// entity type, it's used for initializing its properties (TODO).
 /// For example the `Login` entity receive the account UID.
+///
+/// Generic over how the entity data is stored (`D`, defaulting to `Box<E>`): decoding
+/// (the client side, below) always produces an owned `Box<E>`, but the base app sending
+/// a just-created entity wants to write it without giving up its own copy -- rather than
+/// a separate write-only sibling type, `D = &E` reuses this same struct for that case.
 #[derive(Debug, Clone)]
-pub struct CreateBasePlayer<E: Entity> {
+pub struct CreateBasePlayer<E: Entity, D: Borrow<E> = Box<E>> {
     /// The unique identifier of the entity being created.
     pub entity_id: u32,
     /// The entity type id.
     pub entity_type_id: u16,
     /// The actual data to be sent for creating the player's entity.
-    pub entity_data: Box<E>,
-    /// This integer describe the number of entity components composing
-    /// the entity, this value must be strictly equal to the same value
-    /// as the client.
-    /// 
-    /// TODO: This number is used to know how much entity components
-    /// must be parsed after this number. Components can be seen as
-    /// regular components. **It's not currently implemented.**
+    pub entity_data: D,
+    /// The number of *dynamic* components attached to this specific entity instance --
+    /// confirmed against `wg-toolkit-cli/src/bootstrap/mod.rs`'s own extension-parsing
+    /// comments: WoT's "StaticComponents" (declared per `extension.xml`) fold their
+    /// methods/properties into every instance's own method table at codegen time (see
+    /// `Model::components`), so they need no runtime handling at all and aren't counted
+    /// here. "DynamicComponents" are instead attached to individual entity instances at
+    /// runtime (e.g. only for the duration of a particular battle mode), don't claim a
+    /// fixed exposed id, and are what this count refers to.
+    ///
+    /// TODO: no live capture with a nonzero count has been analyzed yet, so the actual
+    /// per-component wire encoding that would follow (id/name + its own data) isn't
+    /// confirmed -- this field is read/written verbatim (round-trips correctly even at
+    /// 0, the only value seen so far) but the components themselves aren't decoded.
     pub entity_components_count: u8,
+    _phantom: PhantomData<E>,
 }
 
-impl<E: Entity> SimpleCodec for CreateBasePlayer<E> {
+impl<E: Entity, D: Borrow<E>> CreateBasePlayer<E, D> {
 
-    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+    pub fn new(entity_id: u32, entity_type_id: u16, entity_data: D, entity_components_count: u8) -> Self {
+        Self { entity_id, entity_type_id, entity_data, entity_components_count, _phantom: PhantomData }
+    }
+
+    fn write_inner(&self, write: &mut dyn Write) -> io::Result<()> {
         write.write_u32(self.entity_id)?;
         write.write_u16(self.entity_type_id)?;
         write.write_blob_variable(&[])?;  // Unknown blob or string?
-        self.entity_data.write(&mut *write)?;
+        Codec::write(self.entity_data.borrow(), &mut *write, &())?;
         write.write_u8(self.entity_components_count)
+    }
+
+}
+
+impl<E: Entity> SimpleCodec for CreateBasePlayer<E, Box<E>> {
+
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        self.write_inner(write)
     }
 
     fn read(read: &mut dyn Read) -> io::Result<Self> {
@@ -255,23 +279,131 @@ impl<E: Entity> SimpleCodec for CreateBasePlayer<E> {
         if !unk.is_empty() {
             warn!("Non empty unknown blob when decoding CreateBasePlayer: {unk:?}");
         }
-        Ok(Self {
+        Ok(Self::new(
             entity_id,
             entity_type_id,
-            entity_data: Box::new(E::read(&mut *read)?),
-            entity_components_count: read.read_u8()?,
-        })
+            Box::new(Codec::read(&mut *read, &())?),
+            read.read_u8()?,
+        ))
     }
 
 }
 
-impl<E: Entity> SimpleElement for CreateBasePlayer<E> {
+impl<E: Entity> SimpleElement for CreateBasePlayer<E, Box<E>> {
     const ID: u8 = id::CREATE_BASE_PLAYER;
     const LEN: ElementLength = ElementLength::Variable16;
 }
 
+/// Write-only: sends a just-created entity by reference (see the struct doc comment).
+impl<'e, E: Entity> Element<()> for CreateBasePlayer<E, &'e E> {
 
-pub type CreateCellPlayer = DebugElementVariable16<{ id::CREATE_CELL_PLAYER }>;
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        self.write_inner(write)?;
+        Ok(id::CREATE_BASE_PLAYER)
+    }
+
+    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+        unreachable!("CreateBasePlayer<E, &E> is write-only")
+    }
+
+    fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+        unreachable!("CreateBasePlayer<E, &E> is write-only")
+    }
+
+}
+
+
+/// Sent from the base to give the client's already-created base-player entity (see
+/// [`CreateBasePlayer`]) a cell-side presence too, e.g. it has entered a space/battle.
+///
+/// Field order confirmed against vanilla BigWorld's `Witness::Witness`
+/// (`cellapp/witness.cpp`, `CREATE_REAL_FROM_INIT` case) building this exact message,
+/// which the base app then forwards to the client byte-for-byte
+/// (`Proxy::createCellPlayer` in `baseapp/proxy.cpp` is a raw passthrough, not a
+/// re-encode). No entity id is written -- like [`CreateBasePlayer`], this message only
+/// ever targets the one player entity the client already has (base and cell slices of an
+/// entity share one id, `lib/network/basictypes.hpp`), so `base::App::create_cell_player`
+/// takes the existing base [`Handle`](super::super::base::Handle) instead of minting one.
+///
+/// CONFIRMED against a live capture by disassembling this project's actual target (WoT
+/// v2.3.1.3)'s own `ServerConnection::createCellPlayer` handler (found via the live
+/// `ClientInterface` message table, `re-work/frida/dump_cellplayer_handler*.js`): this
+/// fork's wire layout is NOT a plain byte-for-byte match for vanilla 14.4.1's `stream >>
+/// spaceID_ >> vehicleID >> pos >> packedXZScale_ >> dir` (same as [`CreateBasePlayer`]
+/// needing extra fields vanilla doesn't have) -- it inserts a leading byte and widens the
+/// space between `space_id` and `vehicle_id` by a 2-byte field, confirmed against real
+/// capture bytes: `packed_xz_scale` came out byte-for-byte identical across two different
+/// battles (a per-server-config constant, as expected) and `position`/`direction` came out
+/// as plausible in-map meter-scale values, both of which failed completely under the old
+/// (wrong) offsets. `direction` is still assumed to be 3 raw `f32`s (yaw/pitch/roll,
+/// BigWorld's conventional `Direction3D` layout) -- unconfirmed beyond "values are in a
+/// plausible radian range". There's also no generated per-entity "cell properties" struct
+/// yet (unlike `entity_data: Codec<()>` on [`CreateBasePlayer`], entities only have
+/// base-exposed properties modelled today), so the trailing property-dict stream is
+/// carried as a raw pre-encoded blob (`cell_data`) the caller must build.
+#[derive(Debug, Clone)]
+pub struct CreateCellPlayer {
+    /// Always `0` in every capture seen so far -- meaning unconfirmed.
+    pub unk_flag: u8,
+    /// The id of the space this entity now lives in.
+    pub space_id: u32,
+    /// Always `0` in every capture seen so far -- meaning unconfirmed.
+    pub unk_short: u16,
+    /// UNCONFIRMED semantics: not the entity id of a distinct "vehicle" entity (this
+    /// project has only ever observed one entity, `Account`, created per client -- see
+    /// `doc/ENTITY.md`). Empirically the exact same value also appears again inside
+    /// `cell_data` right after a constant marker byte, which is what confirms this field's
+    /// offset is correct, but not what it actually represents.
+    pub vehicle_id: u32,
+    pub position: Vec3,
+    /// The server's packed-XZ compression scale, needed by the client to decode any
+    /// later packed-XZ position updates -- this project doesn't send those (no compressed
+    /// `AvatarUpdate*` elements are implemented), so this value has no effect today.
+    pub packed_xz_scale: f32,
+    /// Yaw/pitch/roll -- see the struct doc comment for why this encoding is unconfirmed.
+    pub direction: Vec3,
+    /// Raw pre-encoded cell-exposed property dict bytes -- see the struct doc comment.
+    pub cell_data: Vec<u8>,
+}
+
+impl SimpleCodec for CreateCellPlayer {
+
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_u8(self.unk_flag)?;
+        write.write_u32(self.space_id)?;
+        write.write_u16(self.unk_short)?;
+        write.write_u32(self.vehicle_id)?;
+        write.write_vec3(self.position)?;
+        write.write_f32(self.packed_xz_scale)?;
+        write.write_vec3(self.direction)?;
+        write.write_all(&self.cell_data)
+    }
+
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let unk_flag = read.read_u8()?;
+        let space_id = read.read_u32()?;
+        let unk_short = read.read_u16()?;
+        let vehicle_id = read.read_u32()?;
+        let position = read.read_vec3()?;
+        let packed_xz_scale = read.read_f32()?;
+        let direction = read.read_vec3()?;
+        let mut cell_data = Vec::new();
+        read.read_to_end(&mut cell_data)?;
+        Ok(Self { unk_flag, space_id, unk_short, vehicle_id, position, packed_xz_scale, direction, cell_data })
+    }
+
+}
+
+impl SimpleElement for CreateCellPlayer {
+    const ID: u8 = id::CREATE_CELL_PLAYER;
+    const LEN: ElementLength = ElementLength::Variable16;
+}
+
+
 pub type DummyPacket = DebugElementVariable16<{ id::DUMMY_PACKET }>;
 pub type SpaceProperty = DebugElementVariable16<{ id::SPACE_PROPERTY }>;
 pub type AddSpaceGeometryMapping = DebugElementVariable16<{ id::ADD_SPACE_GEOMETRY_MAPPING }>;
@@ -371,7 +503,7 @@ crate::__struct_simple_codec! {
     /// This is used to tell the client to switch control to a new base app address.
     #[derive(Debug, Clone)]
     pub struct SwitchBaseApp {
-        pub base_addr: SocketAddrV4,
+        pub base_addr: WgSocketAddrV4,
         pub reset_entities: bool,
     }
 }
@@ -485,6 +617,87 @@ impl SimpleElement for LoggedOff {
 
 pub type DetailedPosition = DebugElementFixed<{ id::DETAILED_POSITION }, 24>;
 
+/// Codec for a property update on an entity (either its base or cell slice, both share
+/// one flat client-visible property list -- see [`super::super::entity::Entity::ClientProperty`]),
+/// the given property type should be the one of the entity being updated. Mirrors
+/// [`EntityMethod`] exactly (see its doc comment) -- a property update is framed and
+/// dispatched by exposed id the same way a method call is.
+#[derive(Debug, Clone)]
+pub struct EntityProperty<P: AnyProperty> {
+    pub inner: EntityPropertyInner<P>,
+}
+
+/// The decoded payload of an [`EntityProperty`]. Unlike [`EntityMethodInner`], there is
+/// no `Unknown` fallback variant here: an unrecognized exposed id (e.g. one belonging to
+/// a *dynamic* component, whose properties this project's model can't predict at all --
+/// see `doc/ENTITY.md`) has no confirmed wire framing to fall back to. `EntityMethod`'s
+/// "assume Variable8" fallback was confirmed live by hooking the real client's own
+/// `getEntityMethodStreamSize`, specifically for methods -- that confirmation was never
+/// done for properties, and guessing wrong here isn't just a missed decode: it silently
+/// misframes the element, desyncing every following element in the bundle, which was
+/// confirmed live to cascade into misinterpreting unrelated garbage bytes as other
+/// message ids (observed: bogus `SwitchBaseApp` triggers, whose `patch_raw` handling
+/// then corrupted and forwarded real, unrelated packet data to the live game client and
+/// crashed it). An unrecognized exposed id must therefore surface as a read error here,
+/// so the caller stops decoding this bundle rather than guessing further.
+#[derive(Debug, Clone)]
+pub enum EntityPropertyInner<P> {
+    /// A property update whose exposed id is present in `P`'s generated table.
+    Known(P),
+}
+
+impl<P: AnyProperty> Element<()> for EntityProperty<P> {
+
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        let EntityPropertyInner::Known(inner) = &self.inner;
+        let (exposed_id, preferred_len) = (inner.exposed_id(), inner.write_length());
+        let (_, sub_id) = id::ENTITY_PROPERTY.from_exposed_id(P::count(), exposed_id);
+        Ok(if sub_id.is_some() { ElementLength::Variable16 } else { preferred_len })
+    }
+
+    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        let EntityPropertyInner::Known(inner) = &self.inner;
+        let exposed_id = inner.exposed_id();
+        let (element_id, sub_id) = id::ENTITY_PROPERTY.from_exposed_id(P::count(), exposed_id);
+        if let Some(sub_id) = sub_id {
+            write.write_u8(sub_id)?;
+        }
+        inner.write(write)?;
+        Ok(element_id)
+    }
+
+    fn read_length(_config: &(), id: u8) -> io::Result<ElementLength> {
+        if !id::ENTITY_PROPERTY.contains(id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
+        }
+        match id::ENTITY_PROPERTY.to_exposed_id_checked(P::count(), id) {
+            // See `EntityPropertyInner`'s doc comment for why an unrecognized exposed id
+            // must error here instead of guessing a fallback length like `EntityMethod` does.
+            Some(exposed_id) => P::read_length(exposed_id),
+            None => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
+        }
+    }
+
+    fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
+        if !id::ENTITY_PROPERTY.contains(id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
+        }
+
+        // No sub-id handling: `read_length` above already rejected any id outside `P`'s
+        // known full-slot range before `read` is ever reached (see `EntityPropertyInner`'s
+        // doc comment), so overflow sub-ids -- which would only ever be used for an id
+        // count this project doesn't have confirmed anyway -- can't occur here.
+        let exposed_id = id::ENTITY_PROPERTY.to_exposed_id(P::count(), id, || unreachable!(
+            "read_length already rejected any id requiring a sub-id"));
+
+        Ok(Self {
+            inner: EntityPropertyInner::Known(P::read(read, exposed_id)?),
+        })
+    }
+
+}
+
+
 pub type NestedEntityProperty = DebugElementVariable16<{ id::NESTED_ENTITY_PROPERTY }>;
 pub type SliceEntityProperty = DebugElementVariable16<{ id::SLICE_ENTITY_PROPERTY }>;
 pub type UpdateEntity = DebugElementVariable16<{ id::UPDATE_ENTITY }>;
@@ -495,7 +708,7 @@ pub type LastProxyMessageAfterDirectCellAppConnection = DebugElementVariable16<{
 /// Codec for a method call on an entity, the given method type should be the one of
 /// the entity being called.
 #[derive(Debug, Clone)]
-pub struct EntityMethod<M: Method> {
+pub struct EntityMethod<M: AnyMethod> {
     pub inner: EntityMethodInner<M>,
 }
 
@@ -517,7 +730,7 @@ pub enum EntityMethodInner<M> {
     },
 }
 
-impl<M: Method> Element<()> for EntityMethod<M> {
+impl<M: AnyMethod> Element<()> for EntityMethod<M> {
 
     fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
         let (exposed_id, preferred_len) = match &self.inner {

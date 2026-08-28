@@ -3,9 +3,10 @@
 
 
 use std::io::{self, Read, Write};
-use std::net::SocketAddrV4;
+use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::borrow::Cow;
 use std::fmt;
+use std::ops::Deref;
 
 use glam::{Vec2, Vec3, Vec4};
 
@@ -158,7 +159,95 @@ impl_builtin_copy!(f64, write_f64, read_f64);
 impl_builtin_copy!(Vec2, write_vec2, read_vec2);
 impl_builtin_copy!(Vec3, write_vec3, read_vec3);
 impl_builtin_copy!(Vec4, write_vec4, read_vec4);
-impl_builtin_copy!(SocketAddrV4, write_socket_addr_v4, read_socket_addr_v4);
+
+
+/// A `Mercury::Address`: an IPv4 socket address paired with a 16-bit "salt".
+///
+/// Confirmed against the leaked BigWorld source (`server/baseapp/baseapp.cpp`, e.g.
+/// `address.salt = pChannel->isTCP() ? 1 : 0`) that this salt is just a TCP/UDP
+/// discriminator bit for an address-of-an-app value like this -- not a checksum or
+/// anything derived from the ip/port -- so it's always `0` for this project's UDP-only
+/// client-facing protocol. It's still modeled explicitly (rather than silently discarded
+/// like the plain `SocketAddrV4` codec used to do) so that code rewriting an
+/// already-encoded address in place (e.g. a proxy patching a `SwitchBaseApp`'s embedded
+/// address) can preserve or set it deliberately instead of by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgSocketAddrV4 {
+    pub addr: SocketAddrV4,
+    pub salt: u16,
+}
+
+impl WgSocketAddrV4 {
+
+    pub fn new(addr: SocketAddrV4, salt: u16) -> Self {
+        Self { addr, salt }
+    }
+
+    /// Encode into the exact 8 on-wire bytes (ip, then port big-endian, then salt
+    /// little-endian) -- e.g. for locating/rewriting an in-place occurrence of this
+    /// value within an already-encoded packet.
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(&self.addr.ip().octets());
+        out[4..6].copy_from_slice(&self.addr.port().to_be_bytes());
+        out[6..8].copy_from_slice(&self.salt.to_le_bytes());
+        out
+    }
+
+    /// Decode from the exact 8 on-wire bytes produced by [`Self::to_bytes`].
+    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+        let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+        let port = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let salt = u16::from_le_bytes([bytes[6], bytes[7]]);
+        Self { addr: SocketAddrV4::new(ip, port), salt }
+    }
+
+}
+
+impl Deref for WgSocketAddrV4 {
+    type Target = SocketAddrV4;
+    fn deref(&self) -> &SocketAddrV4 {
+        &self.addr
+    }
+}
+
+impl fmt::Display for WgSocketAddrV4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.addr, f)
+    }
+}
+
+impl From<SocketAddrV4> for WgSocketAddrV4 {
+    fn from(addr: SocketAddrV4) -> Self {
+        Self { addr, salt: 0 }
+    }
+}
+
+impl From<WgSocketAddrV4> for SocketAddrV4 {
+    fn from(value: WgSocketAddrV4) -> Self {
+        value.addr
+    }
+}
+
+impl From<WgSocketAddrV4> for SocketAddr {
+    fn from(value: WgSocketAddrV4) -> Self {
+        SocketAddr::V4(value.addr)
+    }
+}
+
+impl SimpleCodec for WgSocketAddrV4 {
+
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_all(&self.to_bytes())
+    }
+
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let mut bytes = [0u8; 8];
+        read.read_exact(&mut bytes)?;
+        Ok(Self::from_bytes(bytes))
+    }
+
+}
 
 
 /// The string data type used by default for all STRING types, it will try to 

@@ -13,7 +13,7 @@ use crate::{BootstrapArgs, CliResult};
 mod parse;
 mod model;
 
-use model::{Component, Entity, Interface, Method, Model, PropertyFlags, Ty, TyKind, VariableHeaderSize};
+use model::{Component, Entity, Interface, Method, Model, Property, PropertyFlags, Ty, TyKind, VariableHeaderSize};
 
 // NOTE: For the future, if python bytecode interpretation is needed to automatically
 // generate enumeration or try to gather function arguments' names, see:
@@ -84,16 +84,16 @@ fn load(fs: ResFilesystem, version: String) -> io::Result<Model> {
     let entities_elt = pxml::from_reader(entities_reader).unwrap();
     let entities_elt = entities_elt.get_child("ClientServerEntities").unwrap().as_element().unwrap();
     for (index, (entity_name, _)) in entities_elt.iter_children_all().enumerate() {
-        
+
         println!(" = {entity_name}");
         let entity_reader = fs.read(format!("scripts/entity_defs/{entity_name}.def"))?;
         let entity_elt = pxml::from_reader(entity_reader).unwrap();
-        let entity = parse::parse_entity(&entity_elt, &mut model.tys, index + 1, entity_name.to_string());
+        let entity = parse::parse_entity(&entity_elt, &mut model.tys, index + 1, entity_name.to_string(), None);
         model.entities.push(entity);
 
     }
 
-    println!("== Reading extension components...");
+    println!("== Reading extensions...");
     // WoT extensions (feature packages such as "la_pinger" or "battle_royale") each sit
     // at the root of the resource filesystem and, if active, carry an "extension.xml"
     // declaring a set of "static" components. Each static component is a def file (same
@@ -107,6 +107,15 @@ fn load(fs: ResFilesystem, version: String) -> io::Result<Model> {
     // Account's exposed client method id 0x2B, right after battle_royale's
     // "AccountBattleRoyaleTournamentComponent" 2 client methods (0x29, 0x2A) and Account's
     // own last interface-derived method (0x28) -- see re-work/HANGAR_LOADING.md.
+    //
+    // An extension can also carry its own "Entities" section (`ClientServerEntities` --
+    // has a real def file, same convention as `scripts/entity_defs/`; and
+    // `ServerOnlyEntities` -- no def file exists anywhere for these, no client-visible
+    // surface, so they're only logged, never parsed/generated). Unlike component method
+    // folding, there's no live-capture confirmation of how these entities' network type
+    // ids are actually assigned -- continuing the main list's numbering (same ordering
+    // rule as component folding) is this generator's best inference, not a checked fact
+    // (see `Entity::from_extension`).
     let mut ext_names: Vec<String> = fs.read_dir("")?
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.stat().is_dir())
@@ -122,34 +131,58 @@ fn load(fs: ResFilesystem, version: String) -> io::Result<Model> {
 
         let ext_elt = pxml::from_reader(ext_reader).unwrap();
 
-        // Only "StaticComponents" fold into every instance's static method table.
-        // "DynamicComponents" are attached to specific entity instances at runtime
-        // (e.g. only for the duration of a particular battle mode) and don't claim a
-        // fixed exposed id the way static ones do, so they're intentionally skipped.
-        let Some(Value::Element(components_elt)) = ext_elt.get_child("Components") else {
-            continue;
-        };
+        if let Some(Value::Element(components_elt)) = ext_elt.get_child("Components") {
 
-        let Some(Value::Element(static_elt)) = components_elt.get_child("StaticComponents") else {
-            continue;
-        };
+            for (list_name, components) in [
+                ("StaticComponents", &mut model.static_components),
+                ("DynamicComponents", &mut model.dynamic_components),
+            ] {
 
-        for (component_name, _) in static_elt.iter_children_all() {
+                let Some(Value::Element(list_elt)) = components_elt.get_child(list_name) else {
+                    continue;
+                };
 
-            println!(" = {ext_name}/{component_name}");
+                for (component_name, _) in list_elt.iter_children_all() {
 
-            let component_path = format!("{ext_name}/scripts/component_defs/{component_name}.def");
-            let component_reader = fs.read(&component_path)?;
-            let component_elt = pxml::from_reader(component_reader).unwrap();
+                    println!(" = {ext_name}/{component_name} ({list_name})");
 
-            let of_entities = parse::parse_of_entity(&component_elt);
-            let interface = parse::parse_interface(&component_elt, &mut model.tys, component_name.clone());
+                    let component_path = format!("{ext_name}/scripts/component_defs/{component_name}.def");
+                    let component_reader = fs.read(&component_path)?;
+                    let component_elt = pxml::from_reader(component_reader).unwrap();
 
-            model.components.push(Component {
-                name: component_name.clone(),
-                of_entities,
-                interface,
-            });
+                    let of_entities = parse::parse_of_entity(&component_elt);
+                    let interface = parse::parse_interface(&component_elt, &mut model.tys, component_name.clone());
+
+                    components.push(Component {
+                        name: component_name.clone(),
+                        of_entities,
+                        interface,
+                    });
+
+                }
+
+            }
+
+        }
+
+        if let Some(Value::Element(ext_entities_elt)) = ext_elt.get_child("Entities") {
+
+            for server_only_name in parse::parse_names(ext_entities_elt, "ServerOnlyEntities") {
+                println!(" = {ext_name}/{server_only_name} (ServerOnlyEntities, no def, not modeled)");
+            }
+
+            for entity_name in parse::parse_names(ext_entities_elt, "ClientServerEntities") {
+
+                println!(" = {ext_name}/{entity_name} (ClientServerEntities)");
+
+                let entity_path = format!("{ext_name}/scripts/entity_defs/{entity_name}.def");
+                let entity_reader = fs.read(&entity_path)?;
+                let entity_elt = pxml::from_reader(entity_reader).unwrap();
+                let id = model.entities.len() + 1;
+                let entity = parse::parse_entity(&entity_elt, &mut model.tys, id, entity_name, Some(ext_name.clone()));
+                model.entities.push(entity);
+
+            }
 
         }
 
@@ -298,14 +331,27 @@ fn generate_interfaces(mod_dir: &Path, model: &Model, state: &mut State) -> io::
         generate_interface(&mut writer, model, interface, &mut *state)?;
     }
 
-    // Extension components are folded into entities' method tables (see
-    // `generate_entity_methods`), but -- unlike regular interfaces -- they're never
-    // `pub i_xxx: ComponentName` composed into an entity's property struct, so we only
-    // need their method argument structs here, not a full `generate_interface` pass.
-    for component in &model.components {
-        for app_state in &mut state.apps {
-            generate_interface_methods(&mut writer, model, &component.interface, app_state)?;
-        }
+    // Extension components' methods are also folded into their owning entities' own
+    // method tables (see `generate_entity_methods`), unlike regular interfaces which
+    // only ever get `pub i_xxx: InterfaceName` composed into an entity's property
+    // struct. Components themselves are never composed that way either (that folding
+    // rule is entirely unconfirmed, unlike the already-empirically-checked method
+    // folding), but a full `generate_interface` pass still gives each one its own
+    // standalone, named, `Codec`-backed struct for its properties (most have none, but
+    // e.g. `FLAccountComponent`/`StoryModeAvatarComponent` do) -- and, as a side effect,
+    // the same named section banner every regular interface gets, instead of a run of
+    // anonymous method-table blocks with no indication which component they belong to.
+    for component in &model.static_components {
+        generate_interface(&mut writer, model, &component.interface, &mut *state)?;
+    }
+
+    // Dynamic components are never composed or folded anywhere (see `Component`'s doc
+    // comment on why their methods can't safely join any entity's method table), but
+    // still get the exact same standalone struct/codec treatment -- some carry real
+    // properties/methods too, e.g. `battle_royale`'s `Radar` exposes both a client and
+    // a cell method.
+    for component in &model.dynamic_components {
+        generate_interface(&mut writer, model, &component.interface, &mut *state)?;
     }
 
     Ok(())
@@ -318,7 +364,7 @@ fn generate_entities(mod_dir: &Path, model: &Model, state: &mut State) -> io::Re
     let entity_file = mod_dir.join("entity.rs");
     let mut writer = BufWriter::new(File::create(&entity_file)?);
 
-    writeln!(writer, "use wgtk::net::app::common::entity::{{Entity, SimpleEntity}};")?;
+    writeln!(writer, "use wgtk::net::app::entity::Entity;")?;
     writeln!(writer)?;
     writeln!(writer, "use super::alias::*;")?;
     writeln!(writer, "use super::interface::*;")?;
@@ -333,40 +379,15 @@ fn generate_entities(mod_dir: &Path, model: &Model, state: &mut State) -> io::Re
     writeln!(writer, "// ============================================== //")?;
     writeln!(writer)?;
 
-    writeln!(writer, "/// This internal trait can be used to visit each entity type in order.")?;
-    writeln!(writer, "pub trait EntityTypeCollection {{")?;
-    writeln!(writer, "    /// Create a new instance of this collection that is expected to have the given")?;
-    writeln!(writer, "    /// number of entity types.")?;
-    writeln!(writer, "    fn new(len: usize) -> Self;")?;
-    writeln!(writer, "    /// Visit the given entity type.")?;
-    writeln!(writer, "    fn add<E: Entity>(&mut self)")?;
-    writeln!(writer, "    where")?;
-    writeln!(writer, "        E: std::fmt::Debug,")?;
-    writeln!(writer, "        E::ClientMethod: std::fmt::Debug,")?;
-    writeln!(writer, "        E::BaseMethod: std::fmt::Debug,")?;
-    writeln!(writer, "        E::CellMethod: std::fmt::Debug;")?;
+    writeln!(writer, "wgtk::__enum_entities! {{")?;
+    writeln!(writer, "    /// Generic entity type enumeration allowing decoding of any entity.")?;
+    writeln!(writer, "    pub enum Entities {{")?;
+    for entity in &model.entities {
+        writeln!(writer, "        {}(0x{:02X}),", entity.interface.name, entity.id)?;
+    }
+    writeln!(writer, "    }}")?;
     writeln!(writer, "}}")?;
     writeln!(writer)?;
-
-    writeln!(writer, "/// Visit all entity types in order.")?;
-    writeln!(writer, "pub fn collect_entity_types<C: EntityTypeCollection>() -> C {{")?;
-    writeln!(writer, "    let mut c = C::new({});", model.entities.len())?;
-    for entity in &model.entities {
-        writeln!(writer, "    c.add::<{}>();", entity.interface.name)?;
-    }
-    writeln!(writer, "    c")?;
-    writeln!(writer, "}}")?;
-
-    // writeln!(writer, "wgtk::__bootstrap_enum_entities! {{")?;
-    // writeln!(writer, "    /// Generic entity type enumeration allowing decoding of any entities.")?;
-    // writeln!(writer, "    #[derive(Debug)]")?;
-    // writeln!(writer, "    pub enum Generic: Generic_Client, Generic_Base, Generic_Cell {{")?;
-    // for entity in &model.entities {
-    //     writeln!(writer, "        {} = 0x{:02X},", entity.interface.name, entity.id)?;
-    // }
-    // writeln!(writer, "    }}")?;
-    // writeln!(writer, "}}")?;
-    // writeln!(writer)?;
 
     Ok(())
 
@@ -380,25 +401,159 @@ fn generate_entity(
 ) -> io::Result<()> {
 
     generate_interface(&mut writer, model, &entity.interface, state)?;
-    
+
     for app_state in &mut state.apps {
         generate_entity_methods(&mut writer, model, entity, app_state)?;
     }
-    
-    writeln!(writer, "impl {} {{", entity.interface.name)?;
-    writeln!(writer, "    const TYPE_ID: u16 = 0x{:02X};", entity.id)?;
-    writeln!(writer, "}}")?;
-    writeln!(writer)?;
 
-    writeln!(writer, "impl SimpleEntity for {} {{", entity.interface.name)?;
+    generate_entity_properties(&mut writer, model, entity)?;
+
+    if let Some(ext_name) = &entity.from_extension {
+        writeln!(writer, "// UNCONFIRMED: `{}` is declared by the `{ext_name}` extension, not the main", entity.interface.name)?;
+        writeln!(writer, "// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own")?;
+        writeln!(writer, "// numbering (extension-alphabetical, then declaration order) by analogy with")?;
+        writeln!(writer, "// the already-confirmed static-component method-folding rule -- it has NOT")?;
+        writeln!(writer, "// itself been checked against a live capture.")?;
+    }
+
+    writeln!(writer, "impl Entity for {} {{", entity.interface.name)?;
+    writeln!(writer, "    const TYPE_ID: u16 = 0x{:02X};", entity.id)?;
     writeln!(writer, "    type ClientMethod = {}_Client;", entity.interface.name)?;
     writeln!(writer, "    type BaseMethod = {}_Base;", entity.interface.name)?;
     writeln!(writer, "    type CellMethod = {}_Cell;", entity.interface.name)?;
+    writeln!(writer, "    type ClientProperty = {}_ClientProperty;", entity.interface.name)?;
     writeln!(writer, "}}")?;
     writeln!(writer)?;
 
     Ok(())
 
+}
+
+/// Generate the client-visible property table for an entity: one flat, exposed-id
+/// indexed list covering properties from either the entity's base or cell slice (both
+/// share one id space on the wire, see [`crate::wot::gen::entity`]'s generated
+/// `Entity::ClientProperty`), assigned by mirroring `generate_entity_methods`'s
+/// stable-sort rule exactly (fixed-size first ascending, then variable-size ascending,
+/// static components appended afterward keeping their own order) -- confirmed to be the
+/// same rule BigWorld's engine itself uses for this
+/// (`entitydef/entity_description.cpp`'s `allocateClientServerFullIndexes`).
+fn generate_entity_properties(
+    mut writer: impl Write,
+    model: &Model,
+    entity: &Entity,
+) -> io::Result<()> {
+
+    /// An exposed property for the network protocol -- same rationale as
+    /// `generate_entity_methods`'s `ExposedMethod`.
+    struct ExposedProperty<'a> {
+        property: &'a Property,
+        stream_size: StreamSize,
+    }
+
+    fn add_internal_properties<'m>(
+        exposed_properties: &mut Vec<ExposedProperty<'m>>,
+        model: &'m Model,
+        interface: &'m Interface,
+    ) {
+
+        for interface_name in &interface.implements {
+            let interface = model.interfaces.iter()
+                .find(|i| &i.name == interface_name)
+                .expect("unknown implemented interface");
+            add_internal_properties(exposed_properties, model, interface);
+        }
+
+        for property in &interface.properties {
+            if is_property_exposed(property) {
+                exposed_properties.push(ExposedProperty {
+                    property,
+                    stream_size: compute_property_stream_size(property),
+                });
+            }
+        }
+
+    }
+
+    let mut properties = Vec::new();
+    add_internal_properties(&mut properties, model, &entity.interface);
+
+    properties.sort_by(|a, b| {
+        match (a.stream_size, b.stream_size) {
+            (StreamSize::Variable(a_size), StreamSize::Variable(b_size)) =>
+                a_size.cmp(&b_size),
+            (StreamSize::Fixed(a_size), StreamSize::Fixed(b_size)) =>
+                a_size.cmp(&b_size),
+            (StreamSize::Fixed(_), StreamSize::Variable(_)) =>
+                Ordering::Less,
+            (StreamSize::Variable(_), StreamSize::Fixed(_)) =>
+                Ordering::Greater,
+        }
+    });
+
+    for component in &model.static_components {
+
+        if !component.of_entities.iter().any(|e| e == &entity.interface.name) {
+            continue;
+        }
+
+        for property in &component.interface.properties {
+            if is_property_exposed(property) {
+                properties.push(ExposedProperty {
+                    property,
+                    stream_size: compute_property_stream_size(property),
+                });
+            }
+        }
+
+    }
+
+    writeln!(writer, "wgtk::__enum_entity_properties! {{  // Client-visible properties")?;
+    writeln!(writer, "    pub enum {}_ClientProperty {{", entity.interface.name)?;
+
+    for (exposed_id, prop) in properties.iter().enumerate() {
+
+        let element_length = match prop.stream_size {
+            StreamSize::Fixed(length) => Cow::Owned(format!("{length}")),
+            StreamSize::Variable(VariableHeaderSize::Variable8) => Cow::Borrowed("var8"),
+            StreamSize::Variable(VariableHeaderSize::Variable16) => Cow::Borrowed("var16"),
+            StreamSize::Variable(VariableHeaderSize::Variable24) => Cow::Borrowed("var24"),
+            StreamSize::Variable(VariableHeaderSize::Variable32) => Cow::Borrowed("var32"),
+        };
+
+        let ty = generate_type_ref(&prop.property.ty);
+
+        writeln!(writer, "        {}(0x{exposed_id:02X}, {element_length}, {ty}),",
+            prop.property.name)?;
+
+    }
+
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "}}")?;
+    writeln!(writer)?;
+
+    Ok(())
+
+}
+
+/// Same filter BigWorld's `DataDescription::isClientServerData()` uses (confirmed
+/// against `entitydef/data_description.cpp`/`.ipp`): any of `OTHER_CLIENT`/`OWN_CLIENT`/
+/// `BASE` flag bits reaches the client one way or another, `CellPublic`/`CellPrivate`
+/// alone (ghosted server-to-server replication only) does not.
+fn is_property_exposed(property: &Property) -> bool {
+    matches!(property.flags, PropertyFlags::AllClients | PropertyFlags::OwnClient | PropertyFlags::BaseAndClient)
+}
+
+/// Same rationale as `compute_method_stream_size`, but for a single property type
+/// instead of a method's summed args. `Property` has no `variable_header_size` field of
+/// its own (unlike `Method`) since WoT's entity defs never declare one for properties --
+/// defaulting to `Variable16` for anything without a fixed size, same as this codebase's
+/// existing `DebugElementVariable16` placeholder convention elsewhere. UNCONFIRMED
+/// against a live capture of an actually-oversized variable property.
+fn compute_property_stream_size(property: &Property) -> StreamSize {
+    match compute_type_stream_size(&property.ty) {
+        Some(size) => StreamSize::Fixed(size),
+        None => StreamSize::Variable(VariableHeaderSize::Variable16),
+    }
 }
 
 fn generate_entity_methods(
@@ -476,7 +631,9 @@ fn generate_entity_methods(
     // resorted by stream size, they simply keep claiming the next exposed ids in
     // component order (then declared-method order within a component). This is why
     // adding/removing an unrelated extension never shifts any other exposed id.
-    for component in &model.components {
+    // Dynamic components are deliberately never folded here (see `Component`'s doc
+    // comment) -- there's no confirmed stable exposed-id assignment for them.
+    for component in &model.static_components {
 
         if !component.of_entities.iter().any(|e| e == &entity.interface.name) {
             continue;

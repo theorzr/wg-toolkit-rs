@@ -187,17 +187,27 @@ pub struct Model {
     pub tys: TySystem,
     /// The list of all interfaces available.
     pub interfaces: Vec<Interface>,
-    /// The list of all entities available.
+    /// The list of all entities available: first every entity declared in the main
+    /// `scripts/entities.xml`, then every extension's own `Entities/ClientServerEntities`
+    /// appended after (extension directories in alphabetical order, declaration order
+    /// within each extension), continuing the same id counter -- see [`Entity::from_extension`]
+    /// for why that continuation is an inference, not a confirmed fact.
     pub entities: Vec<Entity>,
     /// The list of all "static" extension components available, in a stable order
     /// (extension directories in alphabetical order, then declaration order within
     /// each extension's `StaticComponents`). See [`Component`] for why order matters.
-    pub components: Vec<Component>,
+    pub static_components: Vec<Component>,
+    /// The list of all "dynamic" extension components available (`DynamicComponents`),
+    /// same stable order as [`Model::static_components`]. Unlike static components,
+    /// these are NOT folded into any entity's method table (see [`Component`]'s doc
+    /// comment) -- they still get their own generated struct/codec (some carry real
+    /// properties/methods, e.g. `battle_royale`'s `Radar`), just not composed anywhere.
+    pub dynamic_components: Vec<Component>,
 }
 
-/// A "static" component from a WoT extension package (`res/<ext>/extension.xml`'s
-/// `Components/StaticComponents`), whose methods/properties are folded into the
-/// method table of every entity it targets (its `<ofEntity>` list) -- e.g.
+/// A component from a WoT extension package (`res/<ext>/extension.xml`'s `Components`).
+/// "Static" components (`StaticComponents`) have their methods/properties folded into
+/// the method table of every entity they target (its `<ofEntity>` list) -- e.g.
 /// `la_pinger`'s `LaPingerComponent` folds into `Account`. Confirmed live (see
 /// `re-work/HANGAR_LOADING.md`) that these are appended *after* the entity's own
 /// interface-derived, size-sorted method table, keeping their own relative order
@@ -205,9 +215,13 @@ pub struct Model {
 /// into that sort -- this is why existing exposed ids never shift when an
 /// unrelated extension is added or removed.
 ///
-/// "Dynamic" components (`DynamicComponents`) are deliberately NOT modeled here:
-/// they're attached to specific entity *instances* at runtime (e.g. only during a
-/// specific battle mode), not baked into every instance's static method table.
+/// "Dynamic" components (`DynamicComponents`, [`Model::dynamic_components`]) are
+/// attached to specific entity *instances* at runtime (e.g. only during a specific
+/// battle mode), not baked into every instance's static method table -- and, unlike
+/// static components, have no confirmed stable exposed-id assignment at all (which
+/// instances get which dynamic components, and in what order, isn't known), so their
+/// methods/properties are deliberately never folded into any entity's method table --
+/// only their own standalone struct/codec is generated.
 #[derive(Debug)]
 pub struct Component {
     /// The component's name (e.g. `LaPingerComponent`), also used as its
@@ -230,6 +244,14 @@ pub struct Entity {
     pub parent: Option<String>,
     /// The index for network protocol.
     pub id: usize,
+    /// `None` for an entity declared in the main `scripts/entities.xml`. `Some(ext_name)`
+    /// for one declared in an extension's own `Entities/ClientServerEntities` (e.g.
+    /// `story_mode`'s `SPGZone`) -- for these, `id` is only an *inferred* continuation of
+    /// the main list's numbering (same ordering rule already confirmed for static
+    /// component method folding: extension-alphabetical, then declaration order), not
+    /// something actually confirmed against a live capture. Generated code should flag
+    /// this id as unconfirmed wherever it's used for wire dispatch.
+    pub from_extension: Option<String>,
 }
 
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/entity_description.cpp
