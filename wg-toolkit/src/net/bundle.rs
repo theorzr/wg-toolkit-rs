@@ -750,12 +750,22 @@ impl<'a> BundleElementReader<'a> {
                 // reading the reply header for example.
                 let unread_len = elt_reader.limit() as usize;
                 if unread_len != 0 {
-                    // Unwrap for the same reason as below.
-                    let unread_data = self.bundle_reader.read_blob(unread_len).unwrap();
+                    // `unread_len` comes from the element's own declared length, which we
+                    // cannot fully trust for elements we don't recognize (e.g. an entity
+                    // method with an exposed id outside our generated tables) -- propagate
+                    // instead of unwrapping so a bogus/oversized length degrades to a
+                    // logged decode error instead of panicking the whole proxy thread.
+                    let unread_data = match self.bundle_reader.read_blob(unread_len) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            self.bundle_reader = reader_save;  // Rollback, same as an E::read failure above.
+                            return Err(e);
+                        }
+                    };
                     warn!("remaining data while reading element of type '{}': {:?}", std::any::type_name::<E>(), AsciiFmt(&unread_data));
                 }
 
-                // We advance the reader by the amount that has not been read. Unwrapping 
+                // We advance the reader by the amount that has not been read. Unwrapping
                 // because it should succeed because the element reader has read this much.
                 self.bundle_reader.advance(moved_bytes.len()).unwrap();
 
