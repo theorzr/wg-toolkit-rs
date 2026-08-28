@@ -110,11 +110,29 @@ fn load(fs: ResFilesystem, version: String) -> io::Result<Model> {
     // An extension can also carry its own "Entities" section (`ClientServerEntities` --
     // has a real def file, same convention as `scripts/entity_defs/`; and
     // `ServerOnlyEntities` -- no def file exists anywhere for these, no client-visible
-    // surface, so they're only logged, never parsed/generated). Unlike component method
-    // folding, there's no live-capture confirmation of how these entities' network type
-    // ids are actually assigned -- continuing the main list's numbering (same ordering
-    // rule as component folding) is this generator's best inference, not a checked fact
-    // (see `Entity::from_extension`).
+    // surface, so they're only logged, never parsed/generated). Continuing the main
+    // list's numbering here (same ordering rule as component folding) was CONFIRMED
+    // live (2026-08-29): a Frida script (`re-work/frida/dump_entity_types.js`) located
+    // the running client's actual `BW::EntityDescriptionMap` vector directly in process
+    // memory (no address/offset knowledge needed -- found by scanning for a known entity
+    // name string, then walking the confirmed 808-byte `EntityDescription` stride outward
+    // until the pattern breaks) and read off every entity in true index order. Every one
+    // of the 10 currently-known extension entities (`battle_royale`'s `Mine`/`Loot`/
+    // `Placement`/`InfluenceZone`/`BattleRoyaleRadio`/`ThunderStrike`, `comp7`'s
+    // `Comp7Lighting`, `comp7_core`'s `ApplicationPoint`, `server_side_replay`'s
+    // `ReplayAccount`, `story_mode`'s `SPGZone`) landed at exactly the id this generator
+    // already assigned it. See `Entity::from_extension` and doc/ENTITY.md.
+    //
+    // The same live dump also turned up something not modeled by this codebase at all:
+    // the id sequence keeps going past the last real entity (`SPGZone`, 0x32) into
+    // dozens more slots with clearly component-shaped names (`DogTagComponent`,
+    // `HealthComponent`, `VehicleBuff`, ...) all the way past 0x100 -- i.e. the live
+    // client's `EntityDescriptionMap` is NOT limited to what `entities.xml`-derived
+    // `Entity` values would suggest; static/dynamic extension components apparently get
+    // their own real slots in this same id space too, distinct from the
+    // already-confirmed exposed-method-id folding. Not yet understood what (if anything)
+    // reads those ids off the wire -- worth revisiting for the "dynamic components" open
+    // question in doc/ENTITY.md.
     let mut ext_names: Vec<String> = fs.read_dir("")?
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.stat().is_dir())
@@ -408,11 +426,13 @@ fn generate_entity(
     generate_entity_properties(&mut writer, model, entity)?;
 
     if let Some(ext_name) = &entity.from_extension {
-        writeln!(writer, "// UNCONFIRMED: `{}` is declared by the `{ext_name}` extension, not the main", entity.interface.name)?;
-        writeln!(writer, "// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own")?;
-        writeln!(writer, "// numbering (extension-alphabetical, then declaration order) by analogy with")?;
-        writeln!(writer, "// the already-confirmed static-component method-folding rule -- it has NOT")?;
-        writeln!(writer, "// itself been checked against a live capture.")?;
+        writeln!(writer, "// `{}` is declared by the `{ext_name}` extension, not the main", entity.interface.name)?;
+        writeln!(writer, "// `scripts/entities.xml`. Its TYPE_ID below continues that list's own")?;
+        writeln!(writer, "// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live")?;
+        writeln!(writer, "// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector")?;
+        writeln!(writer, "// directly out of process memory (re-work/frida/dump_entity_types.js) and")?;
+        writeln!(writer, "// reading off its true index; every entity from `Account` (1) through here")?;
+        writeln!(writer, "// matched this generator's assigned id exactly. See doc/ENTITY.md.")?;
     }
 
     writeln!(writer, "impl Entity for {} {{", entity.interface.name)?;

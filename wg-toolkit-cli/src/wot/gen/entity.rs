@@ -3729,11 +3729,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `Mine` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `Mine` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for Mine {
     const TYPE_ID: u16 = 0x29;
     type ClientMethod = Mine_Client;
@@ -3792,11 +3794,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `Loot` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `Loot` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for Loot {
     const TYPE_ID: u16 = 0x2A;
     type ClientMethod = Loot_Client;
@@ -3855,11 +3859,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `Placement` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `Placement` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for Placement {
     const TYPE_ID: u16 = 0x2B;
     type ClientMethod = Placement_Client;
@@ -3920,11 +3926,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `InfluenceZone` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `InfluenceZone` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for InfluenceZone {
     const TYPE_ID: u16 = 0x2C;
     type ClientMethod = InfluenceZone_Client;
@@ -3975,11 +3983,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `BattleRoyaleRadio` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `BattleRoyaleRadio` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for BattleRoyaleRadio {
     const TYPE_ID: u16 = 0x2D;
     type ClientMethod = BattleRoyaleRadio_Client;
@@ -4041,11 +4051,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `ThunderStrike` is declared by the `battle_royale` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `ThunderStrike` is declared by the `battle_royale` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for ThunderStrike {
     const TYPE_ID: u16 = 0x2E;
     type ClientMethod = ThunderStrike_Client;
@@ -4098,11 +4110,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `Comp7Lighting` is declared by the `comp7` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `Comp7Lighting` is declared by the `comp7` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for Comp7Lighting {
     const TYPE_ID: u16 = 0x2F;
     type ClientMethod = Comp7Lighting_Client;
@@ -4161,11 +4175,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `ApplicationPoint` is declared by the `comp7_core` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `ApplicationPoint` is declared by the `comp7_core` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for ApplicationPoint {
     const TYPE_ID: u16 = 0x30;
     type ClientMethod = ApplicationPoint_Client;
@@ -4231,11 +4247,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `ReplayAccount` is declared by the `server_side_replay` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `ReplayAccount` is declared by the `server_side_replay` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for ReplayAccount {
     const TYPE_ID: u16 = 0x31;
     type ClientMethod = ReplayAccount_Client;
@@ -4286,11 +4304,13 @@ wgtk::__enum_entity_properties! {  // Client-visible properties
     }
 }
 
-// UNCONFIRMED: `SPGZone` is declared by the `story_mode` extension, not the main
-// `scripts/entities.xml`. Its TYPE_ID below only continues that list's own
-// numbering (extension-alphabetical, then declaration order) by analogy with
-// the already-confirmed static-component method-folding rule -- it has NOT
-// itself been checked against a live capture.
+// `SPGZone` is declared by the `story_mode` extension, not the main
+// `scripts/entities.xml`. Its TYPE_ID below continues that list's own
+// numbering (extension-alphabetical, then declaration order) -- CONFIRMED live
+// (2026-08-29) by scanning a running client's BW::EntityDescriptionMap vector
+// directly out of process memory (re-work/frida/dump_entity_types.js) and
+// reading off its true index; every entity from `Account` (1) through here
+// matched this generator's assigned id exactly. See doc/ENTITY.md.
 impl Entity for SPGZone {
     const TYPE_ID: u16 = 0x32;
     type ClientMethod = SPGZone_Client;

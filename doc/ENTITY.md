@@ -254,6 +254,66 @@ Decoding these specific ids would require either observing the exact attach orde
 (e.g. via a Frida hook on the client's component-attach path) or brute-forcing candidate
 dynamic components' property sizes against the captured byte lengths. Not yet attempted.
 
+**New lead (2026-08-29)**: the live `EntityDescriptionMap` dump described below (done to
+confirm extension entity ids) turned up something not modeled by this codebase at all --
+past the last real entity (`SPGZone`, id `0x32`), the *same* id sequence keeps going for
+dozens more slots with clearly component-shaped names (`DogTagComponent`,
+`HealthComponent`, `VehicleBuff`, `Radar`, ... past `0x100`, ending around `BunkerLogicComponent`).
+So static and dynamic extension components apparently get their own real slots in this
+same `EntityTypeID` space too -- distinct from, and in addition to, the already-confirmed
+exposed-method/property-id folding into their owning entity's tables. This is plausibly
+the missing piece for decoding dynamic component attachment (a component "type" would
+have its own id here, the same way an entity does), but that connection hasn't been
+tested yet -- nothing has confirmed what (if anything) reads these particular ids off the
+wire. Worth a follow-up dump (extend `re-work/frida/dump_entity_types.js`'s walk further
+and correlate names 1:1 against `Model::static_components`/`dynamic_components`) before
+trying to use these ids for anything.
+
+## Confirmed: extension entities continue the main list's `TYPE_ID` numbering
+
+The generator's assumption that entities declared inside an extension's own
+`Entities/ClientServerEntities` (`Entity::from_extension`, `wg-toolkit-cli/src/bootstrap/`)
+continue the main `scripts/entities.xml` list's numbering -- extensions in alphabetical
+directory order, declaration order within each -- was, until now, only an analogy with the
+separately-confirmed static-component method-folding rule, never itself checked against a
+live client.
+
+**Confirmed live (2026-08-29)**, by locating a running client's actual
+`BW::EntityDescriptionMap` and reading its backing array directly out of process memory
+(`re-work/frida/dump_entity_types.js`). The approach needed no prior knowledge of the
+map's address or `EntityDescription`'s field layout:
+
+1. Static disassembly (radare2, on the local `re-work/bin-2.3.1.3/WorldOfTanks.exe` copy)
+   found `EntityDescriptionMap::checkCount`'s inlined bounds-check via its distinctive
+   `"FATAL ERROR: invalid entity type id index"` assert string (an `IF_NOT_MF_ASSERT_DEV`
+   that, unlike most such asserts, was NOT compiled out of this release build). Its
+   indexing code (`imul rbx, rax, 0x328; add rbx, [r14]`) confirms `sizeof(EntityDescription)
+   == 0x328` (808 bytes) -- the array's stride.
+2. Chasing the map's own storage address further (who calls `parse()`, where's the
+   persistent singleton) turned into the same kind of static-analysis rabbit hole as this
+   project's earlier `InterfaceMinder` id investigation -- abandoned in favor of a live
+   read, same lesson as before.
+3. Since the process is already running, the object's address doesn't matter: scan live
+   memory for a known entity name string (tried several short ones, since `BW::string`'s
+   inline/SSO storage means a name under ~15 bytes shows up as raw bytes at a fixed
+   struct-relative offset), then check readability at `hit ± k*808` for consecutive `k`.
+   Every element's name lives at the *same* relative offset, so once one hit scores well
+   on this periodicity test, walking outward at that exact stride reads off the whole
+   table in true index order -- no struct-offset knowledge needed at all.
+
+Result: positions `1..0x32` matched `Account` through `SPGZone` exactly, including every
+one of the 10 extension entities that exist today (`battle_royale`'s `Mine`/`Loot`/
+`Placement`/`InfluenceZone`/`BattleRoyaleRadio`/`ThunderStrike` at `0x29..0x2E`, `comp7`'s
+`Comp7Lighting` at `0x2F`, `comp7_core`'s `ApplicationPoint` at `0x30`,
+`server_side_replay`'s `ReplayAccount` at `0x31`, `story_mode`'s `SPGZone` at `0x32`) --
+each landing on precisely the id this generator already assigned it. Position `0` resolved
+to `GeneralSpaceData`, which is not a declared entity at all and has no valid neighbors of
+its own further back -- almost certainly the tail element of a *different*, adjacently-
+allocated table sharing the same `EntityDescription`-shaped 808-byte stride (BigWorld also
+has a separate `UserDataObjectDescriptionMap` for `scripts/user_data_objects.xml`, built
+from the same base class), not a real `EntityTypeID` slot -- consistent with this
+generator's existing 1-indexed convention (`Account` = 1, not 0) being correct.
+
 ## Client-visible properties
 
 Properties visible to the client (any of BigWorld's `ALL_CLIENTS`/`OWN_CLIENT`/

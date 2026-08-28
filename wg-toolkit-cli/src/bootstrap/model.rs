@@ -190,8 +190,8 @@ pub struct Model {
     /// The list of all entities available: first every entity declared in the main
     /// `scripts/entities.xml`, then every extension's own `Entities/ClientServerEntities`
     /// appended after (extension directories in alphabetical order, declaration order
-    /// within each extension), continuing the same id counter -- see [`Entity::from_extension`]
-    /// for why that continuation is an inference, not a confirmed fact.
+    /// within each extension), continuing the same id counter -- confirmed live, see
+    /// [`Entity::from_extension`].
     pub entities: Vec<Entity>,
     /// The list of all "static" extension components available, in a stable order
     /// (extension directories in alphabetical order, then declaration order within
@@ -246,11 +246,12 @@ pub struct Entity {
     pub id: usize,
     /// `None` for an entity declared in the main `scripts/entities.xml`. `Some(ext_name)`
     /// for one declared in an extension's own `Entities/ClientServerEntities` (e.g.
-    /// `story_mode`'s `SPGZone`) -- for these, `id` is only an *inferred* continuation of
-    /// the main list's numbering (same ordering rule already confirmed for static
-    /// component method folding: extension-alphabetical, then declaration order), not
-    /// something actually confirmed against a live capture. Generated code should flag
-    /// this id as unconfirmed wherever it's used for wire dispatch.
+    /// `story_mode`'s `SPGZone`) -- for these, `id` continues the main list's numbering
+    /// (extension-alphabetical, then declaration order). CONFIRMED live (2026-08-29): a
+    /// Frida-based scan of a running client's `BW::EntityDescriptionMap` vector
+    /// (`re-work/frida/dump_entity_types.js`, see doc/ENTITY.md) read every entity's true
+    /// index directly out of process memory, and every one of the 10 extension entities
+    /// that existed at the time matched the id this rule already assigned it.
     pub from_extension: Option<String>,
 }
 
