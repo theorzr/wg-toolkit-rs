@@ -42,6 +42,14 @@ pub struct PythonValue {
     inner: serde_pickle::Value,
 }
 
+impl PythonValue {
+
+    pub fn new(inner: serde_pickle::Value) -> Self {
+        Self { inner }
+    }
+
+}
+
 impl Deref for PythonValue {
     type Target = serde_pickle::Value;
     fn deref(&self) -> &Self::Target {

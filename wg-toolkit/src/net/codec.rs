@@ -2,6 +2,7 @@
 //! types that are commonly used, such as ints, floats and various common blobs.
 
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 use std::borrow::Cow;
@@ -11,7 +12,7 @@ use std::ops::Deref;
 use glam::{Vec2, Vec3, Vec4};
 
 use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options, serde_pickle_ser_options};
-use crate::util::AsciiFmt;
+use crate::script::{Ty, TyKind, Value, StringValue, PythonValue};
 
 
 /// Represent a codec for some data that can be both encoded and decoded, with a 
@@ -160,7 +161,6 @@ impl_builtin_copy!(Vec2, write_vec2, read_vec2);
 impl_builtin_copy!(Vec3, write_vec3, read_vec3);
 impl_builtin_copy!(Vec4, write_vec4, read_vec4);
 
-
 /// A `Mercury::Address`: an IPv4 socket address paired with a 16-bit "salt".
 ///
 /// Confirmed against the leaked BigWorld source (`server/baseapp/baseapp.cpp`, e.g.
@@ -249,37 +249,21 @@ impl SimpleCodec for WgSocketAddrV4 {
 
 }
 
-
-/// The string data type used by default for all STRING types, it will try to 
-#[derive(Clone)]
-pub enum AutoString {
-    String(String),
-    Python(serde_pickle::Value),
-    Raw(Vec<u8>),
-}
-
-impl fmt::Debug for AutoString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::String(string) => f.debug_tuple("Utf8").field(string).finish(),
-            Self::Python(value) => f.debug_tuple("Python").field(&format_args!("{value}")).finish(),
-            Self::Raw(bytes) => f.debug_tuple("Raw").field(&AsciiFmt(&bytes)).finish(),
-        }
-    }
-}
-
-impl SimpleCodec for AutoString {
+/// [`StringValue`] is the string data type used by default for all STRING types, it
+/// will try to decode as a Python pickle first, then fallback to UTF-8, then to raw
+/// bytes.
+impl SimpleCodec for StringValue {
 
     fn write(&self, write: &mut dyn Write) -> io::Result<()> {
         write.write_blob_variable(&*(match self {
-            AutoString::String(v) => Cow::Borrowed(v.as_bytes()),
-            AutoString::Python(v) => Cow::Owned(serde_pickle::value_to_vec(v, serde_pickle_ser_options()).unwrap()),
-            AutoString::Raw(v) => Cow::Borrowed(&v[..]),
+            StringValue::String(v) => Cow::Borrowed(v.as_bytes()),
+            StringValue::Python(v) => Cow::Owned(serde_pickle::value_to_vec(v, serde_pickle_ser_options()).unwrap()),
+            StringValue::Raw(v) => Cow::Borrowed(&v[..]),
         }))
     }
 
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        
+
         let raw = read.read_blob_variable()?;
 
         if let Ok(v) = serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
@@ -295,57 +279,111 @@ impl SimpleCodec for AutoString {
 
 }
 
-
-/// The Python builtin data type.
-pub struct Python {
-    /// Internal pickle value.
-    pub value: serde_pickle::Value,
-}
-
-impl SimpleCodec for Python {
+/// [`PythonValue`] is the Python builtin data type.
+impl SimpleCodec for PythonValue {
 
     #[inline(always)]
     fn write(&self, write: &mut dyn Write) -> io::Result<()> {
-        write.write_python_pickle(&self.value)
+        write.write_python_pickle(self)
     }
 
     #[inline(always)]
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        read.read_python_pickle().map(|value| Self { value })
+        read.read_python_pickle().map(PythonValue::new)
     }
 
 }
 
-impl fmt::Debug for Python {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Python")
-            .field(&format_args!("{}", self.value))
-            .finish()
+/// Codec for a full script [`Value`], the given [`Ty`] configuration is required to
+/// know how to decode the layout, because [`Value`] alone doesn't carry its own type
+/// (e.g. a dict's exact set of properties, or a sequence's element type and, for a
+/// tuple, its fixed size).
+impl Codec<Ty> for Value {
+
+    fn write(&self, write: &mut dyn Write, config: &Ty) -> io::Result<()> {
+        match (self, config.kind()) {
+            (_, TyKind::Alias(inner)) => self.write(write, inner),
+            (Value::Int8(v), TyKind::Int8) => write.write_i8(*v),
+            (Value::Int16(v), TyKind::Int16) => write.write_i16(*v),
+            (Value::Int32(v), TyKind::Int32) => write.write_i32(*v),
+            (Value::Int64(v), TyKind::Int64) => write.write_i64(*v),
+            (Value::UInt8(v), TyKind::UInt8) => write.write_u8(*v),
+            (Value::UInt16(v), TyKind::UInt16) => write.write_u16(*v),
+            (Value::UInt32(v), TyKind::UInt32) => write.write_u32(*v),
+            (Value::UInt64(v), TyKind::UInt64) => write.write_u64(*v),
+            (Value::Float32(v), TyKind::Float32) => write.write_f32(*v),
+            (Value::Float64(v), TyKind::Float64) => write.write_f64(*v),
+            (Value::Vector2(v), TyKind::Vector2) => write.write_vec2(*v),
+            (Value::Vector3(v), TyKind::Vector3) => write.write_vec3(*v),
+            (Value::Vector4(v), TyKind::Vector4) => write.write_vec4(*v),
+            (Value::String(v), TyKind::String) => SimpleCodec::write(v, write),
+            (Value::Python(v), TyKind::Python) => SimpleCodec::write(v, write),
+            (Value::Mailbox, TyKind::Mailbox) =>
+                Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox codec not yet supported")),
+            (Value::Dict(map), TyKind::Dict(dict)) => {
+                for prop in &dict.properties {
+                    let value = map.get(&prop.name).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("missing property: {}", prop.name))
+                    })?;
+                    value.write(write, &prop.ty)?;
+                }
+                Ok(())
+            }
+            (Value::Seq(list), TyKind::Array(seq) | TyKind::Tuple(seq)) => {
+                if seq.size.is_none() {
+                    write.write_packed_u24(list.len() as u32)?;
+                }
+                for value in list {
+                    value.write(write, &seq.ty)?;
+                }
+                Ok(())
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "value doesn't match type")),
+        }
     }
-}
 
-
-/// The mailbox type used sparingly in method calls.
-#[derive(Debug)]
-pub struct Mailbox {
-    pub entity_id: u32,
-    pub address: (), // TODO: 
-}
-
-impl SimpleCodec for Mailbox {
-
-    #[inline]
-    fn write(&self, _write: &mut dyn Write) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox write not yet supported"))
+    fn read(read: &mut dyn Read, config: &Ty) -> io::Result<Self> {
+        Ok(match config.kind() {
+            TyKind::Alias(inner) => return Self::read(read, inner),
+            TyKind::Int8 => Value::Int8(read.read_i8()?),
+            TyKind::Int16 => Value::Int16(read.read_i16()?),
+            TyKind::Int32 => Value::Int32(read.read_i32()?),
+            TyKind::Int64 => Value::Int64(read.read_i64()?),
+            TyKind::UInt8 => Value::UInt8(read.read_u8()?),
+            TyKind::UInt16 => Value::UInt16(read.read_u16()?),
+            TyKind::UInt32 => Value::UInt32(read.read_u32()?),
+            TyKind::UInt64 => Value::UInt64(read.read_u64()?),
+            TyKind::Float32 => Value::Float32(read.read_f32()?),
+            TyKind::Float64 => Value::Float64(read.read_f64()?),
+            TyKind::Vector2 => Value::Vector2(read.read_vec2()?),
+            TyKind::Vector3 => Value::Vector3(read.read_vec3()?),
+            TyKind::Vector4 => Value::Vector4(read.read_vec4()?),
+            TyKind::String => Value::String(SimpleCodec::read(read)?),
+            TyKind::Python => Value::Python(SimpleCodec::read(read)?),
+            TyKind::Mailbox =>
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox codec not yet supported")),
+            TyKind::Dict(dict) => {
+                let mut map = BTreeMap::new();
+                for prop in &dict.properties {
+                    map.insert(prop.name.clone(), Value::read(read, &prop.ty)?);
+                }
+                Value::Dict(map)
+            }
+            TyKind::Array(seq) | TyKind::Tuple(seq) => {
+                let len = match seq.size {
+                    Some(size) => size as usize,
+                    None => read.read_packed_u24()? as usize,
+                };
+                let mut list = Vec::with_capacity(len);
+                for _ in 0..len {
+                    list.push(Value::read(read, &seq.ty)?);
+                }
+                Value::Seq(list)
+            }
+        })
     }
 
-    #[inline]
-    fn read(_read: &mut dyn Read) -> io::Result<Self> {
-        Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox write not yet supported"))
-    }
-
 }
-
 
 /// This macro can be used to create simple aggregation of structures with all fields of
 /// type [`Codec<()>`], the structure is both defined and trait is implemented.

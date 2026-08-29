@@ -13,8 +13,8 @@ pub mod space;
 pub mod model;
 
 pub mod res;
+pub mod script;
 
 pub mod net;
 
-pub mod script;
 pub mod app;

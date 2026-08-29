@@ -1077,7 +1077,7 @@ pub mod flags {
 
 
 /// Wrapper structure for displaying flags.
-pub struct FlagsFmt(pub u16);
+struct FlagsFmt(pub u16);
 
 impl fmt::Display for FlagsFmt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
