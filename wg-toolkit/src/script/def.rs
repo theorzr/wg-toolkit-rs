@@ -2,13 +2,14 @@
 //! resources, such as entities, components and their methods or properties.
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use super::ty::{TySystem, Ty};
 
 
-/// Represent the a full model of resources.
+/// Represent the a full scripting model.
 #[derive(Debug, Default)]
-pub struct Model {
+pub struct Script {
     /// The game version of the parsed model.
     pub version: String,
     /// The type system in this model where all types are defined.
@@ -54,7 +55,7 @@ pub struct Model {
 pub struct Component {
     /// The component's name (e.g. `LaPingerComponent`), also used as its
     /// `Interface::name`.
-    pub name: String,
+    pub name: Arc<str>,
     /// The entities this component's methods/properties fold into (`<ofEntity>`).
     pub of_entities: Vec<String>,
     /// The component's own properties/methods, parsed the same way as a regular
@@ -86,7 +87,7 @@ pub struct Entity {
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/entity_description.cpp
 #[derive(Debug)]
 pub struct Interface {
-    pub name: String,
+    pub name: Arc<str>,
     pub implements: Vec<String>,
     pub properties: Vec<Property>,
     pub temp_properties: Vec<String>,
@@ -97,7 +98,7 @@ pub struct Interface {
 
 #[derive(Debug)]
 pub struct Method {
-    pub name: String,
+    pub name: Arc<str>,
     /// True if this method is exposed to all clients, note that client methods have this
     /// force enabled. This cannot be parsed for base methods, and is possible for cell
     /// methods.
@@ -117,7 +118,7 @@ pub struct Arg {
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/data_description.cpp
 #[derive(Debug)]
 pub struct Property {
-    pub name: String,
+    pub name: Arc<str>,
     pub ty: Ty,
     #[allow(unused)]  // Not used for generation
     pub persistent: bool,

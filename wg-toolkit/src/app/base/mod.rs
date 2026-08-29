@@ -3,7 +3,6 @@
 pub mod element;
 
 use std::collections::{HashMap, VecDeque};
-use std::marker::PhantomData;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::num::Wrapping;
 use std::sync::Arc;
@@ -20,22 +19,26 @@ use crate::net::bundle::{Bundle, NextElementReader, ElementReader};
 use crate::net::element::{Element, ElementLength, SimpleElement};
 use crate::net::socket::PacketSocket;
 use crate::net::proto::Protocol;
+use crate::script::{Script, Value};
 
-use super::entity::{Entity, AnyEntity, AnyMethodValue};
 use super::io_invalid_data;
 use super::client;
+use super::script::{ScriptDispatch, PropertyDef, MethodCall};
 
 use element::{LoginKey, SessionKey};
 
 
 /// The base application.
 ///
-/// Generic over `E`, the game's [`AnyEntity`] sum type (one generated enum covering
-/// every entity type) -- this is what lets [`App`] store the authoritative data of
-/// every entity it creates in one flat, globally-keyed map, and decode an incoming
-/// base method call generically once it knows which entity it targets.
+/// Fully dynamic: driven by a loaded [`Script`] rather than a per-game generated
+/// `AnyEntity` sum type -- entities, methods and properties are all resolved by name (or
+/// exposed id) against that script model at runtime (see [`ScriptDispatch`]), so this
+/// type itself never needs to know about any concrete game's entity types.
 #[derive(Debug)]
-pub struct App<E: AnyEntity> {
+pub struct App {
+    /// The scripting model for this app, and its per entity-type dispatch tables
+    /// computed from it at construction time.
+    dispatch: ScriptDispatch,
     /// Internal socket for this application.
     socket: PacketSocket,
     /// The channel tracker.
@@ -55,16 +58,17 @@ pub struct App<E: AnyEntity> {
     /// process-wide namespace, even though in practice a base-player entity is only
     /// ever relevant to the one client that owns it (BigWorld's `Proxy` only ever holds
     /// a single client channel, never a set of subscribers).
-    entities: HashMap<u32, EntityEntry<E>>,
+    entities: HashMap<u32, EntityEntry>,
     /// The next id for entities, this is wrapping around and we ensure that the same id
     /// isn't used twice!
     entities_next_id: Wrapping<u32>,
 }
 
-impl<E: AnyEntity> App<E> {
+impl App {
 
-    pub fn new(addr: SocketAddr) -> io::Result<Self> {
+    pub fn new(addr: SocketAddr, script: Script) -> io::Result<Self> {
         Ok(Self {
+            dispatch: ScriptDispatch::new(script),
             socket: PacketSocket::bind(addr)?,
             protocol: Protocol::new(),
             events: VecDeque::new(),
@@ -184,28 +188,31 @@ impl<E: AnyEntity> App<E> {
 
     /// Decode and dispatch an incoming base method call, targeting the client's current
     /// base-player entity (there's only ever one -- the wire call itself carries no
-    /// entity id). Decode happens right here, eagerly, using the entity's own data
-    /// (already known concretely at `create_base_player` time) -- not deferred to the
-    /// caller.
+    /// entity id). Decode happens right here, eagerly, dispatched dynamically against
+    /// the entity's own type (resolved from `dispatch`, computed from the script model
+    /// at construction time) -- not deferred to the caller.
     ///
-    /// Propagates (rather than swallows) a genuine decode error from `read_base_method`:
-    /// per its doc comment, that means the bundle reader rolled back to before this
+    /// Propagates (rather than swallows) a genuine decode error from the dynamic method
+    /// read: per its doc comment, that means the bundle reader rolled back to before this
     /// element, so returning `Ok(())` here (as if this element had been consumed) would
     /// make the next `poll()` iteration re-read the exact same unconsumed element
-    /// forever. An unrecognized-but-well-framed exposed id is `Ok(None)`, not an error,
-    /// and just becomes a `decoded: None` event as before.
+    /// forever.
     fn handle_base_entity_method(&mut self, addr: SocketAddr, reader: ElementReader<'_, '_>) -> io::Result<()> {
 
         let Some(entity_id) = self.clients.get(&addr).and_then(|c| c.base_entity_id) else {
             return self.skip::<RawEntityMethod>(reader);
         };
 
-        let decoded = match self.entities.get(&entity_id) {
-            Some(entry) => entry.data.read_base_method(reader)?,
-            None => return self.skip::<RawEntityMethod>(reader),
+        let Some(entry) = self.entities.get(&entity_id) else {
+            return self.skip::<RawEntityMethod>(reader);
         };
 
-        self.events.push_back(Event::BaseMethod(BaseMethodEvent { addr, entity_id, decoded }));
+        let Some(dispatch) = self.dispatch.entity_from_id(entry.type_id) else {
+            return self.skip::<RawEntityMethod>(reader);
+        };
+
+        let call = reader.read::<element::BaseEntityMethod, _>(&dispatch.base_methods)?.element.call;
+        self.events.push_back(Event::BaseMethod(BaseMethodEvent { addr, entity_id, call }));
 
         Ok(())
 
@@ -224,12 +231,16 @@ impl<E: AnyEntity> App<E> {
             return self.skip::<RawEntityMethod>(reader);
         };
 
-        let decoded = match self.entities.get(&entity_id) {
-            Some(entry) => entry.data.read_cell_method(reader)?,
-            None => return self.skip::<RawEntityMethod>(reader),
+        let Some(entry) = self.entities.get(&entity_id) else {
+            return self.skip::<RawEntityMethod>(reader);
         };
 
-        self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, decoded }));
+        let Some(dispatch) = self.dispatch.entity_from_id(entry.type_id) else {
+            return self.skip::<RawEntityMethod>(reader);
+        };
+
+        let call = reader.read::<element::CellEntityMethod, _>(&dispatch.cell_methods)?.element.call;
+        self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, call }));
 
         Ok(())
 
@@ -271,19 +282,26 @@ impl<E: AnyEntity> App<E> {
     /// return a handle to it. This becomes that client's current base-player entity,
     /// replacing any previous one in `Client::base_entity_id` (real BigWorld only ever
     /// has one at a time).
-    pub fn create_base_player<E0: Entity + 'static>(
+    ///
+    /// `entity_name` is resolved against the loaded [`Script`]'s entities by name, and
+    /// `entity_data` must be a [`Value::Dict`] matching that entity's client-visible
+    /// property layout (see [`crate::app::script::EntityDispatch::data_ty`]) -- a
+    /// mismatch surfaces as an `io::Error` from the underlying codec rather than being
+    /// validated up front.
+    pub fn create_base_player(
         &mut self,
         addr: SocketAddr,
-        entity: E0,
+        entity_name: &str,
+        entity_data: Value,
         entity_components_count: u8,
-    ) -> io::Result<Handle<E0>>
-    where
-        E: From<E0>,
-    {
+    ) -> io::Result<Handle> {
 
         if !self.clients.contains_key(&addr) {
             return Err(io_invalid_data(format_args!("no such client: {addr}")));
         }
+
+        let (entity_type_id, dispatch) = self.dispatch.entity_from_name(entity_name)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity: {entity_name}")))?;
 
         // Generate a new unique entity id.
         let entity_id = loop {
@@ -295,20 +313,25 @@ impl<E: AnyEntity> App<E> {
         };
 
         self.bundle.clear();
-        self.bundle.element_writer().write(
-            client::element::CreateBasePlayer::new(entity_id, E0::TYPE_ID, &entity, entity_components_count),
-            &(),
+        self.bundle.element_writer().write_simple(
+            client::element::CreateBasePlayer {
+                entity_id,
+                entity_type_id,
+                entity_data: &entity_data,
+                entity_data_ty: &dispatch.data_ty,
+                entity_components_count,
+            },
         );
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
-        self.entities.insert(entity_id, EntityEntry { addr, data: E::from(entity) });
+        self.entities.insert(entity_id, EntityEntry { addr, type_id: entity_type_id, data: entity_data });
 
         if let Some(client) = self.clients.get_mut(&addr) {
             client.base_entity_id = Some(entity_id);
         }
 
-        Ok(Handle { entity_id, _phantom: PhantomData })
+        Ok(Handle { entity_id })
 
     }
 
@@ -319,9 +342,9 @@ impl<E: AnyEntity> App<E> {
     /// and the wire message itself carries none of its own (see
     /// [`client::element::CreateCellPlayer`]'s doc comment for why, and for the parts of
     /// this message that aren't confirmed against a live capture).
-    pub fn create_cell_player<E0: Entity>(
+    pub fn create_cell_player(
         &mut self,
-        handle: Handle<E0>,
+        handle: Handle,
         space_id: u32,
         vehicle_id: u32,
         position: glam::Vec3,
@@ -356,17 +379,27 @@ impl<E: AnyEntity> App<E> {
 
     }
 
-    /// Call a method on the client owning the given entity.
-    pub fn call_method<E0: Entity, M: Into<E0::ClientMethod>>(&mut self, handle: Handle<E0>, method: M) -> io::Result<()> {
+    /// Call a method, resolved by name against the target entity's client-method table,
+    /// on the client owning the given entity.
+    pub fn call_method(&mut self, handle: Handle, method_name: &str, args: Vec<Value>) -> io::Result<()> {
 
-        let addr = self.entities.get(&handle.entity_id)
-            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {}", handle.entity_id)))?
-            .addr;
+        let entry = self.entities.get(&handle.entity_id)
+            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {}", handle.entity_id)))?;
+        let addr = entry.addr;
+        let type_id = entry.type_id;
+
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("no dispatch table for entity: {}", handle.entity_id)))?;
+
+        let name = dispatch.client_methods.iter().find(|m| &*m.name == method_name)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
+            .name.clone();
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::EntityMethod {
-            inner: client::element::EntityMethodInner::Known(method.into()),
-        });
+        self.bundle.element_writer().write(
+            client::element::EntityMethod { call: MethodCall::Known { name, args } },
+            &dispatch.client_methods,
+        );
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -375,7 +408,7 @@ impl<E: AnyEntity> App<E> {
     }
 
     /// Tell the client that subsequent elements target the given entity's player slot.
-    pub fn select_player_entity<E0: Entity>(&mut self, handle: Handle<E0>) -> io::Result<()> {
+    pub fn select_player_entity(&mut self, handle: Handle) -> io::Result<()> {
 
         let addr = self.entities.get(&handle.entity_id)
             .ok_or_else(|| io_invalid_data(format_args!("no such entity: {}", handle.entity_id)))?
@@ -487,13 +520,27 @@ impl<E: AnyEntity> App<E> {
         Ok(())
     }
 
+    /// Get an entity's current data, as last set by [`Self::create_base_player`] -- a
+    /// [`Value::Dict`] matching its client-visible property layout (see
+    /// [`crate::app::script::EntityDispatch::data_ty`]).
+    pub fn entity_data(&self, handle: Handle) -> Option<&Value> {
+        self.entities.get(&handle.entity_id).map(|entry| &entry.data)
+    }
+
+    /// Get an entity's client-visible property table (covering either its base or cell
+    /// slice, both share one id space on the wire), resolved dynamically from the loaded
+    /// script model -- see [`crate::app::script::EntityDispatch::properties`].
+    pub fn entity_properties(&self, handle: Handle) -> Option<&[PropertyDef]> {
+        let entry = self.entities.get(&handle.entity_id)?;
+        self.dispatch.entity_from_id(entry.type_id).map(|dispatch| dispatch.properties.as_slice())
+    }
+
 }
 
 /// Read the raw wire payload of a `CELL_ENTITY_METHOD`/`BASE_ENTITY_METHOD`-range
-/// element without needing to know its method table (`M`) -- its framing is always
-/// `Variable16` regardless of `M`/id (see the doc comment on
-/// [`BaseEntityMethod`](element::BaseEntityMethod)'s `read_length`), so this can be read
-/// generically and decoded later once the target entity's concrete type is known.
+/// element without needing to know its method table ahead of time -- its framing is
+/// always `Variable16` regardless of the target entity, so this can be read generically
+/// and decoded later once the target entity's dispatch table is known.
 struct RawEntityMethod {
     element_id: u8,
     data: Vec<u8>,
@@ -539,19 +586,30 @@ struct Client {
     cell_entity_id: Option<u32>,
 }
 
-/// One entity this app has created: its data, and the address of the one client that
-/// owns it.
+/// One entity this app has created: its wire type id, its data (a [`Value::Dict`]
+/// matching that type's client-visible property layout, see
+/// [`crate::app::script::EntityDispatch::data_ty`]), and the address of the one client
+/// that owns it.
 #[derive(Debug)]
-struct EntityEntry<E> {
+struct EntityEntry {
     addr: SocketAddr,
-    data: E,
+    type_id: u16,
+    data: Value,
 }
 
-/// A typed handle to an entity in the base app.
+/// A handle to an entity in the base app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Handle<E: Entity> {
+pub struct Handle {
     entity_id: u32,
-    _phantom: PhantomData<fn() -> E>,
+}
+
+impl Handle {
+
+    /// This entity's globally-unique id.
+    pub fn entity_id(&self) -> u32 {
+        self.entity_id
+    }
+
 }
 
 // ============ //
@@ -592,24 +650,9 @@ pub struct LoginEvent {
 pub struct BaseMethodEvent {
     pub addr: SocketAddr,
     pub entity_id: u32,
-    /// The decoded call, already erased into its concrete `E::BaseMethod` type by `App`
-    /// (using the entity's own data, known at `create_base_player` time) -- `None` if
-    /// decoding failed (e.g. an exposed id not present in that entity's method table).
-    decoded: Option<AnyMethodValue>,
-}
-
-impl BaseMethodEvent {
-
-    /// If this call's entity matches `handle` and decoded successfully as `E`'s base
-    /// method, return it -- a cheap downcast of the value `App` already decoded on
-    /// receive, not a re-parse.
-    pub fn extract<E: Entity + 'static>(&self, handle: Handle<E>) -> Option<&E::BaseMethod> {
-        if self.entity_id != handle.entity_id {
-            return None;
-        }
-        self.decoded.as_ref()?.downcast::<E::BaseMethod>()
-    }
-
+    /// The decoded call, resolved dynamically against the entity's own base-method
+    /// table (see [`crate::app::script::EntityDispatch`]).
+    pub call: MethodCall,
 }
 
 /// A client called a method on its current cell-side entity.
@@ -617,20 +660,7 @@ impl BaseMethodEvent {
 pub struct CellMethodEvent {
     pub addr: SocketAddr,
     pub entity_id: u32,
-    /// The decoded call, already erased into its concrete `E::CellMethod` type by `App`
-    /// -- `None` if decoding failed (e.g. an exposed id not present in that entity's
-    /// method table).
-    decoded: Option<AnyMethodValue>,
-}
-
-impl CellMethodEvent {
-
-    /// Same as [`BaseMethodEvent::extract`], but against `E::CellMethod`.
-    pub fn extract<E: Entity + 'static>(&self, handle: Handle<E>) -> Option<&E::CellMethod> {
-        if self.entity_id != handle.entity_id {
-            return None;
-        }
-        self.decoded.as_ref()?.downcast::<E::CellMethod>()
-    }
-
+    /// The decoded call, resolved dynamically against the entity's own cell-method
+    /// table (see [`crate::app::script::EntityDispatch`]).
+    pub call: MethodCall,
 }

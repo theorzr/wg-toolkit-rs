@@ -1,6 +1,5 @@
 //! Implementation of a simple demonstration WoT server.
 
-pub mod r#gen;
 pub mod proxy;
 pub mod emulator;
 
@@ -17,7 +16,38 @@ use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use wgtk::res::fs::ResFilesystem;
+use wgtk::script::{self, Script};
+
 use crate::{CliResult, WotArgs};
+
+
+/// Load the script model (entities, interfaces, aliases) for the game installed at
+/// `dir`, the same way `wg-toolkit-cli`'s old `bootstrap` codegen command used to --
+/// except this is loaded fresh at every startup instead of being turned into generated
+/// Rust source, since `base::App` now resolves everything dynamically against it.
+fn load_script(dir: &std::path::Path) -> CliResult<Script> {
+
+    let version = {
+
+        let version_file = fs::read_to_string(dir.join("version.xml"))
+            .map_err(|e| format!("Failed to read version.xml, reason: {e}"))?;
+
+        version_file
+            .split_once("<version>").ok_or_else(|| format!("Missing <version> from version.xml"))?.1
+            .split_once("</version>").ok_or_else(|| format!("Missing </version> from version.xml"))?.0
+            .trim()
+            .to_string()
+
+    };
+
+    let fs = ResFilesystem::new(dir.join("res"))
+        .map_err(|e| format!("Failed to open resource filesystem, reason: {e}"))?;
+
+    script::load(&fs, version)
+        .map_err(|e| format!("Failed to load script model, reason: {e}"))
+
+}
 
 
 /// Entrypoint.
@@ -47,6 +77,8 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
             .with_writer(std::sync::Mutex::new(trace_file))
             .with_filter(LevelFilter::INFO))
         .init();
+
+    let script = load_script(&args.dir)?;
 
     // Start by decoding the private key...
     let encryption_key;
@@ -79,10 +111,10 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
             real_encryption_key = None;
         }
         
-        proxy::run(args.login_app, real_login_app, args.base_app, encryption_key, real_encryption_key)
-        
+        proxy::run(args.login_app, real_login_app, args.base_app, encryption_key, real_encryption_key, script)
+
     } else {
-        emulator::run(args.login_app, args.base_app, encryption_key)
+        emulator::run(args.login_app, args.base_app, encryption_key, script)
     }
 
 }

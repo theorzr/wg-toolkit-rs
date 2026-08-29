@@ -15,7 +15,7 @@ pub fn parse_aliases(elt: &Element, tys: &mut TySystem) {
 pub fn parse_interface(elt: &Element, tys: &mut TySystem, name: String) -> Interface {
 
     let mut interface = Interface {
-        name,
+        name: name.into(),
         implements: Vec::new(),
         properties: Vec::new(),
         temp_properties: Vec::new(),
@@ -116,7 +116,7 @@ pub fn parse_property(elt: &Element, tys: &mut TySystem, name: String) -> Proper
     // TODO: ExposedForReplay
 
     Property {
-        name,
+        name: name.into(),
         ty,
         persistent: elt.get_child("Persistent")
             .and_then(Value::as_boolean)
@@ -160,7 +160,7 @@ pub fn parse_methods(elt: &Element, tys: &mut TySystem, methods: &mut Vec<Method
 pub fn parse_method(elt: &Element, tys: &mut TySystem, name: String, client: bool) -> Method {
     
     let mut method = Method {
-        name,
+        name: name.into(),
         exposed_to_all_clients: client,
         exposed_to_own_client: false,
         variable_header_size: VariableHeaderSize::Variable8,
@@ -247,7 +247,7 @@ pub fn parse_ty(val: &Value, tys: &mut TySystem, alias_name: Option<String>) -> 
                 let ty = parse_ty(type_val, tys, None);
 
                 dict.properties.push(TyDictProp {
-                    name: field_name.clone(),
+                    name: field_name.clone().into(),
                     ty,
                     default: None,
                 });

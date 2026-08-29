@@ -12,17 +12,17 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use flate2::read::ZlibDecoder;
 use blowfish::Blowfish;
 
-use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, ElementLength, SimpleElement};
+use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, Element, ElementLength, SimpleElement};
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
-use wgtk::net::codec::{SimpleCodec, WgSocketAddrV4};
+use wgtk::net::codec::{Codec, WgSocketAddrV4};
 
 use wgtk::app::{proxy, login_proxy, base, client};
-use wgtk::app::entity::AnyEntity;
+use wgtk::app::script::{ScriptDispatch, MethodCall};
 use wgtk::net::packet::Packet;
+use wgtk::script::{Script, Value};
 
 use wgtk::util::io::{serde_pickle_de_options, WgReadExt};
 
-use super::r#gen::entity::Entities;
 use crate::CliResult;
 
 
@@ -60,6 +60,7 @@ pub fn run(
     base_app_addr: SocketAddrV4,
     encryption_key: Option<Arc<RsaPrivateKey>>,
     real_encryption_key: Option<Arc<RsaPublicKey>>,
+    script: Script,
 ) -> CliResult<()> {
 
     let mut login_app = login_proxy::App::new(login_app_addr.into(), real_login_app_addr.into(), real_encryption_key)
@@ -75,6 +76,7 @@ pub fn run(
     let shared = Arc::new(Shared {
         base_app_addr,
         login_app_addr,
+        dispatch: ScriptDispatch::new(script),
         pending_clients: Mutex::new(HashMap::new()),
         pending_switches: Mutex::new(HashMap::new()),
     });
@@ -125,11 +127,12 @@ struct LoginHandler {
 struct BaseHandler {
     shared: Arc<Shared>,
     next_tick: Option<u8>,
-    /// Every entity created so far, keyed by its id, holding its actual decoded data --
-    /// this is what lets a base/client method call be decoded generically by just
-    /// looking up the entity id and dispatching on the stored `Entities` variant,
-    /// without this proxy needing to know any concrete entity type statically.
-    entities: HashMap<u32, Entities>,
+    /// Every entity created so far, keyed by its id, holding its wire type id and its
+    /// actual decoded data -- this is what lets a base/client method call be decoded
+    /// generically by just looking up the entity id, resolving its dispatch tables from
+    /// `Shared::dispatch` by type id, and dispatching against those, without this proxy
+    /// needing to know any concrete entity type statically.
+    entities: HashMap<u32, (u16, Value)>,
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
     partial_resources: HashMap<u16, PartialResource>,
@@ -146,6 +149,9 @@ struct Shared {
     base_app_addr: SocketAddrV4,
     #[allow(unused)]
     login_app_addr: SocketAddrV4,
+    /// The script model's dynamic dispatch tables, resolved once at startup -- see
+    /// `wgtk::app::script::ScriptDispatch`.
+    dispatch: ScriptDispatch,
     pending_clients: Mutex<HashMap<SocketAddr, PendingClient>>,
     /// Same idea as `pending_clients`, but keyed by IP only: after a SwitchBaseApp, the
     /// client tears down its whole connection and reconnects with a fresh, unpredictable
@@ -364,14 +370,19 @@ impl BaseHandler {
 
                 if let Some(entity_id) = self.player_entity_id {
                     // Unwrap because selected entity should exist!
-                    let entity_data = self.entities.get(&entity_id).unwrap();
-                    // `Ok(None)` means a well-framed but unrecognized exposed id -- the
-                    // bundle reader still safely advanced, so it's fine to keep reading.
-                    // A genuine `Err` means it didn't, so it must be propagated instead
-                    // of continuing (or the next element read would loop on this one).
-                    match entity_data.read_base_method(elt)? {
-                        Some(m) => info!(%addr, id, "-> Base entity method: ({entity_id}) {m:?}"),
-                        None => warn!(%addr, id, "-> Base entity method (unrecognized exposed id): ({entity_id})"),
+                    let &(type_id, _) = self.entities.get(&entity_id).unwrap();
+                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
+                        warn!(%addr, id, "-> Base entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
+                        return Ok(true);
+                    };
+                    // The element's framing is always Variable16 regardless of exposed
+                    // id, so this never fails to decode structurally -- an unrecognized
+                    // exposed id surfaces as `MethodCall::Unknown`, not an `Err`, so the
+                    // bundle reader always safely advances here.
+                    let call = elt.read::<BaseEntityMethod, _>(&dispatch.base_methods)?.element.call;
+                    match &call {
+                        MethodCall::Known { .. } => info!(%addr, id, "-> Base entity method: ({entity_id}) {call:?}"),
+                        MethodCall::Unknown { .. } => warn!(%addr, id, "-> Base entity method (unrecognized exposed id): ({entity_id}) {call:?}"),
                     }
                     return Ok(true);
                 }
@@ -465,6 +476,15 @@ impl BaseHandler {
                     self.player_entity_id = Some(player_entity_id);
                 }
 
+                // `selected_entity_id` isn't necessarily the player entity (see
+                // `SelectEntity`/`SelectAliasedEntity`, not tracked here), but whatever
+                // it pointed to is gone now that `entities` was just cleared -- keeping
+                // it around would leave the `ENTITY_METHOD`/`ENTITY_PROPERTY` arms below
+                // holding a dangling id into `entities`, which used to `unwrap()` a
+                // `None` and panic this connection's poll worker thread silently (no
+                // `JoinHandle::join()` anywhere to surface it -- see `ThreadPoll`).
+                self.selected_entity_id = self.player_entity_id;
+
             }
             LoggedOff::ID => {
                 let lo = elt.read_simple::<LoggedOff>()?;
@@ -474,9 +494,9 @@ impl BaseHandler {
 
                 let cbp = elt.read_simple_stable::<CreateBasePlayerHeader>()?;
 
-                if cbp.element.entity_type_id >= 1 && cbp.element.entity_type_id <= Entities::count() {
+                if self.shared.dispatch.entity_from_id(cbp.element.entity_type_id).is_some() {
 
-                    let full = elt.read_simple::<CreateBasePlayerAny>()?;
+                    let full = elt.read::<CreateBasePlayerAny, _>(&self.shared.dispatch)?;
 
                     // The full entity data is logged as its own field (rather than a
                     // separate `entity_<id>.txt` dump file) so it lands in the same
@@ -486,7 +506,7 @@ impl BaseHandler {
                         "<- Create base player: ({}) entity_type_id={} entity_components_count={}",
                         full.element.entity_id, full.element.entity_type_id, full.element.entity_components_count);
 
-                    self.entities.insert(full.element.entity_id, full.element.entity_data);
+                    self.entities.insert(full.element.entity_id, (full.element.entity_type_id, full.element.entity_data));
                     self.player_entity_id = Some(full.element.entity_id);
 
                     return Ok(true);
@@ -502,8 +522,35 @@ impl BaseHandler {
 
             }
             CreateCellPlayer::ID => {
+
                 let ccp = elt.read_simple::<CreateCellPlayer>()?;
                 warn!(%addr, id = CreateCellPlayer::ID, request_id = ?ccp.request_id, "<- Create cell player: {:?}", ccp.element);
+
+                // `vehicle_id` is a distinct `Vehicle` entity, not the player's own base
+                // entity (confirmed live -- see the doc comment on
+                // `client::element::CreateCellPlayer::vehicle_id`). Register it so a later
+                // `SelectEntity` targeting it can resolve a real dispatch table, instead of
+                // whatever entity happened to be selected before (previously misattributed
+                // to the player's `Account` entity, which then failed to decode the
+                // vehicle's own properties past `Account`'s shorter property table).
+                match self.shared.dispatch.entity_from_name("Vehicle") {
+                    Some((vehicle_type_id, _)) => {
+                        self.entities.insert(ccp.element.vehicle_id, (vehicle_type_id, Value::Dict(BTreeMap::new())));
+                    }
+                    None => warn!(%addr, "<- Create cell player: no 'Vehicle' entity type in the loaded script model"),
+                }
+
+            }
+            SelectEntity::ID => {
+                let se = elt.read_simple::<SelectEntity>()?;
+                if self.entities.contains_key(&se.element.entity_id) {
+                    info!(%addr, id = SelectEntity::ID, request_id = ?se.request_id,
+                        "<- Select entity: {}", se.element.entity_id);
+                } else {
+                    warn!(%addr, id = SelectEntity::ID, request_id = ?se.request_id,
+                        "<- Select entity (not tracked): {}", se.element.entity_id);
+                }
+                self.selected_entity_id = Some(se.element.entity_id);
             }
             SelectPlayerEntity::ID => {
                 let spe = elt.read_simple::<SelectPlayerEntity>()?;
@@ -702,11 +749,34 @@ impl BaseHandler {
             RelativePosition::ID => return trace_dbg!(elt, addr, RelativePosition),
             SetVehicle::ID => return trace_dbg!(elt, addr, SetVehicle),
             SelectAliasedEntity::ID => return trace_dbg!(elt, addr, SelectAliasedEntity),
-            SelectEntity::ID => return trace_dbg!(elt, addr, SelectEntity),
             ForcedPosition::ID => return trace_dbg!(elt, addr, ForcedPosition),
             AvatarUpdateNoAliasDetailed::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasDetailed),
             AvatarUpdateAliasDetailed::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasDetailed),
             AvatarUpdatePlayerDetailed::ID => return trace_dbg!(elt, addr, AvatarUpdatePlayerDetailed),
+            AvatarUpdateNoAliasFullPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasFullPosYawPitchRoll),
+            AvatarUpdateNoAliasFullPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasFullPosYawPitch),
+            AvatarUpdateNoAliasFullPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasFullPosYaw),
+            AvatarUpdateNoAliasFullPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasFullPosNoDir),
+            AvatarUpdateNoAliasOnGroundYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasOnGroundYawPitchRoll),
+            AvatarUpdateNoAliasOnGroundYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasOnGroundYawPitch),
+            AvatarUpdateNoAliasOnGroundYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasOnGroundYaw),
+            AvatarUpdateNoAliasOnGroundNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasOnGroundNoDir),
+            AvatarUpdateNoAliasNoPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosYawPitchRoll),
+            AvatarUpdateNoAliasNoPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosYawPitch),
+            AvatarUpdateNoAliasNoPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosYaw),
+            AvatarUpdateNoAliasNoPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosNoDir),
+            AvatarUpdateAliasFullPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYawPitchRoll),
+            AvatarUpdateAliasFullPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYawPitch),
+            AvatarUpdateAliasFullPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYaw),
+            AvatarUpdateAliasFullPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosNoDir),
+            AvatarUpdateAliasOnGroundYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYawPitchRoll),
+            AvatarUpdateAliasOnGroundYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYawPitch),
+            AvatarUpdateAliasOnGroundYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYaw),
+            AvatarUpdateAliasOnGroundNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundNoDir),
+            AvatarUpdateAliasNoPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYawPitchRoll),
+            AvatarUpdateAliasNoPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYawPitch),
+            AvatarUpdateAliasNoPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYaw),
+            AvatarUpdateAliasNoPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosNoDir),
             AvatarUpdateVolatileProperties::ID => return trace_dbg!(elt, addr, AvatarUpdateVolatileProperties),
             ChangeVolatilePackerType::ID => return trace_dbg!(elt, addr, ChangeVolatilePackerType),
             NrlCreateNode::ID => return trace_dbg!(elt, addr, NrlCreateNode),
@@ -732,13 +802,21 @@ impl BaseHandler {
                 // Account::msg#39 = showGUI
 
                 if let Some(entity_id) = self.selected_entity_id {
-                    // Unwrap because selected entity should exist!
-                    let entity_data = self.entities.get(&entity_id).unwrap();
-                    // See the `BASE_ENTITY_METHOD` arm in `read_out_element` for why
-                    // `Ok(None)` and `Err` are handled differently here.
-                    match entity_data.read_client_method(elt)? {
-                        Some(m) => info!(%addr, id, "<- Entity method: ({entity_id}) {m:?}"),
-                        None => warn!(%addr, id, "<- Entity method (unrecognized exposed id): ({entity_id})"),
+                    let Some(&(type_id, _)) = self.entities.get(&entity_id) else {
+                        warn!(%addr, id, "<- Entity method (selected entity {entity_id} no longer tracked)");
+                        return Ok(true);
+                    };
+                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
+                        warn!(%addr, id, "<- Entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
+                        return Ok(true);
+                    };
+                    // See the `BASE_ENTITY_METHOD` arm in `read_out_element` for why an
+                    // unrecognized exposed id surfaces as `MethodCall::Unknown`, not
+                    // an `Err`.
+                    let call = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call;
+                    match &call {
+                        MethodCall::Known { .. } => info!(%addr, id, "<- Entity method: ({entity_id}) {call:?}"),
+                        MethodCall::Unknown { .. } => warn!(%addr, id, "<- Entity method (unrecognized exposed id): ({entity_id}) {call:?}"),
                     }
                     return Ok(true);
                 }
@@ -752,17 +830,24 @@ impl BaseHandler {
             id if id::ENTITY_PROPERTY.contains(id) => {
 
                 if let Some(entity_id) = self.selected_entity_id {
-                    let entity_data = self.entities.get(&entity_id).unwrap();
+                    let Some(&(type_id, _)) = self.entities.get(&entity_id) else {
+                        warn!(%addr, id, "<- Entity property (selected entity {entity_id} no longer tracked)");
+                        return Ok(true);
+                    };
+                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
+                        warn!(%addr, id, "<- Entity property (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
+                        return Ok(true);
+                    };
                     // An `Err` here (propagated by `?`, caught by `receive_bundle`'s
                     // outer catch-all) is expected for any property belonging to a
                     // *dynamic* component (attached per-instance, see
                     // `entity_components_count` -- this project's model can't predict
                     // their exposed ids, see `doc/ENTITY.md`), not just a real mismatch.
                     // Unlike entity methods, there's no safe fallback framing to guess
-                    // here (see `EntityPropertyInner`'s doc comment) -- reading must stop
+                    // here (see `EntityProperty`'s doc comment) -- reading must stop
                     // rather than risk desyncing the rest of this bundle.
-                    let p = entity_data.read_client_property(elt)?;
-                    info!(%addr, id, "<- Entity property: ({entity_id}) {p:?}");
+                    let p = elt.read::<EntityProperty, _>(&dispatch.properties)?.element;
+                    info!(%addr, id, "<- Entity property: ({entity_id}) {}={:?}", p.name, p.value);
                     return Ok(true);
                 }
 
@@ -786,37 +871,47 @@ impl BaseHandler {
 
 /// Reads a full `CreateBasePlayer` element without knowing the concrete entity type
 /// statically: entity id, entity type id and the unknown blob are read directly (mirrors
-/// `client::element::CreateBasePlayer<E>::read`), then the entity's own data is decoded
-/// generically via [`AnyEntity::read`] using the just-read `entity_type_id`. Read-only,
-/// like the library's own `CreateBasePlayer<E, &E>` write-only sibling.
+/// `client::element::CreateBasePlayer::write`), then the entity's own data is decoded
+/// dynamically as a [`Value`] against that type's `data_ty`, resolved from the given
+/// [`ScriptDispatch`] using the just-read `entity_type_id`. Read-only, like the
+/// library's own `CreateBasePlayer` write-only sibling.
 struct CreateBasePlayerAny {
     entity_id: u32,
     entity_type_id: u16,
-    entity_data: Entities,
+    entity_data: Value,
     entity_components_count: u8,
 }
 
-impl SimpleCodec for CreateBasePlayerAny {
+impl Element<ScriptDispatch> for CreateBasePlayerAny {
 
-    fn write(&self, _write: &mut dyn io::Write) -> io::Result<()> {
+    fn write_length(&self, _config: &ScriptDispatch) -> io::Result<ElementLength> {
         unreachable!("CreateBasePlayerAny is read-only")
     }
 
-    fn read(read: &mut dyn io::Read) -> io::Result<Self> {
+    fn write(&self, _write: &mut dyn io::Write, _config: &ScriptDispatch) -> io::Result<u8> {
+        unreachable!("CreateBasePlayerAny is read-only")
+    }
+
+    fn read_length(_config: &ScriptDispatch, _id: u8) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn read(read: &mut dyn io::Read, config: &ScriptDispatch, _len: usize, _id: u8) -> io::Result<Self> {
+
         let entity_id = read.read_u32()?;
         let entity_type_id = read.read_u16()?;
         let unk = read.read_blob_variable()?;
         if !unk.is_empty() {
             warn!("Non empty unknown blob when decoding CreateBasePlayer: {unk:?}");
         }
-        let entity_data = Entities::read(read, entity_type_id)?;
+
+        let dispatch = config.entity_from_id(entity_type_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown entity type id: 0x{entity_type_id:02X}")))?;
+        let entity_data = Value::read(read, &dispatch.data_ty)?;
         let entity_components_count = read.read_u8()?;
+
         Ok(Self { entity_id, entity_type_id, entity_data, entity_components_count })
+
     }
 
-}
-
-impl SimpleElement for CreateBasePlayerAny {
-    const ID: u8 = client::element::id::CREATE_BASE_PLAYER;
-    const LEN: ElementLength = ElementLength::Variable16;
 }

@@ -2,11 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::fmt;
 
 use glam::{Vec2, Vec3, Vec4};
 
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Value {
     Int8(i8),
     Int16(i16),
@@ -24,8 +26,42 @@ pub enum Value {
     String(StringValue),
     Python(PythonValue),
     Mailbox,
-    Dict(BTreeMap<String, Value>),
+    Dict(BTreeMap<Arc<str>, Value>),
     Seq(Vec<Value>),
+}
+
+/// Prints each value like a regular Rust value rather than as an enum variant: numeric
+/// values get a Rust-literal-style type suffix (e.g. `5i32`, `1.5f32`), dicts print as a
+/// struct literal and sequences as a plain list.
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Int8(v) => write!(f, "{v:?}i8"),
+            Value::Int16(v) => write!(f, "{v:?}i16"),
+            Value::Int32(v) => write!(f, "{v:?}i32"),
+            Value::Int64(v) => write!(f, "{v:?}i64"),
+            Value::UInt8(v) => write!(f, "{v:?}u8"),
+            Value::UInt16(v) => write!(f, "{v:?}u16"),
+            Value::UInt32(v) => write!(f, "{v:?}u32"),
+            Value::UInt64(v) => write!(f, "{v:?}u64"),
+            Value::Float32(v) => write!(f, "{v:?}f32"),
+            Value::Float64(v) => write!(f, "{v:?}f64"),
+            Value::Vector2(v) => fmt::Debug::fmt(v, f),
+            Value::Vector3(v) => fmt::Debug::fmt(v, f),
+            Value::Vector4(v) => fmt::Debug::fmt(v, f),
+            Value::String(v) => fmt::Debug::fmt(v, f),
+            Value::Python(v) => fmt::Debug::fmt(v, f),
+            Value::Mailbox => f.write_str("Mailbox"),
+            Value::Dict(map) => {
+                let mut d = f.debug_struct("Dict");
+                for (k, v) in map {
+                    d.field(k, v);
+                }
+                d.finish()
+            }
+            Value::Seq(list) => f.debug_list().entries(list).finish(),
+        }
+    }
 }
 
 /// The string data type used by default for all STRING types.

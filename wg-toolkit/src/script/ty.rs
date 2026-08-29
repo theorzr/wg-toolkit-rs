@@ -188,7 +188,7 @@ pub struct TyDict {
 
 #[derive(Debug, PartialEq)]
 pub struct TyDictProp {
-    pub name: String,
+    pub name: Arc<str>,
     pub ty: Ty,
     #[allow(unused)]  // Not used for generation
     pub default: Option<Value>,

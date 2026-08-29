@@ -1,19 +1,17 @@
 //! Definition of the elements that can be sent from server to client
 //! once connected to the base application..
 
-use std::borrow::Borrow;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::marker::PhantomData;
+use std::sync::Arc;
 
 use glam::Vec3;
 
-use tracing::warn;
-
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::app::entity::{Entity, AnyMethod, AnyProperty};
-use crate::util::io::{WgReadExt, WgWriteExt};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
+use crate::util::io::{WgReadExt, WgWriteExt};
+use crate::app::script::{MethodDef, PropertyDef, MethodCall};
+use crate::script::{Ty, Value};
 use crate::util::AsciiFmt;
 
 
@@ -63,30 +61,41 @@ pub mod id {
     pub const NRL_DATA: u8                                              = 0x26;  // VAR 2 (1.26.1.1 handler: 1433272E0)
     pub const NRL_MSG_TO_CLIENT: u8                                     = 0x27;  // VAR 2 (1.26.1.1 handler: 143327330)
     pub const NRL_UNRELIABLE_MSG_TO_CLIENT: u8                          = 0x28;  // VAR 2 (1.26.1.1 handler: 143327380)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8        = 0x29;  // CALLBACK 0 (1.26.1.1 handler: 1433273D0)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH: u8             = 0x2A;  // CALLBACK 0 (1.26.1.1 handler: 143327430)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW: u8                   = 0x2B;  // CALLBACK 0 (1.26.1.1 handler: 143327490)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR: u8                = 0x2C;  // CALLBACK 0 (1.26.1.1 handler: 1433274F0)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8       = 0x2D;  // CALLBACK 0 (1.26.1.1 handler: 143327550)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH: u8            = 0x2E;  // CALLBACK 0 (1.26.1.1 handler: 1433275B0)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW: u8                  = 0x2F;  // CALLBACK 0 (1.26.1.1 handler: 143327610)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR: u8               = 0x30;  // CALLBACK 0 (1.26.1.1 handler: 143327670)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL: u8          = 0x31;  // CALLBACK 0 (1.26.1.1 handler: 1433276D0)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH: u8               = 0x32;  // CALLBACK 0 (1.26.1.1 handler: 143327730)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW: u8                     = 0x33;  // CALLBACK 0 (1.26.1.1 handler: 143327790)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR: u8                  = 0x34;  // CALLBACK 0 (1.26.1.1 handler: 1433277F0)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8           = 0x35;  // CALLBACK 0 (1.26.1.1 handler: 143327850)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH: u8                = 0x36;  // CALLBACK 0 (1.26.1.1 handler: 1433278B0)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW: u8                      = 0x37;  // CALLBACK 0 (1.26.1.1 handler: 143327910)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR: u8                   = 0x38;  // CALLBACK 0 (1.26.1.1 handler: 143327970)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8          = 0x39;  // CALLBACK 0 (1.26.1.1 handler: 1433279D0)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH: u8               = 0x3A;  // CALLBACK 0 (1.26.1.1 handler: 143327A30)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW: u8                     = 0x3B;  // CALLBACK 0 (1.26.1.1 handler: 143327A90)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR: u8                  = 0x3C;  // CALLBACK 0 (1.26.1.1 handler: 143327AF0)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL: u8             = 0x3D;  // CALLBACK 0 (1.26.1.1 handler: 143327B50)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH: u8                  = 0x3E;  // CALLBACK 0 (1.26.1.1 handler: 143327BB0)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW: u8                        = 0x3F;  // CALLBACK 0 (1.26.1.1 handler: 143327C10)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR: u8                     = 0x40;  // CALLBACK 0 (1.26.1.1 handler: 143327C70)
+    // The 24 AVUPMSG combinations (see `common_client_interface.hpp` in the leaked
+    // BigWorld 14.4.1 SDK, `re-work/bigworld-src-14.4.1/`): each combination of
+    // {NoAlias 4-byte EntityID, Alias 1-byte IDAlias} x {FullPos 5-byte PackedXYZ,
+    // OnGround 3-byte PackedXZ, NoPos none} x {YawPitchRoll 3 bytes, YawPitch 2 bytes,
+    // Yaw 1 byte, NoDir none} is registered as its own fixed-size message id (id field
+    // + pos field + dir field, in that order) -- all bit-widths are compile-time
+    // `#define`s in `msgtypes.hpp`, not runtime/connection state, so these sizes are
+    // constant for this client build. Previously mislabeled "CALLBACK 0" (a length-style
+    // placeholder, not an actual byte count) -- that mislabeling made a bundle reader
+    // misparse these as some other framing, corrupting the read position for anything
+    // bundled alongside them.
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8        = 0x29;  // FIXED 12 (1.26.1.1 handler: 1433273D0)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH: u8             = 0x2A;  // FIXED 11 (1.26.1.1 handler: 143327430)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW: u8                   = 0x2B;  // FIXED 10 (1.26.1.1 handler: 143327490)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR: u8                = 0x2C;  // FIXED 9 (1.26.1.1 handler: 1433274F0)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8       = 0x2D;  // FIXED 10 (1.26.1.1 handler: 143327550)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH: u8            = 0x2E;  // FIXED 9 (1.26.1.1 handler: 1433275B0)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW: u8                  = 0x2F;  // FIXED 8 (1.26.1.1 handler: 143327610)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR: u8               = 0x30;  // FIXED 7 (1.26.1.1 handler: 143327670)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL: u8          = 0x31;  // FIXED 7 (1.26.1.1 handler: 1433276D0)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH: u8               = 0x32;  // FIXED 6 (1.26.1.1 handler: 143327730)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW: u8                     = 0x33;  // FIXED 5 (1.26.1.1 handler: 143327790)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR: u8                  = 0x34;  // FIXED 4 (1.26.1.1 handler: 1433277F0)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8           = 0x35;  // FIXED 9 (1.26.1.1 handler: 143327850)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH: u8                = 0x36;  // FIXED 8 (1.26.1.1 handler: 1433278B0)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW: u8                      = 0x37;  // FIXED 7 (1.26.1.1 handler: 143327910)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR: u8                   = 0x38;  // FIXED 6 (1.26.1.1 handler: 143327970)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8          = 0x39;  // FIXED 7 (1.26.1.1 handler: 1433279D0)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH: u8               = 0x3A;  // FIXED 6 (1.26.1.1 handler: 143327A30)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW: u8                     = 0x3B;  // FIXED 5 (1.26.1.1 handler: 143327A90)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR: u8                  = 0x3C;  // FIXED 4 (1.26.1.1 handler: 143327AF0)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL: u8             = 0x3D;  // FIXED 4 (1.26.1.1 handler: 143327B50)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH: u8                  = 0x3E;  // FIXED 3 (1.26.1.1 handler: 143327BB0)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW: u8                        = 0x3F;  // FIXED 2 (1.26.1.1 handler: 143327C10)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR: u8                     = 0x40;  // FIXED 1 (1.26.1.1 handler: 143327C70)
     pub const CONTROL_ENTITY: u8                                        = 0x41;  // FIXED 5 (1.26.1.1 handler: 143327CC8)
     pub const VOICE_DATA: u8                                            = 0x42;  // VAR 2 (1.26.1.1 handler: 143327CE0)
     pub const RESTORE_CLIENT: u8                                        = 0x43;  // VAR 2 (1.26.1.1 handler: 143327D00)
@@ -214,109 +223,6 @@ impl SimpleElement for CreateBasePlayerHeader {
 }
 
 
-/// Sent from the base when a player should be created, the entity id
-/// is given with its type.
-///
-/// The remaining data will later be decoded properly depending on the
-/// entity type, it's used for initializing its properties (TODO).
-/// For example the `Login` entity receive the account UID.
-///
-/// Generic over how the entity data is stored (`D`, defaulting to `Box<E>`): decoding
-/// (the client side, below) always produces an owned `Box<E>`, but the base app sending
-/// a just-created entity wants to write it without giving up its own copy -- rather than
-/// a separate write-only sibling type, `D = &E` reuses this same struct for that case.
-#[derive(Debug, Clone)]
-pub struct CreateBasePlayer<E: Entity, D: Borrow<E> = Box<E>> {
-    /// The unique identifier of the entity being created.
-    pub entity_id: u32,
-    /// The entity type id.
-    pub entity_type_id: u16,
-    /// The actual data to be sent for creating the player's entity.
-    pub entity_data: D,
-    /// The number of *dynamic* components attached to this specific entity instance --
-    /// confirmed against `wg-toolkit-cli/src/bootstrap/mod.rs`'s own extension-parsing
-    /// comments: WoT's "StaticComponents" (declared per `extension.xml`) fold their
-    /// methods/properties into every instance's own method table at codegen time (see
-    /// `Model::components`), so they need no runtime handling at all and aren't counted
-    /// here. "DynamicComponents" are instead attached to individual entity instances at
-    /// runtime (e.g. only for the duration of a particular battle mode), don't claim a
-    /// fixed exposed id, and are what this count refers to.
-    ///
-    /// TODO: no live capture with a nonzero count has been analyzed yet, so the actual
-    /// per-component wire encoding that would follow (id/name + its own data) isn't
-    /// confirmed -- this field is read/written verbatim (round-trips correctly even at
-    /// 0, the only value seen so far) but the components themselves aren't decoded.
-    pub entity_components_count: u8,
-    _phantom: PhantomData<E>,
-}
-
-impl<E: Entity, D: Borrow<E>> CreateBasePlayer<E, D> {
-
-    pub fn new(entity_id: u32, entity_type_id: u16, entity_data: D, entity_components_count: u8) -> Self {
-        Self { entity_id, entity_type_id, entity_data, entity_components_count, _phantom: PhantomData }
-    }
-
-    fn write_inner(&self, write: &mut dyn Write) -> io::Result<()> {
-        write.write_u32(self.entity_id)?;
-        write.write_u16(self.entity_type_id)?;
-        write.write_blob_variable(&[])?;  // Unknown blob or string?
-        Codec::write(self.entity_data.borrow(), &mut *write, &())?;
-        write.write_u8(self.entity_components_count)
-    }
-
-}
-
-impl<E: Entity> SimpleCodec for CreateBasePlayer<E, Box<E>> {
-
-    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
-        self.write_inner(write)
-    }
-
-    fn read(read: &mut dyn Read) -> io::Result<Self> {
-        let entity_id = read.read_u32()?;
-        let entity_type_id = read.read_u16()?;
-        let unk = read.read_blob_variable()?;
-        if !unk.is_empty() {
-            warn!("Non empty unknown blob when decoding CreateBasePlayer: {unk:?}");
-        }
-        Ok(Self::new(
-            entity_id,
-            entity_type_id,
-            Box::new(Codec::read(&mut *read, &())?),
-            read.read_u8()?,
-        ))
-    }
-
-}
-
-impl<E: Entity> SimpleElement for CreateBasePlayer<E, Box<E>> {
-    const ID: u8 = id::CREATE_BASE_PLAYER;
-    const LEN: ElementLength = ElementLength::Variable16;
-}
-
-/// Write-only: sends a just-created entity by reference (see the struct doc comment).
-impl<'e, E: Entity> Element<()> for CreateBasePlayer<E, &'e E> {
-
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
-    }
-
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        self.write_inner(write)?;
-        Ok(id::CREATE_BASE_PLAYER)
-    }
-
-    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
-        unreachable!("CreateBasePlayer<E, &E> is write-only")
-    }
-
-    fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
-        unreachable!("CreateBasePlayer<E, &E> is write-only")
-    }
-
-}
-
-
 /// Sent from the base to give the client's already-created base-player entity (see
 /// [`CreateBasePlayer`]) a cell-side presence too, e.g. it has entered a space/battle.
 ///
@@ -353,11 +259,12 @@ pub struct CreateCellPlayer {
     pub space_id: u32,
     /// Always `0` in every capture seen so far -- meaning unconfirmed.
     pub unk_short: u16,
-    /// UNCONFIRMED semantics: not the entity id of a distinct "vehicle" entity (this
-    /// project has only ever observed one entity, `Account`, created per client -- see
-    /// `doc/ENTITY.md`). Empirically the exact same value also appears again inside
-    /// `cell_data` right after a constant marker byte, which is what confirms this field's
-    /// offset is correct, but not what it actually represents.
+    /// CONFIRMED live (WoT v2.3.1.3, actual battle capture): the id of a distinct
+    /// `Vehicle` entity, not the player's own base/`Account` entity -- a later
+    /// `SelectEntity` targets this same id for the vehicle's own property/method
+    /// updates (see `wg-toolkit-cli`'s proxy `CreateCellPlayer` handling, which
+    /// registers it). Empirically the exact same value also appears again inside
+    /// `cell_data` right after a constant marker byte.
     pub vehicle_id: u32,
     pub position: Vec3,
     /// The server's packed-XZ compression scale, needed by the client to decode any
@@ -404,6 +311,64 @@ impl SimpleElement for CreateCellPlayer {
 }
 
 
+/// Sent from the base when a player should be created, the entity id is given with its
+/// type. The remaining data initializes its properties (e.g. the `Login` entity receives
+/// the account UID) -- encoded as a runtime [`Value`] against a runtime-computed [`Ty`]
+/// (see [`crate::app::script::EntityDispatch::data_ty`]), resolved dynamically from the
+/// loaded script model rather than a statically generated `Entity` struct. Write-only:
+/// [`super::super::base::App`] only ever sends these, never decodes them.
+#[derive(Debug, Clone)]
+pub struct CreateBasePlayer<'a> {
+    /// The unique identifier of the entity being created.
+    pub entity_id: u32,
+    /// The entity type id.
+    pub entity_type_id: u16,
+    /// The actual data to be sent for creating the player's entity.
+    pub entity_data: &'a Value,
+    /// The type describing `entity_data`'s layout, see [`crate::app::script::EntityDispatch::data_ty`].
+    pub entity_data_ty: &'a Ty,
+    /// The number of *dynamic* components attached to this specific entity instance --
+    /// confirmed against `wg-toolkit-cli/src/bootstrap/mod.rs`'s own extension-parsing
+    /// comments: WoT's "StaticComponents" (declared per `extension.xml`) fold their
+    /// methods/properties into every instance's own method table at codegen time, so
+    /// they need no runtime handling at all and aren't counted here. "DynamicComponents"
+    /// are instead attached to individual entity instances at runtime (e.g. only for the
+    /// duration of a particular battle mode), don't claim a fixed exposed id, and are
+    /// what this count refers to.
+    ///
+    /// TODO: no live capture with a nonzero count has been analyzed yet, so the actual
+    /// per-component wire encoding that would follow (id/name + its own data) isn't
+    /// confirmed -- this field is read/written verbatim (round-trips correctly even at
+    /// 0, the only value seen so far) but the components themselves aren't decoded.
+    pub entity_components_count: u8,
+}
+
+impl Element<()> for CreateBasePlayer<'_> {
+
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        write.write_u32(self.entity_id)?;
+        write.write_u16(self.entity_type_id)?;
+        write.write_blob_variable(&[])?;  // Unknown blob or string?
+        Codec::write(self.entity_data, write, self.entity_data_ty)?;
+        write.write_u8(self.entity_components_count)?;
+        Ok(id::CREATE_BASE_PLAYER)
+    }
+
+    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+        unreachable!("CreateBasePlayer is write-only")
+    }
+
+    fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+        unreachable!("CreateBasePlayer is write-only")
+    }
+
+}
+
+
 pub type DummyPacket = DebugElementVariable16<{ id::DUMMY_PACKET }>;
 pub type SpaceProperty = DebugElementVariable16<{ id::SPACE_PROPERTY }>;
 pub type AddSpaceGeometryMapping = DebugElementVariable16<{ id::ADD_SPACE_GEOMETRY_MAPPING }>;
@@ -439,8 +404,29 @@ pub type TickSyncPeriodic = DebugElementFixed<{ id::TICK_SYNC_PERIODIC }, 2>;
 pub type RelativePositionReference = DebugElementFixed<{ id::RELATIVE_POSITION_REFERENCE }, 1>;
 pub type RelativePosition = DebugElementFixed<{ id::RELATIVE_POSITION }, 12>;
 pub type SetVehicle = DebugElementFixed<{ id::SET_VEHICLE }, 8>;
+
+crate::__struct_simple_codec! {
+    /// Sent by the server to inform that subsequent elements will target another entity's
+    /// property/method updates, referenced directly by its full id -- confirmed live
+    /// against WoT v2.3.1.3: the controlled `Vehicle` entity created by
+    /// [`CreateCellPlayer`] gets its own `OwnClient`-flagged property updates selected
+    /// this way, distinct from [`SelectPlayerEntity`] (the base/`Account` entity) and
+    /// from the more compact byte-alias form used for broadcast (`AllClients`)
+    /// properties of *other* nearby entities, [`SelectAliasedEntity`] (not decoded here
+    /// -- its alias table would need [`CreateEntity`]/[`EnterAoi`] decoded first, neither
+    /// confirmed live yet).
+    #[derive(Debug, Clone, Copy)]
+    pub struct SelectEntity {
+        pub entity_id: u32,
+    }
+}
+
+impl SimpleElement for SelectEntity {
+    const ID: u8 = id::SELECT_ENTITY;
+    const LEN: ElementLength = ElementLength::Fixed(4);
+}
+
 pub type SelectAliasedEntity = DebugElementFixed<{ id::SELECT_ALIASED_ENTITY }, 1>;
-pub type SelectEntity = DebugElementFixed<{ id::SELECT_ENTITY }, 4>;
 
 
 crate::__struct_simple_codec! {
@@ -480,6 +466,33 @@ impl SimpleElement for ForcedPosition {
 pub type AvatarUpdateNoAliasDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_DETAILED }, 29>;
 pub type AvatarUpdateAliasDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_DETAILED }, 26>;
 pub type AvatarUpdatePlayerDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_PLAYER_DETAILED }, 25>;
+
+// The 24 AVUPMSG combinations -- see the doc comment on `id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL`.
+pub type AvatarUpdateNoAliasFullPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL }, 12>;
+pub type AvatarUpdateNoAliasFullPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH }, 11>;
+pub type AvatarUpdateNoAliasFullPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW }, 10>;
+pub type AvatarUpdateNoAliasFullPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR }, 9>;
+pub type AvatarUpdateNoAliasOnGroundYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL }, 10>;
+pub type AvatarUpdateNoAliasOnGroundYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH }, 9>;
+pub type AvatarUpdateNoAliasOnGroundYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW }, 8>;
+pub type AvatarUpdateNoAliasOnGroundNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR }, 7>;
+pub type AvatarUpdateNoAliasNoPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL }, 7>;
+pub type AvatarUpdateNoAliasNoPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH }, 6>;
+pub type AvatarUpdateNoAliasNoPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW }, 5>;
+pub type AvatarUpdateNoAliasNoPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR }, 4>;
+pub type AvatarUpdateAliasFullPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL }, 9>;
+pub type AvatarUpdateAliasFullPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH }, 8>;
+pub type AvatarUpdateAliasFullPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW }, 7>;
+pub type AvatarUpdateAliasFullPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR }, 6>;
+pub type AvatarUpdateAliasOnGroundYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL }, 7>;
+pub type AvatarUpdateAliasOnGroundYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH }, 6>;
+pub type AvatarUpdateAliasOnGroundYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW }, 5>;
+pub type AvatarUpdateAliasOnGroundNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR }, 4>;
+pub type AvatarUpdateAliasNoPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL }, 4>;
+pub type AvatarUpdateAliasNoPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH }, 3>;
+pub type AvatarUpdateAliasNoPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW }, 2>;
+pub type AvatarUpdateAliasNoPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR }, 1>;
+
 pub type AvatarUpdateVolatileProperties = DebugElementVariable16<{ id::AVATAR_UPDATE_VOLATILE_PROPERTIES }>;
 pub type ChangeVolatilePackerType = DebugElementVariable16<{ id::CHANGE_VOLATILE_PACKER_TYPE }>;
 
@@ -617,87 +630,6 @@ impl SimpleElement for LoggedOff {
 
 pub type DetailedPosition = DebugElementFixed<{ id::DETAILED_POSITION }, 24>;
 
-/// Codec for a property update on an entity (either its base or cell slice, both share
-/// one flat client-visible property list -- see [`super::super::entity::Entity::Property`]),
-/// the given property type should be the one of the entity being updated. Mirrors
-/// [`EntityMethod`] exactly (see its doc comment) -- a property update is framed and
-/// dispatched by exposed id the same way a method call is.
-#[derive(Debug, Clone)]
-pub struct EntityProperty<P: AnyProperty> {
-    pub inner: EntityPropertyInner<P>,
-}
-
-/// The decoded payload of an [`EntityProperty`]. Unlike [`EntityMethodInner`], there is
-/// no `Unknown` fallback variant here: an unrecognized exposed id (e.g. one belonging to
-/// a *dynamic* component, whose properties this project's model can't predict at all --
-/// see `doc/ENTITY.md`) has no confirmed wire framing to fall back to. `EntityMethod`'s
-/// "assume Variable8" fallback was confirmed live by hooking the real client's own
-/// `getEntityMethodStreamSize`, specifically for methods -- that confirmation was never
-/// done for properties, and guessing wrong here isn't just a missed decode: it silently
-/// misframes the element, desyncing every following element in the bundle, which was
-/// confirmed live to cascade into misinterpreting unrelated garbage bytes as other
-/// message ids (observed: bogus `SwitchBaseApp` triggers, whose `patch_raw` handling
-/// then corrupted and forwarded real, unrelated packet data to the live game client and
-/// crashed it). An unrecognized exposed id must therefore surface as a read error here,
-/// so the caller stops decoding this bundle rather than guessing further.
-#[derive(Debug, Clone)]
-pub enum EntityPropertyInner<P> {
-    /// A property update whose exposed id is present in `P`'s generated table.
-    Known(P),
-}
-
-impl<P: AnyProperty> Element<()> for EntityProperty<P> {
-
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        let EntityPropertyInner::Known(inner) = &self.inner;
-        let (exposed_id, preferred_len) = (inner.exposed_id(), inner.write_length());
-        let (_, sub_id) = id::ENTITY_PROPERTY.from_exposed_id(P::count(), exposed_id);
-        Ok(if sub_id.is_some() { ElementLength::Variable16 } else { preferred_len })
-    }
-
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let EntityPropertyInner::Known(inner) = &self.inner;
-        let exposed_id = inner.exposed_id();
-        let (element_id, sub_id) = id::ENTITY_PROPERTY.from_exposed_id(P::count(), exposed_id);
-        if let Some(sub_id) = sub_id {
-            write.write_u8(sub_id)?;
-        }
-        inner.write(write)?;
-        Ok(element_id)
-    }
-
-    fn read_length(_config: &(), id: u8) -> io::Result<ElementLength> {
-        if !id::ENTITY_PROPERTY.contains(id) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
-        }
-        match id::ENTITY_PROPERTY.to_exposed_id_checked(P::count(), id) {
-            // See `EntityPropertyInner`'s doc comment for why an unrecognized exposed id
-            // must error here instead of guessing a fallback length like `EntityMethod` does.
-            Some(exposed_id) => P::read_length(exposed_id),
-            None => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
-        }
-    }
-
-    fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
-        if !id::ENTITY_PROPERTY.contains(id) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
-        }
-
-        // No sub-id handling: `read_length` above already rejected any id outside `P`'s
-        // known full-slot range before `read` is ever reached (see `EntityPropertyInner`'s
-        // doc comment), so overflow sub-ids -- which would only ever be used for an id
-        // count this project doesn't have confirmed anyway -- can't occur here.
-        let exposed_id = id::ENTITY_PROPERTY.to_exposed_id(P::count(), id, || unreachable!(
-            "read_length already rejected any id requiring a sub-id"));
-
-        Ok(Self {
-            inner: EntityPropertyInner::Known(P::read(read, exposed_id)?),
-        })
-    }
-
-}
-
-
 pub type NestedEntityProperty = DebugElementVariable16<{ id::NESTED_ENTITY_PROPERTY }>;
 pub type SliceEntityProperty = DebugElementVariable16<{ id::SLICE_ENTITY_PROPERTY }>;
 pub type UpdateEntity = DebugElementVariable16<{ id::UPDATE_ENTITY }>;
@@ -705,69 +637,70 @@ pub type SetCellAppExtAddress = DebugElementVariable16<{ id::SET_CELL_APP_EXT_AD
 pub type LastProxyMessageAfterDirectCellAppConnection = DebugElementVariable16<{ id::LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION }>;
 
 
-/// Codec for a method call on an entity, the given method type should be the one of
-/// the entity being called.
+/// A client-directed entity method call, encoded/decoded dynamically against a
+/// runtime-computed [`MethodDef`] table (see [`crate::app::script::EntityDispatch`])
+/// resolved from the loaded script model, rather than a statically generated `AnyMethod`
+/// enum -- lets [`super::super::base::App`] call a method purely by name, and lets a
+/// generic wire observer (e.g. a debugging proxy) decode a live capture without knowing
+/// any concrete entity type statically.
 #[derive(Debug, Clone)]
-pub struct EntityMethod<M: AnyMethod> {
-    pub inner: EntityMethodInner<M>,
+pub struct EntityMethod {
+    pub call: MethodCall,
 }
 
-/// The decoded (or not) payload of an [`EntityMethod`].
-#[derive(Debug, Clone)]
-pub enum EntityMethodInner<M> {
-    /// A method call whose exposed id is present in `M`'s generated table.
-    Known(M),
-    /// An exposed id missing from `M`'s generated table (e.g. a mismatch between the
-    /// generated method tables and what the live game actually sends). The real client
-    /// falls back to treating such a call as Variable8-framed instead of erroring --
-    /// confirmed by hooking `getEntityMethodStreamSize` on a live client instance, which
-    /// returns Mercury's `DEFAULT_VARIABLE_LENGTH_HEADER_SIZE` sentinel (-1, i.e. "read
-    /// 1 more header byte") for an id it doesn't recognize either. We mirror that framing
-    /// here and keep the raw, undecoded body instead of losing bundle synchronization.
-    Unknown {
-        exposed_id: u16,
-        data: Vec<u8>,
-    },
+/// Find a method by name in an exposed-id-ordered table, for [`EntityMethod`]'s write
+/// side (the read side instead looks up by exposed id, see [`EntityMethod::read`]).
+fn find_method<'m>(config: &'m [MethodDef], name: &str) -> io::Result<(u16, &'m MethodDef)> {
+    config.iter().enumerate()
+        .find(|(_, def)| &*def.name == name)
+        .map(|(exposed_id, def)| (exposed_id as u16, def))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown method: {name}")))
 }
 
-impl<M: AnyMethod> Element<()> for EntityMethod<M> {
+impl Element<Vec<MethodDef>> for EntityMethod {
 
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        let (exposed_id, preferred_len) = match &self.inner {
-            EntityMethodInner::Known(inner) => (inner.exposed_id(), inner.write_length()),
-            EntityMethodInner::Unknown { exposed_id, .. } => (*exposed_id, ElementLength::Variable8),
+    fn write_length(&self, config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+        let (exposed_id, preferred_len) = match &self.call {
+            MethodCall::Known { name, .. } => {
+                let (exposed_id, def) = find_method(config, name)?;
+                (exposed_id, def.length)
+            }
+            MethodCall::Unknown { exposed_id, .. } => (*exposed_id, ElementLength::Variable8),
         };
         // A sub-id is written as an extra byte ahead of the method's own payload (see
         // `write` below), so the preferred length only applies to full-slot ids; ids
         // requiring a sub-id always frame as Variable16, matching `read_length` below.
-        let (_, sub_id) = id::ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        let (_, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
         Ok(if sub_id.is_some() { ElementLength::Variable16 } else { preferred_len })
     }
 
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let exposed_id = match &self.inner {
-            EntityMethodInner::Known(inner) => inner.exposed_id(),
-            EntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
+    fn write(&self, write: &mut dyn Write, config: &Vec<MethodDef>) -> io::Result<u8> {
+        let exposed_id = match &self.call {
+            MethodCall::Known { name, .. } => find_method(config, name)?.0,
+            MethodCall::Unknown { exposed_id, .. } => *exposed_id,
         };
-        let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
+        let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
         if let Some(sub_id) = sub_id {
             write.write_u8(sub_id)?;
         }
-        match &self.inner {
-            EntityMethodInner::Known(inner) => { inner.write(write)?; }
-            EntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
+        match &self.call {
+            MethodCall::Known { args, .. } => config[exposed_id as usize].write_args(write, args)?,
+            MethodCall::Unknown { data, .. } => write.write_all(data)?,
         }
         Ok(element_id)
     }
 
-    fn read_length(_config: &(), id: u8) -> io::Result<ElementLength> {
+    fn read_length(config: &Vec<MethodDef>, id: u8) -> io::Result<ElementLength> {
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
-        Ok(match id::ENTITY_METHOD.to_exposed_id_checked(M::count(), id) {
-            // See `EntityMethodInner::Unknown` for why an unrecognized exposed id falls
-            // back to Variable8 here instead of erroring.
-            Some(exposed_id) => M::read_length(exposed_id).unwrap_or(ElementLength::Variable8),
+        Ok(match id::ENTITY_METHOD.to_exposed_id_checked(config.len() as u16, id) {
+            // An unrecognized exposed id falls back to Variable8 here instead of
+            // erroring -- confirmed live by hooking `getEntityMethodStreamSize` on a
+            // live client instance, which returns Mercury's
+            // `DEFAULT_VARIABLE_LENGTH_HEADER_SIZE` sentinel (-1, i.e. "read 1 more
+            // header byte") for an id it doesn't recognize either.
+            Some(exposed_id) => config.get(exposed_id as usize).map(|def| def.length).unwrap_or(ElementLength::Variable8),
             // A sub-id slot: the actual exposed id (and so its preferred length) can only
             // be known once the sub-id byte prefixing the payload has been read, so the
             // whole payload is always Variable16-framed instead.
@@ -775,14 +708,14 @@ impl<M: AnyMethod> Element<()> for EntityMethod<M> {
         })
     }
 
-    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
 
         let mut len = len;
         let mut sub_id_err = None;
-        let exposed_id = id::ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+        let exposed_id = id::ENTITY_METHOD.to_exposed_id(config.len() as u16, id, || {
             len = len.saturating_sub(1);
             match read.read_u8() {
                 Ok(n) => n,
@@ -796,16 +729,85 @@ impl<M: AnyMethod> Element<()> for EntityMethod<M> {
             return Err(e);
         }
 
-        let inner = if M::read_length(exposed_id).is_ok() {
-            EntityMethodInner::Known(M::read(read, exposed_id)?)
-        } else {
-            let mut data = vec![0; len];
-            read.read_exact(&mut data)?;
-            EntityMethodInner::Unknown { exposed_id, data }
+        let call = match config.get(exposed_id as usize) {
+            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            None => {
+                let mut data = vec![0; len];
+                read.read_exact(&mut data)?;
+                MethodCall::Unknown { exposed_id, data }
+            }
         };
-        Ok(Self {
-            inner,
-        })
+
+        Ok(Self { call })
+    }
+
+}
+
+
+/// A client-directed property update on an entity (either its base or cell slice, both
+/// share one flat client-visible property list, see [`crate::app::script::EntityDispatch::properties`]),
+/// decoded dynamically against a runtime-computed [`PropertyDef`] table resolved from the
+/// loaded script model. Read-only: for a generic wire observer (e.g. a debugging proxy)
+/// decoding a live capture without knowing any concrete entity type statically --
+/// `base::App` never sends property updates itself.
+///
+/// Unlike [`EntityMethod`], there is no `Unknown` fallback here: an unrecognized exposed
+/// id (e.g. one belonging to a *dynamic* component, whose properties this project's model
+/// can't predict at all) has no confirmed wire framing to fall back to. `EntityMethod`'s
+/// "assume Variable8" fallback was confirmed live by hooking the real client's own
+/// `getEntityMethodStreamSize`, specifically for methods -- that confirmation was never
+/// done for properties, and guessing wrong here isn't just a missed decode: it silently
+/// misframes the element, desyncing every following element in the bundle, which was
+/// confirmed live to cascade into misinterpreting unrelated garbage bytes as other
+/// message ids (observed: bogus `SwitchBaseApp` triggers, whose `patch_raw` handling
+/// then corrupted and forwarded real, unrelated packet data to the live game client and
+/// crashed it). An unrecognized exposed id must therefore surface as a read error here,
+/// so the caller stops decoding this bundle rather than guessing further.
+#[derive(Debug, Clone)]
+pub struct EntityProperty {
+    pub name: Arc<str>,
+    pub value: Value,
+}
+
+impl Element<Vec<PropertyDef>> for EntityProperty {
+
+    fn write_length(&self, _config: &Vec<PropertyDef>) -> io::Result<ElementLength> {
+        unreachable!("EntityProperty is read-only")
+    }
+
+    fn write(&self, _write: &mut dyn Write, _config: &Vec<PropertyDef>) -> io::Result<u8> {
+        unreachable!("EntityProperty is read-only")
+    }
+
+    fn read_length(config: &Vec<PropertyDef>, id: u8) -> io::Result<ElementLength> {
+        if !id::ENTITY_PROPERTY.contains(id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
+        }
+        match id::ENTITY_PROPERTY.to_exposed_id_checked(config.len() as u16, id) {
+            // See this type's doc comment for why an unrecognized exposed id must error
+            // here instead of guessing a fallback length like `EntityMethod` does.
+            Some(exposed_id) => config.get(exposed_id as usize).map(|def| def.length)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
+            None => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
+        }
+    }
+
+    fn read(read: &mut dyn Read, config: &Vec<PropertyDef>, _len: usize, id: u8) -> io::Result<Self> {
+        if !id::ENTITY_PROPERTY.contains(id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
+        }
+
+        // No sub-id handling: `read_length` above already rejected any id outside the
+        // known full-slot range before `read` is ever reached (see this type's doc
+        // comment), so overflow sub-ids -- which would only ever be used for an id count
+        // this project doesn't have confirmed anyway -- can't occur here.
+        let exposed_id = id::ENTITY_PROPERTY.to_exposed_id(config.len() as u16, id, || unreachable!(
+            "read_length already rejected any id requiring a sub-id"));
+
+        let def = config.get(exposed_id as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property exposed id: 0x{exposed_id:02X}")))?;
+
+        Ok(Self { name: def.name.clone(), value: Value::read(read, &def.ty)? })
     }
 
 }

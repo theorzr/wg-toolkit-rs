@@ -40,8 +40,7 @@ widestring = { version = "0.4.3", optional = true }
 fuser = { version = "0.18.0", optional = true }
 
 [features]
-default = ["bootstrap", "wot", "dokan", "fuse"]
-bootstrap = []
+default = ["wot", "dokan", "fuse"]
 wot = []
 dokan = ["dep:dokan", "dep:dokan-sys", "dep:winapi", "dep:widestring"]
 fuse = ["dep:fuser"]

@@ -10,9 +10,6 @@ use clap::{Args, Parser, Subcommand};
 mod pxml;
 mod res;
 
-#[cfg(feature = "bootstrap")]
-mod bootstrap;
-
 #[cfg(feature = "wot")]
 mod wot;
 
@@ -50,8 +47,6 @@ pub enum Command {
     Res(ResArgs),
     #[cfg(feature = "wot")]
     Wot(WotArgs),
-    #[cfg(feature = "bootstrap")]
-    Bootstrap(BootstrapArgs),
 }
 
 /// Packed XML read and write utilities.
@@ -194,19 +189,22 @@ pub struct ResFuseArgs {
 /// 
 #[derive(Debug, Args)]
 pub struct WotArgs {
+    /// Path to the game's directory, used to load its script model (entities,
+    /// interfaces, aliases) dynamically at startup -- see `wgtk::script::load`.
+    pub dir: PathBuf,
     /// The address where the login app should be bound.
     #[arg(long, default_value = "127.0.0.1:20016")]
     pub login_app: SocketAddrV4,
     /// The address where the base app should be bound.
     #[arg(long, default_value = "127.0.0.1:20017")]
     pub base_app: SocketAddrV4,
-    /// The path to the private key, used for login app encryption. 
+    /// The path to the private key, used for login app encryption.
     /// Encryption is disabled if not provided.
     #[arg(long)]
     pub priv_key_path: Option<PathBuf>,
     /// Enable proxy mode for the WoT applications.
-    /// 
-    /// The login application will forward request to the real login application by 
+    ///
+    /// The login application will forward request to the real login application by
     /// emulating a virtual client from the point of view of the real login application
     /// given the socket address. Once the login process has been completed, the proxy
     /// will keep this virtual client socket and the blowfish key and transfer it to the
@@ -216,21 +214,6 @@ pub struct WotArgs {
     pub real_login_app: Option<SocketAddrV4>,
     #[arg(long, requires = "real_login_app")]
     pub real_pub_key_path: Option<PathBuf>,
-}
-
-/// Internal developer command used for updating the code of wg-toolkit automatically
-/// depending on internal resources and scripts.
-/// 
-/// Use the following command to bootstrap the generated code without compiling the 
-/// generated code that may have compile errors:
-/// 
-///   $ cargo run --no-default-features --features bootstrap -- bootstrap D:/Games/WoT ./wg-toolkit-cli/src/wot/gen/
-#[derive(Debug, Args)]
-pub struct BootstrapArgs {
-    /// Path to the game's directory.
-    pub dir: PathBuf,
-    /// Destination source code directory where all files will be generated.
-    pub dest: PathBuf,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output
@@ -251,8 +234,6 @@ fn main() -> ExitCode {
         Command::Res(args) => res::cmd_res(opts, args),
         #[cfg(feature = "wot")]
         Command::Wot(args) => wot::cmd_wot(args),
-        #[cfg(feature = "bootstrap")]
-        Command::Bootstrap(args) => bootstrap::cmd_bootstrap(args),
     };
 
     if let Err(message) = res {

@@ -1,6 +1,7 @@
 //! Provides various internal utilities.
 
 use std::fmt::{self, Write};
+use std::sync::Arc;
 
 pub mod io;
 pub mod fnv;

@@ -7,15 +7,15 @@ use tracing::debug;
 use crate::res::fs::ResFilesystem;
 use crate::pxml::{self, Value};
 
-use super::def::{Component, Model};
+use super::def::{Component, Script};
 use super::parse;
 
 
 /// Load the full model of script resources (aliases, interfaces, entities and
 /// extensions) from the given resource filesystem.
-pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Model> {
+pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Script> {
 
-    let mut model = Model {
+    let mut model = Script {
         version,
         ..Default::default()
     };
@@ -129,7 +129,7 @@ pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Model> {
                     let interface = parse::parse_interface(&component_elt, &mut model.tys, component_name.clone());
 
                     components.push(Component {
-                        name: component_name.clone(),
+                        name: component_name.clone().into(),
                         of_entities,
                         interface,
                     });

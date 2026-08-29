@@ -13,15 +13,16 @@ use rsa::RsaPrivateKey;
 use blowfish::Blowfish;
 
 use wgtk::app::{login, base};
+use wgtk::script::Script;
 
 use crate::CliResult;
-use super::r#gen::entity::Entities;
 
 
 pub fn run(
     login_app_addr: SocketAddrV4,
     base_app_addr: SocketAddrV4,
     encryption_key: Option<Arc<RsaPrivateKey>>,
+    script: Script,
 ) -> CliResult<()> {
 
     let mut login_app = login::App::new(login_app_addr.into())
@@ -31,7 +32,7 @@ pub fn run(
         login_app.set_encryption(encryption_key);
     }
 
-    let base_app = base::App::<Entities>::new(base_app_addr.into())
+    let base_app = base::App::new(base_app_addr.into(), script)
         .map_err(|e| format!("Failed to bind base app: {e}"))?;
 
     let shared = Arc::new(Shared {
@@ -69,7 +70,7 @@ struct LoginThread {
 
 #[derive(Debug)]
 struct BaseThread {
-    app: base::App<Entities>,
+    app: base::App,
     shared: Arc<Shared>,
 }
 

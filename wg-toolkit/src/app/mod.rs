@@ -20,7 +20,7 @@ pub mod proxy;
 pub mod login;
 pub mod login_proxy;
 
-pub mod entity;
+pub mod script;
 
 pub mod client;
 pub mod base;

@@ -6,8 +6,8 @@
 use std::io::{self, Read, Write};
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::util::io::{WgReadExt, WgWriteExt};
-use crate::app::entity::AnyMethod;
+use crate::util::io::WgReadExt;
+use crate::app::script::{MethodDef, MethodCall};
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -21,7 +21,7 @@ pub mod id {
     // memory (from `baseapp_ext_interface.hpp`).
 
     pub const LOGIN_KEY: u8                     = 0x00; // baseAppLogin
-    pub const PING_DATACENTER: u8                = 0x01; // pingDatacenter
+    pub const PING_DATACENTER: u8               = 0x01; // pingDatacenter
     pub const SESSION_KEY: u8                   = 0x02; // authenticate
     pub const AVATAR_UPDATE_IMPLICIT: u8        = 0x03;
     pub const AVATAR_UPDATE_EXPLICIT: u8        = 0x04;
@@ -140,63 +140,38 @@ pub type ClientToServerHeartbeat = DebugElementFixed<{ id::CLIENT_TO_SERVER_HEAR
 pub type SendToCell = DebugElementFixed<{ id::SEND_TO_CELL }, 0>;
 
 
-/// Codec for a base entity method call.
+/// A base-directed entity method call, decoded dynamically against a runtime-computed
+/// [`MethodDef`] table (see [`crate::app::script::EntityDispatch`]) resolved from the
+/// loaded script model -- lets [`super::App`] dispatch by name against whatever game
+/// version's script was loaded. Read-only: this is only ever received, from the client.
 #[derive(Debug, Clone)]
-pub struct BaseEntityMethod<M: AnyMethod> {
-    pub inner: BaseEntityMethodInner<M>,
+pub struct BaseEntityMethod {
+    pub call: MethodCall,
 }
 
-/// The decoded (or not) payload of a [`BaseEntityMethod`].
-#[derive(Debug, Clone)]
-pub enum BaseEntityMethodInner<M> {
-    /// A method call whose exposed id is present in `M`'s generated table.
-    Known(M),
-    /// An exposed id missing from `M`'s generated table (e.g. a mismatch between the
-    /// generated method tables and what the live game actually sends). Unlike
-    /// client-directed `EntityMethod`, this element's length is always Variable16
-    /// regardless of id, so framing was never at risk here -- this variant only avoids
-    /// erroring out of `M::read` and losing bundle synchronization over a method we
-    /// simply don't have a decoder for yet.
-    Unknown {
-        exposed_id: u16,
-        data: Vec<u8>,
-    },
-}
+impl Element<Vec<MethodDef>> for BaseEntityMethod {
 
-impl<M: AnyMethod> Element<()> for BaseEntityMethod<M> {
+    fn write_length(&self, _config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+        unreachable!("BaseEntityMethod is read-only")
+    }
 
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+    fn write(&self, _write: &mut dyn Write, _config: &Vec<MethodDef>) -> io::Result<u8> {
+        unreachable!("BaseEntityMethod is read-only")
+    }
+
+    fn read_length(_config: &Vec<MethodDef>, _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let exposed_id = match &self.inner {
-            BaseEntityMethodInner::Known(inner) => inner.exposed_id(),
-            BaseEntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
-        };
-        let (element_id, sub_id) = id::BASE_ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
-        if let Some(sub_id) = sub_id {
-            write.write_u8(sub_id)?;
-        }
-        match &self.inner {
-            BaseEntityMethodInner::Known(inner) => { inner.write(write)?; }
-            BaseEntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
-        }
-        Ok(element_id)
-    }
+    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
 
-    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
-    }
-
-    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
         if !id::BASE_ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected base entity method element id: {id:02X}")));
         }
 
         let mut len = len;
         let mut sub_id_err = None;
-        let exposed_id = id::BASE_ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+        let exposed_id = id::BASE_ENTITY_METHOD.to_exposed_id(config.len() as u16, id, || {
             len = len.saturating_sub(1);
             match read.read_u8() {
                 Ok(n) => n,
@@ -210,75 +185,54 @@ impl<M: AnyMethod> Element<()> for BaseEntityMethod<M> {
             return Err(e);
         }
 
-        let inner = if M::read_length(exposed_id).is_ok() {
-            BaseEntityMethodInner::Known(M::read(read, exposed_id)?)
-        } else {
-            let mut data = vec![0; len];
-            read.read_exact(&mut data)?;
-            BaseEntityMethodInner::Unknown { exposed_id, data }
+        let call = match config.get(exposed_id as usize) {
+            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            None => {
+                let mut data = vec![0; len];
+                read.read_exact(&mut data)?;
+                MethodCall::Unknown { exposed_id, data }
+            }
         };
-        Ok(Self {
-            inner,
-        })
+
+        Ok(Self { call })
+
     }
 
 }
 
 
-/// Codec for a cell entity method call. The client sends these to the base app (there's
-/// no direct client-to-cell connection), which forwards them to the cell app in real
-/// BigWorld; this project has no `cell::App` yet, so decoding one only recovers the call
-/// itself, not anything about forwarding it.
+/// Same as [`BaseEntityMethod`], but for a cell-directed call. The client sends these to
+/// the base app (there's no direct client-to-cell connection), which forwards them to the
+/// cell app in real BigWorld; this project has no `cell::App` yet, so decoding one only
+/// recovers the call itself, not anything about forwarding it.
 #[derive(Debug, Clone)]
-pub struct CellEntityMethod<M: AnyMethod> {
-    pub inner: CellEntityMethodInner<M>,
+pub struct CellEntityMethod {
+    pub call: MethodCall,
 }
 
-/// The decoded (or not) payload of a [`CellEntityMethod`], see [`BaseEntityMethodInner`]
-/// for why an `Unknown` variant exists.
-#[derive(Debug, Clone)]
-pub enum CellEntityMethodInner<M> {
-    Known(M),
-    Unknown {
-        exposed_id: u16,
-        data: Vec<u8>,
-    },
-}
+impl Element<Vec<MethodDef>> for CellEntityMethod {
 
-impl<M: AnyMethod> Element<()> for CellEntityMethod<M> {
+    fn write_length(&self, _config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+        unreachable!("CellEntityMethod is read-only")
+    }
 
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+    fn write(&self, _write: &mut dyn Write, _config: &Vec<MethodDef>) -> io::Result<u8> {
+        unreachable!("CellEntityMethod is read-only")
+    }
+
+    fn read_length(_config: &Vec<MethodDef>, _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        let exposed_id = match &self.inner {
-            CellEntityMethodInner::Known(inner) => inner.exposed_id(),
-            CellEntityMethodInner::Unknown { exposed_id, .. } => *exposed_id,
-        };
-        let (element_id, sub_id) = id::CELL_ENTITY_METHOD.from_exposed_id(M::count(), exposed_id);
-        if let Some(sub_id) = sub_id {
-            write.write_u8(sub_id)?;
-        }
-        match &self.inner {
-            CellEntityMethodInner::Known(inner) => { inner.write(write)?; }
-            CellEntityMethodInner::Unknown { data, .. } => write.write_all(data)?,
-        }
-        Ok(element_id)
-    }
+    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
 
-    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
-    }
-
-    fn read(read: &mut dyn Read, _config: &(), len: usize, id: u8) -> io::Result<Self> {
         if !id::CELL_ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected cell entity method element id: {id:02X}")));
         }
 
         let mut len = len;
         let mut sub_id_err = None;
-        let exposed_id = id::CELL_ENTITY_METHOD.to_exposed_id(M::count(), id, || {
+        let exposed_id = id::CELL_ENTITY_METHOD.to_exposed_id(config.len() as u16, id, || {
             len = len.saturating_sub(1);
             match read.read_u8() {
                 Ok(n) => n,
@@ -292,16 +246,17 @@ impl<M: AnyMethod> Element<()> for CellEntityMethod<M> {
             return Err(e);
         }
 
-        let inner = if M::read_length(exposed_id).is_ok() {
-            CellEntityMethodInner::Known(M::read(read, exposed_id)?)
-        } else {
-            let mut data = vec![0; len];
-            read.read_exact(&mut data)?;
-            CellEntityMethodInner::Unknown { exposed_id, data }
+        let call = match config.get(exposed_id as usize) {
+            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            None => {
+                let mut data = vec![0; len];
+                read.read_exact(&mut data)?;
+                MethodCall::Unknown { exposed_id, data }
+            }
         };
-        Ok(Self {
-            inner,
-        })
+
+        Ok(Self { call })
+
     }
 
 }
