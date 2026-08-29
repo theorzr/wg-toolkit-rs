@@ -38,7 +38,7 @@ pub fn to_writer<W: Write + Seek>(mut writer: W, element: &Element) -> io::Resul
 /// Internal function to analyze and fill the node's name dictionary.
 fn write_and_fill_dict<'a, W: Write + Seek>(writer: &mut W, element: &'a Element, dict: &mut HashMap<&'a String, u16>, next_index: &mut u16) -> io::Result<()> {
     
-    for (k, v) in &element.children {
+    for (k, v) in element.iter_children_all() {
 
         if let Entry::Vacant(v) = dict.entry(k) {
             writer.write_cstring(k)?;
@@ -61,12 +61,12 @@ fn write_element<W: Write + Seek>(writer: &mut W, element: &Element, dict: &Hash
 
     let self_start_offset = writer.stream_position()?;
 
-    writer.write_u16(element.children.len() as u16)?;
+    writer.write_u16(element.len() as u16)?;
 
     // Here we write placeholder descriptors, that will be later written.
     // Save the start offset of the element.
     writer.write_u32(0)?;
-    for _ in 0..element.children.len() {
+    for _ in 0..element.len() {
         writer.write_u16(0)?;
         writer.write_u32(0)?;
     }
@@ -80,7 +80,7 @@ fn write_element<W: Write + Seek>(writer: &mut W, element: &Element, dict: &Hash
     let mut children_descriptors = SmallVec::<[(u16, u32); 16]>::new();
 
     // Write element's children.
-    for (k, child_value) in &element.children {
+    for (k, child_value) in element.iter_children_all() {
         let (child_ty, child_len) = write_value(&mut *writer, &child_value, dict)?;
         offset += child_len;
         let child_descriptor = calc_data_descriptor(child_ty, offset);
@@ -151,7 +151,7 @@ fn write_value<W: Write + Seek>(writer: &mut W, value: &Value, dict: &HashMap<&S
             Ok((DataType::Boolean, if b { 1 } else { 0 }))
         }
         Value::Vector(v) => {
-            for &comp in &v.0 {
+            for &comp in v.iter() {
                 writer.write_f32(comp)?;
             }
             Ok((DataType::Vector, 4 * v.len()))

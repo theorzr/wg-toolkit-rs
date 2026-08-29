@@ -1,9 +1,15 @@
 //! This module provides a way of understanding the script definitions and the dynamic
 //! types used by them.
 
-pub mod value;
-pub mod ty;
+mod value;
+mod ty;
 
-pub mod def;
-pub mod parse;
-pub mod load;
+mod def;
+
+mod parse;
+mod load;
+
+pub use def::{Model, Component, Entity, Interface, Method, Arg, Property, PropertyFlags, VariableHeaderSize};
+pub use ty::{TySystem, Ty, TyKind, TyDict, TyDictProp, TySeq};
+pub use value::{Value, StringValue, PythonValue};
+pub use load::load;

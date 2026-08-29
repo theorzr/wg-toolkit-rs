@@ -7,8 +7,8 @@ use thiserror::Error;
 pub mod primitive;
 pub mod visual;
 
-use self::visual::{Visual, RenderSet};
-use self::primitive::{PrimitiveReader, Vertices, Indices, Vertex, Primitive, Group};
+use primitive::{PrimitiveReader, Vertices, Indices, Vertex, Primitive, Group};
+use visual::{Visual, RenderSet};
 
 
 /// Decode and resolve a compiled model.

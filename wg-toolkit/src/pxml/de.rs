@@ -115,7 +115,7 @@ fn read_data<R: Read>(reader: &mut R, value: &mut Value, desc: &DataDescriptor, 
         DataType::Integer => Value::Integer(read_integer(reader, len)?),
         DataType::Boolean => Value::Boolean(read_bool(reader, len)?),
         DataType::CompressedString => Value::String(read_compressed_string(reader, len)?),
-        DataType::Vector => Value::Vector(Vector(read_vector(reader, len)?)),
+        DataType::Vector => Value::Vector(Vector::from_smallvec(read_vector(reader, len)?)),
     };
     Ok(())
 }
