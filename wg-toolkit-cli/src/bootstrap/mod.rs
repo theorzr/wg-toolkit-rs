@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::borrow::Cow;
 use std::path::Path;
 
-use wgtk::res::ResFilesystem;
+use wgtk::res::fs::ResFilesystem;
 use wgtk::pxml::{self, Value};
 
 use crate::{BootstrapArgs, CliResult};
@@ -381,7 +381,7 @@ fn generate_entities(mod_dir: &Path, model: &Model, state: &mut State) -> io::Re
     let entity_file = mod_dir.join("entity.rs");
     let mut writer = BufWriter::new(File::create(&entity_file)?);
 
-    writeln!(writer, "use wgtk::net::app::entity::Entity;")?;
+    writeln!(writer, "use wgtk::app::entity::Entity;")?;
     writeln!(writer)?;
     writeln!(writer, "use super::alias::*;")?;
     writeln!(writer, "use super::interface::*;")?;

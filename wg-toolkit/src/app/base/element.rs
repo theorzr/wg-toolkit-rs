@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
 use crate::util::io::{WgReadExt, WgWriteExt};
-use crate::net::app::entity::AnyMethod;
+use crate::app::entity::AnyMethod;
 
 
 /// Internal module containing all raw elements numerical ids.

@@ -15,3 +15,6 @@ pub mod model;
 pub mod res;
 
 pub mod net;
+
+pub mod script;
+pub mod app;

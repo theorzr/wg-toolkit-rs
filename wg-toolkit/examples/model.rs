@@ -9,7 +9,7 @@ fn main() {
 
     let path_raw = env::var("WGT_MODEL_PATH").unwrap();
     let path = Path::new(&path_raw);
-    let mut visual_file = File::open(path.with_extension("visual_processed")).unwrap();
+    let visual_file = File::open(path.with_extension("visual_processed")).unwrap();
     let primitives_file = File::open(path.with_extension("primitives_processed")).unwrap();
 
     let model = model::from_readers(visual_file, primitives_file).unwrap();

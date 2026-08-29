@@ -16,10 +16,6 @@
 //! - Packet: Represents the payload sent in a single UDP datagram, it can be interpreted
 //!   as-is because it contains all informations about itself, including its sequence 
 //!   number if part of a bundle to be reconstructed.
-//! 
-//! # Applications
-//! 
-//! See the [`app`] module for detailed descriptions of applications.
 
 pub mod codec;
 pub mod element;
@@ -32,5 +28,3 @@ pub mod filter;
 
 pub mod socket;
 pub mod proto;
-
-pub mod app;

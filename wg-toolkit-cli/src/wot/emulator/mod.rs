@@ -12,7 +12,7 @@ use rsa::rand_core::{OsRng, RngCore};
 use rsa::RsaPrivateKey;
 use blowfish::Blowfish;
 
-use wgtk::net::app::{login, base};
+use wgtk::app::{login, base};
 
 use crate::CliResult;
 use super::r#gen::entity::Entities;

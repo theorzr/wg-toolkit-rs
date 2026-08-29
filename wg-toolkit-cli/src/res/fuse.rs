@@ -11,7 +11,7 @@ use fuser::{AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesyst
     FopenFlags, Generation, INodeNo, MountOption, OpenAccMode, OpenFlags, ReplyAttr, 
     ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request};
 
-use wgtk::res::{ResFilesystem, ResReadDir, ResReadFile, ResStat};
+use wgtk::res::fs::{ResFilesystem, ResReadDir, ResReadFile, ResStat};
 
 use crate::{CliOptions, CliResult, ResFuseArgs};
 

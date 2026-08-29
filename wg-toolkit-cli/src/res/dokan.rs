@@ -16,7 +16,7 @@ use dokan::{
 
 use widestring::{U16CStr, U16CString};
 
-use wgtk::res::{ResFilesystem, ResReadDir, ResReadFile};
+use wgtk::res::fs::{ResFilesystem, ResReadDir, ResReadFile};
 
 use crate::{CliOptions, CliResult, ResDokanArgs};
 

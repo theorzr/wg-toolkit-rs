@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::fs::File;
 
-use wgtk::res::{ResFilesystem, ResReadDir, ResReadFile};
+use wgtk::res::fs::{ResFilesystem, ResReadDir, ResReadFile};
 use wgtk::util::SizeFmt;
 
 use crate::{CliOptions, CliResult, ResArgs, ResCommand, ResCopyArgs, ResListArgs, ResReadArgs};

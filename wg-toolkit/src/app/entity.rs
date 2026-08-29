@@ -82,7 +82,7 @@ pub trait AnyEntity: Sized {
     /// client-visible property list -- see [`Entity::Property`]). Unlike
     /// [`AnyEntity::read_base_method`], there's no `Ok(None)` case: an unrecognized
     /// exposed id (e.g. one belonging to a *dynamic* component -- see
-    /// [`EntityPropertyInner`](crate::net::app::client::element::EntityPropertyInner)'s
+    /// [`EntityPropertyInner`](crate::app::client::element::EntityPropertyInner)'s
     /// doc comment for why) always surfaces as `Err` here, since this project has no
     /// confirmed safe framing to fall back to for it. Callers must not keep reading past
     /// an `Err`, same as for a method read failure.
@@ -244,7 +244,7 @@ macro_rules! __enum_entity_methods {
                 $( $method_name ( $method_name ),)*
             }
 
-            impl $crate::net::app::entity::AnyMethod for $enum_name {
+            impl $crate::app::entity::AnyMethod for $enum_name {
                 fn exposed_id(&self) -> u16 {
                     match self {
                         $( Self::$method_name (_) => $method_exposed_id, )*
@@ -334,7 +334,7 @@ macro_rules! __enum_entity_properties {
                 $( $prop_name ( $prop_ty ),)*
             }
 
-            impl $crate::net::app::entity::AnyProperty for $enum_name {
+            impl $crate::app::entity::AnyProperty for $enum_name {
                 fn exposed_id(&self) -> u16 {
                     match self {
                         $( Self::$prop_name (_) => $prop_exposed_id, )*
@@ -409,7 +409,7 @@ macro_rules! __enum_entities {
                 $( $entity_name ( $entity_name ), )*
             }
 
-            impl $crate::net::app::entity::AnyEntity for $enum_name {
+            impl $crate::app::entity::AnyEntity for $enum_name {
 
                 fn type_id(&self) -> u16 {
                     match self {
@@ -440,13 +440,13 @@ macro_rules! __enum_entities {
                     })
                 }
 
-                fn read_base_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::net::app::entity::AnyMethodValue>> {
-                    use $crate::net::app::base::element::{BaseEntityMethod, BaseEntityMethodInner};
-                    use $crate::net::app::entity::AnyMethodValue;
+                fn read_base_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::app::entity::AnyMethodValue>> {
+                    use $crate::app::base::element::{BaseEntityMethod, BaseEntityMethodInner};
+                    use $crate::app::entity::AnyMethodValue;
                     match self {
                         $(
                             Self::$entity_name (_) => {
-                                type M = <$entity_name as $crate::net::app::entity::Entity>::BaseMethod;
+                                type M = <$entity_name as $crate::app::entity::Entity>::BaseMethod;
                                 Ok(match reader.read::<BaseEntityMethod<M>, ()>(&())?.element.inner {
                                     BaseEntityMethodInner::Known(m) => Some(AnyMethodValue::new(m)),
                                     BaseEntityMethodInner::Unknown { .. } => None,
@@ -457,13 +457,13 @@ macro_rules! __enum_entities {
                     }
                 }
 
-                fn read_cell_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::net::app::entity::AnyMethodValue>> {
-                    use $crate::net::app::base::element::{CellEntityMethod, CellEntityMethodInner};
-                    use $crate::net::app::entity::AnyMethodValue;
+                fn read_cell_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::app::entity::AnyMethodValue>> {
+                    use $crate::app::base::element::{CellEntityMethod, CellEntityMethodInner};
+                    use $crate::app::entity::AnyMethodValue;
                     match self {
                         $(
                             Self::$entity_name (_) => {
-                                type M = <$entity_name as $crate::net::app::entity::Entity>::CellMethod;
+                                type M = <$entity_name as $crate::app::entity::Entity>::CellMethod;
                                 Ok(match reader.read::<CellEntityMethod<M>, ()>(&())?.element.inner {
                                     CellEntityMethodInner::Known(m) => Some(AnyMethodValue::new(m)),
                                     CellEntityMethodInner::Unknown { .. } => None,
@@ -474,13 +474,13 @@ macro_rules! __enum_entities {
                     }
                 }
 
-                fn read_client_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::net::app::entity::AnyMethodValue>> {
-                    use $crate::net::app::client::element::{EntityMethod, EntityMethodInner};
-                    use $crate::net::app::entity::AnyMethodValue;
+                fn read_client_method(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<Option<$crate::app::entity::AnyMethodValue>> {
+                    use $crate::app::client::element::{EntityMethod, EntityMethodInner};
+                    use $crate::app::entity::AnyMethodValue;
                     match self {
                         $(
                             Self::$entity_name (_) => {
-                                type M = <$entity_name as $crate::net::app::entity::Entity>::ClientMethod;
+                                type M = <$entity_name as $crate::app::entity::Entity>::ClientMethod;
                                 Ok(match reader.read::<EntityMethod<M>, ()>(&())?.element.inner {
                                     EntityMethodInner::Known(m) => Some(AnyMethodValue::new(m)),
                                     EntityMethodInner::Unknown { .. } => None,
@@ -491,13 +491,13 @@ macro_rules! __enum_entities {
                     }
                 }
 
-                fn read_client_property(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<$crate::net::app::entity::AnyPropertyValue> {
-                    use $crate::net::app::client::element::{EntityProperty, EntityPropertyInner};
-                    use $crate::net::app::entity::AnyPropertyValue;
+                fn read_client_property(&self, reader: $crate::net::bundle::ElementReader<'_, '_>) -> std::io::Result<$crate::app::entity::AnyPropertyValue> {
+                    use $crate::app::client::element::{EntityProperty, EntityPropertyInner};
+                    use $crate::app::entity::AnyPropertyValue;
                     match self {
                         $(
                             Self::$entity_name (_) => {
-                                type P = <$entity_name as $crate::net::app::entity::Entity>::Property;
+                                type P = <$entity_name as $crate::app::entity::Entity>::Property;
                                 let EntityPropertyInner::Known(p) = reader.read::<EntityProperty<P>, ()>(&())?.element.inner;
                                 Ok(AnyPropertyValue::new(p))
                             }

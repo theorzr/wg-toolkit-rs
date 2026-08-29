@@ -1,4 +1,4 @@
-use wgtk::net::app::entity::Entity;
+use wgtk::app::entity::Entity;
 
 use super::alias::*;
 use super::interface::*;

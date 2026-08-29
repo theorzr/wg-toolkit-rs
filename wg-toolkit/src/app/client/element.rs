@@ -11,7 +11,7 @@ use glam::Vec3;
 use tracing::warn;
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::net::app::entity::{Entity, AnyMethod, AnyProperty};
+use crate::app::entity::{Entity, AnyMethod, AnyProperty};
 use crate::util::io::{WgReadExt, WgWriteExt};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::util::AsciiFmt;

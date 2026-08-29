@@ -16,8 +16,8 @@ use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, ElementL
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
 use wgtk::net::codec::{SimpleCodec, WgSocketAddrV4};
 
-use wgtk::net::app::{proxy, login_proxy, base, client};
-use wgtk::net::app::entity::AnyEntity;
+use wgtk::app::{proxy, login_proxy, base, client};
+use wgtk::app::entity::AnyEntity;
 use wgtk::net::packet::Packet;
 
 use wgtk::util::io::{serde_pickle_de_options, WgReadExt};
