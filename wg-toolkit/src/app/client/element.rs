@@ -1,18 +1,23 @@
 //! Definition of the elements that can be sent from server to client
 //! once connected to the base application..
 
-use std::fmt;
 use std::io::{self, Read, Write};
+use std::borrow::Cow;
 use std::sync::Arc;
+use std::fmt;
 
 use glam::Vec3;
 
+use tracing::warn;
+
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
+use crate::app::dispatch::{ScriptDispatch, EntityDispatch, MethodDef, PropertyDef, MethodCall};
+use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
-use crate::util::io::{WgReadExt, WgWriteExt};
-use crate::app::script::{MethodDef, PropertyDef, MethodCall};
-use crate::script::{Ty, Value};
+use crate::script::{Ty, TyKind, Value, PythonValue};
 use crate::util::AsciiFmt;
+
+pub use crate::app::math::{PackedXyz, PackedXz, PackedYawPitch, PackedYawPitchRoll, PackedYaw};
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -20,25 +25,36 @@ pub mod id {
 
     use crate::net::element::ElementIdRange;
 
+    // --- Connection handshake & session bookkeeping ---
     pub const AUTHENTICATE: u8                                          = 0x00;  // FIXED 4 (1.26.1.1 handler: 143326C40)
     pub const BANDWIDTH_NOTIFICATION: u8                                = 0x01;  // FIXED 4 (1.26.1.1 handler: 143326C58)
     pub const UPDATE_FREQUENCY_NOTIFICATION: u8                         = 0x02;  // FIXED 7 (1.26.1.1 handler: 143326C70)
     pub const SET_GAME_TIME: u8                                         = 0x03;  // FIXED 4 (1.26.1.1 handler: 143326C88)
     pub const RESET_ENTITIES: u8                                        = 0x04;  // FIXED 1 (1.26.1.1 handler: 143326CA0)
+    // --- Player entity creation (base & cell) ---
     pub const CREATE_BASE_PLAYER: u8                                    = 0x05;  // VAR 2 (1.26.1.1 handler: 143326CC0)
     pub const CREATE_CELL_PLAYER: u8                                    = 0x06;  // VAR 2 (1.26.1.1 handler: 143326D10)
+
+    // --- Spaces & general entity lifecycle (creation, AoI enter/leave) ---
     pub const DUMMY_PACKET: u8                                          = 0x07;  // VAR 2 (1.26.1.1 handler: 143326D60)
     pub const SPACE_PROPERTY: u8                                        = 0x08;  // VAR 2 (1.26.1.1 handler: 143326DB0)
     pub const ADD_SPACE_GEOMETRY_MAPPING: u8                            = 0x09;  // VAR 2 (1.26.1.1 handler: 143326E00)
     pub const REMOVE_SPACE_GEOMETRY_MAPPING: u8                         = 0x0A;  // VAR 2 (1.26.1.1 handler: 143326E50)
     pub const CREATE_ENTITY: u8                                         = 0x0B;  // VAR 2 (1.26.1.1 handler: 143326EA0)
     pub const CREATE_ENTITY_DETAILED: u8                                = 0x0C;  // VAR 2 (1.26.1.1 handler: 143326EF0)
+
+    // --- Cell suspend/resume & client suspension detection (not in vanilla BigWorld,
+    // confirmed live via `re-work/frida/dump_interfaces.js`) ---
     pub const CELL_APP_SUSPENDED: u8                                    = 0x0D;  // FIXED 0 (1.26.1.1 handler: 143326F38)
     pub const CELL_APP_RESUMED: u8                                      = 0x0E;  // FIXED 0 (1.26.1.1 handler: 143326F50)
     pub const CLIENT_SUSPENSION_DETECTION_ENABLED: u8                   = 0x0F;  // FIXED 4 (1.26.1.1 handler: 143326F68)
+
+    // --- Area of Interest enter/leave ---
     pub const ENTER_AOI: u8                                             = 0x10;  // FIXED 5 (1.26.1.1 handler: 143326F80)
     pub const ENTER_AOI_ON_VEHICLE: u8                                  = 0x11;  // FIXED 9 (1.26.1.1 handler: 143326F98)
     pub const LEAVE_AOI: u8                                             = 0x12;  // VAR 2 (1.26.1.1 handler: 143326FB0)
+
+    // --- Timing, positioning references & entity selection ---
     pub const TICK_SYNC: u8                                             = 0x13;  // FIXED 1 (1.26.1.1 handler: 143326FF8)
     pub const TICK_SYNC_PERIODIC: u8                                    = 0x14;  // FIXED 2 (1.26.1.1 handler: 143327010)
     pub const RELATIVE_POSITION_REFERENCE: u8                           = 0x15;  // FIXED 1 (1.26.1.1 handler: 143327028)
@@ -48,11 +64,16 @@ pub mod id {
     pub const SELECT_ENTITY: u8                                         = 0x19;  // FIXED 4 (1.26.1.1 handler: 143327088)
     pub const SELECT_PLAYER_ENTITY: u8                                  = 0x1A;  // FIXED 0 (1.26.1.1 handler: 1433270A0)
     pub const FORCED_POSITION: u8                                       = 0x1B;  // FIXED 38 (1.26.1.1 handler: 1433270B8)
+
+    // --- Avatar detailed updates & volatile properties (see also 0x29-0x40 below) ---
     pub const AVATAR_UPDATE_NO_ALIAS_DETAILED: u8                       = 0x1C;  // FIXED 29 (1.26.1.1 handler: 1433270D0)
     pub const AVATAR_UPDATE_ALIAS_DETAILED: u8                          = 0x1D;  // FIXED 26 (1.26.1.1 handler: 1433270E8)
     pub const AVATAR_UPDATE_PLAYER_DETAILED: u8                         = 0x1E;  // FIXED 25 (1.26.1.1 handler: 143327100)
     pub const AVATAR_UPDATE_VOLATILE_PROPERTIES: u8                     = 0x1F;  // VAR 2 (1.26.1.1 handler: 143327120)
     pub const CHANGE_VOLATILE_PACKER_TYPE: u8                           = 0x20;  // VAR 2 (1.26.1.1 handler: 143327170)
+
+    // --- Network Replication Layer ("NRL"): WoT's own CGF node-replication messages
+    // (`NetworkReplicationPointComponent.py`), not present in vanilla BigWorld. ---
     pub const NRL_CREATE_NODE: u8                                       = 0x21;  // VAR 2 (1.26.1.1 handler: 1433271C0)
     pub const NRL_UNLINK_TREE: u8                                       = 0x22;  // VAR 2 (1.26.1.1 handler: 143327210)
     pub const NRL_UPDATE_NODE: u8                                       = 0x23;  // VAR 2 (1.26.1.1 handler: 143327260)
@@ -61,6 +82,8 @@ pub mod id {
     pub const NRL_DATA: u8                                              = 0x26;  // VAR 2 (1.26.1.1 handler: 1433272E0)
     pub const NRL_MSG_TO_CLIENT: u8                                     = 0x27;  // VAR 2 (1.26.1.1 handler: 143327330)
     pub const NRL_UNRELIABLE_MSG_TO_CLIENT: u8                          = 0x28;  // VAR 2 (1.26.1.1 handler: 143327380)
+
+    // --- Avatar movement updates (`AVUPMSG` combinatorial family), continued from 0x1C ---
     // The 24 AVUPMSG combinations (see `common_client_interface.hpp` in the leaked
     // BigWorld 14.4.1 SDK, `re-work/bigworld-src-14.4.1/`): each combination of
     // {NoAlias 4-byte EntityID, Alias 1-byte IDAlias} x {FullPos 5-byte PackedXYZ,
@@ -96,12 +119,18 @@ pub mod id {
     pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH: u8                  = 0x3E;  // FIXED 3 (1.26.1.1 handler: 143327BB0)
     pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW: u8                        = 0x3F;  // FIXED 2 (1.26.1.1 handler: 143327C10)
     pub const AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR: u8                     = 0x40;  // FIXED 1 (1.26.1.1 handler: 143327C70)
+
+    // --- Entity control, voice & session hand-off ---
     pub const CONTROL_ENTITY: u8                                        = 0x41;  // FIXED 5 (1.26.1.1 handler: 143327CC8)
     pub const VOICE_DATA: u8                                            = 0x42;  // VAR 2 (1.26.1.1 handler: 143327CE0)
     pub const RESTORE_CLIENT: u8                                        = 0x43;  // VAR 2 (1.26.1.1 handler: 143327D00)
     pub const SWITCH_BASE_APP: u8                                       = 0x44;  // FIXED 9 (1.26.1.1 handler: 143327D48)
+
+    // --- Resource download (fonts, sounds, etc. streamed on demand) ---
     pub const RESOURCE_HEADER: u8                                       = 0x45;  // VAR 2 (1.26.1.1 handler: 143327D60)
     pub const RESOURCE_FRAGMENT: u8                                     = 0x46;  // VAR 2 (1.26.1.1 handler: 143327DB0)
+
+    // --- Session teardown & raw entity property/position streaming ---
     pub const LOGGED_OFF: u8                                            = 0x47;  // FIXED 1 (1.26.1.1 handler: 143327DF8)
     pub const DETAILED_POSITION: u8                                     = 0x48;  // FIXED 24 (1.26.1.1 handler: 143327E10)
     pub const NESTED_ENTITY_PROPERTY: u8                                = 0x49;  // VAR 2 (1.26.1.1 handler: 143327E30)
@@ -109,12 +138,17 @@ pub mod id {
     pub const UPDATE_ENTITY: u8                                         = 0x4B;  // VAR 2 (1.26.1.1 handler: 143327ED0)
     pub const SET_CELL_APP_EXT_ADDRESS: u8                              = 0x4C;  // VAR 2 (1.26.1.1 handler: 143327F20)
     pub const LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION: u8   = 0x4D;  // FIXED 0 (1.26.1.1 handler: 143327F68)
-    
+
+    // --- Dynamic entity method/property dispatch (script-model-driven) ---
     pub const ENTITY_METHOD: ElementIdRange     = ElementIdRange::new(0x4E, 0xA6);  // CALLBACK 0 (1.26.1.1 handler: 143327F80)
     pub const ENTITY_PROPERTY: ElementIdRange   = ElementIdRange::new(0xA7, 0xFE);  // CALLBACK 0 (1.26.1.1 handler: 143327FA8)
 
 }
 
+
+// =============================================================================
+// Connection handshake & session bookkeeping
+// =============================================================================
 
 crate::__struct_simple_codec! {
     #[derive(Debug, Clone)]
@@ -192,36 +226,9 @@ impl SimpleElement for ResetEntities {
 }
 
 
-/// The header for the non-generic [`CreateBasePlayer`] element, that can be used to read
-/// the header once before 
-#[derive(Debug, Clone)]
-pub struct CreateBasePlayerHeader {
-    /// The unique identifier of the entity being created.
-    pub entity_id: u32,
-    /// The entity type id.
-    pub entity_type_id: u16,
-}
-
-impl SimpleCodec for CreateBasePlayerHeader {
-
-    fn write(&self, _write: &mut dyn Write) -> io::Result<()> {
-        panic!("this header element should not be used for encoding");
-    }
-
-    fn read(read: &mut dyn Read) -> io::Result<Self> {
-        Ok(Self {
-            entity_id: read.read_u32()?,
-            entity_type_id: read.read_u16()?,
-        })
-    }
-
-}
-
-impl SimpleElement for CreateBasePlayerHeader {
-    const ID: u8 = id::CREATE_BASE_PLAYER;
-    const LEN: ElementLength = ElementLength::Variable16;
-}
-
+// =============================================================================
+// Player entity creation (base & cell)
+// =============================================================================
 
 /// Sent from the base to give the client's already-created base-player entity (see
 /// [`CreateBasePlayer`]) a cell-side presence too, e.g. it has entered a space/battle.
@@ -313,20 +320,26 @@ impl SimpleElement for CreateCellPlayer {
 
 /// Sent from the base when a player should be created, the entity id is given with its
 /// type. The remaining data initializes its properties (e.g. the `Login` entity receives
-/// the account UID) -- encoded as a runtime [`Value`] against a runtime-computed [`Ty`]
-/// (see [`crate::app::script::EntityDispatch::data_ty`]), resolved dynamically from the
-/// loaded script model rather than a statically generated `Entity` struct. Write-only:
-/// [`super::super::base::App`] only ever sends these, never decodes them.
+/// the account UID) -- encoded/decoded as a runtime [`Value`] against a runtime-computed
+/// [`Ty`] (see [`crate::app::script::EntityDispatch::data_ty`]), resolved dynamically from
+/// the loaded script model rather than a statically generated `Entity` struct.
+///
+/// Generic over how that `Ty` gets resolved, via two separate [`Element`] impls: against a
+/// full [`ScriptDispatch`] by reading `entity_type_id` off the wire first (for a generic
+/// wire observer that doesn't know the entity type ahead of time, e.g. this project's
+/// debugging proxy -- read-only, since such an observer never constructs one of these
+/// itself), or directly against an already-resolved [`EntityDispatch`] (for
+/// [`super::super::base::App`], which always knows exactly which entity it's creating --
+/// write-only, since it never decodes one of these itself).
 #[derive(Debug, Clone)]
 pub struct CreateBasePlayer<'a> {
     /// The unique identifier of the entity being created.
     pub entity_id: u32,
     /// The entity type id.
     pub entity_type_id: u16,
-    /// The actual data to be sent for creating the player's entity.
-    pub entity_data: &'a Value,
-    /// The type describing `entity_data`'s layout, see [`crate::app::script::EntityDispatch::data_ty`].
-    pub entity_data_ty: &'a Ty,
+    /// The actual data sent for creating the player's entity -- borrowed when writing
+    /// (the caller already owns it), owned when read off the wire.
+    pub entity_data: Cow<'a, Value>,
     /// The number of *dynamic* components attached to this specific entity instance --
     /// confirmed against `wg-toolkit-cli/src/bootstrap/mod.rs`'s own extension-parsing
     /// comments: WoT's "StaticComponents" (declared per `extension.xml`) fold their
@@ -343,48 +356,347 @@ pub struct CreateBasePlayer<'a> {
     pub entity_components_count: u8,
 }
 
-impl Element<()> for CreateBasePlayer<'_> {
+impl CreateBasePlayer<'_> {
 
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
+    /// Read everything but `entity_data` (which needs a resolved [`Ty`] the two
+    /// [`Element`] impls below each get differently), returning it alongside the
+    /// remaining trailer so each impl only has to plug in its own `data_ty` resolution.
+    fn read_prefix(read: &mut dyn Read) -> io::Result<(u32, u16)> {
+        let entity_id = read.read_u32()?;
+        let entity_type_id = read.read_u16()?;
+        let unk = read.read_blob_variable()?;
+        if !unk.is_empty() {
+            warn!("non-empty unknown blob when decoding CreateBasePlayer: {unk:?}");
+        }
+        Ok((entity_id, entity_type_id))
     }
 
-    fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+    fn read_suffix(read: &mut dyn Read, entity_id: u32, entity_type_id: u16, data_ty: &Ty) -> io::Result<Self> {
+        let entity_data = Value::read(read, data_ty)?;
+        let entity_components_count = read.read_u8()?;
+        Ok(Self {
+            entity_id,
+            entity_type_id,
+            entity_data: Cow::Owned(entity_data),
+            entity_components_count,
+        })
+    }
+
+    fn write_to(&self, write: &mut dyn Write, data_ty: &Ty) -> io::Result<u8> {
         write.write_u32(self.entity_id)?;
         write.write_u16(self.entity_type_id)?;
         write.write_blob_variable(&[])?;  // Unknown blob or string?
-        Codec::write(self.entity_data, write, self.entity_data_ty)?;
+        Codec::write(&*self.entity_data, write, data_ty)?;
         write.write_u8(self.entity_components_count)?;
         Ok(id::CREATE_BASE_PLAYER)
     }
 
-    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
-        unreachable!("CreateBasePlayer is write-only")
+}
+
+impl Element<ScriptDispatch> for CreateBasePlayer<'_> {
+
+    fn write_length(&self, _config: &ScriptDispatch) -> io::Result<ElementLength> {
+        unreachable!("CreateBasePlayer<ScriptDispatch> is read-only")
     }
 
-    fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
-        unreachable!("CreateBasePlayer is write-only")
+    fn write(&self, _write: &mut dyn Write, _config: &ScriptDispatch) -> io::Result<u8> {
+        unreachable!("CreateBasePlayer<ScriptDispatch> is read-only")
+    }
+
+    fn read_length(_config: &ScriptDispatch, _id: u8) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn read(read: &mut dyn Read, config: &ScriptDispatch, _len: usize, _id: u8) -> io::Result<Self> {
+        let (entity_id, entity_type_id) = Self::read_prefix(read)?;
+        let dispatch = config.entity_from_id(entity_type_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown entity type id: 0x{entity_type_id:02X}")))?;
+        Self::read_suffix(read, entity_id, entity_type_id, &dispatch.data_ty)
     }
 
 }
 
+impl Element<EntityDispatch> for CreateBasePlayer<'_> {
+
+    fn write_length(&self, _config: &EntityDispatch) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn write(&self, write: &mut dyn Write, config: &EntityDispatch) -> io::Result<u8> {
+        self.write_to(write, &config.data_ty)
+    }
+
+    fn read_length(_config: &EntityDispatch, _id: u8) -> io::Result<ElementLength> {
+        unreachable!("CreateBasePlayer<EntityDispatch> is write-only")
+    }
+
+    fn read(_read: &mut dyn Read, _config: &EntityDispatch, _len: usize, _id: u8) -> io::Result<Self> {
+        unreachable!("CreateBasePlayer<EntityDispatch> is write-only")
+    }
+
+}
+
+// =============================================================================
+// Spaces & general entity lifecycle (creation, AoI enter/leave)
+// =============================================================================
 
 pub type DummyPacket = DebugElementVariable16<{ id::DUMMY_PACKET }>;
 pub type SpaceProperty = DebugElementVariable16<{ id::SPACE_PROPERTY }>;
 pub type AddSpaceGeometryMapping = DebugElementVariable16<{ id::ADD_SPACE_GEOMETRY_MAPPING }>;
 pub type RemoveSpaceGeometryMapping = DebugElementVariable16<{ id::REMOVE_SPACE_GEOMETRY_MAPPING }>;
 
-pub type CreateEntity = DebugElementVariable16<{ id::CREATE_ENTITY }>;
-pub type CreateEntityDetailed = DebugElementVariable16<{ id::CREATE_ENTITY_DETAILED }>;
+/// Sent from the cell when another entity (not the client's own player) enters its Area
+/// of Interest -- see [`EnterAoi`]/[`EnterAoiOnVehicle`] for the companion message that
+/// actually adds it to the AoI id-alias table. Layout confirmed against the leaked
+/// BigWorld 14.4.1 SDK's vanilla `ServerConnection::createEntity`
+/// (`connection/server_connection.cpp`) -- NOT yet confirmed against a live WoT capture,
+/// unlike [`CreateCellPlayer`]/[`CreateBasePlayer`] (both found to diverge from this same
+/// vanilla source once checked).
+///
+/// The whole payload (`entity_id`/`entity_type_id`/`position`/`direction` included, not
+/// just the trailing property dict) is wrapped server-side in a `CompressionIStream`: a
+/// 1-byte compression-type tag optionally followed by a zlib-compressed body. This crate
+/// has no zlib dependency, so a non-`NONE` tag surfaces as an error here rather than
+/// silently misreading compressed bytes as plain fields.
+#[derive(Debug, Clone)]
+pub struct CreateEntity {
+    pub entity_id: u32,
+    pub entity_type_id: u16,
+    pub position: Vec3,
+    /// Yaw/pitch/roll, packed the same way as the `AVATAR_UPDATE_*_YAW_PITCH_ROLL`
+    /// family (see [`PackedYawPitchRoll`]) but with `HALFPITCH` forced to `false` here
+    /// (confirmed: `ServerConnection::createEntity` explicitly instantiates
+    /// `PackedYawPitchRoll</* HALFPITCH */ false>`, unlike the avatar-update messages'
+    /// default `HALFPITCH = true`) -- decode with [`PackedYawPitchRoll::unpack`]
+    /// passing `half_pitch = false`.
+    pub direction: PackedYawPitchRoll,
+    /// Raw pre-encoded client-visible property dict bytes (only the entity's
+    /// `AllClients`-flagged properties, in exposed-id order). This project doesn't have
+    /// a dispatch table for that specific subset yet (unlike [`CreateBasePlayer`]'s own
+    /// `data_ty`, built for the different `AllClients | OwnClient | BaseAndClient` set
+    /// exposed to an entity's *own* client), so it's carried opaque for now.
+    pub client_data: Vec<u8>,
+}
 
-pub type CellAppSuspended = DebugElementFixed<{ id::CELL_APP_SUSPENDED }, 0>;
-pub type CellAppResumed = DebugElementFixed<{ id::CELL_APP_RESUMED }, 0>;
+impl SimpleCodec for CreateEntity {
 
-pub type ClientSuspensionDetectionEnabled = DebugElementFixed<{ id::CLIENT_SUSPENSION_DETECTION_ENABLED }, 4>;
-pub type EnterAoi = DebugElementFixed<{ id::ENTER_AOI }, 5>;
-pub type EnterAoiOnVehicle = DebugElementFixed<{ id::ENTER_AOI_ON_VEHICLE }, 9>;
-pub type LeaveAoi = DebugElementVariable16<{ id::LEAVE_AOI }>;
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_u8(0)?; // BW_COMPRESSION_NONE
+        write.write_u32(self.entity_id)?;
+        write.write_u16(self.entity_type_id)?;
+        write.write_vec3(self.position)?;
+        SimpleCodec::write(&self.direction, write)?;
+        write.write_all(&self.client_data)
+    }
 
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let compression_type = read.read_u8()?;
+        if compression_type != 0 {
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                format!("CreateEntity: compressed payload (type {compression_type}) not supported")));
+        }
+        let entity_id = read.read_u32()?;
+        let entity_type_id = read.read_u16()?;
+        let position = read.read_vec3()?;
+        let direction = SimpleCodec::read(read)?;
+        let mut client_data = Vec::new();
+        read.read_to_end(&mut client_data)?;
+        Ok(Self { entity_id, entity_type_id, position, direction, client_data })
+    }
+
+}
+
+impl SimpleElement for CreateEntity {
+    const ID: u8 = id::CREATE_ENTITY;
+    const LEN: ElementLength = ElementLength::Variable16;
+}
+
+/// Same as [`CreateEntity`], but with an uncompressed direction instead of a packed
+/// [`PackedYawPitchRoll`] -- confirmed against the leaked BigWorld 14.4.1 SDK's vanilla
+/// `ServerConnection::createEntityDetailed` (`connection/server_connection.cpp`), which
+/// is identical to `createEntity` except `stream >> pos >> yaw >> pitch >> roll` reads
+/// three raw `f32`s instead of a `PackedYawPitchRoll`. Same caveats as [`CreateEntity`]:
+/// not confirmed against a live WoT capture, and the whole payload (this struct's fields
+/// included) is `CompressionIStream`-wrapped, with only `BW_COMPRESSION_NONE` handled.
+#[derive(Debug, Clone)]
+pub struct CreateEntityDetailed {
+    pub entity_id: u32,
+    pub entity_type_id: u16,
+    pub position: Vec3,
+    /// Yaw/pitch/roll as three raw, uncompressed `f32`s (unlike [`CreateEntity::direction`]).
+    pub direction: Vec3,
+    /// See [`CreateEntity::client_data`].
+    pub client_data: Vec<u8>,
+}
+
+impl SimpleCodec for CreateEntityDetailed {
+
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_u8(0)?; // BW_COMPRESSION_NONE
+        write.write_u32(self.entity_id)?;
+        write.write_u16(self.entity_type_id)?;
+        write.write_vec3(self.position)?;
+        write.write_vec3(self.direction)?;
+        write.write_all(&self.client_data)
+    }
+
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let compression_type = read.read_u8()?;
+        if compression_type != 0 {
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                format!("CreateEntityDetailed: compressed payload (type {compression_type}) not supported")));
+        }
+        let entity_id = read.read_u32()?;
+        let entity_type_id = read.read_u16()?;
+        let position = read.read_vec3()?;
+        let direction = read.read_vec3()?;
+        let mut client_data = Vec::new();
+        read.read_to_end(&mut client_data)?;
+        Ok(Self { entity_id, entity_type_id, position, direction, client_data })
+    }
+
+}
+
+impl SimpleElement for CreateEntityDetailed {
+    const ID: u8 = id::CREATE_ENTITY_DETAILED;
+    const LEN: ElementLength = ElementLength::Variable16;
+}
+
+// `cellAppSuspended`/`cellAppResumed`/`clientSuspensionDetectionEnabled` don't exist in
+// the leaked BigWorld 14.4.1 SDK at all (like the `Nrl*` elements above, apparently a
+// later-engine or WoT-specific addition) -- their names and fixed lengths below are
+// instead confirmed live by dumping the real client's own registered `ClientInterface`
+// message table (`re-work/frida/dump_interfaces.js`, ids `0x0D`-`0x0F`), which is where
+// this project's names for them (and the `id` module's byte counts) originally came
+// from; there's no header to cross-check field-level semantics against, though, so
+// [`ClientSuspensionDetectionEnabled`]'s single field is a plausible guess, not confirmed.
+
+crate::__struct_simple_codec! {
+    /// Sent by the cell when it is about to be suspended (e.g. for a space/cell
+    /// hand-off) -- the client is presumably expected to stop predicting/simulating
+    /// entity movement until a matching [`CellAppResumed`] arrives. No fields: this is
+    /// purely a state transition signal.
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct CellAppSuspended {}
+}
+
+impl SimpleElement for CellAppSuspended {
+    const ID: u8 = id::CELL_APP_SUSPENDED;
+    const LEN: ElementLength = ElementLength::ZERO;
+}
+
+crate::__struct_simple_codec! {
+    /// Counterpart to [`CellAppSuspended`]: sent when the cell resumes normal operation.
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct CellAppResumed {}
+}
+
+impl SimpleElement for CellAppResumed {
+    const ID: u8 = id::CELL_APP_RESUMED;
+    const LEN: ElementLength = ElementLength::ZERO;
+}
+
+crate::__struct_simple_codec! {
+    /// Enables or configures the client's "suspension detection" -- likely a mechanism
+    /// for the client to notice when *itself* has been stalled (OS-level pause, a
+    /// debugger breakpoint, a long GC/loading hitch, ...) for long enough that the
+    /// resulting time gap shouldn't be treated as a network issue. Only the 4-byte
+    /// length is confirmed live (`re-work/frida/dump_interfaces.js`); there's no header
+    /// to confirm the field's exact type or unit against, so `threshold` is a plausible
+    /// reading (a timeout/period, `f32` seconds or `u32` milliseconds) rather than a
+    /// confirmed one -- kept as a raw `u32` here to avoid asserting a specific meaning.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ClientSuspensionDetectionEnabled {
+        pub threshold: u32,
+    }
+}
+
+impl SimpleElement for ClientSuspensionDetectionEnabled {
+    const ID: u8 = id::CLIENT_SUSPENSION_DETECTION_ENABLED;
+    const LEN: ElementLength = ElementLength::Fixed(4);
+}
+
+crate::__struct_simple_codec! {
+    /// Sent when an entity enters the client's Area of Interest -- see [`CreateEntity`]
+    /// for the companion message carrying its initial snapshot. Layout confirmed against
+    /// the leaked BigWorld 14.4.1 SDK (`connection/client_interface.hpp`'s `enterAoI`
+    /// message: `EntityID id; IDAlias idAlias;`), matching this project's own
+    /// already-confirmed 5-byte length for `ENTER_AOI`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct EnterAoi {
+        pub entity_id: u32,
+        pub id_alias: u8,
+    }
+}
+
+impl SimpleElement for EnterAoi {
+    const ID: u8 = id::ENTER_AOI;
+    const LEN: ElementLength = ElementLength::Fixed(5);
+}
+
+crate::__struct_simple_codec! {
+    /// Like [`EnterAoi`], but for an entity that enters while riding a vehicle (a
+    /// passenger). Layout confirmed against the leaked BigWorld 14.4.1 SDK
+    /// (`connection/client_interface.hpp`'s `enterAoIOnVehicle` message: `EntityID id;
+    /// EntityID vehicleID; IDAlias idAlias;`), matching this project's own
+    /// already-confirmed 9-byte length for `ENTER_AOI_ON_VEHICLE`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct EnterAoiOnVehicle {
+        pub entity_id: u32,
+        pub vehicle_id: u32,
+        pub id_alias: u8,
+    }
+}
+
+impl SimpleElement for EnterAoiOnVehicle {
+    const ID: u8 = id::ENTER_AOI_ON_VEHICLE;
+    const LEN: ElementLength = ElementLength::Fixed(9);
+}
+
+/// Sent when an entity leaves the client's Area of Interest. Layout confirmed against
+/// the leaked BigWorld 14.4.1 SDK (`ServerConnection::leaveAoI`,
+/// `connection/server_connection.cpp`): an `EntityID` followed by zero or more
+/// `EventNumber` (`i32`) values filling the rest of the element -- there's no explicit
+/// count, the reader instead divides the remaining byte count by 4 (`sizeof(EventNumber)`
+/// in the source), which this project's framing already gives for free since the
+/// underlying reader is bounded to this element's declared `Variable16` length before
+/// [`SimpleCodec::read`] is ever called.
+#[derive(Debug, Clone)]
+pub struct LeaveAoi {
+    pub entity_id: u32,
+    pub last_event_numbers: Vec<i32>,
+}
+
+impl SimpleCodec for LeaveAoi {
+
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_u32(self.entity_id)?;
+        for &event_number in &self.last_event_numbers {
+            write.write_i32(event_number)?;
+        }
+        Ok(())
+    }
+
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let entity_id = read.read_u32()?;
+        let mut data = Vec::new();
+        read.read_to_end(&mut data)?;
+        let last_event_numbers = data.chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        Ok(Self { entity_id, last_event_numbers })
+    }
+
+}
+
+impl SimpleElement for LeaveAoi {
+    const ID: u8 = id::LEAVE_AOI;
+    const LEN: ElementLength = ElementLength::Variable16;
+}
+
+// =============================================================================
+// Timing, positioning references & entity selection
+// =============================================================================
 
 crate::__struct_simple_codec! {
     /// It is used as a timestamp for the elements in a bundle.
@@ -463,38 +775,143 @@ impl SimpleElement for ForcedPosition {
 }
 
 
-pub type AvatarUpdateNoAliasDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_DETAILED }, 29>;
-pub type AvatarUpdateAliasDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_DETAILED }, 26>;
-pub type AvatarUpdatePlayerDetailed = DebugElementFixed<{ id::AVATAR_UPDATE_PLAYER_DETAILED }, 25>;
+// =============================================================================
+// Avatar movement updates (`AVUPMSG` family) & their packed field types
+// =============================================================================
 
-// The 24 AVUPMSG combinations -- see the doc comment on `id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL`.
-pub type AvatarUpdateNoAliasFullPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL }, 12>;
-pub type AvatarUpdateNoAliasFullPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH }, 11>;
-pub type AvatarUpdateNoAliasFullPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW }, 10>;
-pub type AvatarUpdateNoAliasFullPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR }, 9>;
-pub type AvatarUpdateNoAliasOnGroundYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL }, 10>;
-pub type AvatarUpdateNoAliasOnGroundYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH }, 9>;
-pub type AvatarUpdateNoAliasOnGroundYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW }, 8>;
-pub type AvatarUpdateNoAliasOnGroundNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR }, 7>;
-pub type AvatarUpdateNoAliasNoPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL }, 7>;
-pub type AvatarUpdateNoAliasNoPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH }, 6>;
-pub type AvatarUpdateNoAliasNoPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW }, 5>;
-pub type AvatarUpdateNoAliasNoPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR }, 4>;
-pub type AvatarUpdateAliasFullPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL }, 9>;
-pub type AvatarUpdateAliasFullPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH }, 8>;
-pub type AvatarUpdateAliasFullPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW }, 7>;
-pub type AvatarUpdateAliasFullPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR }, 6>;
-pub type AvatarUpdateAliasOnGroundYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL }, 7>;
-pub type AvatarUpdateAliasOnGroundYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH }, 6>;
-pub type AvatarUpdateAliasOnGroundYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_YAW }, 5>;
-pub type AvatarUpdateAliasOnGroundNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR }, 4>;
-pub type AvatarUpdateAliasNoPosYawPitchRoll = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL }, 4>;
-pub type AvatarUpdateAliasNoPosYawPitch = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH }, 3>;
-pub type AvatarUpdateAliasNoPosYaw = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_YAW }, 2>;
-pub type AvatarUpdateAliasNoPosNoDir = DebugElementFixed<{ id::AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR }, 1>;
+// These three messages carry a full-detail, uncompressed position/direction, for cases
+// where the entity is too far from the reference position for the packed `AVUPMSG`
+// forms above, or more precision is wanted, at the cost of more bandwidth -- confirmed
+// against the leaked BigWorld 14.4.1 SDK (`connection/common_client_interface.hpp`'s
+// `avatarUpdateNoAliasDetailed`/`avatarUpdateAliasDetailed`/`avatarUpdatePlayerDetailed`:
+// `{NoAlias EntityID | Alias IDAlias | Player nothing} + Position3D + Direction3D`, same
+// `EntityID`/`IDAlias` split as the `AVUPMSG` family above, `PlayerDetailed` omitting the
+// id entirely since it only ever targets the client's own player).
+//
+// That vanilla layout is 1 byte short of this project's own already-confirmed sizes
+// (28/25/24 vs the confirmed-live 29/26/25 -- see the `id` module), in all three cases by
+// exactly the same amount. The same SDK's `BaseAppExtInterface::avatarUpdateImplicit`
+// (`connection/baseapp_ext_interface.hpp`, the base-directed sibling of these) has a
+// directly analogous trailing `uint8 refNum` appended after `pos`/`dir` specifically
+// under this build's `VOLATILE_POSITIONS_ARE_ABSOLUTE == 0` configuration (confirmed
+// still in effect, see `msgtypes.hpp`) -- "refNum is used to refer to this position later
+// as the base for relative positions", matching this doc comment's own "detailed enough
+// to be reference positions" wording almost verbatim. A trailing `ref_num: u8` here
+// accounts for the missing byte exactly in all three messages independently, which is
+// strong circumstantial support, but this hasn't been confirmed against a live WoT
+// capture (unlike e.g. [`CreateCellPlayer`]'s own confirmed deviations from vanilla).
+crate::__struct_simple_codec! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct AvatarUpdateNoAliasDetailed {
+        pub entity_id: u32,
+        pub position: Vec3,
+        /// Yaw/pitch/roll -- see [`ForcedPosition::direction`] for why the exact float
+        /// encoding is unconfirmed beyond "plausible radian values".
+        pub direction: Vec3,
+        /// See this type's doc comment: likely a reference-position sequence number, not
+        /// confirmed live.
+        pub ref_num: u8,
+    }
+}
+
+impl SimpleElement for AvatarUpdateNoAliasDetailed {
+    const ID: u8 = id::AVATAR_UPDATE_NO_ALIAS_DETAILED;
+    const LEN: ElementLength = ElementLength::Fixed(29);
+}
+
+crate::__struct_simple_codec! {
+    /// See [`AvatarUpdateNoAliasDetailed`].
+    #[derive(Debug, Clone, Copy)]
+    pub struct AvatarUpdateAliasDetailed {
+        pub id_alias: u8,
+        pub position: Vec3,
+        pub direction: Vec3,
+        pub ref_num: u8,
+    }
+}
+
+impl SimpleElement for AvatarUpdateAliasDetailed {
+    const ID: u8 = id::AVATAR_UPDATE_ALIAS_DETAILED;
+    const LEN: ElementLength = ElementLength::Fixed(26);
+}
+
+crate::__struct_simple_codec! {
+    /// See [`AvatarUpdateNoAliasDetailed`]. Always targets the client's own player
+    /// entity, so there's no id field at all -- confirmed by this being the only one of
+    /// the three actually used as a reference position (per the same doc comment on
+    /// `avatarUpdatePlayerDetailed` in the leaked SDK).
+    #[derive(Debug, Clone, Copy)]
+    pub struct AvatarUpdatePlayerDetailed {
+        pub position: Vec3,
+        pub direction: Vec3,
+        pub ref_num: u8,
+    }
+}
+
+impl SimpleElement for AvatarUpdatePlayerDetailed {
+    const ID: u8 = id::AVATAR_UPDATE_PLAYER_DETAILED;
+    const LEN: ElementLength = ElementLength::Fixed(25);
+}
+
+/// Generates one [`SimpleElement`] struct per `AVUPMSG` combination: a `NoAlias`
+/// (`entity_id: u32`) or `Alias` (`id_alias: u8`) target, followed by its position and
+/// direction fields -- see the doc comment on
+/// `id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL` for how these three independent
+/// axes combine into the 24 distinct fixed-size element ids.
+macro_rules! avatar_update_elements {
+    ($( $name:ident { $id_field:ident: $id_ty:ty, position: $pos_ty:ty, direction: $dir_ty:ty } = $id_const:ident, $len:literal; )*) => {
+        $(
+            crate::__struct_simple_codec! {
+                #[derive(Debug, Clone, Copy)]
+                pub struct $name {
+                    pub $id_field: $id_ty,
+                    pub position: $pos_ty,
+                    pub direction: $dir_ty,
+                }
+            }
+
+            impl SimpleElement for $name {
+                const ID: u8 = id::$id_const;
+                const LEN: ElementLength = ElementLength::Fixed($len);
+            }
+        )*
+    };
+}
+
+avatar_update_elements! {
+    AvatarUpdateNoAliasFullPosYawPitchRoll  { entity_id: u32, position: PackedXyz, direction: PackedYawPitchRoll } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL, 12;
+    AvatarUpdateNoAliasFullPosYawPitch      { entity_id: u32, position: PackedXyz, direction: PackedYawPitch }     = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH, 11;
+    AvatarUpdateNoAliasFullPosYaw           { entity_id: u32, position: PackedXyz, direction: PackedYaw }          = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW, 10;
+    AvatarUpdateNoAliasFullPosNoDir         { entity_id: u32, position: PackedXyz, direction: () }                 = AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR, 9;
+    AvatarUpdateNoAliasOnGroundYawPitchRoll { entity_id: u32, position: PackedXz, direction: PackedYawPitchRoll }  = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 10;
+    AvatarUpdateNoAliasOnGroundYawPitch     { entity_id: u32, position: PackedXz, direction: PackedYawPitch }      = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH, 9;
+    AvatarUpdateNoAliasOnGroundYaw          { entity_id: u32, position: PackedXz, direction: PackedYaw }           = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW, 8;
+    AvatarUpdateNoAliasOnGroundNoDir        { entity_id: u32, position: PackedXz, direction: () }                  = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR, 7;
+    AvatarUpdateNoAliasNoPosYawPitchRoll    { entity_id: u32, position: (), direction: PackedYawPitchRoll }        = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL, 7;
+    AvatarUpdateNoAliasNoPosYawPitch        { entity_id: u32, position: (), direction: PackedYawPitch }            = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH, 6;
+    AvatarUpdateNoAliasNoPosYaw             { entity_id: u32, position: (), direction: PackedYaw }                 = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW, 5;
+    AvatarUpdateNoAliasNoPosNoDir           { entity_id: u32, position: (), direction: () }                        = AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR, 4;
+    AvatarUpdateAliasFullPosYawPitchRoll    { id_alias: u8, position: PackedXyz, direction: PackedYawPitchRoll }   = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL, 9;
+    AvatarUpdateAliasFullPosYawPitch        { id_alias: u8, position: PackedXyz, direction: PackedYawPitch }       = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH, 8;
+    AvatarUpdateAliasFullPosYaw             { id_alias: u8, position: PackedXyz, direction: PackedYaw }            = AVATAR_UPDATE_ALIAS_FULL_POS_YAW, 7;
+    AvatarUpdateAliasFullPosNoDir           { id_alias: u8, position: PackedXyz, direction: () }                   = AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR, 6;
+    AvatarUpdateAliasOnGroundYawPitchRoll   { id_alias: u8, position: PackedXz, direction: PackedYawPitchRoll }    = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 7;
+    AvatarUpdateAliasOnGroundYawPitch       { id_alias: u8, position: PackedXz, direction: PackedYawPitch }        = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH, 6;
+    AvatarUpdateAliasOnGroundYaw            { id_alias: u8, position: PackedXz, direction: PackedYaw }             = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW, 5;
+    AvatarUpdateAliasOnGroundNoDir          { id_alias: u8, position: PackedXz, direction: () }                    = AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR, 4;
+    AvatarUpdateAliasNoPosYawPitchRoll      { id_alias: u8, position: (), direction: PackedYawPitchRoll }          = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL, 4;
+    AvatarUpdateAliasNoPosYawPitch          { id_alias: u8, position: (), direction: PackedYawPitch }              = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH, 3;
+    AvatarUpdateAliasNoPosYaw               { id_alias: u8, position: (), direction: PackedYaw }                   = AVATAR_UPDATE_ALIAS_NO_POS_YAW, 2;
+    AvatarUpdateAliasNoPosNoDir             { id_alias: u8, position: (), direction: () }                          = AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR, 1;
+}
 
 pub type AvatarUpdateVolatileProperties = DebugElementVariable16<{ id::AVATAR_UPDATE_VOLATILE_PROPERTIES }>;
 pub type ChangeVolatilePackerType = DebugElementVariable16<{ id::CHANGE_VOLATILE_PACKER_TYPE }>;
+
+// =============================================================================
+// Network Replication Layer ("NRL") -- WoT's own CGF node-replication
+// messages (`NetworkReplicationPointComponent.py`), not present in vanilla BigWorld.
+// =============================================================================
 
 pub type NrlCreateNode = DebugElementVariable16<{ id::NRL_CREATE_NODE }>;
 pub type NrlUnlinkTree = DebugElementVariable16<{ id::NRL_UNLINK_TREE }>;
@@ -505,9 +922,32 @@ pub type NrlData = DebugElementVariable16<{ id::NRL_DATA }>;
 pub type NrlMsgToClient = DebugElementVariable16<{ id::NRL_MSG_TO_CLIENT }>;
 pub type NrlUnreliableMsgToClient = DebugElementVariable16<{ id::NRL_UNRELIABLE_MSG_TO_CLIENT }>;
 
-// TODO: Avatar update
+// =============================================================================
+// Entity control, voice & session hand-off
+// =============================================================================
 
-pub type ControlEntity = DebugElementFixed<{ id::CONTROL_ENTITY }, 5>;
+crate::__struct_simple_codec! {
+    /// Sent by the server to tell the client whether it now has (`on = true`) or has
+    /// lost (`on = false`) control authority over an entity -- while controlled, the
+    /// client is expected to locally predict/simulate the entity's movement and report
+    /// it back itself (the base-directed `AvatarUpdateImplicit`/`AvatarUpdateExplicit`
+    /// elements in [`super::super::base::element`]) rather than only passively receiving
+    /// server-driven `AVATAR_UPDATE_*` elements for it. Layout confirmed against the
+    /// leaked BigWorld 14.4.1 SDK (`connection/client_interface.hpp`'s `controlEntity`:
+    /// `EntityID id; bool on;`), matching this project's own already-confirmed 5-byte
+    /// length for `CONTROL_ENTITY`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ControlEntity {
+        pub entity_id: u32,
+        pub on: bool,
+    }
+}
+
+impl SimpleElement for ControlEntity {
+    const ID: u8 = id::CONTROL_ENTITY;
+    const LEN: ElementLength = ElementLength::Fixed(5);
+}
+
 pub type VoiceData = DebugElementVariable16<{ id::VOICE_DATA }>;
 pub type RestoreClient = DebugElementVariable16<{ id::RESTORE_CLIENT }>;
 
@@ -526,6 +966,9 @@ impl SimpleElement for SwitchBaseApp {
     const LEN: ElementLength = ElementLength::Fixed(9);
 }
 
+// =============================================================================
+// Resource download (fonts, sounds, etc. streamed on demand)
+// =============================================================================
 
 /// Header describing a resource that will be downloaded in possibly many fragments.
 #[derive(Clone)]
@@ -613,6 +1056,10 @@ impl fmt::Debug for ResourceFragment {
 }
 
 
+// =============================================================================
+// Session teardown & raw entity property/position streaming
+// =============================================================================
+
 crate::__struct_simple_codec! {
     /// Sent by the server to inform that subsequent elements will target
     /// the player entity.
@@ -628,7 +1075,30 @@ impl SimpleElement for LoggedOff {
 }
 
 
-pub type DetailedPosition = DebugElementFixed<{ id::DETAILED_POSITION }, 24>;
+crate::__struct_simple_codec! {
+    /// Sent for the currently-selected entity (see [`SelectEntity`]/[`SelectPlayerEntity`]/
+    /// [`SelectAliasedEntity`] -- no id field of its own) when its volatile position
+    /// becomes "less volatile" or it teleports, i.e. an accurate, uncompressed correction
+    /// on top of the regular `AVATAR_UPDATE_*` stream. Ignored client-side for an entity
+    /// under local control (confirmed by `ServerConnection::detailedPosition`'s own
+    /// `isControlledLocally` early-return). Layout confirmed against the leaked BigWorld
+    /// 14.4.1 SDK (`connection/client_interface.hpp`'s `detailedPosition`: `Position3D
+    /// position; Direction3D direction;`), matching this project's own already-confirmed
+    /// 24-byte length for `DETAILED_POSITION` exactly (unlike the `*Detailed` avatar
+    /// update messages, no extra byte here).
+    #[derive(Debug, Clone, Copy)]
+    pub struct DetailedPosition {
+        pub position: Vec3,
+        /// Yaw/pitch/roll -- see [`ForcedPosition::direction`] for why the exact float
+        /// encoding is unconfirmed beyond "plausible radian values".
+        pub direction: Vec3,
+    }
+}
+
+impl SimpleElement for DetailedPosition {
+    const ID: u8 = id::DETAILED_POSITION;
+    const LEN: ElementLength = ElementLength::Fixed(24);
+}
 
 pub type NestedEntityProperty = DebugElementVariable16<{ id::NESTED_ENTITY_PROPERTY }>;
 pub type SliceEntityProperty = DebugElementVariable16<{ id::SLICE_ENTITY_PROPERTY }>;
@@ -636,6 +1106,9 @@ pub type UpdateEntity = DebugElementVariable16<{ id::UPDATE_ENTITY }>;
 pub type SetCellAppExtAddress = DebugElementVariable16<{ id::SET_CELL_APP_EXT_ADDRESS }>;
 pub type LastProxyMessageAfterDirectCellAppConnection = DebugElementVariable16<{ id::LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION }>;
 
+// =============================================================================
+// Dynamic entity method/property dispatch (script-model-driven)
+// =============================================================================
 
 /// A client-directed entity method call, encoded/decoded dynamically against a
 /// runtime-computed [`MethodDef`] table (see [`crate::app::script::EntityDispatch`])
@@ -660,6 +1133,7 @@ fn find_method<'m>(config: &'m [MethodDef], name: &str) -> io::Result<(u16, &'m 
 impl Element<Vec<MethodDef>> for EntityMethod {
 
     fn write_length(&self, config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+        
         let (exposed_id, preferred_len) = match &self.call {
             MethodCall::Known { name, .. } => {
                 let (exposed_id, def) = find_method(config, name)?;
@@ -667,33 +1141,42 @@ impl Element<Vec<MethodDef>> for EntityMethod {
             }
             MethodCall::Unknown { exposed_id, .. } => (*exposed_id, ElementLength::Variable8),
         };
+
         // A sub-id is written as an extra byte ahead of the method's own payload (see
         // `write` below), so the preferred length only applies to full-slot ids; ids
         // requiring a sub-id always frame as Variable16, matching `read_length` below.
         let (_, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
         Ok(if sub_id.is_some() { ElementLength::Variable16 } else { preferred_len })
+    
     }
 
     fn write(&self, write: &mut dyn Write, config: &Vec<MethodDef>) -> io::Result<u8> {
+        
         let exposed_id = match &self.call {
             MethodCall::Known { name, .. } => find_method(config, name)?.0,
             MethodCall::Unknown { exposed_id, .. } => *exposed_id,
         };
+        
         let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
         if let Some(sub_id) = sub_id {
             write.write_u8(sub_id)?;
         }
+        
         match &self.call {
             MethodCall::Known { args, .. } => config[exposed_id as usize].write_args(write, args)?,
             MethodCall::Unknown { data, .. } => write.write_all(data)?,
         }
+
         Ok(element_id)
+
     }
 
     fn read_length(config: &Vec<MethodDef>, id: u8) -> io::Result<ElementLength> {
+        
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
+
         Ok(match id::ENTITY_METHOD.to_exposed_id_checked(config.len() as u16, id) {
             // An unrecognized exposed id falls back to Variable8 here instead of
             // erroring -- confirmed live by hooking `getEntityMethodStreamSize` on a
@@ -706,9 +1189,11 @@ impl Element<Vec<MethodDef>> for EntityMethod {
             // whole payload is always Variable16-framed instead.
             None => ElementLength::Variable16,
         })
+
     }
 
     fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
+        
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
         }
@@ -739,6 +1224,7 @@ impl Element<Vec<MethodDef>> for EntityMethod {
         };
 
         Ok(Self { call })
+
     }
 
 }
@@ -780,9 +1266,11 @@ impl Element<Vec<PropertyDef>> for EntityProperty {
     }
 
     fn read_length(config: &Vec<PropertyDef>, id: u8) -> io::Result<ElementLength> {
+        
         if !id::ENTITY_PROPERTY.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
         }
+
         match id::ENTITY_PROPERTY.to_exposed_id_checked(config.len() as u16, id) {
             // See this type's doc comment for why an unrecognized exposed id must error
             // here instead of guessing a fallback length like `EntityMethod` does.
@@ -790,9 +1278,11 @@ impl Element<Vec<PropertyDef>> for EntityProperty {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
             None => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property element id: {id:02X}"))),
         }
+
     }
 
     fn read(read: &mut dyn Read, config: &Vec<PropertyDef>, _len: usize, id: u8) -> io::Result<Self> {
+        
         if !id::ENTITY_PROPERTY.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
         }
@@ -807,7 +1297,31 @@ impl Element<Vec<PropertyDef>> for EntityProperty {
         let def = config.get(exposed_id as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unrecognized entity property exposed id: 0x{exposed_id:02X}")))?;
 
-        Ok(Self { name: def.name.clone(), value: Value::read(read, &def.ty)? })
+        // A top-level `PYTHON` property is read directly from the *whole* remaining
+        // bytes of this already element-length-bounded reader, bypassing `Value::read`'s
+        // usual `PythonValue` codec (which additionally expects its own embedded packed
+        // length, correct for a `PYTHON` field nested inside a larger concatenated `Dict`
+        // -- e.g. `CreateBasePlayer`'s `initialServerSettings`, still working correctly
+        // as of this comment -- but confirmed live to systematically overrun here: this
+        // project has no way to know a standalone property's declared length ahead of
+        // time (see `property_length`'s own doc comment on its `Variable8` guess), but
+        // *this* element's own length is already known once we're inside `read` at all,
+        // and stacking a second, redundant inner length on top of it consistently asked
+        // for more bytes than remained). `EntityProperty`'s framing already fully
+        // delimits this property on its own, so no extra inner length is needed here.
+        let value = if matches!(def.ty.kind(), TyKind::Python) {
+            let mut raw = Vec::new();
+            read.read_to_end(&mut raw)?;
+            Value::Python(match serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
+                Ok(v) => PythonValue::Decoded(v),
+                Err(_) => PythonValue::Raw(raw),
+            })
+        } else {
+            Value::read(read, &def.ty)?
+        };
+
+        Ok(Self { name: def.name.clone(), value })
+
     }
 
 }

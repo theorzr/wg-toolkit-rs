@@ -154,6 +154,22 @@ fn is_property_exposed(property: &Property) -> bool {
     matches!(property.flags, PropertyFlags::AllClients | PropertyFlags::OwnClient | PropertyFlags::BaseAndClient)
 }
 
+/// Whether this property is both client-visible *and* base-hosted (BigWorld's
+/// `DataDescription::isBaseData()`, gated on the `DATA_BASE` flag bit specifically) --
+/// unlike [`is_property_exposed`], this excludes `AllClients`/`OwnClient`, which are
+/// cell-hosted (confirmed live: a `CreateBasePlayer` entity_data built with the wider
+/// filter reads past its own declared element length, because cell-hosted properties
+/// like `AvatarObserver`'s `remoteCamera`/`isObserverFPV`/`numOfObservers`, all flagged
+/// plain `OWN_CLIENT` with no `BASE_AND_CLIENT`, aren't actually part of the base
+/// creation payload at all -- they arrive later, opaque, inside `CreateCellPlayer`'s own
+/// `cell_data` blob). Only [`build_entity_data_ty`] needs this narrower filter: the
+/// exposed-id property table built by [`build_property_table`] legitimately covers
+/// every client-visible property regardless of hosting, since an individual
+/// property-change broadcast can originate from either side.
+fn is_base_property_exposed(property: &Property) -> bool {
+    matches!(property.flags, PropertyFlags::BaseAndClient)
+}
+
 /// Return the fixed on-wire size of this type in bytes, or `None` if it has no fixed
 /// size (e.g. a string, or a sequence/dict containing one).
 fn ty_stream_size(ty: &Ty) -> Option<usize> {
@@ -198,7 +214,22 @@ fn method_length(method: &Method) -> ElementLength {
 fn property_length(property: &Property) -> ElementLength {
     match ty_stream_size(&property.ty) {
         Some(size) => ElementLength::Fixed(size as u32),
-        None => ElementLength::Variable16,
+        // Unlike methods (`method_length` above), a property has no per-declaration
+        // `VariableLengthHeaderSize`-equivalent in this project's script model to read a
+        // real preferred size from -- properties don't expose one in the entity XML the
+        // way methods do. `Variable8` here is a live-evidence-backed guess, not a
+        // confirmed-live constant like the one on `EntityMethod::read_length`: every
+        // variable-sized property observed live so far that uses this fallback (e.g.
+        // `Avatar::arenaExtraData`, a `PYTHON` property) failed to decode with the
+        // previous `Variable16` guess (`failed to fill whole buffer`, consistently, on
+        // this one property, while every *fixed*-size property on the same entity
+        // decoded fine) -- exactly what a too-wide length prefix looks like. `Variable8`
+        // also mirrors `EntityMethod`'s own confirmed-live default for anything without a
+        // declared preferred size (Mercury's `DEFAULT_VARIABLE_LENGTH_HEADER_SIZE`
+        // sentinel), which is at least a principled guess rather than an arbitrary one.
+        // Flag for re-evaluation if a *larger* (>254 byte) variable-sized property is
+        // ever observed failing under this new guess instead.
+        None => ElementLength::Variable8,
     }
 }
 
@@ -350,11 +381,13 @@ fn build_property_table(
 }
 
 /// Build the [`Ty`] (always a [`TyKind::Dict`]) describing an entity's base creation
-/// payload (`CreateBasePlayer`'s `entity_data`): every client-visible property reachable
-/// through `implements`, in plain declaration order (recursed depth-first, NOT sorted by
-/// stream size -- unlike [`build_property_table`], this must match the nested-struct
-/// field order the wire's `Codec` actually walks, not the method/property *exposed id*
-/// table). Registers (and returns) a fresh anonymous type in `tys`.
+/// payload (`CreateBasePlayer`'s `entity_data`): every *base-hosted*, client-visible
+/// property reachable through `implements` (see [`is_base_property_exposed`] -- cell-hosted
+/// properties arrive later, opaque, inside `CreateCellPlayer`'s `cell_data`), in plain
+/// declaration order (recursed depth-first, NOT sorted by stream size -- unlike
+/// [`build_property_table`], this must match the nested-struct field order the wire's
+/// `Codec` actually walks, not the method/property *exposed id* table). Registers (and
+/// returns) a fresh anonymous type in `tys`.
 fn build_entity_data_ty(tys: &mut TySystem, interfaces: &[Interface], entity_interface: &Interface) -> Ty {
 
     fn collect(interfaces: &[Interface], interface: &Interface, out: &mut Vec<TyDictProp>) {
@@ -362,7 +395,7 @@ fn build_entity_data_ty(tys: &mut TySystem, interfaces: &[Interface], entity_int
             collect(interfaces, find_interface(interfaces, implement_name), out);
         }
         for property in &interface.properties {
-            if is_property_exposed(property) {
+            if is_base_property_exposed(property) {
                 out.push(TyDictProp { name: property.name.clone(), ty: property.ty.clone(), default: None });
             }
         }
@@ -370,6 +403,6 @@ fn build_entity_data_ty(tys: &mut TySystem, interfaces: &[Interface], entity_int
 
     let mut properties = Vec::new();
     collect(interfaces, entity_interface, &mut properties);
-    tys.register(None, TyKind::Dict(TyDict { properties }))
+    tys.register(None, TyKind::Dict(TyDict { properties, allow_none: false }))
 
 }

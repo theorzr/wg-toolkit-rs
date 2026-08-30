@@ -1,7 +1,6 @@
 //! Represent runtime script values.
 
 use std::collections::BTreeMap;
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::fmt;
 
@@ -28,6 +27,9 @@ pub enum Value {
     Mailbox,
     Dict(BTreeMap<Arc<str>, Value>),
     Seq(Vec<Value>),
+    /// A `FIXED_DICT` value whose type declares `AllowNone` (see [`crate::script::TyDict`]),
+    /// read off the wire as Python `None` instead of the dict's properties.
+    None,
 }
 
 /// Prints each value like a regular Rust value rather than as an enum variant: numeric
@@ -60,6 +62,7 @@ impl fmt::Debug for Value {
                 d.finish()
             }
             Value::Seq(list) => f.debug_list().entries(list).finish(),
+            Value::None => f.write_str("None"),
         }
     }
 }
@@ -72,29 +75,15 @@ pub enum StringValue {
     Raw(Vec<u8>),
 }
 
-/// A python data value.
+/// A python data value -- either successfully decoded pickle content, or, if this
+/// specific blob failed to parse (e.g. an as-yet-unsupported pickle opcode, or a bundle
+/// already desynced upstream), the raw bytes instead of hard-failing the whole read.
+/// Mirrors how [`StringValue`] already handles an ambiguous encoding: the field's
+/// declared length is always fully consumed either way (see `PythonValue`'s
+/// [`crate::net::codec`] impl), so one unparseable blob doesn't have to desync
+/// everything read after it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PythonValue {
-    inner: serde_pickle::Value,
-}
-
-impl PythonValue {
-
-    pub fn new(inner: serde_pickle::Value) -> Self {
-        Self { inner }
-    }
-
-}
-
-impl Deref for PythonValue {
-    type Target = serde_pickle::Value;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for PythonValue {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
+pub enum PythonValue {
+    Decoded(serde_pickle::Value),
+    Raw(Vec<u8>),
 }

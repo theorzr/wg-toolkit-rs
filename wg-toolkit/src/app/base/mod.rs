@@ -4,9 +4,10 @@ pub mod element;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, SocketAddrV4};
-use std::num::Wrapping;
-use std::sync::Arc;
 use std::io::{self, Read, Write};
+use std::num::Wrapping;
+use std::borrow::Cow;
+use std::sync::Arc;
 
 use blowfish::Blowfish;
 
@@ -18,12 +19,12 @@ use tracing::warn;
 use crate::net::bundle::{Bundle, NextElementReader, ElementReader};
 use crate::net::element::{Element, ElementLength, SimpleElement};
 use crate::net::socket::PacketSocket;
-use crate::net::proto::Protocol;
 use crate::script::{Script, Value};
+use crate::net::proto::Protocol;
 
+use super::dispatch::{ScriptDispatch, PropertyDef, MethodCall};
 use super::io_invalid_data;
 use super::client;
-use super::script::{ScriptDispatch, PropertyDef, MethodCall};
 
 use element::{LoginKey, SessionKey};
 
@@ -313,14 +314,14 @@ impl App {
         };
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(
+        self.bundle.element_writer().write(
             client::element::CreateBasePlayer {
                 entity_id,
                 entity_type_id,
-                entity_data: &entity_data,
-                entity_data_ty: &dispatch.data_ty,
+                entity_data: Cow::Borrowed(&entity_data),
                 entity_components_count,
             },
+            dispatch,
         );
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;

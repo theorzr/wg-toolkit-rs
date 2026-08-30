@@ -12,16 +12,16 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use flate2::read::ZlibDecoder;
 use blowfish::Blowfish;
 
-use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, Element, ElementLength, SimpleElement};
+use wgtk::net::element::{DebugElementUndefined, SimpleElement};
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
-use wgtk::net::codec::{Codec, WgSocketAddrV4};
+use wgtk::net::codec::WgSocketAddrV4;
 
 use wgtk::app::{proxy, login_proxy, base, client};
-use wgtk::app::script::{ScriptDispatch, MethodCall};
+use wgtk::app::dispatch::{ScriptDispatch, MethodCall};
 use wgtk::net::packet::Packet;
 use wgtk::script::{Script, Value};
 
-use wgtk::util::io::{serde_pickle_de_options, WgReadExt};
+use wgtk::util::io::serde_pickle_de_options;
 
 use crate::CliResult;
 
@@ -91,6 +91,7 @@ pub fn run(
         entities: HashMap::new(),
         selected_entity_id: None,
         player_entity_id: None,
+        cell_player_entity_id: None,
         partial_resources: HashMap::new(),
         session_keys: HashMap::new(),
     };
@@ -135,6 +136,16 @@ struct BaseHandler {
     entities: HashMap<u32, (u16, Value)>,
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
+    /// The `Vehicle` entity registered by the last [`client::element::CreateCellPlayer`]
+    /// (id: `id::CREATE_CELL_PLAYER`, see that handling below), if any -- confirmed live
+    /// (WoT v2.3.1.3, actual battle capture) that once this exists, `SelectPlayerEntity`
+    /// targets *this* entity rather than `player_entity_id` (the base/`Account` entity):
+    /// every property update observed after entering a battle decoded correctly only
+    /// against the `Vehicle` entity's own property table, never `Account`'s. Kept
+    /// separate from `player_entity_id` rather than overwriting it, since client-directed
+    /// *base* entity method calls (`BASE_ENTITY_METHOD`, below) must still always target
+    /// the base/`Account` entity regardless of any cell/vehicle presence.
+    cell_player_entity_id: Option<u32>,
     partial_resources: HashMap<u16, PartialResource>,
     /// The session key last sent by each client, as observed on the initial handshake
     /// with the base app. When a SwitchBaseApp is intercepted and rewritten to keep the
@@ -297,6 +308,14 @@ impl proxy::Handler for BaseHandler {
 
 impl BaseHandler {
 
+    /// What `SelectPlayerEntity` (id: `id::SELECT_PLAYER_ENTITY`) actually targets --
+    /// confirmed live (WoT v2.3.1.3) that once a `Vehicle` has been registered by
+    /// `CreateCellPlayer`, it takes over from the base/`Account` entity for this
+    /// purpose, see the doc comment on `cell_player_entity_id`.
+    fn select_player_entity_id(&self) -> Option<u32> {
+        self.cell_player_entity_id.or(self.player_entity_id)
+    }
+
     fn read_out_bundle(&mut self, mut peer: proxy::Peer, bundle: Bundle) -> io::Result<()> {
 
         // Every event traced underneath this span (down to the trace file too, see
@@ -429,7 +448,7 @@ impl BaseHandler {
 
     }
 
-    fn read_in_element(&mut self, peer: &mut proxy::Peer, mut elt: ElementReader) -> io::Result<bool> {
+    fn read_in_element(&mut self, peer: &mut proxy::Peer, elt: ElementReader) -> io::Result<bool> {
 
         use client::element::*;
 
@@ -470,6 +489,10 @@ impl BaseHandler {
                 self.entities.clear();
                 self.player_entity_id = None;
 
+                // The vehicle (if any) doesn't survive a reset either -- a new battle
+                // means a fresh `CreateCellPlayer` for a new vehicle id.
+                self.cell_player_entity_id = None;
+
                 // Restore player entity!
                 if let Some((player_entity_id, player_entity)) = player_entity {
                     self.entities.insert(player_entity_id, player_entity);
@@ -483,42 +506,31 @@ impl BaseHandler {
                 // holding a dangling id into `entities`, which used to `unwrap()` a
                 // `None` and panic this connection's poll worker thread silently (no
                 // `JoinHandle::join()` anywhere to surface it -- see `ThreadPoll`).
-                self.selected_entity_id = self.player_entity_id;
+                self.selected_entity_id = self.select_player_entity_id();
 
             }
             LoggedOff::ID => {
                 let lo = elt.read_simple::<LoggedOff>()?;
                 info!(%addr, id = LoggedOff::ID, request_id = ?lo.request_id, "<- Logged off: 0x{:02X}", lo.element.reason);
             }
-            CreateBasePlayerHeader::ID => {
+            id::CREATE_BASE_PLAYER => {
 
-                let cbp = elt.read_simple_stable::<CreateBasePlayerHeader>()?;
+                // An unrecognized entity type id surfaces as an `Err` here (propagated by
+                // `?`), same as everywhere else this project has decided it's safer to
+                // stop reading a bundle than to guess -- see `CreateBasePlayer`'s
+                // `Element<ScriptDispatch>` impl.
+                let full = elt.read::<CreateBasePlayer, _>(&self.shared.dispatch)?;
 
-                if self.shared.dispatch.entity_from_id(cbp.element.entity_type_id).is_some() {
+                // The full entity data is logged as its own field (rather than a
+                // separate `entity_<id>.txt` dump file) so it lands in the same
+                // ordered trace while keeping the message itself a short one-liner.
+                info!(%addr, id = id::CREATE_BASE_PLAYER, request_id = ?full.request_id,
+                    entity_data = ?full.element.entity_data,
+                    "<- Create base player: ({}) entity_type_id={} entity_components_count={}",
+                    full.element.entity_id, full.element.entity_type_id, full.element.entity_components_count);
 
-                    let full = elt.read::<CreateBasePlayerAny, _>(&self.shared.dispatch)?;
-
-                    // The full entity data is logged as its own field (rather than a
-                    // separate `entity_<id>.txt` dump file) so it lands in the same
-                    // ordered trace while keeping the message itself a short one-liner.
-                    info!(%addr, id = CreateBasePlayerHeader::ID, request_id = ?full.request_id,
-                        entity_data = ?full.element.entity_data,
-                        "<- Create base player: ({}) entity_type_id={} entity_components_count={}",
-                        full.element.entity_id, full.element.entity_type_id, full.element.entity_components_count);
-
-                    self.entities.insert(full.element.entity_id, (full.element.entity_type_id, full.element.entity_data));
-                    self.player_entity_id = Some(full.element.entity_id);
-
-                    return Ok(true);
-
-                }
-
-                self.player_entity_id = None;
-                // It's possible to skip it because its len is variable.
-                let dbg = elt.read_simple::<DebugElementVariable16<0>>()?;
-                warn!(%addr, id = CreateBasePlayerHeader::ID, request_id = ?dbg.request_id,
-                    "<- Create base player with invalid entity type id: 0x{:02X}, {:?}",
-                    cbp.element.entity_type_id, dbg.element);
+                self.entities.insert(full.element.entity_id, (full.element.entity_type_id, full.element.entity_data.into_owned()));
+                self.player_entity_id = Some(full.element.entity_id);
 
             }
             CreateCellPlayer::ID => {
@@ -536,6 +548,10 @@ impl BaseHandler {
                 match self.shared.dispatch.entity_from_name("Vehicle") {
                     Some((vehicle_type_id, _)) => {
                         self.entities.insert(ccp.element.vehicle_id, (vehicle_type_id, Value::Dict(BTreeMap::new())));
+                        // Confirmed live: once this exists, `SelectPlayerEntity` targets
+                        // the vehicle, not the base/`Account` entity -- see the doc
+                        // comment on `cell_player_entity_id`.
+                        self.cell_player_entity_id = Some(ccp.element.vehicle_id);
                     }
                     None => warn!(%addr, "<- Create cell player: no 'Vehicle' entity type in the loaded script model"),
                 }
@@ -554,18 +570,42 @@ impl BaseHandler {
             }
             SelectPlayerEntity::ID => {
                 let spe = elt.read_simple::<SelectPlayerEntity>()?;
-                if let Some(player_entity_id) = self.player_entity_id {
+                if let Some(player_entity_id) = self.select_player_entity_id() {
                     info!(%addr, id = SelectPlayerEntity::ID, request_id = ?spe.request_id,
                         "<- Select player entity: {player_entity_id}");
                 } else {
                     warn!(%addr, id = SelectPlayerEntity::ID, request_id = ?spe.request_id,
                         "<- Select player entity: no player entity")
                 }
-                self.selected_entity_id = self.player_entity_id;
+                self.selected_entity_id = self.select_player_entity_id();
             }
             SwitchBaseApp::ID => {
 
                 let sba = elt.read_simple::<SwitchBaseApp>()?;
+
+                // A `0.x.x.x` address, or a real-looking address with port 0, is never
+                // valid for a real game server -- seeing one here means the bundle's read
+                // position already desynced on an earlier element (confirmed live: a busy
+                // battle with other entities in view exercises `SelectAliasedEntity`/
+                // `CreateEntity`, still unconfirmed/undecoded, see their doc comments) and
+                // these 9 bytes are garbage, not a real `SwitchBaseApp`. Trusting it would
+                // register the garbage address as this peer's reconnect target below, so
+                // when the client's real reconnect arrives, this proxy forwards it into a
+                // black hole it can never reach -- confirmed live to be exactly what an
+                // "instant" battle disconnect turned out to be. Confirmed live a second
+                // time, worse: forwarding a subsequent packet to a port-0 address makes
+                // the OS-level send fail with `EINVAL`, which isn't a `ConnectionReset`
+                // and so isn't handled as a per-peer drop -- it propagates all the way out
+                // of the base app's `run()` loop and kills request handling for every
+                // connected client, not just this one. Bail out loudly instead of
+                // chaining into either failure mode.
+                if sba.element.base_addr.addr.ip().octets()[0] == 0 || sba.element.base_addr.addr.port() == 0 {
+                    error!(%addr, id = SwitchBaseApp::ID, request_id = ?sba.request_id,
+                        "<- Switch base app: implausible address {:?}, likely bundle desync upstream -- ignoring",
+                        sba.element.base_addr);
+                    return Ok(true);
+                }
+
                 info!(%addr, id = SwitchBaseApp::ID, request_id = ?sba.request_id,
                     "<- Switch base app to: {:?} (reset entities: {})", sba.element.base_addr, sba.element.reset_entities);
 
@@ -801,59 +841,109 @@ impl BaseHandler {
                 // Account::msg#37 = onClanInfoReceived
                 // Account::msg#39 = showGUI
 
-                if let Some(entity_id) = self.selected_entity_id {
-                    let Some(&(type_id, _)) = self.entities.get(&entity_id) else {
-                        warn!(%addr, id, "<- Entity method (selected entity {entity_id} no longer tracked)");
-                        return Ok(true);
-                    };
-                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
-                        warn!(%addr, id, "<- Entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
-                        return Ok(true);
-                    };
+                // `EntityMethod::read_length` needs the *correct* entity's own
+                // `client_methods.len()` to even know this element's framing (it decides
+                // per id whether a sub-id byte follows, which shifts Fixed/Variable8 vs.
+                // Variable16 -- see that fn's doc comment): without a real dispatch table
+                // there is no safe length to guess, unlike a merely *unrecognized exposed
+                // id* within a table we do have (that case still surfaces safely as
+                // `MethodCall::Unknown`, not consulted here). So every branch below that
+                // can't resolve one falls through to the same unbounded, stop-reading
+                // path at the bottom instead of trying to skip a guessed number of bytes.
+                let dispatch = self.selected_entity_id.and_then(|entity_id| {
+                    let &(type_id, _) = self.entities.get(&entity_id)?;
+                    Some((entity_id, self.shared.dispatch.entity_from_id(type_id)?))
+                });
+
+                if let Some((entity_id, dispatch)) = dispatch {
                     // See the `BASE_ENTITY_METHOD` arm in `read_out_element` for why an
                     // unrecognized exposed id surfaces as `MethodCall::Unknown`, not
                     // an `Err`.
                     let call = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call;
-                    match &call {
-                        MethodCall::Known { .. } => info!(%addr, id, "<- Entity method: ({entity_id}) {call:?}"),
-                        MethodCall::Unknown { .. } => warn!(%addr, id, "<- Entity method (unrecognized exposed id): ({entity_id}) {call:?}"),
-                    }
-                    return Ok(true);
+                    return Ok(match &call {
+                        MethodCall::Known { .. } => {
+                            info!(%addr, id, "<- Entity method: ({entity_id}) {call:?}");
+                            true
+                        }
+                        MethodCall::Unknown { .. } => {
+                            // Unlike `BASE_ENTITY_METHOD` (always Variable16, confirmed
+                            // safe regardless of exposed id), `EntityMethod`'s fallback
+                            // for an exposed id outside our table is Variable8 (max 254
+                            // bytes) -- confirmed live to be wrong here: our reconstructed
+                            // `client_methods` table is missing this id (most likely a
+                            // dynamic-component method, see the TODO on
+                            // `CreateBasePlayer::entity_components_count` -- this project
+                            // doesn't model those at all), not something the real client
+                            // fails to recognize too, and the real call was longer than
+                            // 254 bytes. Confirmed by a live capture: an entity name
+                            // string (a bot vehicle's) got split across two separately
+                            // logged "Unknown" calls, and reading continued into unrelated
+                            // bytes afterward, eventually misparsing them as a bogus
+                            // `CreateBasePlayerHeader` with garbage "python" content. So
+                            // stop reading the rest of this bundle rather than trust the
+                            // position past a truncated read.
+                            warn!(%addr, id, "<- Entity method (unrecognized exposed id, stopping bundle): ({entity_id}) {call:?}");
+                            false
+                        }
+                    });
                 }
 
+                // No dispatch table to resolve this element's framing against (nothing
+                // selected, the selected entity is no longer tracked, or its type has no
+                // dispatch table) -- reading must stop here instead of risking a
+                // misinterpreted length desyncing the rest of this bundle (confirmed
+                // live: this is exactly how a decode desync turned into a garbage
+                // `SwitchBaseApp` that stranded a reconnecting client).
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
                 warn!(%addr, id, request_id = ?elt.request_id,
-                    "<- Entity method (unknown selected entity): msg#{} {:?}", id - id::ENTITY_METHOD.first, elt.element);
+                    "<- Entity method (no dispatch table): msg#{} {:?}", id - id::ENTITY_METHOD.first, elt.element);
                 return Ok(false);
 
             }
             id if id::ENTITY_PROPERTY.contains(id) => {
 
-                if let Some(entity_id) = self.selected_entity_id {
-                    let Some(&(type_id, _)) = self.entities.get(&entity_id) else {
-                        warn!(%addr, id, "<- Entity property (selected entity {entity_id} no longer tracked)");
-                        return Ok(true);
-                    };
-                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
-                        warn!(%addr, id, "<- Entity property (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
-                        return Ok(true);
-                    };
-                    // An `Err` here (propagated by `?`, caught by `receive_bundle`'s
-                    // outer catch-all) is expected for any property belonging to a
-                    // *dynamic* component (attached per-instance, see
-                    // `entity_components_count` -- this project's model can't predict
-                    // their exposed ids, see `doc/ENTITY.md`), not just a real mismatch.
-                    // Unlike entity methods, there's no safe fallback framing to guess
-                    // here (see `EntityProperty`'s doc comment) -- reading must stop
-                    // rather than risk desyncing the rest of this bundle.
-                    let p = elt.read::<EntityProperty, _>(&dispatch.properties)?.element;
-                    info!(%addr, id, "<- Entity property: ({entity_id}) {}={:?}", p.name, p.value);
-                    return Ok(true);
+                // Same reasoning as `ENTITY_METHOD` above: without the correct entity's
+                // own `properties.len()`, `EntityProperty::read_length` can't resolve
+                // this element's framing at all (see that fn's doc comment -- unlike
+                // methods, it has no generic fallback length either), so every branch
+                // that can't resolve a dispatch table falls through to the same
+                // unbounded, stop-reading path at the bottom.
+                let dispatch = self.selected_entity_id.and_then(|entity_id| {
+                    let &(type_id, _) = self.entities.get(&entity_id)?;
+                    Some((entity_id, self.shared.dispatch.entity_from_id(type_id)?))
+                });
+
+                if let Some((entity_id, dispatch)) = dispatch {
+                    // An `Err` here is expected for any property belonging to a *dynamic*
+                    // component (attached per-instance, see `entity_components_count` --
+                    // this project's model can't predict their exposed ids, see
+                    // `doc/ENTITY.md`), not just a real mismatch -- and also, less
+                    // obviously, for a property this table *does* recognize but whose
+                    // reconstructed `Ty`/length is itself wrong (e.g. mis-sized, so
+                    // `Value::read` over- or under-runs the bounded reader). Unlike entity
+                    // methods, there's no safe fallback framing to guess here (see
+                    // `EntityProperty`'s doc comment) -- reading must stop rather than
+                    // risk desyncing the rest of this bundle. Caught explicitly (rather
+                    // than propagated via `?` to the bundle-level catch-all) so the
+                    // exposed id and property name -- unavailable once the error reaches
+                    // that outer, entity-agnostic context -- can still be logged.
+                    match elt.read::<EntityProperty, _>(&dispatch.properties) {
+                        Ok(p) => {
+                            info!(%addr, id, "<- Entity property: ({entity_id}) {}={:?}", p.element.name, p.element.value);
+                            return Ok(true);
+                        }
+                        Err(e) => {
+                            let exposed_id = id::ENTITY_PROPERTY.to_exposed_id_checked(dispatch.properties.len() as u16, id);
+                            let name = exposed_id.and_then(|e| dispatch.properties.get(e as usize)).map(|def| &*def.name);
+                            warn!(%addr, id, "<- Entity property (failed to decode, stopping bundle): ({entity_id}) exposed_id={exposed_id:?} name={name:?}: {e}");
+                            return Ok(false);
+                        }
+                    }
                 }
 
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
                 warn!(%addr, id, request_id = ?elt.request_id,
-                    "<- Entity property (unknown selected entity): msg#{} {:?}", id - id::ENTITY_PROPERTY.first, elt.element);
+                    "<- Entity property (no dispatch table): msg#{} {:?}", id - id::ENTITY_PROPERTY.first, elt.element);
                 return Ok(false);
             }
             id => {
@@ -869,49 +959,3 @@ impl BaseHandler {
 
 }
 
-/// Reads a full `CreateBasePlayer` element without knowing the concrete entity type
-/// statically: entity id, entity type id and the unknown blob are read directly (mirrors
-/// `client::element::CreateBasePlayer::write`), then the entity's own data is decoded
-/// dynamically as a [`Value`] against that type's `data_ty`, resolved from the given
-/// [`ScriptDispatch`] using the just-read `entity_type_id`. Read-only, like the
-/// library's own `CreateBasePlayer` write-only sibling.
-struct CreateBasePlayerAny {
-    entity_id: u32,
-    entity_type_id: u16,
-    entity_data: Value,
-    entity_components_count: u8,
-}
-
-impl Element<ScriptDispatch> for CreateBasePlayerAny {
-
-    fn write_length(&self, _config: &ScriptDispatch) -> io::Result<ElementLength> {
-        unreachable!("CreateBasePlayerAny is read-only")
-    }
-
-    fn write(&self, _write: &mut dyn io::Write, _config: &ScriptDispatch) -> io::Result<u8> {
-        unreachable!("CreateBasePlayerAny is read-only")
-    }
-
-    fn read_length(_config: &ScriptDispatch, _id: u8) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
-    }
-
-    fn read(read: &mut dyn io::Read, config: &ScriptDispatch, _len: usize, _id: u8) -> io::Result<Self> {
-
-        let entity_id = read.read_u32()?;
-        let entity_type_id = read.read_u16()?;
-        let unk = read.read_blob_variable()?;
-        if !unk.is_empty() {
-            warn!("Non empty unknown blob when decoding CreateBasePlayer: {unk:?}");
-        }
-
-        let dispatch = config.entity_from_id(entity_type_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown entity type id: 0x{entity_type_id:02X}")))?;
-        let entity_data = Value::read(read, &dispatch.data_ty)?;
-        let entity_components_count = read.read_u8()?;
-
-        Ok(Self { entity_id, entity_type_id, entity_data, entity_components_count })
-
-    }
-
-}

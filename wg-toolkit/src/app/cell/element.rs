@@ -19,8 +19,11 @@ use crate::net::element::{DebugElementFixed, DebugElementVariable16};
 /// (id 7) is a single anchor id, not the start of a range, at least as registered by
 /// the client binary.
 pub mod id {
+    // --- Cell session handshake ---
     pub const CELL_APP_LOGIN: u8           = 0x00;
     pub const AUTHENTICATE: u8              = 0x01;
+
+    // --- Avatar updates, physics corrections, NRL & method dispatch (raw placeholders) ---
     pub const AVATAR_UPDATE_IMPLICIT: u8    = 0x02;
     pub const AVATAR_UPDATE_EXPLICIT: u8    = 0x03;
     pub const ACK_PHYSICS_CORRECTION: u8    = 0x04;
@@ -30,8 +33,17 @@ pub mod id {
 }
 
 
+// =============================================================================
+// Cell session handshake
+// =============================================================================
+
 pub type CellAppLogin = DebugElementVariable16<{ id::CELL_APP_LOGIN }>;
 pub type Authenticate = DebugElementFixed<{ id::AUTHENTICATE }, 8>;
+
+// =============================================================================
+// Avatar updates, physics corrections, NRL & method dispatch (raw placeholders)
+// =============================================================================
+
 pub type AvatarUpdateImplicit = DebugElementFixed<{ id::AVATAR_UPDATE_IMPLICIT }, 21>;
 pub type AvatarUpdateExplicit = DebugElementFixed<{ id::AVATAR_UPDATE_EXPLICIT }, 26>;
 pub type AckPhysicsCorrection = DebugElementFixed<{ id::ACK_PHYSICS_CORRECTION }, 4>;

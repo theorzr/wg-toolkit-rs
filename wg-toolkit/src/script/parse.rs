@@ -240,6 +240,10 @@ pub fn parse_ty(val: &Value, tys: &mut TySystem, alias_name: Option<String>) -> 
                 .expect("fixed dict should have properties");
 
             let mut dict = TyDict::default();
+            dict.allow_none = elt.get_child("AllowNone")
+                .and_then(Value::as_boolean)
+                .unwrap_or_default();
+
             for (field_name, field_val) in properties_elt.iter_children_all() {
 
                 let field_elt = field_val.as_element().expect("field should be an element");

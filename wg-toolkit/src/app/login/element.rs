@@ -25,13 +25,24 @@ use crate::util::io::*;
 /// (v2.3.1.3, 2026-08-24) and reading the actual registration order out of
 /// `LoginInterface`'s `Mercury::InterfaceMinder` in memory.
 pub mod id {
+    // --- Login request (client -> server) ---
     pub const LOGIN_REQUEST: u8         = 0x00;
+
+    // --- Connectivity probing ---
     pub const PROBE: u8                 = 0x01;
     pub const PING: u8                  = 0x02;
+
+    // --- Challenge response (client -> server) ---
     pub const CHALLENGE_RESPONSE: u8    = 0x03;
+
+    // --- Connectivity probing, continued from 0x01 ---
     pub const MTU_PROBE: u8             = 0x04;
 }
 
+
+// =============================================================================
+// Connectivity probing
+// =============================================================================
 
 crate::__struct_simple_codec! {
     /// A ping sent from the client to the login app or replied from the
@@ -60,7 +71,11 @@ pub type Probe = DebugElementFixed<{ id::PROBE }, 0>;
 pub type MtuProbe = DebugElementVariable16<{ id::MTU_PROBE }>;
 
 
-/// A login request to be sent with [`LoginCodec`], sent from client to 
+// =============================================================================
+// Login request (client -> server)
+// =============================================================================
+
+/// A login request to be sent with [`LoginCodec`], sent from client to
 /// server when it wants to log into and gain access to a base app.
 #[derive(Debug, Default, Clone)]
 pub struct LoginRequest {
@@ -174,6 +189,10 @@ where LoginRequest: Codec<C> {
     const LEN: ElementLength = ElementLength::Variable16;
 }
 
+
+// =============================================================================
+// Login response (server -> client): success, challenge, error
+// =============================================================================
 
 /// Describe all kinds of responses returned from server to client when
 /// the client attempt to login. This includes challenge or error codes.
@@ -395,6 +414,10 @@ fn read_login_success(read: &mut dyn Read) -> io::Result<LoginSuccess> {
     })
 }
 
+
+// =============================================================================
+// Challenge response (client -> server)
+// =============================================================================
 
 /// Describe a generic challenge response of a given generic type. This is an element
 /// that's not expecting any reply, because the client sends a new login request just

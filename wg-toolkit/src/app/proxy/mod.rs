@@ -11,7 +11,7 @@ use std::io;
 
 use blowfish::Blowfish;
 
-use tracing::{trace, trace_span};
+use tracing::{trace, trace_span, warn};
 
 use crate::util::thread::{ThreadPoll, ThreadWorker};
 use crate::net::proto::{Channel, ChannelIndex, Protocol};
@@ -280,6 +280,21 @@ impl App {
                     trace!("Dropped peer due to connection reset: {addr}");
                     self.peers.remove(&addr).unwrap();
                 }
+                // A handler-supplied `real_addr` that the OS rejects outright (e.g. port
+                // 0, confirmed live from a patched-in address built off a desynced/corrupt
+                // upstream element) must not be allowed to propagate: unlike
+                // `ConnectionReset`, this doesn't self-resolve by dropping the peer's
+                // *socket*, but the peer itself is unsalvageable either way, and letting
+                // it bubble out of `poll` kills `run`'s loop for every other connected
+                // peer too, not just this one -- confirmed live to take down the whole
+                // base app. Drop just this peer and keep serving everyone else.
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                    warn!("Dropped peer due to an invalid destination address ({:?}): {addr}", match direction {
+                        PacketDirection::Out => peer.real_addr,
+                        PacketDirection::In => peer.addr,
+                    });
+                    self.peers.remove(&addr).unwrap();
+                }
                 Err(e) => {
                     return Err(e.into());
                 }
@@ -300,6 +315,15 @@ impl App {
                     // longer has a listening socket to send to! Ignore this peer.
                     trace!("Dropped peer due to connection reset: {addr}");
                     // Unwrap because we have this peer and it exists.
+                    self.peers.remove(&addr).unwrap();
+                }
+                // See the matching arm above (the `patch` branch) for why this must be
+                // handled the same way as `ConnectionReset` instead of propagating.
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                    warn!("Dropped peer due to an invalid destination address ({:?}): {addr}", match direction {
+                        PacketDirection::Out => peer.real_addr,
+                        PacketDirection::In => peer.addr,
+                    });
                     self.peers.remove(&addr).unwrap();
                 }
                 Err(e) => {

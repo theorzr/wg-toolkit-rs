@@ -735,6 +735,23 @@ impl<'a> BundleElementReader<'a> {
         let element = match E::read(&mut elt_reader, config, elt_len as usize, elt_id) {
             Ok(ret) => ret,
             Err(e) => {
+                // Temporary diagnostic: dump a raw preview of the element (from its
+                // header onward, before anything was consumed) whenever it fails to
+                // decode, to help root-cause "failed to fill whole buffer"-style errors
+                // that give no other visibility into what was actually on the wire.
+                let mut preview_reader = reader_save.clone();
+                let mut preview = vec![0u8; 2048];
+                let mut n = 0;
+                while n < preview.len() {
+                    match preview_reader.read(&mut preview[n..]) {
+                        Ok(0) => break,  // End of bundle, nothing more to preview.
+                        Ok(read) => n += read,
+                        Err(_) => break,
+                    }
+                }
+                preview.truncate(n);
+                warn!("failed to read element of type '{}' (id={elt_id:02X}, len_kind={elt_len_kind:?}, len={elt_len}, oversize={elt_len_oversize}): {e}; preview: {:?}",
+                    std::any::type_name::<E>(), AsciiFmt(&preview));
                 self.bundle_reader = reader_save;  // Rollback before going further.
                 return Err(e);
             }
@@ -758,6 +775,15 @@ impl<'a> BundleElementReader<'a> {
                     let unread_data = match self.bundle_reader.read_blob(unread_len) {
                         Ok(data) => data,
                         Err(e) => {
+                            // Same temporary diagnostic as the `E::read` failure case above:
+                            // this means the element's *declared* length claimed more
+                            // trailing bytes than the bundle actually has left.
+                            let mut preview_reader = reader_save.clone();
+                            let mut preview = vec![0u8; 96];
+                            let n = preview_reader.read(&mut preview).unwrap_or(0);
+                            preview.truncate(n);
+                            warn!("declared unread length ({unread_len}) for element of type '{}' (id={elt_id:02X}, len_kind={elt_len_kind:?}, len={elt_len}, oversize={elt_len_oversize}) exceeds remaining bundle data: {e}; preview: {:?}",
+                                std::any::type_name::<E>(), AsciiFmt(&preview));
                             self.bundle_reader = reader_save;  // Rollback, same as an E::read failure above.
                             return Err(e);
                         }

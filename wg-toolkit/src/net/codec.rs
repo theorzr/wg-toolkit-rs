@@ -282,14 +282,19 @@ impl SimpleCodec for StringValue {
 /// [`PythonValue`] is the Python builtin data type.
 impl SimpleCodec for PythonValue {
 
-    #[inline(always)]
     fn write(&self, write: &mut dyn Write) -> io::Result<()> {
-        write.write_python_pickle(self)
+        match self {
+            PythonValue::Decoded(v) => write.write_python_pickle(v),
+            PythonValue::Raw(raw) => write.write_blob_variable(raw),
+        }
     }
 
-    #[inline(always)]
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        read.read_python_pickle().map(PythonValue::new)
+        let raw = read.read_blob_variable()?;
+        Ok(match serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
+            Ok(v) => PythonValue::Decoded(v),
+            Err(_) => PythonValue::Raw(raw),
+        })
     }
 
 }
@@ -320,7 +325,11 @@ impl Codec<Ty> for Value {
             (Value::Python(v), TyKind::Python) => SimpleCodec::write(v, write),
             (Value::Mailbox, TyKind::Mailbox) =>
                 Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox codec not yet supported")),
+            (Value::None, TyKind::Dict(dict)) if dict.allow_none => write.write_u8(0),
             (Value::Dict(map), TyKind::Dict(dict)) => {
+                if dict.allow_none {
+                    write.write_u8(1)?;
+                }
                 for prop in &dict.properties {
                     let value = map.get(&prop.name).ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, format!("missing property: {}", prop.name))
@@ -363,11 +372,15 @@ impl Codec<Ty> for Value {
             TyKind::Mailbox =>
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "mailbox codec not yet supported")),
             TyKind::Dict(dict) => {
-                let mut map = BTreeMap::new();
-                for prop in &dict.properties {
-                    map.insert(prop.name.clone(), Value::read(read, &prop.ty)?);
+                if dict.allow_none && read.read_u8()? == 0 {
+                    Value::None
+                } else {
+                    let mut map = BTreeMap::new();
+                    for prop in &dict.properties {
+                        map.insert(prop.name.clone(), Value::read(read, &prop.ty)?);
+                    }
+                    Value::Dict(map)
                 }
-                Value::Dict(map)
             }
             TyKind::Array(seq) | TyKind::Tuple(seq) => {
                 let len = match seq.size {

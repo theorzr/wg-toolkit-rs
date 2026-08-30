@@ -70,12 +70,12 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer()
             .with_filter(EnvFilter::builder()
-                .with_default_directive(LevelFilter::TRACE.into())
+                .with_default_directive(LevelFilter::DEBUG.into())
                 .from_env_lossy()))
-        .with(tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(std::sync::Mutex::new(trace_file))
-            .with_filter(LevelFilter::INFO))
+        // .with(tracing_subscriber::fmt::layer()
+        //     .json()
+        //     .with_writer(std::sync::Mutex::new(trace_file))
+        //     .with_filter(LevelFilter::INFO))
         .init();
 
     let script = load_script(&args.dir)?;
