@@ -24,12 +24,25 @@ World of Tanks. This crate also provides an implementation of the network protoc
   - Package indexing
   - Reading file either from native filesystem or packages
   - Reading directory entries from native filesystem and packages
-- Network protocol *(WIP)*
+- Script definitions (entities, interfaces, components, aliases, type system)
+  - Loading and parsing the game's own definition files (Packed XML) into a
+    programmatic model, no per-game code generation required
+  - Dynamic runtime values, including lazy-decoded Python pickle values
+  - Dynamic entity/method/property dispatch computed from the loaded model
+- Network protocol
   - Packets encoding and decoding *(partial flags support)*
   - Writing and reading elements to and from a bundle of packets
   - Off-channel and channel bundle input and output with reliable support
-  - Working login application
-  - *WIP* base application
+  - Applications (`app` module), abstracting over the socket server:
+    - Login application (server-side)
+    - Base application (server-side), with dynamic dispatch against a loaded
+      script model
+    - Cell application element ids and (partial) codecs, reverse-engineered
+      from the live client *(no server implementation yet)*
+    - Client application element definitions
+    - Login proxy and generic debugging proxy applications, for intercepting,
+      forwarding and inspecting traffic without being blocked by the Blowfish
+      cipher
 
 ## CLI
 - [Crate page](https://crates.io/crates/wg-toolkit-cli)
@@ -39,8 +52,14 @@ World of Tanks. This crate also provides an implementation of the network protoc
 - Resource virtual filesystem
   - Read file content and copy it to stdout
   - Read directory content with possible configured recursion
-- Demonstrative login and base applications for WoT (`wot` feature)
-- Bootstrapping of WoT entities/methods (`bootstrap` feature)
+  - Mount as a real filesystem via Dokan (Windows, `dokan` feature) or FUSE
+    (Unix, `fuse` feature)
+- World of Tanks server (`wot` feature)
+  - Login and base application server, with its script model (entities,
+    interfaces, aliases) loaded dynamically from the game's own resources at
+    startup
+  - Proxy mode, forwarding and decoding traffic to/from a real login and base
+    application for debugging and protocol analysis
 
 ## Contributing guidelines
 When contributing to the code base, some rules should be followed:
