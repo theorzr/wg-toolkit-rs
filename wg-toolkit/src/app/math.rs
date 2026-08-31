@@ -12,13 +12,13 @@
 //! client's handler table) match this source's bit widths exactly, which is strong
 //! indirect confirmation.
 
-use std::f32::consts::PI;
 use std::io::{self, Read, Write};
+use std::f32::consts::PI;
 
 use glam::Vec3;
 
-use crate::net::codec::SimpleCodec;
 use crate::util::io::{WgReadExt, WgWriteExt};
+use crate::net::codec::SimpleCodec;
 
 use super::bit::{BitReader, BitWriter};
 

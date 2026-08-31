@@ -21,37 +21,41 @@ pub mod id {
     // All ids below were confirmed empirically by attaching to a live game
     // process (v2.3.1.3, 2026-08-24) and reading the actual registration
     // order out of `BaseAppExtInterface`'s `Mercury::InterfaceMinder` in
-    // memory (from `baseapp_ext_interface.hpp`).
+    // memory (from `baseapp_ext_interface.hpp`). Length style/param
+    // re-confirmed via a fresh re-run of `re-work/frida/dump_interfaces.js`
+    // (2026-08-31) -- unlike `client::element`'s `ClientInterface`, nothing
+    // in this whole interface uses `CALLBACK`; every id here really is
+    // either a fixed byte count or a `Variable16`-style dynamic size.
 
     // --- Login/session handshake & datacenter ping ---
-    pub const LOGIN_KEY: u8                     = 0x00; // baseAppLogin
-    pub const PING_DATACENTER: u8               = 0x01; // pingDatacenter
-    pub const SESSION_KEY: u8                   = 0x02; // authenticate
+    pub const LOGIN_KEY: u8                     = 0x00; // baseAppLogin, FIXED 7
+    pub const PING_DATACENTER: u8               = 0x01; // pingDatacenter, FIXED 10
+    pub const SESSION_KEY: u8                   = 0x02; // authenticate, FIXED 4
 
     // --- Avatar updates & physics corrections (raw placeholders) ---
-    pub const AVATAR_UPDATE_IMPLICIT: u8        = 0x03;
-    pub const AVATAR_UPDATE_EXPLICIT: u8        = 0x04;
-    pub const ACK_PHYSICS_CORRECTION: u8        = 0x05;
-    pub const REQUEST_ENTITY_UPDATE: u8         = 0x06;
+    pub const AVATAR_UPDATE_IMPLICIT: u8        = 0x03;  // FIXED 17
+    pub const AVATAR_UPDATE_EXPLICIT: u8        = 0x04;  // FIXED 22
+    pub const ACK_PHYSICS_CORRECTION: u8        = 0x05;  // FIXED 0
+    pub const REQUEST_ENTITY_UPDATE: u8         = 0x06;  // VAR 2
 
     // --- Network Replication Layer ("NRL") ---
-    pub const NRL_MSG_TO_CELL: u8               = 0x07;
+    pub const NRL_MSG_TO_CELL: u8               = 0x07;  // VAR 2
 
     // --- Ward avatar updates & physics corrections ---
-    pub const AVATAR_UPDATE_WARD_IMPLICIT: u8   = 0x08;
-    pub const AVATAR_UPDATE_WARD_EXPLICIT: u8   = 0x09;
-    pub const ACK_WARD_PHYSICS_CORRECTION: u8   = 0x0A;
+    pub const AVATAR_UPDATE_WARD_IMPLICIT: u8   = 0x08;  // FIXED 20
+    pub const AVATAR_UPDATE_WARD_EXPLICIT: u8   = 0x09;  // FIXED 29
+    pub const ACK_WARD_PHYSICS_CORRECTION: u8   = 0x0A;  // FIXED 4
 
     // --- Session control & acks ---
-    pub const ENABLE_ENTITIES: u8               = 0x0B;
-    pub const RESTORE_CLIENT_ACK: u8            = 0x0C;
-    pub const DISCONNECT_CLIENT: u8             = 0x0D;
-    pub const CLIENT_TO_SERVER_HEARTBEAT: u8    = 0x0E;
-    pub const SEND_TO_CELL: u8                  = 0x0F;
+    pub const ENABLE_ENTITIES: u8               = 0x0B;  // FIXED 0
+    pub const RESTORE_CLIENT_ACK: u8            = 0x0C;  // FIXED 4
+    pub const DISCONNECT_CLIENT: u8             = 0x0D;  // FIXED 1
+    pub const CLIENT_TO_SERVER_HEARTBEAT: u8    = 0x0E;  // FIXED 0
+    pub const SEND_TO_CELL: u8                  = 0x0F;  // FIXED 0
 
     // --- Dynamic entity method dispatch (base & cell) ---
-    pub const CELL_ENTITY_METHOD: ElementIdRange = ElementIdRange::new(0x10, 0x87);
-    pub const BASE_ENTITY_METHOD: ElementIdRange = ElementIdRange::new(0x88, 0xFE);
+    pub const CELL_ENTITY_METHOD: ElementIdRange = ElementIdRange::new(0x10, 0x87);  // VAR 2 (all entries, not CALLBACK)
+    pub const BASE_ENTITY_METHOD: ElementIdRange = ElementIdRange::new(0x88, 0xFE);  // VAR 2 (all entries, not CALLBACK)
 
 }
 

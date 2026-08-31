@@ -294,8 +294,14 @@ impl proxy::Handler for BaseHandler {
                 }
             }
             proxy::PacketDirection::In => {
+                // On success this clone is wasted work, but bundles are tiny (a handful
+                // of packets at most) and this is the only way to get the *whole*
+                // bundle's raw bytes for forensic logging: by the time `read_in_bundle`
+                // returns an error, the `ElementReader` has already consumed part of it,
+                // and nothing else exposes the pre-parse bytes.
+                let raw: Vec<String> = bundle.iter().map(|p| hex(p.slice())).collect();
                 if let Err(e) = self.read_in_bundle(peer, bundle) {
-                    error!(%addr, "<- Error while reading bundle: {e}");
+                    error!(%addr, raw_packets = ?raw, "<- Error while reading bundle: {e}");
                 }
             }
         }
@@ -409,6 +415,29 @@ impl BaseHandler {
                 let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
                 warn!(%addr, id, request_id = ?elt.request_id,
                     "-> Base entity method (unknown selected entity): msg#{} {:?}", id - id::BASE_ENTITY_METHOD.first, elt.element);
+                return Ok(false);
+
+            }
+            id if id::CELL_ENTITY_METHOD.contains(id) => {
+
+                if let Some(entity_id) = self.player_entity_id {
+                    // Unwrap because selected entity should exist!
+                    let &(type_id, _) = self.entities.get(&entity_id).unwrap();
+                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
+                        warn!(%addr, id, "-> Cell entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
+                        return Ok(true);
+                    };
+                    let call = elt.read::<CellEntityMethod, _>(&dispatch.cell_methods)?.element.call;
+                    match &call {
+                        MethodCall::Known { .. } => info!(%addr, id, "-> Cell entity method: ({entity_id}) {call:?}"),
+                        MethodCall::Unknown { .. } => warn!(%addr, id, "-> Cell entity method (unrecognized exposed id): ({entity_id}) {call:?}"),
+                    }
+                    return Ok(true);
+                }
+
+                let elt = elt.read_simple::<DebugElementUndefined<0>>()?;
+                warn!(%addr, id, request_id = ?elt.request_id,
+                    "-> Cell entity method (unknown selected entity): msg#{} {:?}", id - id::CELL_ENTITY_METHOD.first, elt.element);
                 return Ok(false);
 
             }

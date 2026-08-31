@@ -26,9 +26,16 @@ use crate::script::{
 ///
 /// `entities` is indexed by wire type id minus one: entity type ids are allocated as a
 /// contiguous 1-based sequence matching `script.entities`' own order (see
-/// [`crate::script::Entity::id`]), so a `Vec` slot maps directly to each entity, no
-/// `HashMap` needed -- use [`Self::entity`] rather than indexing it directly, since the
-/// wire id is off by one from the backing storage.
+/// [`crate::script::Entity::id`]), followed immediately by one slot per
+/// `script.dynamic_components` entry, same order -- confirmed live (2026-08-31) via a
+/// Frida dump of a running client's `EntityDescriptionMap` (`re-work/frida/
+/// dump_entity_types.js`): dynamic components get their own real, independently
+/// creatable entity type id, continuing the same counter right after the last real
+/// entity, in declaration order, deduped by name (see `script::load`'s
+/// `seen_components`) -- `StaticComponents` never get a slot of their own, only folded
+/// into whatever entity's table references them via `<ofEntity>`. So a `Vec` slot still
+/// maps directly to each id, no `HashMap` needed -- use [`Self::entity_from_id`] rather
+/// than indexing it directly, since the wire id is off by one from the backing storage.
 #[derive(Debug)]
 pub struct ScriptDispatch {
     pub script: Script,
@@ -38,18 +45,39 @@ pub struct ScriptDispatch {
 impl ScriptDispatch {
 
     /// Compute the dispatch tables for every entity declared in `script`, in the same
-    /// order as `script.entities`.
+    /// order as `script.entities`, followed by one per `script.dynamic_components` entry
+    /// (see [`ScriptDispatch`]'s doc comment on why).
     pub fn new(mut script: Script) -> Self {
 
-        let mut entities = Vec::with_capacity(script.entities.len());
+        let mut entities = Vec::with_capacity(script.entities.len() + script.dynamic_components.len());
+
+        // Components (either kind) folding other components into themselves has never
+        // been observed live, and no `<ofEntity>`-eligible target would even apply to a
+        // component's own interface (`<ofEntity>` names real entities) -- so a dynamic
+        // component's own dispatch tables (below) are built with no folding at all,
+        // unlike a real entity's (which folds every static-or-dynamic component whose
+        // `<ofEntity>` names it).
+        let all_components: Vec<&Component> = script.static_components.iter()
+            .chain(script.dynamic_components.iter())
+            .collect();
 
         for entity in &script.entities {
             entities.push(EntityDispatch {
-                base_methods: build_method_table(&script.interfaces, &script.static_components, &entity.interface, base_methods_of),
-                cell_methods: build_method_table(&script.interfaces, &script.static_components, &entity.interface, cell_methods_of),
-                client_methods: build_method_table(&script.interfaces, &script.static_components, &entity.interface, client_methods_of),
-                properties: build_property_table(&script.interfaces, &script.static_components, &entity.interface),
+                base_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, base_methods_of),
+                cell_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, cell_methods_of),
+                client_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, client_methods_of),
+                properties: build_property_table(&script.interfaces, &all_components, &entity.interface),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface),
+            });
+        }
+
+        for component in &script.dynamic_components {
+            entities.push(EntityDispatch {
+                base_methods: build_method_table(&script.interfaces, &[], &component.interface, base_methods_of),
+                cell_methods: build_method_table(&script.interfaces, &[], &component.interface, cell_methods_of),
+                client_methods: build_method_table(&script.interfaces, &[], &component.interface, client_methods_of),
+                properties: build_property_table(&script.interfaces, &[], &component.interface),
+                data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface),
             });
         }
 
@@ -64,9 +92,15 @@ impl ScriptDispatch {
         self.entities.get(usize::from(type_id).checked_sub(1)?)
     }
 
-    /// Look up an entity's wire type id and dispatch tables by its script-declared name.
+    /// Look up an entity's or dynamic component's wire type id and dispatch tables by
+    /// its script-declared name.
     pub fn entity_from_name(&self, name: &str) -> Option<(u16, &EntityDispatch)> {
-        let type_id = self.script.entities.iter().find(|e| &*e.interface.name == name)?.id as u16;
+        let type_id = if let Some(entity) = self.script.entities.iter().find(|e| &*e.interface.name == name) {
+            entity.id as u16
+        } else {
+            let offset = self.script.dynamic_components.iter().position(|c| &*c.name == name)?;
+            (self.script.entities.len() + 1 + offset) as u16
+        };
         Some((type_id, self.entity_from_id(type_id)?))
     }
 
@@ -187,10 +221,15 @@ fn ty_stream_size(ty: &Ty) -> Option<usize> {
         TyKind::Python => None,
         TyKind::Mailbox => None,
         TyKind::Alias(inner) => ty_stream_size(inner),
-        TyKind::Dict(dict) =>
-            dict.properties.iter()
+        TyKind::Dict(dict) => {
+            let props_size: Option<usize> = dict.properties.iter()
                 .map(|prop| ty_stream_size(&prop.ty))
-                .sum(),
+                .sum();
+            // `AllowNone` FIXED_DICTs are preceded on the wire by a presence byte (see
+            // `Value`'s `Codec<Ty>` impl in `net/codec.rs`), which isn't itself one of
+            // `dict.properties`.
+            props_size.map(|size| size + dict.allow_none as usize)
+        }
         TyKind::Array(seq) | TyKind::Tuple(seq) =>
             seq.size.map(|len| len as usize)
                 .zip(ty_stream_size(&seq.ty))
@@ -301,7 +340,7 @@ fn cell_methods_of(interface: &Interface) -> &[Method] { &interface.cell_methods
 /// `wg-toolkit-cli`'s codegen time.
 fn build_method_table(
     interfaces: &[Interface],
-    static_components: &[Component],
+    static_components: &[&Component],
     entity_interface: &Interface,
     methods_of: fn(&Interface) -> &[Method],
 ) -> Vec<MethodDef> {
@@ -318,7 +357,7 @@ fn build_method_table(
         })
         .collect();
 
-    for component in static_components {
+    for component in static_components.iter().copied() {
 
         if !component.of_entities.iter().any(|e| **e == *entity_interface.name) {
             continue;
@@ -346,7 +385,7 @@ fn build_method_table(
 /// that. Same stable-sort/component-folding rule as [`build_method_table`].
 fn build_property_table(
     interfaces: &[Interface],
-    static_components: &[Component],
+    static_components: &[&Component],
     entity_interface: &Interface,
 ) -> Vec<PropertyDef> {
 
@@ -358,7 +397,7 @@ fn build_property_table(
         .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length })
         .collect();
 
-    for component in static_components {
+    for component in static_components.iter().copied() {
 
         if !component.of_entities.iter().any(|e| **e == *entity_interface.name) {
             continue;

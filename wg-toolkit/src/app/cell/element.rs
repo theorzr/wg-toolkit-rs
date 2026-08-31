@@ -19,17 +19,21 @@ use crate::net::element::{DebugElementFixed, DebugElementVariable16};
 /// (id 7) is a single anchor id, not the start of a range, at least as registered by
 /// the client binary.
 pub mod id {
+    // Length style/param re-confirmed via a fresh re-run of
+    // `re-work/frida/dump_interfaces.js` (2026-08-31) -- no `CALLBACK` ids in this
+    // interface either, same as `base::element`'s `BaseAppExtInterface`.
+
     // --- Cell session handshake ---
-    pub const CELL_APP_LOGIN: u8           = 0x00;
-    pub const AUTHENTICATE: u8              = 0x01;
+    pub const CELL_APP_LOGIN: u8           = 0x00;  // VAR 2
+    pub const AUTHENTICATE: u8              = 0x01;  // FIXED 8
 
     // --- Avatar updates, physics corrections, NRL & method dispatch (raw placeholders) ---
-    pub const AVATAR_UPDATE_IMPLICIT: u8    = 0x02;
-    pub const AVATAR_UPDATE_EXPLICIT: u8    = 0x03;
-    pub const ACK_PHYSICS_CORRECTION: u8    = 0x04;
-    pub const REQUEST_ENTITY_UPDATE: u8     = 0x05;
-    pub const NRL_MSG_TO_CELL: u8           = 0x06;
-    pub const RUN_EXPOSED_METHOD: u8        = 0x07;
+    pub const AVATAR_UPDATE_IMPLICIT: u8    = 0x02;  // FIXED 21
+    pub const AVATAR_UPDATE_EXPLICIT: u8    = 0x03;  // FIXED 26
+    pub const ACK_PHYSICS_CORRECTION: u8    = 0x04;  // FIXED 4
+    pub const REQUEST_ENTITY_UPDATE: u8     = 0x05;  // VAR 2
+    pub const NRL_MSG_TO_CELL: u8           = 0x06;  // VAR 2
+    pub const RUN_EXPOSED_METHOD: u8        = 0x07;  // VAR 2
 }
 
 

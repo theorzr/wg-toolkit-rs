@@ -1,5 +1,6 @@
 //! Loads a full script [`Model`] from the game's resources.
 
+use std::collections::HashSet;
 use std::io;
 
 use tracing::debug;
@@ -40,6 +41,27 @@ pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Script> {
 
     }
 
+    // A component's own `<Implements>` (e.g. many `DynamicComponents` implement
+    // `ReplicableComponent`) resolves against this separate, parallel interfaces
+    // directory -- confirmed to exist only at this one base-game location, no per-
+    // extension equivalent found anywhere in the resource tree.
+    if let Ok(component_interface_files) = fs.read_dir("scripts/component_defs/interfaces") {
+        for interface_file in component_interface_files {
+
+            let interface_file = interface_file?;
+            let Some((interface_name, "")) = interface_file.name().split_once(".def") else {
+                continue;
+            };
+
+            let interface_reader = fs.read(interface_file.path())?;
+            let interface_elt = pxml::from_reader(interface_reader).unwrap();
+            let interface = parse::parse_interface(&interface_elt, &mut model.tys, interface_name.to_string());
+            model.interfaces.push(interface);
+            debug!("read component interface {interface_name}");
+
+        }
+    }
+
     let entities_reader = fs.read("scripts/entities.xml")?;
     let entities_elt = pxml::from_reader(entities_reader).unwrap();
     let entities_elt = entities_elt.get_child("ClientServerEntities").unwrap().as_element().unwrap();
@@ -51,6 +73,75 @@ pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Script> {
         debug!("read entity {entity_name}");
         model.entities.push(entity);
 
+    }
+
+    // The base game itself also declares its own "static"/"dynamic" components, the same
+    // shape as an extension's (`<ofEntity>`-folded def files), just rooted at plain
+    // `scripts/component_defs/` instead of `<ext>/scripts/component_defs/` and listed by
+    // `scripts/components.xml` instead of an `extension.xml`'s `Components` block (e.g.
+    // `AvatarInBattleVehicleSwitch`, folded into `Avatar`) -- previously not parsed at
+    // all here, which silently dropped every base-game component's properties/methods
+    // from every entity's exposed-id table (confirmed live: real property updates for
+    // entity types like `Avatar` referenced exposed ids past the end of this project's
+    // table, entirely accounted for by these missing base components once added back).
+    // NOT empirically confirmed whether these fold in before or after every extension's
+    // own components in the live client's actual exposed-id order -- placed first here
+    // as the natural guess (base components predate any extension), matching how
+    // `scripts/entities.xml`'s own entities are already ordered before extension ones.
+    //
+    // `seen_components` dedupes by name across this whole function (base game AND every
+    // extension, `StaticComponents` AND `DynamicComponents` alike): the same component
+    // name can legitimately appear more than once in the raw data (confirmed live in the
+    // base game's own `scripts/components.xml` -- e.g. `SecondaryGunComponent` is listed
+    // under both `StaticComponents` and `DynamicComponents`, and a handful of names like
+    // `NetworkReplicationPointComponent` even repeat within the same `DynamicComponents`
+    // list), but only ever gets ONE real slot: a live Frida dump of the running client's
+    // `EntityDescriptionMap` (`re-work/frida/dump_entity_types.js`) showed each dynamic
+    // component name exactly once, in first-occurrence order -- a second listing further
+    // down was silently not assigned its own id. Skipping every occurrence past the first
+    // keeps this project's dynamic-component id sequence aligned with that live table
+    // (confirmed: before this fix, `EntityDescriptionMap` index 256 lived on
+    // `LSVehicleShotChargerComponent`, but this project's un-deduped list put a duplicate
+    // `SecondaryGunComponent` at index ~93, shifting every id after it by one).
+    let mut seen_components = HashSet::new();
+
+    {
+        let components_reader = fs.read("scripts/components.xml")?;
+        let components_elt = pxml::from_reader(components_reader).unwrap();
+
+        for (list_name, components) in [
+            ("StaticComponents", &mut model.static_components),
+            ("DynamicComponents", &mut model.dynamic_components),
+        ] {
+
+            let Some(Value::Element(list_elt)) = components_elt.get_child(list_name) else {
+                continue;
+            };
+
+            for (component_name, _) in list_elt.iter_children_all() {
+
+                if !seen_components.insert(component_name.clone()) {
+                    debug!("skipped duplicate component {component_name} ({list_name})");
+                    continue;
+                }
+
+                let component_path = format!("scripts/component_defs/{component_name}.def");
+                let component_reader = fs.read(&component_path)?;
+                let component_elt = pxml::from_reader(component_reader).unwrap();
+
+                let of_entities = parse::parse_of_entity(&component_elt);
+                let interface = parse::parse_interface(&component_elt, &mut model.tys, component_name.clone());
+
+                components.push(Component {
+                    name: component_name.clone().into(),
+                    of_entities,
+                    interface,
+                });
+                debug!("read component {component_name} ({list_name})");
+
+            }
+
+        }
     }
 
     // WoT extensions (feature packages such as "la_pinger" or "battle_royale") each sit
@@ -120,6 +211,11 @@ pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Script> {
                 };
 
                 for (component_name, _) in list_elt.iter_children_all() {
+
+                    if !seen_components.insert(component_name.clone()) {
+                        debug!("skipped duplicate component {ext_name}/{component_name} ({list_name})");
+                        continue;
+                    }
 
                     let component_path = format!("{ext_name}/scripts/component_defs/{component_name}.def");
                     let component_reader = fs.read(&component_path)?;

@@ -25,18 +25,22 @@ use crate::util::io::*;
 /// (v2.3.1.3, 2026-08-24) and reading the actual registration order out of
 /// `LoginInterface`'s `Mercury::InterfaceMinder` in memory.
 pub mod id {
+    // Length style/param re-confirmed via a fresh re-run of
+    // `re-work/frida/dump_interfaces.js` (2026-08-31) -- no `CALLBACK` ids in this
+    // interface either.
+
     // --- Login request (client -> server) ---
-    pub const LOGIN_REQUEST: u8         = 0x00;
+    pub const LOGIN_REQUEST: u8         = 0x00;  // VAR 2
 
     // --- Connectivity probing ---
-    pub const PROBE: u8                 = 0x01;
-    pub const PING: u8                  = 0x02;
+    pub const PROBE: u8                 = 0x01;  // FIXED 0
+    pub const PING: u8                  = 0x02;  // FIXED 1
 
     // --- Challenge response (client -> server) ---
-    pub const CHALLENGE_RESPONSE: u8    = 0x03;
+    pub const CHALLENGE_RESPONSE: u8    = 0x03;  // VAR 2
 
     // --- Connectivity probing, continued from 0x01 ---
-    pub const MTU_PROBE: u8             = 0x04;
+    pub const MTU_PROBE: u8             = 0x04;  // VAR 2
 }
 
 

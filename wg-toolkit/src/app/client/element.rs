@@ -26,122 +26,137 @@ pub mod id {
     use crate::net::element::ElementIdRange;
 
     // --- Connection handshake & session bookkeeping ---
-    pub const AUTHENTICATE: u8                                          = 0x00;  // FIXED 4 (1.26.1.1 handler: 143326C40)
-    pub const BANDWIDTH_NOTIFICATION: u8                                = 0x01;  // FIXED 4 (1.26.1.1 handler: 143326C58)
-    pub const UPDATE_FREQUENCY_NOTIFICATION: u8                         = 0x02;  // FIXED 7 (1.26.1.1 handler: 143326C70)
-    pub const SET_GAME_TIME: u8                                         = 0x03;  // FIXED 4 (1.26.1.1 handler: 143326C88)
-    pub const RESET_ENTITIES: u8                                        = 0x04;  // FIXED 1 (1.26.1.1 handler: 143326CA0)
+    pub const AUTHENTICATE: u8                                          = 0x00;  // FIXED 4
+    pub const BANDWIDTH_NOTIFICATION: u8                                = 0x01;  // FIXED 4
+    pub const UPDATE_FREQUENCY_NOTIFICATION: u8                         = 0x02;  // FIXED 7
+    pub const SET_GAME_TIME: u8                                         = 0x03;  // FIXED 4
+    pub const RESET_ENTITIES: u8                                        = 0x04;  // FIXED 1
     // --- Player entity creation (base & cell) ---
-    pub const CREATE_BASE_PLAYER: u8                                    = 0x05;  // VAR 2 (1.26.1.1 handler: 143326CC0)
-    pub const CREATE_CELL_PLAYER: u8                                    = 0x06;  // VAR 2 (1.26.1.1 handler: 143326D10)
+    pub const CREATE_BASE_PLAYER: u8                                    = 0x05;  // VAR 2
+    pub const CREATE_CELL_PLAYER: u8                                    = 0x06;  // VAR 2
 
     // --- Spaces & general entity lifecycle (creation, AoI enter/leave) ---
-    pub const DUMMY_PACKET: u8                                          = 0x07;  // VAR 2 (1.26.1.1 handler: 143326D60)
-    pub const SPACE_PROPERTY: u8                                        = 0x08;  // VAR 2 (1.26.1.1 handler: 143326DB0)
-    pub const ADD_SPACE_GEOMETRY_MAPPING: u8                            = 0x09;  // VAR 2 (1.26.1.1 handler: 143326E00)
-    pub const REMOVE_SPACE_GEOMETRY_MAPPING: u8                         = 0x0A;  // VAR 2 (1.26.1.1 handler: 143326E50)
-    pub const CREATE_ENTITY: u8                                         = 0x0B;  // VAR 2 (1.26.1.1 handler: 143326EA0)
-    pub const CREATE_ENTITY_DETAILED: u8                                = 0x0C;  // VAR 2 (1.26.1.1 handler: 143326EF0)
+    pub const DUMMY_PACKET: u8                                          = 0x07;  // VAR 2
+    pub const SPACE_PROPERTY: u8                                        = 0x08;  // VAR 2
+    pub const ADD_SPACE_GEOMETRY_MAPPING: u8                            = 0x09;  // VAR 2
+    pub const REMOVE_SPACE_GEOMETRY_MAPPING: u8                         = 0x0A;  // VAR 2
+    pub const CREATE_ENTITY: u8                                         = 0x0B;  // VAR 2
+    pub const CREATE_ENTITY_DETAILED: u8                                = 0x0C;  // VAR 2
 
     // --- Cell suspend/resume & client suspension detection (not in vanilla BigWorld,
     // confirmed live via `re-work/frida/dump_interfaces.js`) ---
-    pub const CELL_APP_SUSPENDED: u8                                    = 0x0D;  // FIXED 0 (1.26.1.1 handler: 143326F38)
-    pub const CELL_APP_RESUMED: u8                                      = 0x0E;  // FIXED 0 (1.26.1.1 handler: 143326F50)
-    pub const CLIENT_SUSPENSION_DETECTION_ENABLED: u8                   = 0x0F;  // FIXED 4 (1.26.1.1 handler: 143326F68)
+    pub const CELL_APP_SUSPENDED: u8                                    = 0x0D;  // FIXED 0
+    pub const CELL_APP_RESUMED: u8                                      = 0x0E;  // FIXED 0
+    pub const CLIENT_SUSPENSION_DETECTION_ENABLED: u8                   = 0x0F;  // FIXED 4
 
     // --- Area of Interest enter/leave ---
-    pub const ENTER_AOI: u8                                             = 0x10;  // FIXED 5 (1.26.1.1 handler: 143326F80)
-    pub const ENTER_AOI_ON_VEHICLE: u8                                  = 0x11;  // FIXED 9 (1.26.1.1 handler: 143326F98)
-    pub const LEAVE_AOI: u8                                             = 0x12;  // VAR 2 (1.26.1.1 handler: 143326FB0)
+    pub const ENTER_AOI: u8                                             = 0x10;  // FIXED 5
+    pub const ENTER_AOI_ON_VEHICLE: u8                                  = 0x11;  // FIXED 9
+    pub const LEAVE_AOI: u8                                             = 0x12;  // VAR 2
 
     // --- Timing, positioning references & entity selection ---
-    pub const TICK_SYNC: u8                                             = 0x13;  // FIXED 1 (1.26.1.1 handler: 143326FF8)
-    pub const TICK_SYNC_PERIODIC: u8                                    = 0x14;  // FIXED 2 (1.26.1.1 handler: 143327010)
-    pub const RELATIVE_POSITION_REFERENCE: u8                           = 0x15;  // FIXED 1 (1.26.1.1 handler: 143327028)
-    pub const RELATIVE_POSITION: u8                                     = 0x16;  // FIXED 12 (1.26.1.1 handler: 143327040)
-    pub const SET_VEHICLE: u8                                           = 0x17;  // FIXED 8 (1.26.1.1 handler: 143327058)
-    pub const SELECT_ALIASED_ENTITY: u8                                 = 0x18;  // FIXED 1 (1.26.1.1 handler: 143327070)
-    pub const SELECT_ENTITY: u8                                         = 0x19;  // FIXED 4 (1.26.1.1 handler: 143327088)
-    pub const SELECT_PLAYER_ENTITY: u8                                  = 0x1A;  // FIXED 0 (1.26.1.1 handler: 1433270A0)
-    pub const FORCED_POSITION: u8                                       = 0x1B;  // FIXED 38 (1.26.1.1 handler: 1433270B8)
+    pub const TICK_SYNC: u8                                             = 0x13;  // FIXED 1
+    pub const TICK_SYNC_PERIODIC: u8                                    = 0x14;  // FIXED 2
+    pub const RELATIVE_POSITION_REFERENCE: u8                           = 0x15;  // FIXED 1
+    pub const RELATIVE_POSITION: u8                                     = 0x16;  // FIXED 12
+    pub const SET_VEHICLE: u8                                           = 0x17;  // FIXED 8
+    pub const SELECT_ALIASED_ENTITY: u8                                 = 0x18;  // FIXED 1
+    pub const SELECT_ENTITY: u8                                         = 0x19;  // FIXED 4
+    pub const SELECT_PLAYER_ENTITY: u8                                  = 0x1A;  // FIXED 0
+    pub const FORCED_POSITION: u8                                       = 0x1B;  // FIXED 38
 
     // --- Avatar detailed updates & volatile properties (see also 0x29-0x40 below) ---
-    pub const AVATAR_UPDATE_NO_ALIAS_DETAILED: u8                       = 0x1C;  // FIXED 29 (1.26.1.1 handler: 1433270D0)
-    pub const AVATAR_UPDATE_ALIAS_DETAILED: u8                          = 0x1D;  // FIXED 26 (1.26.1.1 handler: 1433270E8)
-    pub const AVATAR_UPDATE_PLAYER_DETAILED: u8                         = 0x1E;  // FIXED 25 (1.26.1.1 handler: 143327100)
-    pub const AVATAR_UPDATE_VOLATILE_PROPERTIES: u8                     = 0x1F;  // VAR 2 (1.26.1.1 handler: 143327120)
-    pub const CHANGE_VOLATILE_PACKER_TYPE: u8                           = 0x20;  // VAR 2 (1.26.1.1 handler: 143327170)
+    pub const AVATAR_UPDATE_NO_ALIAS_DETAILED: u8                       = 0x1C;  // FIXED 29
+    pub const AVATAR_UPDATE_ALIAS_DETAILED: u8                          = 0x1D;  // FIXED 26
+    pub const AVATAR_UPDATE_PLAYER_DETAILED: u8                         = 0x1E;  // FIXED 25
+    pub const AVATAR_UPDATE_VOLATILE_PROPERTIES: u8                     = 0x1F;  // VAR 2
+    pub const CHANGE_VOLATILE_PACKER_TYPE: u8                           = 0x20;  // VAR 2
 
     // --- Network Replication Layer ("NRL"): WoT's own CGF node-replication messages
     // (`NetworkReplicationPointComponent.py`), not present in vanilla BigWorld. ---
-    pub const NRL_CREATE_NODE: u8                                       = 0x21;  // VAR 2 (1.26.1.1 handler: 1433271C0)
-    pub const NRL_UNLINK_TREE: u8                                       = 0x22;  // VAR 2 (1.26.1.1 handler: 143327210)
-    pub const NRL_UPDATE_NODE: u8                                       = 0x23;  // VAR 2 (1.26.1.1 handler: 143327260)
-    pub const NRL_UNLINK_TREE_FLAG: u8                                  = 0x24;  // FIXED 0 (1.26.1.1 handler: 1433272A8)
-    pub const NRL_UPDATE_NODE_FLAG: u8                                  = 0x25;  // FIXED 0 (1.26.1.1 handler: 1433272C0)
-    pub const NRL_DATA: u8                                              = 0x26;  // VAR 2 (1.26.1.1 handler: 1433272E0)
-    pub const NRL_MSG_TO_CLIENT: u8                                     = 0x27;  // VAR 2 (1.26.1.1 handler: 143327330)
-    pub const NRL_UNRELIABLE_MSG_TO_CLIENT: u8                          = 0x28;  // VAR 2 (1.26.1.1 handler: 143327380)
+    pub const NRL_CREATE_NODE: u8                                       = 0x21;  // VAR 2
+    pub const NRL_UNLINK_TREE: u8                                       = 0x22;  // VAR 2
+    pub const NRL_UPDATE_NODE: u8                                       = 0x23;  // VAR 2
+    pub const NRL_UNLINK_TREE_FLAG: u8                                  = 0x24;  // FIXED 0
+    pub const NRL_UPDATE_NODE_FLAG: u8                                  = 0x25;  // FIXED 0
+    pub const NRL_DATA: u8                                              = 0x26;  // VAR 2
+    pub const NRL_MSG_TO_CLIENT: u8                                     = 0x27;  // VAR 2
+    pub const NRL_UNRELIABLE_MSG_TO_CLIENT: u8                          = 0x28;  // VAR 2
 
     // --- Avatar movement updates (`AVUPMSG` combinatorial family), continued from 0x1C ---
     // The 24 AVUPMSG combinations (see `common_client_interface.hpp` in the leaked
     // BigWorld 14.4.1 SDK, `re-work/bigworld-src-14.4.1/`): each combination of
     // {NoAlias 4-byte EntityID, Alias 1-byte IDAlias} x {FullPos 5-byte PackedXYZ,
     // OnGround 3-byte PackedXZ, NoPos none} x {YawPitchRoll 3 bytes, YawPitch 2 bytes,
-    // Yaw 1 byte, NoDir none} is registered as its own fixed-size message id (id field
-    // + pos field + dir field, in that order) -- all bit-widths are compile-time
-    // `#define`s in `msgtypes.hpp`, not runtime/connection state, so these sizes are
-    // constant for this client build. Previously mislabeled "CALLBACK 0" (a length-style
-    // placeholder, not an actual byte count) -- that mislabeling made a bundle reader
-    // misparse these as some other framing, corrupting the read position for anything
-    // bundled alongside them.
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8        = 0x29;  // FIXED 12 (1.26.1.1 handler: 1433273D0)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH: u8             = 0x2A;  // FIXED 11 (1.26.1.1 handler: 143327430)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW: u8                   = 0x2B;  // FIXED 10 (1.26.1.1 handler: 143327490)
-    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR: u8                = 0x2C;  // FIXED 9 (1.26.1.1 handler: 1433274F0)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8       = 0x2D;  // FIXED 10 (1.26.1.1 handler: 143327550)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH: u8            = 0x2E;  // FIXED 9 (1.26.1.1 handler: 1433275B0)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW: u8                  = 0x2F;  // FIXED 8 (1.26.1.1 handler: 143327610)
-    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR: u8               = 0x30;  // FIXED 7 (1.26.1.1 handler: 143327670)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL: u8          = 0x31;  // FIXED 7 (1.26.1.1 handler: 1433276D0)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH: u8               = 0x32;  // FIXED 6 (1.26.1.1 handler: 143327730)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW: u8                     = 0x33;  // FIXED 5 (1.26.1.1 handler: 143327790)
-    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR: u8                  = 0x34;  // FIXED 4 (1.26.1.1 handler: 1433277F0)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8           = 0x35;  // FIXED 9 (1.26.1.1 handler: 143327850)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH: u8                = 0x36;  // FIXED 8 (1.26.1.1 handler: 1433278B0)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW: u8                      = 0x37;  // FIXED 7 (1.26.1.1 handler: 143327910)
-    pub const AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR: u8                   = 0x38;  // FIXED 6 (1.26.1.1 handler: 143327970)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8          = 0x39;  // FIXED 7 (1.26.1.1 handler: 1433279D0)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH: u8               = 0x3A;  // FIXED 6 (1.26.1.1 handler: 143327A30)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW: u8                     = 0x3B;  // FIXED 5 (1.26.1.1 handler: 143327A90)
-    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR: u8                  = 0x3C;  // FIXED 4 (1.26.1.1 handler: 143327AF0)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL: u8             = 0x3D;  // FIXED 4 (1.26.1.1 handler: 143327B50)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH: u8                  = 0x3E;  // FIXED 3 (1.26.1.1 handler: 143327BB0)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW: u8                        = 0x3F;  // FIXED 2 (1.26.1.1 handler: 143327C10)
-    pub const AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR: u8                     = 0x40;  // FIXED 1 (1.26.1.1 handler: 143327C70)
+    // Yaw 1 byte, NoDir none} suggests a fixed-size message per id (id field + pos field
+    // + dir field, in that order) -- but a fresh live re-check of the registration table
+    // itself (`re-work/frida/dump_interfaces.js`, re-run 2026-08-31 against the running
+    // client) CONFIRMS all 24 of these ids (and the `entityMethod`/`entityProperty`
+    // ranges below) are genuinely registered with `lengthStyle=CALLBACK`, not `FIXED` --
+    // an earlier pass through this file had concluded the opposite (that CALLBACK was
+    // some kind of stale/placeholder mislabeling and these were "really" fixed-size),
+    // which was wrong: CALLBACK means the client asks a per-message callback for the
+    // byte count of each individual instance rather than using one constant, so the
+    // *true* wire length of any of these ids can vary message-to-message depending on
+    // runtime state this project hasn't investigated (a good candidate given the
+    // existence of `CHANGE_VOLATILE_PACKER_TYPE` nearby, but not confirmed -- not
+    // pursued further here per explicit decision to not dig into what CALLBACK-style
+    // elements compute). The `Fixed(N)` declarations below are this project's own
+    // approximation, good enough for the common case observed live, but NOT a wire
+    // guarantee -- `AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL` (0x35) needed a
+    // different constant than the vanilla-SDK-derived formula in a live capture (see its
+    // hand-written impl below), and `AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR` (0x3C) has
+    // since been observed failing to decode at its declared `Fixed(4)` in another live
+    // capture too -- both consistent with this being a systemic "declared length is only
+    // an approximation" issue across the whole CALLBACK family, not one-off bugs in
+    // isolated ids.
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8        = 0x29;  // CALLBACK 0, approximated here as Fixed(12)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH: u8             = 0x2A;  // CALLBACK 0, approximated here as Fixed(11)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW: u8                   = 0x2B;  // CALLBACK 0, approximated here as Fixed(10)
+    pub const AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR: u8                = 0x2C;  // CALLBACK 0, approximated here as Fixed(9)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8       = 0x2D;  // CALLBACK 0, approximated here as Fixed(10)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH: u8            = 0x2E;  // CALLBACK 0, approximated here as Fixed(9)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW: u8                  = 0x2F;  // CALLBACK 0, approximated here as Fixed(8)
+    pub const AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR: u8               = 0x30;  // CALLBACK 0, approximated here as Fixed(7)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL: u8          = 0x31;  // CALLBACK 0, approximated here as Fixed(7)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH: u8               = 0x32;  // CALLBACK 0, approximated here as Fixed(6)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW: u8                     = 0x33;  // CALLBACK 0, approximated here as Fixed(5)
+    pub const AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR: u8                  = 0x34;  // CALLBACK 0, approximated here as Fixed(4)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL: u8           = 0x35;  // CALLBACK 0, approximated here as Fixed(12) -- see hand-written impl below
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH: u8                = 0x36;  // CALLBACK 0, approximated here as Fixed(8)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_YAW: u8                      = 0x37;  // CALLBACK 0, approximated here as Fixed(7)
+    pub const AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR: u8                   = 0x38;  // CALLBACK 0, approximated here as Fixed(6)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL: u8          = 0x39;  // CALLBACK 0, approximated here as Fixed(7)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH: u8               = 0x3A;  // CALLBACK 0, approximated here as Fixed(6)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_YAW: u8                     = 0x3B;  // CALLBACK 0, approximated here as Fixed(5)
+    pub const AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR: u8                  = 0x3C;  // CALLBACK 0, approximated here as Fixed(4) -- known to sometimes need more, unresolved
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL: u8             = 0x3D;  // CALLBACK 0, approximated here as Fixed(4)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH: u8                  = 0x3E;  // CALLBACK 0, approximated here as Fixed(3)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_YAW: u8                        = 0x3F;  // CALLBACK 0, approximated here as Fixed(2)
+    pub const AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR: u8                     = 0x40;  // CALLBACK 0, approximated here as Fixed(1)
 
     // --- Entity control, voice & session hand-off ---
-    pub const CONTROL_ENTITY: u8                                        = 0x41;  // FIXED 5 (1.26.1.1 handler: 143327CC8)
-    pub const VOICE_DATA: u8                                            = 0x42;  // VAR 2 (1.26.1.1 handler: 143327CE0)
-    pub const RESTORE_CLIENT: u8                                        = 0x43;  // VAR 2 (1.26.1.1 handler: 143327D00)
-    pub const SWITCH_BASE_APP: u8                                       = 0x44;  // FIXED 9 (1.26.1.1 handler: 143327D48)
+    pub const CONTROL_ENTITY: u8                                        = 0x41;  // FIXED 5
+    pub const VOICE_DATA: u8                                            = 0x42;  // VAR 2
+    pub const RESTORE_CLIENT: u8                                        = 0x43;  // VAR 2
+    pub const SWITCH_BASE_APP: u8                                       = 0x44;  // FIXED 9
 
     // --- Resource download (fonts, sounds, etc. streamed on demand) ---
-    pub const RESOURCE_HEADER: u8                                       = 0x45;  // VAR 2 (1.26.1.1 handler: 143327D60)
-    pub const RESOURCE_FRAGMENT: u8                                     = 0x46;  // VAR 2 (1.26.1.1 handler: 143327DB0)
+    pub const RESOURCE_HEADER: u8                                       = 0x45;  // VAR 2
+    pub const RESOURCE_FRAGMENT: u8                                     = 0x46;  // VAR 2
 
     // --- Session teardown & raw entity property/position streaming ---
-    pub const LOGGED_OFF: u8                                            = 0x47;  // FIXED 1 (1.26.1.1 handler: 143327DF8)
-    pub const DETAILED_POSITION: u8                                     = 0x48;  // FIXED 24 (1.26.1.1 handler: 143327E10)
-    pub const NESTED_ENTITY_PROPERTY: u8                                = 0x49;  // VAR 2 (1.26.1.1 handler: 143327E30)
-    pub const SLICE_ENTITY_PROPERTY: u8                                 = 0x4A;  // VAR 2 (1.26.1.1 handler: 143327E80)
-    pub const UPDATE_ENTITY: u8                                         = 0x4B;  // VAR 2 (1.26.1.1 handler: 143327ED0)
-    pub const SET_CELL_APP_EXT_ADDRESS: u8                              = 0x4C;  // VAR 2 (1.26.1.1 handler: 143327F20)
-    pub const LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION: u8   = 0x4D;  // FIXED 0 (1.26.1.1 handler: 143327F68)
+    pub const LOGGED_OFF: u8                                            = 0x47;  // FIXED 1
+    pub const DETAILED_POSITION: u8                                     = 0x48;  // FIXED 24
+    pub const NESTED_ENTITY_PROPERTY: u8                                = 0x49;  // VAR 2
+    pub const SLICE_ENTITY_PROPERTY: u8                                 = 0x4A;  // VAR 2
+    pub const UPDATE_ENTITY: u8                                         = 0x4B;  // VAR 2
+    pub const SET_CELL_APP_EXT_ADDRESS: u8                              = 0x4C;  // VAR 2
+    pub const LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION: u8   = 0x4D;  // FIXED 0
 
     // --- Dynamic entity method/property dispatch (script-model-driven) ---
-    pub const ENTITY_METHOD: ElementIdRange     = ElementIdRange::new(0x4E, 0xA6);  // CALLBACK 0 (1.26.1.1 handler: 143327F80)
-    pub const ENTITY_PROPERTY: ElementIdRange   = ElementIdRange::new(0xA7, 0xFE);  // CALLBACK 0 (1.26.1.1 handler: 143327FA8)
+    pub const ENTITY_METHOD: ElementIdRange     = ElementIdRange::new(0x4E, 0xA6);  // CALLBACK 0
+    pub const ENTITY_PROPERTY: ElementIdRange   = ElementIdRange::new(0xA7, 0xFE);  // CALLBACK 0
 
 }
 
@@ -857,7 +872,9 @@ impl SimpleElement for AvatarUpdatePlayerDetailed {
 /// (`entity_id: u32`) or `Alias` (`id_alias: u8`) target, followed by its position and
 /// direction fields -- see the doc comment on
 /// `id::AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL` for how these three independent
-/// axes combine into the 24 distinct fixed-size element ids.
+/// axes combine into the 24 distinct element ids, and for why every `Fixed($len)` below
+/// is only this project's approximation of a wire length the live client actually
+/// registers as `CALLBACK` (dynamic, computed per-instance) -- not a guaranteed constant.
 macro_rules! avatar_update_elements {
     ($( $name:ident { $id_field:ident: $id_ty:ty, position: $pos_ty:ty, direction: $dir_ty:ty } = $id_const:ident, $len:literal; )*) => {
         $(
@@ -891,7 +908,6 @@ avatar_update_elements! {
     AvatarUpdateNoAliasNoPosYawPitch        { entity_id: u32, position: (), direction: PackedYawPitch }            = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH, 6;
     AvatarUpdateNoAliasNoPosYaw             { entity_id: u32, position: (), direction: PackedYaw }                 = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW, 5;
     AvatarUpdateNoAliasNoPosNoDir           { entity_id: u32, position: (), direction: () }                        = AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR, 4;
-    AvatarUpdateAliasFullPosYawPitchRoll    { id_alias: u8, position: PackedXyz, direction: PackedYawPitchRoll }   = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL, 9;
     AvatarUpdateAliasFullPosYawPitch        { id_alias: u8, position: PackedXyz, direction: PackedYawPitch }       = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH, 8;
     AvatarUpdateAliasFullPosYaw             { id_alias: u8, position: PackedXyz, direction: PackedYaw }            = AVATAR_UPDATE_ALIAS_FULL_POS_YAW, 7;
     AvatarUpdateAliasFullPosNoDir           { id_alias: u8, position: PackedXyz, direction: () }                   = AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR, 6;
@@ -903,6 +919,63 @@ avatar_update_elements! {
     AvatarUpdateAliasNoPosYawPitch          { id_alias: u8, position: (), direction: PackedYawPitch }              = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH, 3;
     AvatarUpdateAliasNoPosYaw               { id_alias: u8, position: (), direction: PackedYaw }                   = AVATAR_UPDATE_ALIAS_NO_POS_YAW, 2;
     AvatarUpdateAliasNoPosNoDir             { id_alias: u8, position: (), direction: () }                          = AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR, 1;
+}
+
+/// `AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL` (id `0x35`) -- kept out of the
+/// `avatar_update_elements!` family above because, unlike the rest of it, its observed
+/// size does NOT match the vanilla BigWorld SDK formula (`id_alias` 1 + `position` 5 +
+/// `direction` 3 = 9): confirmed live (WoT 2.3.1.3, two independent battle captures,
+/// each replayed byte-exact through to a clean bundle end with zero further decode
+/// errors via `wg-toolkit-cli/examples/replay_bundle.rs`) that this element is actually
+/// 12 bytes, with 3 extra trailing bytes this project doesn't yet know the meaning of
+/// (values vary a lot between instances, so not padding/a constant marker) -- likely a
+/// WoT-specific extension of the vanilla AVUPMSG format, same idea as the WoT-only NRL
+/// messages nearby. Previously declared as `Fixed(9)` (matching the vanilla formula), which
+/// desynced the bundle reader for everything following it -- this was a real,
+/// reproducible cause of the client dropping its connection mid-battle.
+///
+/// Now understood as one instance of a wider pattern, not an isolated one-off: a fresh
+/// live re-check of `ClientInterface`'s own registration table
+/// (`re-work/frida/dump_interfaces.js`, re-run 2026-08-31) confirms this id -- and all 23
+/// others in the family above, plus `entityMethod`/`entityProperty` -- are registered
+/// with `lengthStyle=CALLBACK`, meaning the *true* wire length is computed per-instance
+/// by the client itself and is not a fixed constant at all. This project's `Fixed(N)`
+/// declarations (this hand-written one included) are only approximations of the common
+/// case, not a protocol guarantee -- `AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR` (`0x3C`) has
+/// since also been observed failing to decode at its declared `Fixed(4)` in a later live
+/// capture, consistent with the same systemic issue rather than a second unrelated bug.
+/// What actually drives the callback's length choice (`ChangeVolatilePackerType`-related
+/// state is a plausible candidate, given the name) has not been investigated -- out of
+/// scope here by design.
+#[derive(Debug, Clone, Copy)]
+pub struct AvatarUpdateAliasFullPosYawPitchRoll {
+    pub id_alias: u8,
+    pub position: PackedXyz,
+    pub direction: PackedYawPitchRoll,
+    /// Unconfirmed meaning -- see this struct's doc comment.
+    pub unk: [u8; 3],
+}
+
+impl SimpleCodec for AvatarUpdateAliasFullPosYawPitchRoll {
+    fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+        write.write_u8(self.id_alias)?;
+        SimpleCodec::write(&self.position, write)?;
+        SimpleCodec::write(&self.direction, write)?;
+        write.write_all(&self.unk)
+    }
+    fn read(read: &mut dyn Read) -> io::Result<Self> {
+        let id_alias = read.read_u8()?;
+        let position = <PackedXyz as SimpleCodec>::read(read)?;
+        let direction = <PackedYawPitchRoll as SimpleCodec>::read(read)?;
+        let mut unk = [0; 3];
+        read.read_exact(&mut unk)?;
+        Ok(Self { id_alias, position, direction, unk })
+    }
+}
+
+impl SimpleElement for AvatarUpdateAliasFullPosYawPitchRoll {
+    const ID: u8 = id::AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL;
+    const LEN: ElementLength = ElementLength::Fixed(12);
 }
 
 pub type AvatarUpdateVolatileProperties = DebugElementVariable16<{ id::AVATAR_UPDATE_VOLATILE_PROPERTIES }>;
