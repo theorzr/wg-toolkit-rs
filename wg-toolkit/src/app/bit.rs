@@ -30,6 +30,7 @@ impl<'a> BitWriter<'a> {
 }
 
 /// Counterpart to [`BitWriter`].
+#[derive(Clone, Copy)]
 pub(crate) struct BitReader<'a> {
     buf: &'a [u8],
     pos: u32,
@@ -39,6 +40,32 @@ impl<'a> BitReader<'a> {
 
     pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
+    }
+
+    /// Total number of bits available.
+    pub(crate) fn total_bits(&self) -> u32 {
+        self.buf.len() as u32 * 8
+    }
+
+    /// Like [`Self::get`], but returns `None` instead of panicking if `num_bits` aren't
+    /// available, leaving the position unchanged on failure. Meant for speculative
+    /// decoding where running out of bits is an expected "this guess doesn't work"
+    /// outcome, not a programming error.
+    pub(crate) fn try_get(&mut self, num_bits: u32) -> Option<u32> {
+        if self.pos.checked_add(num_bits)? > self.total_bits() {
+            return None;
+        }
+        Some(self.get(num_bits))
+    }
+
+    /// Skip to the start of the next byte, discarding any partial-byte padding bits.
+    pub(crate) fn align_to_byte(&mut self) {
+        self.pos = self.pos.div_ceil(8) * 8;
+    }
+
+    /// The bytes remaining after the current position, or `None` if not byte-aligned.
+    pub(crate) fn remaining_bytes(&self) -> Option<&'a [u8]> {
+        (self.pos % 8 == 0).then(|| &self.buf[(self.pos / 8) as usize..])
     }
 
     pub(crate) fn get(&mut self, num_bits: u32) -> u32 {
@@ -58,6 +85,7 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -100,4 +128,5 @@ mod tests {
             assert_eq!(reader.get(5), v);
         }
     }
+    
 }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::net::element::ElementLength;
 use crate::net::codec::Codec;
 use crate::script::{
-    Script, Interface, Method, Property, Component, PropertyFlags, VariableHeaderSize,
+    Script, Interface, Method, Property, PropertyFlags, VariableHeaderSize,
     Ty, TyKind, TyDict, TyDictProp, TySystem, Value,
 };
 
@@ -51,32 +51,22 @@ impl ScriptDispatch {
 
         let mut entities = Vec::with_capacity(script.entities.len() + script.dynamic_components.len());
 
-        // Components (either kind) folding other components into themselves has never
-        // been observed live, and no `<ofEntity>`-eligible target would even apply to a
-        // component's own interface (`<ofEntity>` names real entities) -- so a dynamic
-        // component's own dispatch tables (below) are built with no folding at all,
-        // unlike a real entity's (which folds every static-or-dynamic component whose
-        // `<ofEntity>` names it).
-        let all_components: Vec<&Component> = script.static_components.iter()
-            .chain(script.dynamic_components.iter())
-            .collect();
-
         for entity in &script.entities {
             entities.push(EntityDispatch {
-                base_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, base_methods_of),
-                cell_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, cell_methods_of),
-                client_methods: build_method_table(&script.interfaces, &all_components, &entity.interface, client_methods_of),
-                properties: build_property_table(&script.interfaces, &all_components, &entity.interface),
+                base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of),
+                cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of),
+                client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of),
+                properties: build_property_table(&script.interfaces, &entity.interface),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface),
             });
         }
 
         for component in &script.dynamic_components {
             entities.push(EntityDispatch {
-                base_methods: build_method_table(&script.interfaces, &[], &component.interface, base_methods_of),
-                cell_methods: build_method_table(&script.interfaces, &[], &component.interface, cell_methods_of),
-                client_methods: build_method_table(&script.interfaces, &[], &component.interface, client_methods_of),
-                properties: build_property_table(&script.interfaces, &[], &component.interface),
+                base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of),
+                cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of),
+                client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of),
+                properties: build_property_table(&script.interfaces, &component.interface),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface),
             });
         }
@@ -222,13 +212,18 @@ fn ty_stream_size(ty: &Ty) -> Option<usize> {
         TyKind::Mailbox => None,
         TyKind::Alias(inner) => ty_stream_size(inner),
         TyKind::Dict(dict) => {
-            let props_size: Option<usize> = dict.properties.iter()
+            // An `AllowNone` FIXED_DICT has no fixed stream size at all: it is a lone
+            // presence byte when `None`, and that byte plus its fields otherwise (see
+            // `Value`'s `Codec<Ty>` impl in `net/codec.rs`). Confirmed against the live
+            // client, which gives such a property a variable-length slot -- counting it as
+            // fixed sorts it into the wrong place in the property table and shifts every
+            // slot after it.
+            if dict.allow_none {
+                return None;
+            }
+            dict.properties.iter()
                 .map(|prop| ty_stream_size(&prop.ty))
-                .sum();
-            // `AllowNone` FIXED_DICTs are preceded on the wire by a presence byte (see
-            // `Value`'s `Codec<Ty>` impl in `net/codec.rs`), which isn't itself one of
-            // `dict.properties`.
-            props_size.map(|size| size + dict.allow_none as usize)
+                .sum()
         }
         TyKind::Array(seq) | TyKind::Tuple(seq) =>
             seq.size.map(|len| len as usize)
@@ -340,42 +335,26 @@ fn cell_methods_of(interface: &Interface) -> &[Method] { &interface.cell_methods
 /// `wg-toolkit-cli`'s codegen time.
 fn build_method_table(
     interfaces: &[Interface],
-    static_components: &[&Component],
     entity_interface: &Interface,
     methods_of: fn(&Interface) -> &[Method],
 ) -> Vec<MethodDef> {
 
+    // Only the entity's own and inherited (`implements`) methods -- a component's methods
+    // are not part of the entity's exposed table, for the same reason its properties
+    // aren't (see [`build_property_table`]). Confirmed against the live client, whose
+    // `MethodDescription` exposed-index field covers exactly this set: 70 client methods
+    // for Avatar, against 86 when components were folded in.
     let mut collected = Vec::new();
     collect_methods(interfaces, entity_interface, methods_of, &mut collected);
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
-    let mut defs: Vec<MethodDef> = collected.into_iter()
+    collected.into_iter()
         .map(|(method, length)| MethodDef {
             name: method.name.clone(),
             args: method.args.iter().map(|arg| arg.ty.clone()).collect(),
             length,
         })
-        .collect();
-
-    for component in static_components.iter().copied() {
-
-        if !component.of_entities.iter().any(|e| **e == *entity_interface.name) {
-            continue;
-        }
-
-        for method in methods_of(&component.interface) {
-            if is_method_exposed(method) {
-                defs.push(MethodDef {
-                    name: method.name.clone(),
-                    args: method.args.iter().map(|arg| arg.ty.clone()).collect(),
-                    length: method_length(method),
-                });
-            }
-        }
-
-    }
-
-    defs
+        .collect()
 
 }
 
@@ -385,37 +364,28 @@ fn build_method_table(
 /// that. Same stable-sort/component-folding rule as [`build_method_table`].
 fn build_property_table(
     interfaces: &[Interface],
-    static_components: &[&Component],
     entity_interface: &Interface,
 ) -> Vec<PropertyDef> {
 
+    // Only the entity's own and inherited (`implements`) properties. A component's
+    // properties are NOT part of the entity's client-server table, even when its
+    // `<ofEntity>` names this entity: confirmed against the live client, whose
+    // `DataDescription::clientServerIndex` covers exactly this set (Avatar 28, Vehicle 50)
+    // and gives no index to any component property. Folding them in used to inflate the
+    // table (Vehicle to 139, with 14 duplicate names) and, because they took part in the
+    // sort below, shifted every slot after the first one inserted -- so element ids decoded
+    // against the wrong property and desynced the rest of the bundle.
+    //
+    // A component is addressed as an entity in its own right instead, with its own type id
+    // and table (see [`ScriptDispatch::new`]) selected by `SelectEntity` on the component's
+    // own entity id.
     let mut collected = Vec::new();
     collect_properties(interfaces, entity_interface, &mut collected);
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
-    let mut defs: Vec<PropertyDef> = collected.into_iter()
+    collected.into_iter()
         .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length })
-        .collect();
-
-    for component in static_components.iter().copied() {
-
-        if !component.of_entities.iter().any(|e| **e == *entity_interface.name) {
-            continue;
-        }
-
-        for property in &component.interface.properties {
-            if is_property_exposed(property) {
-                defs.push(PropertyDef {
-                    name: property.name.clone(),
-                    ty: property.ty.clone(),
-                    length: property_length(property),
-                });
-            }
-        }
-
-    }
-
-    defs
+        .collect()
 
 }
 

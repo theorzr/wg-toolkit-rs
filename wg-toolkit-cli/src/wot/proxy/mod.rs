@@ -12,7 +12,7 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use flate2::read::ZlibDecoder;
 use blowfish::Blowfish;
 
-use wgtk::net::element::{DebugElementUndefined, SimpleElement};
+use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, Element, SimpleElement};
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
 use wgtk::net::codec::WgSocketAddrV4;
 
@@ -25,6 +25,14 @@ use wgtk::util::io::serde_pickle_de_options;
 
 use crate::CliResult;
 
+
+/// Sentinel `id_alias` value meaning "no alias assigned" -- confirmed against the leaked
+/// BigWorld 14.4.1 SDK (`server/cellapp/entity_cache.hpp`: `const IDAlias NO_ID_ALIAS =
+/// 0xff;`). The server only allocates a real alias to entities with volatile (position)
+/// data, and only while its per-client alias pool (`Witness::freeAliases_`, an 8-bit
+/// free-list, `server/cellapp/witness.cpp`) still has a free slot; everything else keeps
+/// this sentinel.
+const NO_ID_ALIAS: u8 = 0xff;
 
 /// Hex-encode bytes for embedding in a log line (used for raw payloads that failed to
 /// decode into anything more structured, so they still end up in the protocol trace).
@@ -53,6 +61,21 @@ macro_rules! trace_dbg {
     }};
 }
 
+/// Like [`trace_dbg`], but for the `AVATAR_UPDATE_ALIAS_*` (AVUPMSG) family: also
+/// resolves `element.id_alias` back to a full entity id via `self.id_aliases` (see that
+/// field's doc comment) and logs it alongside, so per-entity correlation (e.g. of the
+/// still-unexplained trailing `unk` bytes) doesn't require cross-referencing `EnterAoi`
+/// by hand.
+macro_rules! trace_dbg_alias {
+    ($self:expr, $elt:expr, $addr:expr, $ty:ty) => {{
+        let e = $elt.read_simple::<$ty>()?;
+        let entity_id = $self.id_aliases.get(&e.element.id_alias).copied();
+        trace!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id, entity_id = ?entity_id,
+            "{}: {:?}", stringify!($ty), e.element);
+        Ok(true)
+    }};
+}
+
 
 pub fn run(
     login_app_addr: SocketAddrV4,
@@ -76,6 +99,7 @@ pub fn run(
     let shared = Arc::new(Shared {
         base_app_addr,
         login_app_addr,
+        real_login_app_addr,
         dispatch: ScriptDispatch::new(script),
         pending_clients: Mutex::new(HashMap::new()),
         pending_switches: Mutex::new(HashMap::new()),
@@ -89,9 +113,11 @@ pub fn run(
         shared,
         next_tick: None,
         entities: HashMap::new(),
+        created_entity_types: HashMap::new(),
         selected_entity_id: None,
         player_entity_id: None,
         cell_player_entity_id: None,
+        id_aliases: HashMap::new(),
         partial_resources: HashMap::new(),
         session_keys: HashMap::new(),
     };
@@ -134,6 +160,17 @@ struct BaseHandler {
     /// `Shared::dispatch` by type id, and dispatching against those, without this proxy
     /// needing to know any concrete entity type statically.
     entities: HashMap<u32, (u16, Value)>,
+    /// Entity types learned from `CreateEntity`/`CreateEntityDetailed`. Kept separate from
+    /// `entities` because only decoders whose element framing is independent of the table
+    /// may use a merely-plausible type: currently `Nested`/`SliceEntityProperty`, both
+    /// always `Variable16`.
+    ///
+    /// `ENTITY_PROPERTY`/`ENTITY_METHOD` must not, since they derive the element's wire
+    /// length from the table (see `EntityMethod::read_length`, keyed off
+    /// `client_methods.len()`). A wrong type there mis-frames that element and everything
+    /// after it in the bundle, which can corrupt a downstream `SwitchBaseApp` into a
+    /// garbage address that this proxy would then adopt, killing the connection.
+    created_entity_types: HashMap<u32, u16>,
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
     /// The `Vehicle` entity registered by the last [`client::element::CreateCellPlayer`]
@@ -146,6 +183,14 @@ struct BaseHandler {
     /// *base* entity method calls (`BASE_ENTITY_METHOD`, below) must still always target
     /// the base/`Account` entity regardless of any cell/vehicle presence.
     cell_player_entity_id: Option<u32>,
+    /// Resolves an AVUPMSG `id_alias` byte back to the full entity id it currently
+    /// refers to. Mirrors the server's own `Witness::freeAliases_` pool (confirmed
+    /// against the leaked BigWorld 14.4.1 SDK, `server/cellapp/witness.cpp`): an alias
+    /// is assigned in `EnterAoi`/`EnterAoiOnVehicle` (only to entities with volatile
+    /// data -- others get `NO_ID_ALIAS`/255, never inserted here) and freed for reuse
+    /// once the same entity's `LeaveAoi` is seen, so this map is kept in lock-step with
+    /// those three messages rather than ever being inferred.
+    id_aliases: HashMap<u8, u32>,
     partial_resources: HashMap<u16, PartialResource>,
     /// The session key last sent by each client, as observed on the initial handshake
     /// with the base app. When a SwitchBaseApp is intercepted and rewritten to keep the
@@ -160,6 +205,9 @@ struct Shared {
     base_app_addr: SocketAddrV4,
     #[allow(unused)]
     login_app_addr: SocketAddrV4,
+    /// The real login app this proxy forwards to. Used to sanity-check a `SwitchBaseApp`
+    /// address against the operator's own network -- see that element's handling.
+    real_login_app_addr: SocketAddrV4,
     /// The script model's dynamic dispatch tables, resolved once at startup -- see
     /// `wgtk::app::script::ScriptDispatch`.
     dispatch: ScriptDispatch,
@@ -516,6 +564,10 @@ impl BaseHandler {
                 }
 
                 self.entities.clear();
+                // Entity ids are reused across spaces, so a leftover mapping would resolve
+                // a wrong type for a reused id. Dropped wholesale: unlike `entities`, this
+                // never holds the player, so nothing here needs preserving.
+                self.created_entity_types.clear();
                 self.player_entity_id = None;
 
                 // The vehicle (if any) doesn't survive a reset either -- a new battle
@@ -588,7 +640,10 @@ impl BaseHandler {
             }
             SelectEntity::ID => {
                 let se = elt.read_simple::<SelectEntity>()?;
-                if self.entities.contains_key(&se.element.entity_id) {
+                // A type known only from `CreateEntity` still lets the framing-independent
+                // decoders resolve a table, so it counts as tracked here.
+                if self.entities.contains_key(&se.element.entity_id)
+                    || self.created_entity_types.contains_key(&se.element.entity_id) {
                     info!(%addr, id = SelectEntity::ID, request_id = ?se.request_id,
                         "<- Select entity: {}", se.element.entity_id);
                 } else {
@@ -628,6 +683,25 @@ impl BaseHandler {
                 // of the base app's `run()` loop and kills request handling for every
                 // connected client, not just this one. Bail out loudly instead of
                 // chaining into either failure mode.
+                // The `0.x.x.x`/port-0 checks below are necessary but not sufficient: a
+                // desynced read can yield an address that passes both, and adopting it as
+                // the peer's real address kills the connection (inbound stops dead while
+                // the client resends its session key forever). A genuine base-app switch
+                // stays inside the operator's network, so require the same /16 as the real
+                // login app -- the tightest bound derivable from this proxy's own config
+                // without hardcoding an IP range.
+                let real_login_octets = self.shared.real_login_app_addr.ip().octets();
+                let new_octets = sba.element.base_addr.addr.ip().octets();
+                let same_network = new_octets[..2] == real_login_octets[..2];
+
+                if !same_network {
+                    error!(%addr, id = SwitchBaseApp::ID, request_id = ?sba.request_id,
+                        "<- Switch base app: address {:?} is outside the real login app's network ({}), \
+                         likely bundle desync upstream -- ignoring",
+                        sba.element.base_addr, self.shared.real_login_app_addr.ip());
+                    return Ok(true);
+                }
+
                 if sba.element.base_addr.addr.ip().octets()[0] == 0 || sba.element.base_addr.addr.port() == 0 {
                     error!(%addr, id = SwitchBaseApp::ID, request_id = ?sba.request_id,
                         "<- Switch base app: implausible address {:?}, likely bundle desync upstream -- ignoring",
@@ -805,14 +879,55 @@ impl BaseHandler {
             SpaceProperty::ID => return trace_dbg!(elt, addr, SpaceProperty),
             AddSpaceGeometryMapping::ID => return trace_dbg!(elt, addr, AddSpaceGeometryMapping),
             RemoveSpaceGeometryMapping::ID => return trace_dbg!(elt, addr, RemoveSpaceGeometryMapping),
-            CreateEntity::ID => return trace_dbg!(elt, addr, CreateEntity),
-            CreateEntityDetailed::ID => return trace_dbg!(elt, addr, CreateEntityDetailed),
+            CreateEntity::ID => {
+                // Record the entity's type so a later `SelectEntity` targeting it can
+                // resolve a dispatch table. Without this, only the player's own base
+                // entity (`CreateBasePlayer`) and vehicle (`CreateCellPlayer`) were ever
+                // known, so every message aimed at any *other* entity fell through to a
+                // "not tracked" warning -- which is what kept the `Nested`/
+                // `SliceEntityProperty` codecs from ever being exercised against real
+                // traffic, since those target exactly such entities. See
+                // `created_entity_types` for why this deliberately doesn't go into
+                // `entities`.
+                let e = elt.read_simple::<CreateEntity>()?;
+                self.created_entity_types.insert(e.element.entity_id, e.element.entity_type_id);
+                trace!(%addr, id = CreateEntity::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(CreateEntity), e.element);
+                return Ok(true);
+            }
+            CreateEntityDetailed::ID => {
+                let e = elt.read_simple::<CreateEntityDetailed>()?;
+                self.created_entity_types.insert(e.element.entity_id, e.element.entity_type_id);
+                trace!(%addr, id = CreateEntityDetailed::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(CreateEntityDetailed), e.element);
+                return Ok(true);
+            }
             CellAppSuspended::ID => return trace_dbg!(elt, addr, CellAppSuspended),
             CellAppResumed::ID => return trace_dbg!(elt, addr, CellAppResumed),
             ClientSuspensionDetectionEnabled::ID => return trace_dbg!(elt, addr, ClientSuspensionDetectionEnabled),
-            EnterAoi::ID => return trace_dbg!(elt, addr, EnterAoi),
-            EnterAoiOnVehicle::ID => return trace_dbg!(elt, addr, EnterAoiOnVehicle),
-            LeaveAoi::ID => return trace_dbg!(elt, addr, LeaveAoi),
+            EnterAoi::ID => {
+                let e = elt.read_simple::<EnterAoi>()?;
+                if e.element.id_alias != NO_ID_ALIAS {
+                    self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
+                }
+                trace!(%addr, id = EnterAoi::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(EnterAoi), e.element);
+                return Ok(true);
+            }
+            EnterAoiOnVehicle::ID => {
+                let e = elt.read_simple::<EnterAoiOnVehicle>()?;
+                if e.element.id_alias != NO_ID_ALIAS {
+                    self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
+                }
+                trace!(%addr, id = EnterAoiOnVehicle::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(EnterAoiOnVehicle), e.element);
+                return Ok(true);
+            }
+            LeaveAoi::ID => {
+                let e = elt.read_simple::<LeaveAoi>()?;
+                // The wire message only carries the entity id (see `Witness::onLeaveAoI`
+                // in the leaked BigWorld source), not the alias itself, so the freed slot
+                // has to be found by value rather than by key.
+                self.id_aliases.retain(|_, &mut entity_id| entity_id != e.element.entity_id);
+                trace!(%addr, id = LeaveAoi::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(LeaveAoi), e.element);
+                return Ok(true);
+            }
             TickSyncPeriodic::ID => return trace_dbg!(elt, addr, TickSyncPeriodic),
             RelativePositionReference::ID => return trace_dbg!(elt, addr, RelativePositionReference),
             RelativePosition::ID => return trace_dbg!(elt, addr, RelativePosition),
@@ -834,18 +949,18 @@ impl BaseHandler {
             AvatarUpdateNoAliasNoPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosYawPitch),
             AvatarUpdateNoAliasNoPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosYaw),
             AvatarUpdateNoAliasNoPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateNoAliasNoPosNoDir),
-            AvatarUpdateAliasFullPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYawPitchRoll),
-            AvatarUpdateAliasFullPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYawPitch),
-            AvatarUpdateAliasFullPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosYaw),
-            AvatarUpdateAliasFullPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasFullPosNoDir),
-            AvatarUpdateAliasOnGroundYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYawPitchRoll),
-            AvatarUpdateAliasOnGroundYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYawPitch),
-            AvatarUpdateAliasOnGroundYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundYaw),
-            AvatarUpdateAliasOnGroundNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasOnGroundNoDir),
-            AvatarUpdateAliasNoPosYawPitchRoll::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYawPitchRoll),
-            AvatarUpdateAliasNoPosYawPitch::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYawPitch),
-            AvatarUpdateAliasNoPosYaw::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosYaw),
-            AvatarUpdateAliasNoPosNoDir::ID => return trace_dbg!(elt, addr, AvatarUpdateAliasNoPosNoDir),
+            AvatarUpdateAliasFullPosYawPitchRoll::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasFullPosYawPitchRoll),
+            AvatarUpdateAliasFullPosYawPitch::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasFullPosYawPitch),
+            AvatarUpdateAliasFullPosYaw::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasFullPosYaw),
+            AvatarUpdateAliasFullPosNoDir::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasFullPosNoDir),
+            AvatarUpdateAliasOnGroundYawPitchRoll::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasOnGroundYawPitchRoll),
+            AvatarUpdateAliasOnGroundYawPitch::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasOnGroundYawPitch),
+            AvatarUpdateAliasOnGroundYaw::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasOnGroundYaw),
+            AvatarUpdateAliasOnGroundNoDir::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasOnGroundNoDir),
+            AvatarUpdateAliasNoPosYawPitchRoll::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosYawPitchRoll),
+            AvatarUpdateAliasNoPosYawPitch::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosYawPitch),
+            AvatarUpdateAliasNoPosYaw::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosYaw),
+            AvatarUpdateAliasNoPosNoDir::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosNoDir),
             AvatarUpdateVolatileProperties::ID => return trace_dbg!(elt, addr, AvatarUpdateVolatileProperties),
             ChangeVolatilePackerType::ID => return trace_dbg!(elt, addr, ChangeVolatilePackerType),
             NrlCreateNode::ID => return trace_dbg!(elt, addr, NrlCreateNode),
@@ -860,8 +975,89 @@ impl BaseHandler {
             VoiceData::ID => return trace_dbg!(elt, addr, VoiceData),
             RestoreClient::ID => return trace_dbg!(elt, addr, RestoreClient),
             DetailedPosition::ID => return trace_dbg!(elt, addr, DetailedPosition),
-            NestedEntityProperty::ID => return trace_dbg!(elt, addr, NestedEntityProperty),
-            SliceEntityProperty::ID => return trace_dbg!(elt, addr, SliceEntityProperty),
+            id @ NestedEntityProperty::ID => {
+
+                // Buffer the raw payload first so a decode failure (or a missing dispatch
+                // table) can still report the exact bytes as plain hex, which is what makes
+                // such a failure diagnosable at all. Reading the correctly-framed element
+                // rather than an unbounded `DebugElementUndefined` also lets every path
+                // below continue the bundle safely.
+                let raw = elt.read_simple::<DebugElementVariable16<{ NestedEntityProperty::ID }>>()?;
+                let data = raw.element.data;
+
+                // Same dispatch-table requirement as `ENTITY_PROPERTY` below: decoding
+                // the compressed path needs the correct entity's own property table to
+                // know each container's shape (see `NestedEntityProperty`'s doc comment).
+                // Safe to consult `created_entity_types` here (unlike
+                // `ENTITY_PROPERTY`/`ENTITY_METHOD`): this element is always `Variable16`,
+                // so its framing doesn't depend on the table and a wrong guess can only
+                // produce a bad decode of this one element, never a bundle desync.
+                let dispatch = self.selected_entity_id.and_then(|entity_id| {
+                    let type_id = self.created_entity_types.get(&entity_id).copied()
+                        .or_else(|| self.entities.get(&entity_id).map(|&(type_id, _)| type_id))?;
+                    Some((entity_id, self.shared.dispatch.entity_from_id(type_id)?))
+                });
+
+                let Some((entity_id, dispatch)) = dispatch else {
+                    warn!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Nested entity property (no dispatch table)");
+                    return Ok(true);
+                };
+
+                let mut read = io::Cursor::new(&data[..]);
+                match NestedEntityProperty::read(&mut read, &dispatch.properties, data.len(), id) {
+                    Ok(p) => info!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Nested entity property: ({entity_id}) {:?} = {:?}", p.path, p.value),
+                    // Unlike `ENTITY_PROPERTY`, a decode failure here doesn't risk
+                    // desyncing the rest of the bundle (the payload is fully consumed
+                    // above), so log and keep going rather than stop the whole bundle.
+                    Err(e) => warn!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Nested entity property (failed to decode): ({entity_id}) {e}"),
+                }
+
+                return Ok(true);
+
+            }
+            id @ SliceEntityProperty::ID => {
+
+                // See the `NestedEntityProperty` arm above for why the payload is
+                // buffered and hex-logged before any decode is attempted.
+                let raw = elt.read_simple::<DebugElementVariable16<{ SliceEntityProperty::ID }>>()?;
+                let data = raw.element.data;
+
+                // Safe to consult `created_entity_types` here (unlike
+                // `ENTITY_PROPERTY`/`ENTITY_METHOD`): this element is always `Variable16`,
+                // so its framing doesn't depend on the table and a wrong guess can only
+                // produce a bad decode of this one element, never a bundle desync.
+                let dispatch = self.selected_entity_id.and_then(|entity_id| {
+                    let type_id = self.created_entity_types.get(&entity_id).copied()
+                        .or_else(|| self.entities.get(&entity_id).map(|&(type_id, _)| type_id))?;
+                    Some((entity_id, self.shared.dispatch.entity_from_id(type_id)?))
+                });
+
+                let Some((entity_id, dispatch)) = dispatch else {
+                    warn!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Slice entity property (no dispatch table)");
+                    return Ok(true);
+                };
+
+                let mut read = io::Cursor::new(&data[..]);
+                match SliceEntityProperty::read(&mut read, &dispatch.properties, data.len(), id) {
+                    // Several readings parsed and the append-consistent one was picked;
+                    // keep that visibly distinct so a wrong pick can't become fact.
+                    Ok(p) if p.seq_len_inferred => info!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Slice entity property (append-inferred): ({entity_id}) {:?} [{}..{}] = {:?}",
+                        p.path, p.start, p.end, p.values),
+                    Ok(p) => info!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Slice entity property: ({entity_id}) {:?} [{}..{}] = {:?}",
+                        p.path, p.start, p.end, p.values),
+                    Err(e) => warn!(%addr, id, len = data.len(), data = %hex(&data),
+                        "<- Slice entity property (failed to decode): ({entity_id}) {e}"),
+                }
+
+                return Ok(true);
+
+            }
             UpdateEntity::ID => return trace_dbg!(elt, addr, UpdateEntity),
             SetCellAppExtAddress::ID => return trace_dbg!(elt, addr, SetCellAppExtAddress),
             LastProxyMessageAfterDirectCellAppConnection::ID => return trace_dbg!(elt, addr, LastProxyMessageAfterDirectCellAppConnection),
@@ -964,8 +1160,15 @@ impl BaseHandler {
                         Err(e) => {
                             let exposed_id = id::ENTITY_PROPERTY.to_exposed_id_checked(dispatch.properties.len() as u16, id);
                             let name = exposed_id.and_then(|e| dispatch.properties.get(e as usize)).map(|def| &*def.name);
-                            warn!(%addr, id, "<- Entity property (failed to decode, stopping bundle): ({entity_id}) exposed_id={exposed_id:?} name={name:?}: {e}");
-                            return Ok(false);
+                            // Propagated (not just `Ok(false)`) so the bundle-level catch-all
+                            // logs this bundle's full raw bytes -- needed to reproduce this
+                            // class of failure byte-exact via `replay_bundle.rs`, since the
+                            // AsciiFmt preview elsewhere is lossy/ambiguous around literal
+                            // quote bytes in the data (confirmed the hard way: hand-parsing
+                            // one back to bytes silently produced 640 bytes instead of the
+                            // declared 88).
+                            return Err(io::Error::new(e.kind(), format!(
+                                "Entity property (failed to decode, stopping bundle): ({entity_id}) exposed_id={exposed_id:?} name={name:?}: {e}")));
                         }
                     }
                 }
