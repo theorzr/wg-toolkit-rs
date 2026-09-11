@@ -723,9 +723,15 @@ impl NodeCache {
                 .as_dir_mut()
                 .expect("current directory should effectively be a directory");
 
-            let prev_child = dir.children.insert(Arc::from(file_name), inner_len);
+            // More than one package can legitimately ship the same file path (confirmed
+            // live against a real WoT install, v2.4.0.0: 218 per-map `.pkg` files, several
+            // `_hd` variants of the same map, apparently share some non-texture file) --
+            // whichever package is indexed last for that path simply wins, matching
+            // `fs::read_dir`'s (arbitrary, OS-dependent) enumeration order. The shadowed
+            // node stays in `self.nodes` unreferenced (a harmless small leak) rather than
+            // being removed, since removing it would shift every later index.
+            dir.children.insert(Arc::from(file_name), inner_len);
             self.dir_children_max_count = self.dir_children_max_count.max(dir.children.len());
-            debug_assert!(prev_child.is_none(), "overwriting a file");
             self.nodes.push(NodeInfo::File(FileInfo {
                 package_index,
                 file_index,
