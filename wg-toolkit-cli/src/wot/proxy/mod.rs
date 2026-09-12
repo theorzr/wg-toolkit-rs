@@ -116,7 +116,6 @@ pub fn run(
         created_entity_types: HashMap::new(),
         selected_entity_id: None,
         player_entity_id: None,
-        cell_player_entity_id: None,
         id_aliases: HashMap::new(),
         partial_resources: HashMap::new(),
         session_keys: HashMap::new(),
@@ -173,16 +172,6 @@ struct BaseHandler {
     created_entity_types: HashMap<u32, u16>,
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
-    /// The `Vehicle` entity registered by the last [`client::element::CreateCellPlayer`]
-    /// (id: `id::CREATE_CELL_PLAYER`, see that handling below), if any -- confirmed live
-    /// (WoT v2.3.1.3, actual battle capture) that once this exists, `SelectPlayerEntity`
-    /// targets *this* entity rather than `player_entity_id` (the base/`Account` entity):
-    /// every property update observed after entering a battle decoded correctly only
-    /// against the `Vehicle` entity's own property table, never `Account`'s. Kept
-    /// separate from `player_entity_id` rather than overwriting it, since client-directed
-    /// *base* entity method calls (`BASE_ENTITY_METHOD`, below) must still always target
-    /// the base/`Account` entity regardless of any cell/vehicle presence.
-    cell_player_entity_id: Option<u32>,
     /// Resolves an AVUPMSG `id_alias` byte back to the full entity id it currently
     /// refers to. Mirrors the server's own `Witness::freeAliases_` pool (confirmed
     /// against the leaked BigWorld 14.4.1 SDK, `server/cellapp/witness.cpp`): an alias
@@ -362,12 +351,34 @@ impl proxy::Handler for BaseHandler {
 
 impl BaseHandler {
 
-    /// What `SelectPlayerEntity` (id: `id::SELECT_PLAYER_ENTITY`) actually targets --
-    /// confirmed live (WoT v2.3.1.3) that once a `Vehicle` has been registered by
-    /// `CreateCellPlayer`, it takes over from the base/`Account` entity for this
-    /// purpose, see the doc comment on `cell_player_entity_id`.
+    /// What `SelectPlayerEntity` (id: `id::SELECT_PLAYER_ENTITY`) targets: always the
+    /// entity from the most recent `CreateBasePlayer`, never the `Vehicle` that
+    /// `CreateCellPlayer` announces alongside it.
+    ///
+    /// This used to prefer the `CreateCellPlayer` vehicle over `player_entity_id`, on the
+    /// strength of a v2.3.1.3 capture where battle property updates appeared to decode
+    /// only against `Vehicle`'s table. That was a false positive, disproven on a v2.4.0.0
+    /// battle capture:
+    ///
+    /// * Entering a battle fires a *second* `CreateBasePlayer`, with `entity_type_id=2`
+    ///   (`Avatar`) -- so the old reasoning's "the base/`Account` entity" premise simply
+    ///   doesn't hold in battle: by then the player entity *is* the `Avatar`.
+    /// * `Vehicle[19] debuff` is `Fixed(4)`; `Avatar[19] ownVehicleAuxPhysicsData` is
+    ///   `Fixed(8)`. Reading the latter as the former consumes half the element, and the
+    ///   4 trailing bytes then get eaten as the next element's id -- which is why the
+    ///   leftovers kept landing on further *plausible-looking* `Vehicle` properties
+    ///   (`isStrafing`, `engineMode`, `gunAnglesPacked`) and made the wrong table look
+    ///   right. Live proof: all 3908 `debuff` reads in one battle were followed by a
+    ///   decode error or a bundle stop, never once by a clean continuation.
+    /// * Replaying that battle's 304 failing packets settles it: as `Vehicle` all 304
+    ///   fail; as `Avatar` all 304 decode to completion, recovering 73% more elements,
+    ///   with `ownVehicleAuxPhysicsData` exactly where the bogus `debuff` used to be.
+    ///
+    /// The `Vehicle` is still registered in `entities` by `CreateCellPlayer` so that an
+    /// explicit `SelectEntity` naming it resolves a real dispatch table -- it just no
+    /// longer hijacks `SelectPlayerEntity`.
     fn select_player_entity_id(&self) -> Option<u32> {
-        self.cell_player_entity_id.or(self.player_entity_id)
+        self.player_entity_id
     }
 
     fn read_out_bundle(&mut self, mut peer: proxy::Peer, bundle: Bundle) -> io::Result<()> {
@@ -570,10 +581,6 @@ impl BaseHandler {
                 self.created_entity_types.clear();
                 self.player_entity_id = None;
 
-                // The vehicle (if any) doesn't survive a reset either -- a new battle
-                // means a fresh `CreateCellPlayer` for a new vehicle id.
-                self.cell_player_entity_id = None;
-
                 // Restore player entity!
                 if let Some((player_entity_id, player_entity)) = player_entity {
                     self.entities.insert(player_entity_id, player_entity);
@@ -629,10 +636,6 @@ impl BaseHandler {
                 match self.shared.dispatch.entity_from_name("Vehicle") {
                     Some((vehicle_type_id, _)) => {
                         self.entities.insert(ccp.element.vehicle_id, (vehicle_type_id, Value::Dict(BTreeMap::new())));
-                        // Confirmed live: once this exists, `SelectPlayerEntity` targets
-                        // the vehicle, not the base/`Account` entity -- see the doc
-                        // comment on `cell_player_entity_id`.
-                        self.cell_player_entity_id = Some(ccp.element.vehicle_id);
                     }
                     None => warn!(%addr, "<- Create cell player: no 'Vehicle' entity type in the loaded script model"),
                 }
