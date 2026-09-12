@@ -788,7 +788,36 @@ impl<'a> BundleElementReader<'a> {
                             return Err(e);
                         }
                     };
-                    warn!("remaining data while reading element of type '{}': {:?}", std::any::type_name::<E>(), AsciiFmt(&unread_data));
+                    // The trailing bytes alone say *how much* was missed but not where
+                    // it belongs, which is exactly what is needed to correct a struct
+                    // layout. So dump the whole element -- header included -- from the
+                    // saved pre-header reader, letting the miss be lined up against the
+                    // fields that did decode. Capped, since a method body can be large
+                    // and this fires for every under-read element in the bundle.
+                    const MAX_ELEMENT_DUMP: usize = 160;
+                    let full = (!elt_len_oversize).then(|| {
+                        let header_len = 1 + elt_len_kind.len() + if request { 6 } else { 0 };
+                        let want = (header_len + elt_len as usize).min(MAX_ELEMENT_DUMP);
+                        let mut buf = vec![0u8; want];
+                        let mut r = reader_save.clone();
+                        let mut n = 0;
+                        while n < want {
+                            match r.read(&mut buf[n..]) {
+                                Ok(0) => break,
+                                Ok(read) => n += read,
+                                Err(_) => break,
+                            }
+                        }
+                        buf.truncate(n);
+                        buf
+                    });
+                    let full_hex = full.as_deref().map(|b| {
+                        let mut h = b.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                        if b.len() >= MAX_ELEMENT_DUMP { h.push_str(" ..."); }
+                        h
+                    }).unwrap_or_else(|| "<oversize>".to_string());
+                    warn!("remaining data while reading element of type '{}' (id={elt_id:02X}, len={elt_len}, unread={unread_len}): {:?}; element: {full_hex}",
+                        std::any::type_name::<E>(), AsciiFmt(&unread_data));
                 }
 
                 // We advance the reader by the amount that has not been read. Unwrapping

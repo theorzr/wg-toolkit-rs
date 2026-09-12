@@ -325,6 +325,12 @@ impl Element<Vec<MethodDef>> for BaseEntityMethod {
 /// recovers the call itself, not anything about forwarding it.
 #[derive(Debug, Clone)]
 pub struct CellEntityMethod {
+    /// Target entity, streamed *before* the method's sub-id and arguments. `0` is the
+    /// common case and is not a real id: it means "the client's own entity", which the
+    /// base app substitutes (`Proxy::cellEntityMethod`: `if (entityID == 0) entityID =
+    /// id_;`). Kept verbatim rather than resolved, since the connection's own entity id
+    /// is not this element's to know.
+    pub entity_id: u32,
     pub call: MethodCall,
 }
 
@@ -348,7 +354,19 @@ impl Element<Vec<MethodDef>> for CellEntityMethod {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected cell entity method element id: {id:02X}")));
         }
 
-        let mut len = len;
+        // The target entity id leads the body, before the sub-id and the arguments. Only
+        // the *cell* form carries it: `Proxy::cellEntityMethod` opens with `data >>
+        // entityID;` and forwards the rest, whereas `Proxy::baseEntityMethod` goes
+        // straight to `exposedMethodFromMsgID` -- so this must not be copied to
+        // [`BaseEntityMethod`]. The sub-id is read after it, on the cell app, by
+        // `ExposedMethodMessageRange::exposedIDFromMsgID`, which is why the order here is
+        // entity id first and sub-id second.
+        //
+        // Missing this consumed the (almost always zero) entity id *as the arguments* and
+        // left the real ones unread as trailing bytes -- every client-to-cell call was
+        // silently decoded with shifted, wrong arguments.
+        let entity_id = read.read_u32()?;
+        let mut len = len.saturating_sub(4);
         let mut sub_id_err = None;
         let exposed_id = id::CELL_ENTITY_METHOD.to_exposed_id(config.len() as u16, id, || {
             len = len.saturating_sub(1);
@@ -373,7 +391,7 @@ impl Element<Vec<MethodDef>> for CellEntityMethod {
             }
         };
 
-        Ok(Self { call })
+        Ok(Self { entity_id, call })
 
     }
 

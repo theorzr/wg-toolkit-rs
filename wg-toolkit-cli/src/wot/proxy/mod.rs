@@ -620,10 +620,19 @@ impl BaseHandler {
                         warn!(%addr, id, "-> Cell entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
                         return Ok(true);
                     };
-                    let call = elt.read::<CellEntityMethod, _>(&dispatch.cell_methods)?.element.call;
+                    let m = elt.read::<CellEntityMethod, _>(&dispatch.cell_methods)?.element;
+                    // The wire id is 0 for "my own entity" (the base app substitutes its
+                    // own), so report the resolved target but keep the raw value visible
+                    // when it names someone else -- that case is rare and worth seeing.
+                    let target = if m.entity_id == 0 {
+                        format!("{entity_id}")
+                    } else {
+                        format!("{} (wire)", m.entity_id)
+                    };
+                    let call = m.call;
                     match &call {
-                        MethodCall::Known { .. } => info!(%addr, id, "-> Cell entity method: ({entity_id}) {call:?}"),
-                        MethodCall::Unknown { .. } => warn!(%addr, id, "-> Cell entity method (unrecognized exposed id): ({entity_id}) {call:?}"),
+                        MethodCall::Known { .. } => info!(%addr, id, "-> Cell entity method: ({target}) {call:?}"),
+                        MethodCall::Unknown { .. } => warn!(%addr, id, "-> Cell entity method (unrecognized exposed id): ({target}) {call:?}"),
                     }
                     return Ok(true);
                 }
