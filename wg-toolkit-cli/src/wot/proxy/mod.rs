@@ -35,6 +35,17 @@ use crate::CliResult;
 /// this sentinel.
 const NO_ID_ALIAS: u8 = 0xff;
 
+/// Renders an `id_alias` for logging, spelling out the `NO_ID_ALIAS` sentinel. It is a
+/// real slot in the client's table (see `id_aliases`), so it is worth being able to tell
+/// "entity has no volatile data" from an ordinary alias when reading a trace.
+fn fmt_id_alias(id_alias: u8) -> String {
+    if id_alias == NO_ID_ALIAS {
+        format!("{id_alias} (NO_ID_ALIAS)")
+    } else {
+        id_alias.to_string()
+    }
+}
+
 /// Hex-encode bytes for embedding in a log line (used for raw payloads that failed to
 /// decode into anything more structured, so they still end up in the protocol trace).
 fn hex(bytes: &[u8]) -> String {
@@ -116,6 +127,14 @@ macro_rules! trace_dbg_alias {
     ($self:expr, $elt:expr, $addr:expr, $ty:ty) => {{
         let e = $elt.read_simple::<$ty>()?;
         let entity_id = $self.id_aliases.get(&e.element.id_alias).copied();
+        // Re-target exactly like the `NoAlias` family does (see [`trace_dbg_entity`]):
+        // `IMPLEMENT_AVUPMSG` sets `selectedEntityID_` unconditionally, and the aliased
+        // forms are the *common* case in a battle, so skipping this pins the stream to
+        // whatever `SelectPlayerEntity` last named (the player `Avatar`) and decodes
+        // every other vehicle's properties against the wrong table. An alias we can't
+        // resolve clears the selection rather than leaving a stale one, so the element
+        // stops on "no dispatch table" instead of silently mis-decoding.
+        $self.selected_entity_id = entity_id;
         // Sample the *raw* bytes of the first few of each AVUPMSG id. The parsed body is
         // known-unreliable (its internal field splits are wrong, and element length alone
         // can't tell `Alias+FullPos+YawPitchRoll` (1+7+4) from `NoAlias+OnGround+
@@ -254,12 +273,16 @@ struct BaseHandler {
     selected_entity_id: Option<u32>,
     player_entity_id: Option<u32>,
     /// Resolves an AVUPMSG `id_alias` byte back to the full entity id it currently
-    /// refers to. Mirrors the server's own `Witness::freeAliases_` pool (confirmed
-    /// against the leaked BigWorld 14.4.1 SDK, `server/cellapp/witness.cpp`): an alias
-    /// is assigned in `EnterAoi`/`EnterAoiOnVehicle` (only to entities with volatile
-    /// data -- others get `NO_ID_ALIAS`/255, never inserted here) and freed for reuse
-    /// once the same entity's `LeaveAoi` is seen, so this map is kept in lock-step with
-    /// those three messages rather than ever being inferred.
+    /// refers to. This mirrors the *client*'s `ServerConnection::idAlias_[256]` rather
+    /// than the server's `Witness::freeAliases_` pool, because it has to answer the same
+    /// question the client answers when it decodes the same bytes.
+    ///
+    /// That distinction decides the lifetime rules, and they are narrower than they look:
+    /// the only writer is `enterAoI` (shared by `EnterAoi`/`EnterAoiOnVehicle`), which
+    /// records the mapping *including* the `NO_ID_ALIAS`/255 slot, and the only bulk
+    /// clear is the full connection reset (`ResetEntities`). In particular `LeaveAoi`
+    /// does **not** remove anything -- the server reuses an alias by sending a fresh
+    /// `enterAoI` that overwrites the slot. See those three arms for the details.
     id_aliases: HashMap<u8, u32>,
     /// Id aliases already reported as unresolvable, so the warning below fires once per
     /// distinct alias instead of once per position update (thousands per battle).
@@ -690,6 +713,14 @@ impl BaseHandler {
                 // a wrong type for a reused id. Dropped wholesale: unlike `entities`, this
                 // never holds the player, so nothing here needs preserving.
                 self.created_entity_types.clear();
+                // The alias table is per-connection state in the real client and is wiped
+                // by the same reset that clears `id_`/`spaceID_`/`controlledEntities_`
+                // (`memset( idAlias_, 0, sizeof( idAlias_ ) )`). Aliases are small ints
+                // reused from scratch in the next space, so keeping them across a reset
+                // would silently resolve a new space's alias to a dead entity from the
+                // old one -- the same class of bug as the `entities` map, which is why
+                // that is cleared here too.
+                self.id_aliases.clear();
                 self.player_entity_id = None;
 
                 // Restore player entity!
@@ -1031,33 +1062,51 @@ impl BaseHandler {
             ClientSuspensionDetectionEnabled::ID => return trace_dbg!(elt, addr, ClientSuspensionDetectionEnabled),
             EnterAoi::ID => {
                 let e = elt.read_simple::<EnterAoi>()?;
-                if e.element.id_alias != NO_ID_ALIAS {
-                    self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
-                }
+                // Recorded even when the alias is `NO_ID_ALIAS` (0xFF), matching
+                // `ServerConnection::enterAoI`, which does `idAlias_[ idAlias ] = id;`
+                // under the explicit comment "Set this even if args.idAlias is
+                // NO_ID_ALIAS." 0xFF is a real, addressable slot in the client's 256-entry
+                // table, so a later `selectAliasedEntity( 0xFF )` resolves to whichever
+                // entity last entered without an alias. Skipping it made that lookup miss.
+                self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
                 info!(%addr, id = EnterAoi::ID, request_id = ?e.request_id,
-                    "<- Enter AoI: entity {} alias {}", e.element.entity_id, e.element.id_alias);
+                    "<- Enter AoI: entity {} alias {}", e.element.entity_id,
+                    fmt_id_alias(e.element.id_alias));
                 return Ok(true);
             }
             EnterAoiOnVehicle::ID => {
                 let e = elt.read_simple::<EnterAoiOnVehicle>()?;
-                if e.element.id_alias != NO_ID_ALIAS {
-                    self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
-                }
+                // Same slot-0xFF handling as `EnterAoi` above: `enterAoI` is the shared
+                // implementation behind both messages.
+                self.id_aliases.insert(e.element.id_alias, e.element.entity_id);
                 info!(%addr, id = EnterAoiOnVehicle::ID, request_id = ?e.request_id,
                     "<- Enter AoI on vehicle: entity {} vehicle {} alias {}",
-                    e.element.entity_id, e.element.vehicle_id, e.element.id_alias);
+                    e.element.entity_id, e.element.vehicle_id,
+                    fmt_id_alias(e.element.id_alias));
                 return Ok(true);
             }
             LeaveAoi::ID => {
                 let e = elt.read_simple::<LeaveAoi>()?;
                 // The wire message only carries the entity id (see `Witness::onLeaveAoI`
-                // in the leaked BigWorld source), not the alias itself, so the freed slot
-                // has to be found by value rather than by key.
-                let freed: Vec<u8> = self.id_aliases.iter()
+                // in the leaked BigWorld source), not the alias itself, so a slot can only
+                // be found by value rather than by key -- reported here, but deliberately
+                // *not* removed.
+                //
+                // The real client never unmaps an alias on leave: `idAlias_` is written
+                // only by `ServerConnection::enterAoI` and cleared only by the full
+                // connection reset (`memset( idAlias_, 0, sizeof( idAlias_ ) )`). The
+                // server reuses a freed alias by sending a fresh `enterAoI` for it, which
+                // overwrites the slot, so dropping it here buys nothing and costs real
+                // data: an unresolvable alias now *clears* `selected_entity_id` (see
+                // `trace_dbg_alias`), so a volatile update that arrives slightly after the
+                // leave -- reordering is normal, these are unreliable messages -- would
+                // stop the bundle on "no dispatch table" instead of decoding as the client
+                // decodes it.
+                let stale: Vec<u8> = self.id_aliases.iter()
                     .filter(|(_, v)| **v == e.element.entity_id).map(|(k, _)| *k).collect();
-                self.id_aliases.retain(|_, &mut entity_id| entity_id != e.element.entity_id);
                 info!(%addr, id = LeaveAoi::ID, request_id = ?e.request_id,
-                    "<- Leave AoI: entity {} (freed aliases {:?})", e.element.entity_id, freed);
+                    "<- Leave AoI: entity {} (aliases now stale, kept as the client keeps them: {:?})",
+                    e.element.entity_id, stale);
                 return Ok(true);
             }
             TickSyncPeriodic::ID => return trace_dbg!(elt, addr, TickSyncPeriodic),
