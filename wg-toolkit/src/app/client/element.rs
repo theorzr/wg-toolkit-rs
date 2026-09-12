@@ -525,6 +525,31 @@ pub struct CreateEntity {
     pub client_data: Vec<u8>,
 }
 
+/// Read a `CompressionIStream`-wrapped payload (BigWorld
+/// `lib/network/compression_stream.cpp`): a one-byte `BWCompressionType` tag, then either
+/// the plain body (`BW_COMPRESSION_NONE` = 0) or a zlib stream (`BW_COMPRESSION_ZIP_1..9`
+/// = 1..=9, the tag being the zlib *level*, which doesn't affect decoding).
+///
+/// Any other tag value is not a compression type at all -- the real client treats it as
+/// fatal (`CRITICAL_MSG "Invalid compression type"`), so in this proxy it almost always
+/// means the read position is already desynced rather than that some exotic codec is in
+/// use. The error says so, to stop that being misread as a missing feature.
+fn read_compressed(read: &mut dyn Read) -> io::Result<Vec<u8>> {
+    let compression_type = read.read_u8()?;
+    let mut body = Vec::new();
+    match compression_type {
+        0 => { read.read_to_end(&mut body)?; }
+        1..=9 => {
+            let mut decoder = flate2::read::ZlibDecoder::new(read);
+            decoder.read_to_end(&mut body)?;
+        }
+        other => return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+            "CompressionIStream: invalid compression type {other} (valid: 0, or 1..=9 for \
+             zlib) -- the stream is most likely desynced, not compressed with something new"))),
+    }
+    Ok(body)
+}
+
 impl SimpleCodec for CreateEntity {
 
     fn write(&self, write: &mut dyn Write) -> io::Result<()> {
@@ -539,11 +564,8 @@ impl SimpleCodec for CreateEntity {
     }
 
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        let compression_type = read.read_u8()?;
-        if compression_type != 0 {
-            return Err(io::Error::new(io::ErrorKind::Unsupported,
-                format!("CreateEntity: compressed payload (type {compression_type}) not supported")));
-        }
+        let body = read_compressed(read)?;
+        let read = &mut &body[..];
         let entity_id = read.read_u32()?;
         let entity_type_id = read.read_u16()?;
         let unk_u16 = read.read_u16()?;
@@ -600,11 +622,8 @@ impl SimpleCodec for CreateEntityDetailed {
     }
 
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        let compression_type = read.read_u8()?;
-        if compression_type != 0 {
-            return Err(io::Error::new(io::ErrorKind::Unsupported,
-                format!("CreateEntityDetailed: compressed payload (type {compression_type}) not supported")));
-        }
+        let body = read_compressed(read)?;
+        let read = &mut &body[..];
         let entity_id = read.read_u32()?;
         let entity_type_id = read.read_u16()?;
         let unk_u16 = read.read_u16()?;
@@ -857,21 +876,30 @@ impl SimpleElement for ForcedPosition {
 // under this build's `VOLATILE_POSITIONS_ARE_ABSOLUTE == 0` configuration (confirmed
 // still in effect, see `msgtypes.hpp`) -- "refNum is used to refer to this position later
 // as the base for relative positions", matching this doc comment's own "detailed enough
-// to be reference positions" wording almost verbatim. A trailing `ref_num: u8` here
-// accounts for the missing byte exactly in all three messages independently, which is
-// strong circumstantial support, but this hasn't been confirmed against a live WoT
-// capture (unlike e.g. [`CreateCellPlayer`]'s own confirmed deviations from vanilla).
+// to be reference positions" wording almost verbatim. That extra byte is indeed a
+// `ref_num` -- but it *leads* rather than trails, now confirmed against a live WoT battle
+// capture. Raw `AvatarUpdateAliasDetailed` bytes
+// `00 fa | 0d10b943 d9f33d41 6b638bc3 | 00000000 267158bc 2727cbbf` decode under the
+// leading layout as ref_num=0, id_alias=250 (an alias `EnterAoi` had actually assigned),
+// position (370.13, 11.87, -278.77) and direction (0.0, -0.013, -1.59) rad -- all
+// plausible battle values. Under the old trailing layout the same bytes gave
+// `position: Vec3(-0.00014, 0.119, -4.4e-32)` and made *every* id_alias read as 0, which
+// is what stranded ~2000 property updates per battle on the "no entity selected" path.
 crate::__struct_simple_codec! {
     #[derive(Debug, Clone, Copy)]
     pub struct AvatarUpdateNoAliasDetailed {
+        /// Reference-position sequence number, and the *first* field on the wire.
+        /// Confirmed live: raw `00 fa 0d10b943 d9f33d41 6b638bc3 ...` decodes as
+        /// ref_num=0, id_alias=250 (an alias `EnterAoi` really did assign),
+        /// position (370.13, 11.87, -278.77) and direction (0.0, -0.013, -1.59)
+        /// rad -- all plausible. The previous trailing layout gave garbage
+        /// (`Vec3(-0.00014, 0.119, -4.4e-32)`) and made every alias read as 0.
+        pub ref_num: u8,
         pub entity_id: u32,
         pub position: Vec3,
         /// Yaw/pitch/roll -- see [`ForcedPosition::direction`] for why the exact float
         /// encoding is unconfirmed beyond "plausible radian values".
         pub direction: Vec3,
-        /// See this type's doc comment: likely a reference-position sequence number, not
-        /// confirmed live.
-        pub ref_num: u8,
     }
 }
 
@@ -884,10 +912,16 @@ crate::__struct_simple_codec! {
     /// See [`AvatarUpdateNoAliasDetailed`].
     #[derive(Debug, Clone, Copy)]
     pub struct AvatarUpdateAliasDetailed {
+        /// Reference-position sequence number, and the *first* field on the wire.
+        /// Confirmed live: raw `00 fa 0d10b943 d9f33d41 6b638bc3 ...` decodes as
+        /// ref_num=0, id_alias=250 (an alias `EnterAoi` really did assign),
+        /// position (370.13, 11.87, -278.77) and direction (0.0, -0.013, -1.59)
+        /// rad -- all plausible. The previous trailing layout gave garbage
+        /// (`Vec3(-0.00014, 0.119, -4.4e-32)`) and made every alias read as 0.
+        pub ref_num: u8,
         pub id_alias: u8,
         pub position: Vec3,
         pub direction: Vec3,
-        pub ref_num: u8,
     }
 }
 
@@ -903,9 +937,15 @@ crate::__struct_simple_codec! {
     /// `avatarUpdatePlayerDetailed` in the leaked SDK).
     #[derive(Debug, Clone, Copy)]
     pub struct AvatarUpdatePlayerDetailed {
+        /// Reference-position sequence number, and the *first* field on the wire.
+        /// Confirmed live: raw `00 fa 0d10b943 d9f33d41 6b638bc3 ...` decodes as
+        /// ref_num=0, id_alias=250 (an alias `EnterAoi` really did assign),
+        /// position (370.13, 11.87, -278.77) and direction (0.0, -0.013, -1.59)
+        /// rad -- all plausible. The previous trailing layout gave garbage
+        /// (`Vec3(-0.00014, 0.119, -4.4e-32)`) and made every alias read as 0.
+        pub ref_num: u8,
         pub position: Vec3,
         pub direction: Vec3,
-        pub ref_num: u8,
     }
 }
 
@@ -939,6 +979,10 @@ macro_rules! avatar_update_elements {
         $(
             #[derive(Debug, Clone, Copy)]
             pub struct $name {
+                /// Reference-position sequence number, and the *first* field on the wire --
+                /// see the doc comment on the `avatar_update_elements!` invocation below
+                /// for the live evidence that it leads rather than trails.
+                pub ref_num: u8,
                 pub $id_field: $id_ty,
                 pub position: $pos_ty,
                 pub direction: $dir_ty,
@@ -949,18 +993,20 @@ macro_rules! avatar_update_elements {
 
             impl SimpleCodec for $name {
                 fn write(&self, write: &mut dyn Write) -> io::Result<()> {
+                    write.write_u8(self.ref_num)?;
                     <$id_ty as SimpleCodec>::write(&self.$id_field, write)?;
                     <$pos_ty as SimpleCodec>::write(&self.position, write)?;
                     <$dir_ty as SimpleCodec>::write(&self.direction, write)?;
                     write.write_all(&self.unk)
                 }
                 fn read(read: &mut dyn Read) -> io::Result<Self> {
+                    let ref_num = read.read_u8()?;
                     let $id_field = <$id_ty as SimpleCodec>::read(read)?;
                     let position = <$pos_ty as SimpleCodec>::read(read)?;
                     let direction = <$dir_ty as SimpleCodec>::read(read)?;
                     let mut unk = [0; $unk_len];
                     read.read_exact(&mut unk)?;
-                    Ok(Self { $id_field, position, direction, unk })
+                    Ok(Self { ref_num, $id_field, position, direction, unk })
                 }
             }
 
@@ -973,30 +1019,30 @@ macro_rules! avatar_update_elements {
 }
 
 avatar_update_elements! {
-    AvatarUpdateNoAliasFullPosYawPitchRoll  { entity_id: u32, position: PackedXyz, direction: PackedYawPitchRoll, unk: 3 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL, 15;
-    AvatarUpdateNoAliasFullPosYawPitch      { entity_id: u32, position: PackedXyz, direction: PackedYawPitch,     unk: 2 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH, 13;
-    AvatarUpdateNoAliasFullPosYaw           { entity_id: u32, position: PackedXyz, direction: PackedYaw,          unk: 2 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW, 12;
-    AvatarUpdateNoAliasFullPosNoDir         { entity_id: u32, position: PackedXyz, direction: (),                 unk: 2 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR, 11;
-    AvatarUpdateNoAliasOnGroundYawPitchRoll { entity_id: u32, position: PackedXz,  direction: PackedYawPitchRoll, unk: 2 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 12;
-    AvatarUpdateNoAliasOnGroundYawPitch     { entity_id: u32, position: PackedXz,  direction: PackedYawPitch,     unk: 1 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH, 10;
-    AvatarUpdateNoAliasOnGroundYaw          { entity_id: u32, position: PackedXz,  direction: PackedYaw,          unk: 1 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW, 9;
-    AvatarUpdateNoAliasOnGroundNoDir        { entity_id: u32, position: PackedXz,  direction: (),                 unk: 1 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR, 8;
-    AvatarUpdateNoAliasNoPosYawPitchRoll    { entity_id: u32, position: (),        direction: PackedYawPitchRoll, unk: 2 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL, 9;
-    AvatarUpdateNoAliasNoPosYawPitch        { entity_id: u32, position: (),        direction: PackedYawPitch,     unk: 1 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH, 7;
-    AvatarUpdateNoAliasNoPosYaw             { entity_id: u32, position: (),        direction: PackedYaw,          unk: 1 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW, 6;
-    AvatarUpdateNoAliasNoPosNoDir           { entity_id: u32, position: (),        direction: (),                 unk: 1 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR, 5;
-    AvatarUpdateAliasFullPosYawPitchRoll    { id_alias: u8,   position: PackedXyz, direction: PackedYawPitchRoll, unk: 3 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL, 12;
-    AvatarUpdateAliasFullPosYawPitch        { id_alias: u8,   position: PackedXyz, direction: PackedYawPitch,     unk: 2 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH, 10;
-    AvatarUpdateAliasFullPosYaw             { id_alias: u8,   position: PackedXyz, direction: PackedYaw,          unk: 2 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW, 9;
-    AvatarUpdateAliasFullPosNoDir           { id_alias: u8,   position: PackedXyz, direction: (),                 unk: 2 } = AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR, 8;
-    AvatarUpdateAliasOnGroundYawPitchRoll   { id_alias: u8,   position: PackedXz,  direction: PackedYawPitchRoll, unk: 2 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 9;
-    AvatarUpdateAliasOnGroundYawPitch       { id_alias: u8,   position: PackedXz,  direction: PackedYawPitch,     unk: 1 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH, 7;
-    AvatarUpdateAliasOnGroundYaw            { id_alias: u8,   position: PackedXz,  direction: PackedYaw,          unk: 1 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW, 6;
-    AvatarUpdateAliasOnGroundNoDir          { id_alias: u8,   position: PackedXz,  direction: (),                 unk: 1 } = AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR, 5;
-    AvatarUpdateAliasNoPosYawPitchRoll      { id_alias: u8,   position: (),        direction: PackedYawPitchRoll, unk: 2 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL, 6;
-    AvatarUpdateAliasNoPosYawPitch          { id_alias: u8,   position: (),        direction: PackedYawPitch,     unk: 1 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH, 4;
-    AvatarUpdateAliasNoPosYaw               { id_alias: u8,   position: (),        direction: PackedYaw,          unk: 1 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW, 3;
-    AvatarUpdateAliasNoPosNoDir             { id_alias: u8,   position: (),        direction: (),                 unk: 1 } = AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR, 2;
+    AvatarUpdateNoAliasFullPosYawPitchRoll  { entity_id: u32, position: PackedXyz, direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL, 15;
+    AvatarUpdateNoAliasFullPosYawPitch      { entity_id: u32, position: PackedXyz, direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH, 13;
+    AvatarUpdateNoAliasFullPosYaw           { entity_id: u32, position: PackedXyz, direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW, 12;
+    AvatarUpdateNoAliasFullPosNoDir         { entity_id: u32, position: PackedXyz, direction: (),                 unk: 0 } = AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR, 11;
+    AvatarUpdateNoAliasOnGroundYawPitchRoll { entity_id: u32, position: PackedXz,  direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 12;
+    AvatarUpdateNoAliasOnGroundYawPitch     { entity_id: u32, position: PackedXz,  direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH, 10;
+    AvatarUpdateNoAliasOnGroundYaw          { entity_id: u32, position: PackedXz,  direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW, 9;
+    AvatarUpdateNoAliasOnGroundNoDir        { entity_id: u32, position: PackedXz,  direction: (),                 unk: 0 } = AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR, 8;
+    AvatarUpdateNoAliasNoPosYawPitchRoll    { entity_id: u32, position: (),        direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL, 9;
+    AvatarUpdateNoAliasNoPosYawPitch        { entity_id: u32, position: (),        direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH, 7;
+    AvatarUpdateNoAliasNoPosYaw             { entity_id: u32, position: (),        direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW, 6;
+    AvatarUpdateNoAliasNoPosNoDir           { entity_id: u32, position: (),        direction: (),                 unk: 0 } = AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR, 5;
+    AvatarUpdateAliasFullPosYawPitchRoll    { id_alias: u8,   position: PackedXyz, direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL, 12;
+    AvatarUpdateAliasFullPosYawPitch        { id_alias: u8,   position: PackedXyz, direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH, 10;
+    AvatarUpdateAliasFullPosYaw             { id_alias: u8,   position: PackedXyz, direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_ALIAS_FULL_POS_YAW, 9;
+    AvatarUpdateAliasFullPosNoDir           { id_alias: u8,   position: PackedXyz, direction: (),                 unk: 0 } = AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR, 8;
+    AvatarUpdateAliasOnGroundYawPitchRoll   { id_alias: u8,   position: PackedXz,  direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL, 9;
+    AvatarUpdateAliasOnGroundYawPitch       { id_alias: u8,   position: PackedXz,  direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH, 7;
+    AvatarUpdateAliasOnGroundYaw            { id_alias: u8,   position: PackedXz,  direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_ALIAS_ON_GROUND_YAW, 6;
+    AvatarUpdateAliasOnGroundNoDir          { id_alias: u8,   position: PackedXz,  direction: (),                 unk: 0 } = AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR, 5;
+    AvatarUpdateAliasNoPosYawPitchRoll      { id_alias: u8,   position: (),        direction: PackedYawPitchRoll, unk: 1 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL, 6;
+    AvatarUpdateAliasNoPosYawPitch          { id_alias: u8,   position: (),        direction: PackedYawPitch,     unk: 0 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH, 4;
+    AvatarUpdateAliasNoPosYaw               { id_alias: u8,   position: (),        direction: PackedYaw,          unk: 0 } = AVATAR_UPDATE_ALIAS_NO_POS_YAW, 3;
+    AvatarUpdateAliasNoPosNoDir             { id_alias: u8,   position: (),        direction: (),                 unk: 0 } = AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR, 2;
 }
 
 pub type AvatarUpdateVolatileProperties = DebugElementVariable16<{ id::AVATAR_UPDATE_VOLATILE_PROPERTIES }>;

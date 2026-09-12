@@ -94,10 +94,19 @@ fn i8_to_half_angle(compressed: i8) -> f32 {
 
 /// A position packed into 5 bytes (BigWorld's `PackedXYZ`, default template params: 3
 /// exponent + 8 mantissa bits for `x`/`z`, 4 exponent + 11 mantissa bits for `y`), used
-/// by the `FullPos` family of `AVATAR_UPDATE_*` elements. `CreateEntity` doesn't use this
+/// by the `FullPos` family of `AVATAR_UPDATE_*` elements.
+///
+/// **Width is 6 bytes, bit split is NOT confirmed.** The width is forced by solving the
+/// 24 confirmed `AVATAR_UPDATE_*` element lengths simultaneously (the `Alias`/`NoPos`
+/// row fixes `ref_num`=1 and `id_alias`=1, which then pins `FullPos`=6 via
+/// `AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR` = 8). The bit allocation below still sums to
+/// 40 bits = 5 bytes, i.e. it is the *vanilla* split and cannot be right for a 6-byte
+/// (43-48 bit) WoT field -- so [`Self::unpack`] currently returns wrong coordinates.
+/// Framing is correct; the values are not. Do not trust `unpack` until the real
+/// `PackedFullPos` template parameters are recovered from the client. `CreateEntity` doesn't use this
 /// compressed form -- its own position is a plain unpacked [`Vec3`].
 #[derive(Debug, Clone, Copy)]
-pub struct PackedXyz(pub [u8; 5]);
+pub struct PackedXyz(pub [u8; 6]);
 
 impl PackedXyz {
 
@@ -117,7 +126,7 @@ impl PackedXyz {
     /// Inverse of [`Self::unpack`]: `offset.x`/`offset.z` are offsets from the reference
     /// position (divided by `xz_scale` before packing), `offset.y` is absolute.
     pub fn pack(offset: Vec3, xz_scale: f32) -> Self {
-        let mut data = [0u8; 5];
+        let mut data = [0u8; 6];
         let mut writer = BitWriter::new(&mut data);
         pack_float(offset.x / xz_scale, 3, 8, &mut writer);
         pack_float(offset.z / xz_scale, 3, 8, &mut writer);
@@ -132,7 +141,7 @@ impl SimpleCodec for PackedXyz {
         write.write_all(&self.0)
     }
     fn read(read: &mut dyn Read) -> io::Result<Self> {
-        let mut data = [0; 5];
+        let mut data = [0; 6];
         read.read_exact(&mut data)?;
         Ok(Self(data))
     }

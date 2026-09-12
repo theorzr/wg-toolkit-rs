@@ -18,6 +18,7 @@ base64.workspace = true
 glam.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
+flate2.workspace = true
 
 serde.workspace = true
 serde-pickle.workspace = true
