@@ -17,7 +17,7 @@ use crate::script::{Ty, TyKind, Value, StringValue, PythonValue};
 
 /// Represent a codec for some data that can be both encoded and decoded, with a 
 /// configuration value that can alter how the data is actually encoded and decoded.
-pub trait Codec<C>: Sized {
+pub trait Codec<C: ?Sized>: Sized {
 
     /// Write the data onto the given writer and configuration.
     fn write(&self, write: &mut dyn Write, config: &C) -> io::Result<()>;
@@ -81,7 +81,7 @@ impl SimpleCodec for String {
 
 }
 
-impl<const LEN: usize, C, D: Codec<C>> Codec<C> for Box<[D; LEN]> {
+impl<const LEN: usize, C: ?Sized, D: Codec<C>> Codec<C> for Box<[D; LEN]> {
 
     fn write(&self, write: &mut dyn Write, config: &C) -> io::Result<()> {
         for comp in &**self {
@@ -107,7 +107,7 @@ impl<const LEN: usize, C, D: Codec<C>> Codec<C> for Box<[D; LEN]> {
     
 }
 
-impl<C, D: Codec<C>> Codec<C> for Vec<D> {
+impl<C: ?Sized, D: Codec<C>> Codec<C> for Vec<D> {
 
     fn write(&self, write: &mut dyn Write, config: &C) -> io::Result<()> {
         write.write_packed_u24(self.len() as u32)?;

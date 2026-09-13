@@ -478,7 +478,7 @@ impl<'a> BundleElementWriter<'a> {
 
     /// Add an element to this bundle.
     #[inline]
-    pub fn write<E: Element<C>, C>(&mut self, element: E, config: &C) {
+    pub fn write<E: Element<C>, C: ?Sized>(&mut self, element: E, config: &C) {
         self.write_raw(BundleElement { element, request_id: None }, config)
     }
 
@@ -490,7 +490,7 @@ impl<'a> BundleElementWriter<'a> {
 
     /// Add a request element to this bundle, with a given request ID.
     #[inline]
-    pub fn write_request<E: Element<C>, C>(&mut self, element: E, request_id: u32, config: &C) {
+    pub fn write_request<E: Element<C>, C: ?Sized>(&mut self, element: E, request_id: u32, config: &C) {
         self.write_raw(BundleElement { element, request_id: Some(request_id) }, config)
     }
 
@@ -507,7 +507,7 @@ impl<'a> BundleElementWriter<'a> {
     /// are always of  a 32-bit variable length and prefixed with the 
     /// request ID.
     #[inline]
-    pub fn write_reply<D: Codec<C>, C>(&mut self, data: D, request_id: u32, config: &C) {
+    pub fn write_reply<D: Codec<C>, C: ?Sized>(&mut self, data: D, request_id: u32, config: &C) {
         self.write(Reply::new(request_id, data), config)
     }
 
@@ -520,7 +520,7 @@ impl<'a> BundleElementWriter<'a> {
 
     /// Raw method to add an element to this bundle, given an ID, the 
     /// element and its config. With an optional request ID.
-    pub fn write_raw<E: Element<C>, C>(&mut self, element: BundleElement<E>, config: &C) {
+    pub fn write_raw<E: Element<C>, C: ?Sized>(&mut self, element: BundleElement<E>, config: &C) {
 
         let elt_len_kind = element.element.write_length(config).unwrap();  // FIXME: NO UNWRAP!!
 
@@ -658,7 +658,7 @@ impl<'a> BundleElementReader<'a> {
 
     /// Try to decode the current element using a given codec. You can choose to go
     /// to the next element using the `next` argument.
-    pub fn read<E: Element<C>, C>(&mut self, config: &C, next: bool) -> io::Result<BundleElement<E>> {
+    pub fn read<E: Element<C>, C: ?Sized>(&mut self, config: &C, next: bool) -> io::Result<BundleElement<E>> {
 
         // Here we ensure that we have some bytes to read the next element from.
         let Some(slice) = self.bundle_reader.ensure() else {
@@ -884,7 +884,7 @@ impl ElementReader<'_, '_> {
 
     /// Same as `read` but never go to the next element *(this is why this method doesn't take
     /// self by value)*.
-    pub fn read_stable<E: Element<C>, C>(&mut self, config: &C) -> io::Result<BundleElement<E>> {
+    pub fn read_stable<E: Element<C>, C: ?Sized>(&mut self, config: &C) -> io::Result<BundleElement<E>> {
         self.0.read(config, false)
     }
 
@@ -896,7 +896,7 @@ impl ElementReader<'_, '_> {
     /// Read the element using the given codec. This method take self by value and automatically
     /// go the next element if read is successful, if not successful you will need to call
     /// `Bundle::next_element` again.
-    pub fn read<E: Element<C>, C>(self, config: &C) -> io::Result<BundleElement<E>> {
+    pub fn read<E: Element<C>, C: ?Sized>(self, config: &C) -> io::Result<BundleElement<E>> {
         self.0.read(config, true)
     }
 
@@ -929,7 +929,7 @@ impl ReplyReader<'_, '_> {
     /// self by value)*.
     ///
     /// This method doesn't returns the reply element but the final element.
-    pub fn read_stable<D: Codec<C>, C>(&mut self, config: &C) -> io::Result<D> {
+    pub fn read_stable<D: Codec<C>, C: ?Sized>(&mut self, config: &C) -> io::Result<D> {
         let reply = self.0.read::<Reply<D>, C>(config, false)?;
         if reply.request_id.is_some() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "got request id on a reply"));
@@ -947,7 +947,7 @@ impl ReplyReader<'_, '_> {
     /// will need to call `Bundle::next_element` again.
     ///
     /// This method doesn't returns the reply element but the final element.
-    pub fn read<D: Codec<C>, C>(self, config: &C) -> io::Result<D> {
+    pub fn read<D: Codec<C>, C: ?Sized>(self, config: &C) -> io::Result<D> {
         let reply = self.0.read::<Reply<D>, C>(config, true)?;
         if reply.request_id.is_some() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "got request id on a reply"));

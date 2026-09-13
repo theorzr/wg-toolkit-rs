@@ -17,7 +17,7 @@ pub const REPLY_ID: u8 = 0xFF;
 /// numerical identifier, this is an alternative to [`Codec`], specifically for elements.
 /// If the element's is simple, then it can instead implements [`Codec`] and be derived
 /// using the simpler trait [`SimpleElement`]. 
-pub trait Element<C>: Sized {
+pub trait Element<C: ?Sized>: Sized {
 
     /// Provide the configuration of this elements when writing it, possibly depending on
     /// the configuration.
@@ -39,7 +39,7 @@ pub trait Element<C>: Sized {
 
 /// A simpler alternative trait to [`Element`] for types that already implements the
 /// [`Codec`] trait but with a static numerical identifier and preferred length.
-pub trait SimpleElement<C = ()>: Codec<C> {
+pub trait SimpleElement<C: ?Sized = ()>: Codec<C> {
 
     /// The numeric ID for this element.
     const ID: u8;
@@ -51,7 +51,7 @@ pub trait SimpleElement<C = ()>: Codec<C> {
 
 }
 
-impl<E: SimpleElement<C>, C> Element<C> for E {
+impl<E: SimpleElement<C>, C: ?Sized> Element<C> for E {
 
     #[inline]
     fn write_length(&self, _config: &C) -> io::Result<ElementLength> {
@@ -186,7 +186,7 @@ impl<D> Reply<D> {
     
 }
 
-impl<D: Codec<C>, C> Codec<C> for Reply<D> {
+impl<D: Codec<C>, C: ?Sized> Codec<C> for Reply<D> {
 
     fn write(&self, write: &mut dyn Write, config: &C) -> io::Result<()> {
         write.write_u32(self.request_id)?;
@@ -202,7 +202,7 @@ impl<D: Codec<C>, C> Codec<C> for Reply<D> {
 
 }
 
-impl<D: Codec<C>, C> SimpleElement<C> for Reply<D> {
+impl<D: Codec<C>, C: ?Sized> SimpleElement<C> for Reply<D> {
     const ID: u8 = REPLY_ID;
     const LEN: ElementLength = ElementLength::Variable32;
 }
