@@ -240,10 +240,14 @@ impl App {
             return self.skip::<RawEntityMethod>(reader);
         };
 
-        let call = reader.read::<element::CellEntityMethod, _>(&dispatch.cell_methods)?.element.call;
-        self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, call }));
-
-        Ok(())
+        // // This server knows which entity its client is, so the wire target adds nothing
+        // // to resolve -- unlike the proxy, which observes calls aimed at other entities.
+        // let tables = element::FixedCellMethods(&dispatch.cell_methods);
+        // let call = reader.read::<element::CellEntityMethod, _>(&element::CellMethodLookup(&tables))?.element.call;
+        // self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, call }));
+        // Ok(())
+        
+        todo!()
 
     }
 

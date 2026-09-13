@@ -13,12 +13,12 @@ use flate2::read::ZlibDecoder;
 use blowfish::Blowfish;
 
 use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, Element, SimpleElement};
-use wgtk::net::codec::SimpleCodec;
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
 use wgtk::net::codec::WgSocketAddrV4;
 
 use wgtk::app::{proxy, login_proxy, base, client};
-use wgtk::app::dispatch::{ScriptDispatch, MethodCall};
+use wgtk::app::dispatch::{ScriptDispatch, MethodCall, MethodDef};
+use wgtk::app::base::element::CellMethodTables;
 use wgtk::net::packet::Packet;
 use wgtk::script::{Script, Value};
 
@@ -112,8 +112,11 @@ macro_rules! trace_dbg_entity {
     ($self:expr, $elt:expr, $addr:expr, $ty:ty) => {{
         let e = $elt.read_simple::<$ty>()?;
         $self.selected_entity_id = Some(e.element.entity_id);
-        trace!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id,
-            "{}: {:?}", stringify!($ty), e.element);
+        // INFO, like the aliased family, so the values land in `proxy-trace.jsonl`
+        // (which is INFO-and-up; TRACE there is transport bookkeeping, not protocol
+        // content). See `trace_dbg_alias` for why `position` shows packed bytes.
+        info!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id,
+            entity_id = e.element.entity_id, "<- {}: {:?}", stringify!($ty), e.element);
         Ok(true)
     }};
 }
@@ -135,26 +138,17 @@ macro_rules! trace_dbg_alias {
         // resolve clears the selection rather than leaving a stale one, so the element
         // stops on "no dispatch table" instead of silently mis-decoding.
         $self.selected_entity_id = entity_id;
-        // Sample the *raw* bytes of the first few of each AVUPMSG id. The parsed body is
-        // known-unreliable (its internal field splits are wrong, and element length alone
-        // can't tell `Alias+FullPos+YawPitchRoll` (1+7+4) from `NoAlias+OnGround+
-        // YawPitchRoll` (4+4+4) -- both are 12), so re-encode and log hex instead: a
-        // 4-byte window matching a live entity id identifies the NoAlias form and settles
-        // the id -> message mapping. Codecs round-trip, so this reproduces the wire bytes.
-        {
-            let seen = $self.avup_samples.entry(<$ty as SimpleElement>::ID).or_insert(0);
-            if *seen < 8 {
-                *seen += 1;
-                let mut raw = Vec::new();
-                let _ = SimpleCodec::write(&e.element, &mut raw);
-                let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-                warn!(addr = %$addr, id = <$ty as SimpleElement>::ID,
-                    "<- AVUPMSG raw ({}): {} (parsed alias {} -> {:?})",
-                    stringify!($ty), hex, e.element.id_alias, entity_id);
-            }
-        }
-        trace!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id, entity_id = ?entity_id,
-            "{}: {:?}", stringify!($ty), e.element);
+        // Logged at INFO so it reaches `proxy-trace.jsonl`, which is INFO-and-up by
+        // design (TRACE there is transport bookkeeping). This replaced a bounded raw-hex
+        // sampler that existed only while the AVUPMSG field splits were unknown; now that
+        // all 24 layouts are settled, the parsed values are what's actually wanted.
+        //
+        // Note `position` prints as `PackedXyz([..6 bytes..])` rather than coordinates on
+        // purpose: the 6-byte width is proven but the bit split is not, so `unpack` would
+        // return confidently wrong floats (see `app/math.rs`). The packed bytes are the
+        // honest thing to record until that is worked out.
+        info!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id, entity_id = ?entity_id,
+            "<- {}: {:?} (alias {} -> {:?})", stringify!($ty), e.element, e.element.id_alias, entity_id);
         Ok(true)
     }};
 }
@@ -613,21 +607,17 @@ impl BaseHandler {
             }
             id if id::CELL_ENTITY_METHOD.contains(id) => {
 
-                if let Some(entity_id) = self.player_entity_id {
-                    // Unwrap because selected entity should exist!
-                    let &(type_id, _) = self.entities.get(&entity_id).unwrap();
-                    let Some(dispatch) = self.shared.dispatch.entity_from_id(type_id) else {
-                        warn!(%addr, id, "-> Cell entity method (no dispatch table for entity type 0x{type_id:02X}): ({entity_id})");
-                        return Ok(true);
-                    };
-                    let m = elt.read::<CellEntityMethod, _>(&dispatch.cell_methods)?.element;
-                    // The wire id is 0 for "my own entity" (the base app substitutes its
-                    // own), so report the resolved target but keep the raw value visible
-                    // when it names someone else -- that case is rare and worth seeing.
+                if let Some(player_entity_id) = self.player_entity_id {
+                    let tables = CellTables { handler: self, player_entity_id };
+                    let m = elt.read::<CellEntityMethod, _>(&tables)?.element;
+                    // A wire id of 0 means "my own entity" (the base app substitutes its
+                    // own id), so resolve it for the log but keep an explicit target
+                    // visible when the call names one -- in a battle that is the common
+                    // case, since gun aiming is addressed to the player's *vehicle*.
                     let target = if m.entity_id == 0 {
-                        format!("{entity_id}")
+                        format!("{player_entity_id} (self)")
                     } else {
-                        format!("{} (wire)", m.entity_id)
+                        format!("{}", m.entity_id)
                     };
                     let call = m.call;
                     match &call {
@@ -1415,3 +1405,24 @@ impl BaseHandler {
 
 }
 
+
+
+/// Resolves a client-to-cell call's method table from the entity it names, for
+/// [`CellEntityMethod`]. Borrowed per call rather than stored on [`BaseHandler`] so it
+/// always reflects the current entity/type maps.
+struct CellTables<'a> {
+    handler: &'a BaseHandler,
+    /// Substituted for a wire entity id of 0, exactly as the base app does.
+    player_entity_id: u32,
+}
+
+impl CellMethodTables for CellTables<'_> {
+    fn cell_methods(&self, entity_id: u32) -> Option<&[MethodDef]> {
+        let entity_id = if entity_id == 0 { self.player_entity_id } else { entity_id };
+        // Same two-map lookup the property/method dispatch above uses: an entity can be
+        // known either from its full creation or from a `CreateEntity` type record.
+        let type_id = self.handler.created_entity_types.get(&entity_id).copied()
+            .or_else(|| self.handler.entities.get(&entity_id).map(|&(type_id, _)| type_id))?;
+        Some(&self.handler.shared.dispatch.entity_from_id(type_id)?.cell_methods)
+    }
+}

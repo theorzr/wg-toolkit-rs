@@ -10,6 +10,7 @@
 //! per-game generated Rust type ahead of time.
 
 use std::io::{self, Read, Write};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::net::element::ElementLength;
@@ -346,6 +347,22 @@ fn build_method_table(
     // for Avatar, against 86 when components were folded in.
     let mut collected = Vec::new();
     collect_methods(interfaces, entity_interface, methods_of, &mut collected);
+
+    // A name may be declared by both the entity and one of its interfaces (live example:
+    // `Account::requestToken`, also in `AccountAuthTokenProvider`). BigWorld keeps only
+    // the first: `EntityMethodDescriptions::init` inserts into a name -> index map and
+    // pushes to `internalMethods_`/`exposedMethods_` *only* when the insert is new --
+    // a repeat just records an extra implementing component (and must have an equal
+    // signature). So a redeclared method occupies one exposed slot, not two.
+    //
+    // Deduplicating before the sort matters: an extra entry lengthens the table and
+    // shifts every slot after it, which decodes later methods against the wrong
+    // signature. That is exactly what made `Account`'s exposed id 13 read as
+    // `accountDebugger_registerDebugTaskResult` (20 bytes) when the client means
+    // `doCmdInt3` (28), leaving 8 bytes unread on every call.
+    let mut seen = HashSet::new();
+    collected.retain(|(method, _)| seen.insert(Arc::clone(&method.name)));
+
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
     collected.into_iter()
@@ -413,5 +430,71 @@ fn build_entity_data_ty(tys: &mut TySystem, interfaces: &[Interface], entity_int
     let mut properties = Vec::new();
     collect(interfaces, entity_interface, &mut properties);
     tys.register(None, TyKind::Dict(TyDict { properties, allow_none: false }))
+
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use crate::script::{Arg, Interface, Method, TyKind, TySystem, VariableHeaderSize};
+
+    use super::*;
+
+    fn method(name: &str, args: Vec<Ty>) -> Method {
+        Method {
+            name: name.into(),
+            exposed_to_all_clients: true,
+            exposed_to_own_client: true,
+            variable_header_size: VariableHeaderSize::Variable8,
+            args: args.into_iter().map(|ty| Arg { ty }).collect(),
+        }
+    }
+
+    fn interface(name: &str, implements: &[&str], base_methods: Vec<Method>) -> Interface {
+        Interface {
+            name: name.into(),
+            implements: implements.iter().map(|s| s.to_string()).collect(),
+            properties: Vec::new(),
+            temp_properties: Vec::new(),
+            client_methods: Vec::new(),
+            base_methods,
+            cell_methods: Vec::new(),
+        }
+    }
+
+    /// A method declared by both an entity and one of its interfaces must occupy a single
+    /// exposed slot, as in BigWorld's `EntityMethodDescriptions::init` (which pushes to
+    /// `exposedMethods_` only when the name->index insert is new). Live case:
+    /// `Account::requestToken`, also declared by `AccountAuthTokenProvider`. The extra
+    /// entry lengthened the table and shifted every later slot, so `Account`'s exposed id
+    /// 13 decoded as a 20-byte method when the client meant a 28-byte one.
+    #[test]
+    fn redeclared_method_takes_one_exposed_slot() {
+
+        let mut tys = TySystem::default();
+        let u8_ty = tys.register(None, TyKind::UInt8);
+        let u64_ty = tys.register(None, TyKind::UInt64);
+
+        // `shared` is declared by the interface *and* the entity, with an equal signature.
+        let iface = interface("Iface", &[], vec![
+            method("shared", vec![u8_ty.clone()]),
+        ]);
+        let entity = interface("Entity", &["Iface"], vec![
+            method("shared", vec![u8_ty.clone()]),
+            method("big", vec![u64_ty.clone()]),
+        ]);
+
+        let interfaces = vec![iface];
+        let table = build_method_table(&interfaces, &entity, base_methods_of);
+
+        let names: Vec<&str> = table.iter().map(|m| &*m.name).collect();
+        assert_eq!(names, ["shared", "big"], "the redeclared method must not be duplicated");
+
+        // The point of deduplicating *before* the sort: a phantom entry would push `big`
+        // to index 2, and the wire's index 1 would then decode with the wrong signature.
+        assert_eq!(table[1].length, ElementLength::Fixed(8));
+
+    }
 
 }

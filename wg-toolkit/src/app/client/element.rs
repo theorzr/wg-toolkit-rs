@@ -844,6 +844,14 @@ crate::__struct_simple_codec! {
         pub entity_id: u32,
         pub space_id: u32,
         pub vehicle_entity_id: u32,
+        /// Two bytes WoT adds that the BigWorld 14.4.1 `forcedPosition` layout
+        /// (`x.id >> x.spaceID >> x.vehicleID >> x.position >> x.direction`, 36 bytes)
+        /// does not have; they make up the declared 38. Observed zero in all 27 samples
+        /// of a battle, so the meaning is unknown -- but the *position* is not: placing
+        /// them here rather than at the end is what makes the following `Vec3` read as
+        /// clean, smoothly drifting world coordinates (e.g. `(271.13, 60.88, 320.84)`)
+        /// instead of the denormal garbage a 2-byte-early read produced.
+        pub unk: u16,
         pub position: Vec3,
         pub direction: Vec3,
     }
@@ -2282,9 +2290,9 @@ fn find_method<'m>(config: &'m [MethodDef], name: &str) -> io::Result<(u16, &'m 
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown method: {name}")))
 }
 
-impl Element<Vec<MethodDef>> for EntityMethod {
+impl Element<[MethodDef]> for EntityMethod {
 
-    fn write_length(&self, config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, config: &[MethodDef]) -> io::Result<ElementLength> {
         
         let (exposed_id, preferred_len) = match &self.call {
             MethodCall::Known { name, .. } => {
@@ -2302,7 +2310,7 @@ impl Element<Vec<MethodDef>> for EntityMethod {
     
     }
 
-    fn write(&self, write: &mut dyn Write, config: &Vec<MethodDef>) -> io::Result<u8> {
+    fn write(&self, write: &mut dyn Write, config: &[MethodDef]) -> io::Result<u8> {
         
         let exposed_id = match &self.call {
             MethodCall::Known { name, .. } => find_method(config, name)?.0,
@@ -2323,7 +2331,7 @@ impl Element<Vec<MethodDef>> for EntityMethod {
 
     }
 
-    fn read_length(config: &Vec<MethodDef>, id: u8) -> io::Result<ElementLength> {
+    fn read_length(config: &[MethodDef], id: u8) -> io::Result<ElementLength> {
         
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
@@ -2344,7 +2352,7 @@ impl Element<Vec<MethodDef>> for EntityMethod {
 
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &[MethodDef], len: usize, id: u8) -> io::Result<Self> {
         
         if !id::ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity method element id: {id:02X}")));
@@ -2486,6 +2494,45 @@ mod tests {
     use crate::script::{TySystem, TyDictProp, TySeq, StringValue};
 
     use super::*;
+
+    /// A real `forcedPosition` body captured live (WoT v2.4.0.0), used to pin the field
+    /// split: BigWorld's own layout accounts for only 36 of the declared 38 bytes, and
+    /// the two extra sit *between* `vehicle_entity_id` and `position`, not at the end.
+    /// Reading them at the end instead shifts `position` two bytes early and turns clean
+    /// world coordinates into denormal garbage, which is how the bug showed up.
+    #[test]
+    fn forced_position_field_split() {
+
+        let body = [
+            0x7c, 0x3c, 0x48, 0x20, // entity_id  = 541604988
+            0xe1, 0x0a, 0x00, 0x00, // space_id   = 2785
+            0x00, 0x00, 0x00, 0x00, // vehicle_id = 0
+            0x00, 0x00,             // the two unaccounted bytes
+            0x6a, 0x90, 0x87, 0x43, 0x30, 0x86, 0x73, 0x42, 0x69, 0x6b, 0xa0, 0x43, // position
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // direction
+        ];
+
+        // The declared element length must account for every field, or the bundle reader
+        // leaves a tail and desyncs the elements after it.
+        assert_eq!(ForcedPosition::LEN, ElementLength::Fixed(body.len() as u32));
+
+        let mut read = &body[..];
+        let elt = <ForcedPosition as SimpleCodec>::read(&mut read).unwrap();
+        assert!(read.is_empty(), "the body must be consumed exactly");
+
+        assert_eq!(elt.entity_id, 541604988);
+        assert_eq!(elt.space_id, 2785);
+        assert_eq!(elt.vehicle_entity_id, 0);
+        assert_eq!(elt.unk, 0);
+        // Plausible world coordinates rather than denormals -- this is the actual check.
+        assert_eq!(elt.position, Vec3::new(271.12823, 60.881042, 320.83914));
+        assert_eq!(elt.direction, Vec3::new(0.0, 0.0, 0.0));
+
+        let mut written = Vec::new();
+        SimpleCodec::write(&elt, &mut written).unwrap();
+        assert_eq!(written, body, "codec must round-trip");
+
+    }
 
     /// A tiny synthetic schema: `foo: { a: UINT8, b: UINT16 }`, `bar: Array<STRING>`
     /// (real/live length 5, unknown to the decoder -- must be guessed). `bar`'s element

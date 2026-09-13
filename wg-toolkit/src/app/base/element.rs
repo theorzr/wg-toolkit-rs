@@ -262,26 +262,29 @@ pub type SendToCell = DebugElementFixed<{ id::SEND_TO_CELL }, 0>;
 /// [`MethodDef`] table (see [`crate::app::script::EntityDispatch`]) resolved from the
 /// loaded script model -- lets [`super::App`] dispatch by name against whatever game
 /// version's script was loaded. Read-only: this is only ever received, from the client.
+/// 
+/// Base method is always done against the current player entity id, and so we know in
+/// advance the method dispatch table. This is not the case for cell methods below!
 #[derive(Debug, Clone)]
 pub struct BaseEntityMethod {
     pub call: MethodCall,
 }
 
-impl Element<Vec<MethodDef>> for BaseEntityMethod {
+impl Element<[MethodDef]> for BaseEntityMethod {
 
-    fn write_length(&self, _config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, _config: &[MethodDef]) -> io::Result<ElementLength> {
         unreachable!("BaseEntityMethod is read-only")
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &Vec<MethodDef>) -> io::Result<u8> {
+    fn write(&self, _write: &mut dyn Write, _config: &[MethodDef]) -> io::Result<u8> {
         unreachable!("BaseEntityMethod is read-only")
     }
 
-    fn read_length(_config: &Vec<MethodDef>, _id: u8) -> io::Result<ElementLength> {
+    fn read_length(_config: &[MethodDef], _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &[MethodDef], len: usize, id: u8) -> io::Result<Self> {
 
         if !id::BASE_ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected base entity method element id: {id:02X}")));
@@ -319,6 +322,22 @@ impl Element<Vec<MethodDef>> for BaseEntityMethod {
 }
 
 
+/// Resolves the exposed cell-method table a client-to-cell call should be decoded
+/// against.
+///
+/// A cell call names its target entity on the wire, and different entity *types* have
+/// different exposed tables, so the element id alone does not identify the method: the
+/// same id means `Avatar::activateEquipment` for one target and
+/// `Vehicle::trackRelativePointWithGun` for another. Decoding every call against the
+/// player's own table silently mis-read the ones aimed at the player's vehicle -- which
+/// in a battle is the overwhelming majority, since gun aiming is sent every tick.
+pub trait CellMethodTables {
+    /// Exposed cell methods for `entity_id`, or `None` if the target is unknown (the
+    /// call is then reported raw rather than guessed at). `0` is not a real id: it means
+    /// "the client's own entity", which the base app substitutes.
+    fn cell_methods(&self, entity_id: u32) -> Option<&[MethodDef]>;
+}
+
 /// Same as [`BaseEntityMethod`], but for a cell-directed call. The client sends these to
 /// the base app (there's no direct client-to-cell connection), which forwards them to the
 /// cell app in real BigWorld; this project has no `cell::App` yet, so decoding one only
@@ -334,21 +353,21 @@ pub struct CellEntityMethod {
     pub call: MethodCall,
 }
 
-impl Element<Vec<MethodDef>> for CellEntityMethod {
+impl<'t> Element<dyn CellMethodTables + 't> for CellEntityMethod {
 
-    fn write_length(&self, _config: &Vec<MethodDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, _config: &(dyn CellMethodTables + 't)) -> io::Result<ElementLength> {
         unreachable!("CellEntityMethod is read-only")
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &Vec<MethodDef>) -> io::Result<u8> {
+    fn write(&self, _write: &mut dyn Write, _config: &(dyn CellMethodTables + 't)) -> io::Result<u8> {
         unreachable!("CellEntityMethod is read-only")
     }
 
-    fn read_length(_config: &Vec<MethodDef>, _id: u8) -> io::Result<ElementLength> {
+    fn read_length(_config: &(dyn CellMethodTables + 't), _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<MethodDef>, len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &(dyn CellMethodTables + 't), len: usize, id: u8) -> io::Result<Self> {
 
         if !id::CELL_ENTITY_METHOD.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected cell entity method element id: {id:02X}")));
@@ -367,6 +386,19 @@ impl Element<Vec<MethodDef>> for CellEntityMethod {
         // silently decoded with shifted, wrong arguments.
         let entity_id = read.read_u32()?;
         let mut len = len.saturating_sub(4);
+
+        // Pick the table by target, not by the connection's own entity (see
+        // [`CellMethodTables`]). An unknown target is reported raw: guessing with some
+        // other entity's table is exactly the failure this replaced.
+        let Some(config) = config.cell_methods(entity_id) else {
+            let mut data = vec![0; len];
+            read.read_exact(&mut data)?;
+            return Ok(Self {
+                entity_id,
+                call: MethodCall::Unknown { exposed_id: (id - id::CELL_ENTITY_METHOD.first) as u16, data },
+            });
+        };
+
         let mut sub_id_err = None;
         let exposed_id = id::CELL_ENTITY_METHOD.to_exposed_id(config.len() as u16, id, || {
             len = len.saturating_sub(1);
