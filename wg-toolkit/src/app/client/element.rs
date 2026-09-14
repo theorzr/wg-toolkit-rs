@@ -2188,21 +2188,21 @@ impl NestedEntityProperty {
     pub const ID: u8 = id::NESTED_ENTITY_PROPERTY;
 }
 
-impl Element<Vec<PropertyDef>> for NestedEntityProperty {
+impl Element<[PropertyDef]> for NestedEntityProperty {
 
-    fn write_length(&self, _config: &Vec<PropertyDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, _config: &[PropertyDef]) -> io::Result<ElementLength> {
         unreachable!("NestedEntityProperty is read-only")
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &Vec<PropertyDef>) -> io::Result<u8> {
+    fn write(&self, _write: &mut dyn Write, _config: &[PropertyDef]) -> io::Result<u8> {
         unreachable!("NestedEntityProperty is read-only")
     }
 
-    fn read_length(_config: &Vec<PropertyDef>, _id: u8) -> io::Result<ElementLength> {
+    fn read_length(_config: &[PropertyDef], _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<PropertyDef>, len: usize, _id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &[PropertyDef], len: usize, _id: u8) -> io::Result<Self> {
         let mut data = vec![0u8; len];
         read.read_exact(&mut data)?;
         match decode_compressed_path(config, &data, false)?.0 {
@@ -2235,21 +2235,21 @@ impl SliceEntityProperty {
     pub const ID: u8 = id::SLICE_ENTITY_PROPERTY;
 }
 
-impl Element<Vec<PropertyDef>> for SliceEntityProperty {
+impl Element<[PropertyDef]> for SliceEntityProperty {
 
-    fn write_length(&self, _config: &Vec<PropertyDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, _config: &[PropertyDef]) -> io::Result<ElementLength> {
         unreachable!("SliceEntityProperty is read-only")
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &Vec<PropertyDef>) -> io::Result<u8> {
+    fn write(&self, _write: &mut dyn Write, _config: &[PropertyDef]) -> io::Result<u8> {
         unreachable!("SliceEntityProperty is read-only")
     }
 
-    fn read_length(_config: &Vec<PropertyDef>, _id: u8) -> io::Result<ElementLength> {
+    fn read_length(_config: &[PropertyDef], _id: u8) -> io::Result<ElementLength> {
         Ok(ElementLength::Variable16)
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<PropertyDef>, len: usize, _id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &[PropertyDef], len: usize, _id: u8) -> io::Result<Self> {
         let mut data = vec![0u8; len];
         read.read_exact(&mut data)?;
         let (outcome, seq_len_inferred) = decode_compressed_path(config, &data, true)?;
@@ -2415,17 +2415,17 @@ pub struct EntityProperty {
     pub value: Value,
 }
 
-impl Element<Vec<PropertyDef>> for EntityProperty {
+impl Element<[PropertyDef]> for EntityProperty {
 
-    fn write_length(&self, _config: &Vec<PropertyDef>) -> io::Result<ElementLength> {
+    fn write_length(&self, _config: &[PropertyDef]) -> io::Result<ElementLength> {
         unreachable!("EntityProperty is read-only")
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &Vec<PropertyDef>) -> io::Result<u8> {
+    fn write(&self, _write: &mut dyn Write, _config: &[PropertyDef]) -> io::Result<u8> {
         unreachable!("EntityProperty is read-only")
     }
 
-    fn read_length(config: &Vec<PropertyDef>, id: u8) -> io::Result<ElementLength> {
+    fn read_length(config: &[PropertyDef], id: u8) -> io::Result<ElementLength> {
         
         if !id::ENTITY_PROPERTY.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));
@@ -2441,7 +2441,7 @@ impl Element<Vec<PropertyDef>> for EntityProperty {
 
     }
 
-    fn read(read: &mut dyn Read, config: &Vec<PropertyDef>, _len: usize, id: u8) -> io::Result<Self> {
+    fn read(read: &mut dyn Read, config: &[PropertyDef], _len: usize, id: u8) -> io::Result<Self> {
         
         if !id::ENTITY_PROPERTY.contains(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected entity property element id: {id:02X}")));

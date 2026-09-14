@@ -261,7 +261,7 @@ pub trait WgReadExt: Read {
     /// bytes to an object, returns a vector with all vector's objects.
     fn read_vector<F, T>(&mut self, mut func: F) -> io::Result<Vec<T>>
     where
-        F: FnMut(&mut Cursor<&Vec<u8>>) -> io::Result<T>
+        F: FnMut(&mut Cursor<&[u8]>) -> io::Result<T>
     {
 
         let (sec_size, sec_count) = self.read_vector_head()?;
@@ -272,7 +272,7 @@ pub trait WgReadExt: Read {
         let mut data = Vec::with_capacity(sec_count);
         for _ in 0..sec_count {
             self.read_exact(&mut buf[..])?;
-            data.push((func)(&mut Cursor::new(&buf))?);
+            data.push((func)(&mut Cursor::new(&buf[..]))?);
         }
 
         Ok(data)

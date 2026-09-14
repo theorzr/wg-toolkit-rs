@@ -4,7 +4,6 @@
 //! session.
 
 use std::env;
-use std::fs;
 use std::path::Path;
 
 use wgtk::res::fs::ResFilesystem;
@@ -20,14 +19,8 @@ fn main() {
     let entity_name = env::args().nth(2).expect("need entity name (e.g. Avatar)");
     let hex_str = env::args().nth(3).expect("need hex packet bytes");
 
-    let version_file = fs::read_to_string(dir.join("version.xml")).unwrap();
-    let version = version_file
-        .split_once("<version>").unwrap().1
-        .split_once("</version>").unwrap().0
-        .trim().to_string();
-
     let fs = ResFilesystem::new(dir.join("res")).unwrap();
-    let script = script::load(&fs, version).unwrap();
+    let script = script::load(&fs).unwrap();
     let dispatch = ScriptDispatch::new(script);
     let (_type_id, ed) = dispatch.entity_from_name(&entity_name).expect("entity not found");
 
@@ -148,12 +141,12 @@ fn main() {
                     }
                 }
                 else if id == NESTED_ENTITY_PROPERTY {
-                    match elt.read::<client_el::NestedEntityProperty, _>(&()) {
+                    match elt.read::<client_el::NestedEntityProperty, _>(&ed.properties) {
                         Ok(e) => { println!("[id=0x{id:02X}] NestedEntityProperty: {:?}", e.element); true }
                         Err(e) => { println!("[id=0x{id:02X}] NestedEntityProperty FAILED: {e}"); false }
                     }
                 } else if id == SLICE_ENTITY_PROPERTY {
-                    match elt.read::<client_el::SliceEntityProperty, _>(&()) {
+                    match elt.read::<client_el::SliceEntityProperty, _>(&ed.properties) {
                         Ok(e) => { println!("[id=0x{id:02X}] SliceEntityProperty: {:?}", e.element); true }
                         Err(e) => { println!("[id=0x{id:02X}] SliceEntityProperty FAILED: {e}"); false }
                     }

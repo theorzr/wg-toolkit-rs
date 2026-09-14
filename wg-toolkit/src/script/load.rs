@@ -14,12 +14,9 @@ use super::parse;
 
 /// Load the full model of script resources (aliases, interfaces, entities and
 /// extensions) from the given resource filesystem.
-pub fn load(fs: &ResFilesystem, version: String) -> io::Result<Script> {
+pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
 
-    let mut model = Script {
-        version,
-        ..Default::default()
-    };
+    let mut model = Script::default();
 
     let alias_reader = fs.read("scripts/entity_defs/alias.xml")?;
     let alias_elt = pxml::from_reader(alias_reader).unwrap();

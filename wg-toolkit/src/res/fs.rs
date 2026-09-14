@@ -106,18 +106,18 @@ impl ResFilesystem {
             return Err(io::ErrorKind::NotFound.into());
         }
 
-        let native_file_path = self.shared.dir_path.join(node_path);
-        match native_file_path.metadata() {
-            Ok(metadata) => {
-                return Ok(ResStat {
-                    is_dir: metadata.is_dir(),
-                    size: if metadata.is_dir() { 0 } else { metadata.len() },
-                });
-            }
-            Err(_) => {}
+        // Packages first, see [`Self::read()`] for why they have priority.
+        let package_stat = self.shared.mutable.lock().unwrap().stat(node_path);
+        match package_stat {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            res => return res,
         }
 
-        self.shared.mutable.lock().unwrap().stat(node_path)
+        let metadata = self.shared.dir_path.join(node_path).metadata()?;
+        Ok(ResStat {
+            is_dir: metadata.is_dir(),
+            size: if metadata.is_dir() { 0 } else { metadata.len() },
+        })
 
     }
 
@@ -129,6 +129,19 @@ impl ResFilesystem {
             return Err(io::ErrorKind::NotFound.into());
         }
 
+        // Packages have priority over the native "res/" directory, because this is the
+        // order the game itself uses: its "paths.xml" lists the whole "<Packages>" block
+        // *before* the "./res" path, and the first path providing a file wins. So the
+        // native directory is only a fallback for files no package contains, and we need
+        // to fully resolve the packages first -- which, on a lookup that ends up in the
+        // native directory, means every remaining package gets opened and indexed.
+        let package_read = self.shared.mutable.lock().unwrap().read(file_path);
+        match package_read {
+            Ok(reader) => return Ok(ResReadFile(ReadFileInner::Package(reader))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+        }
+
         let native_file_path = self.shared.dir_path.join(file_path);
         if native_file_path.is_file() {
             match File::open(native_file_path) {
@@ -137,9 +150,7 @@ impl ResFilesystem {
             }
         }
 
-        self.shared.mutable.lock().unwrap()
-            .read(file_path)
-            .map(|reader| ResReadFile(ReadFileInner::Package(reader)))
+        Err(io::ErrorKind::NotFound.into())
 
     }
 
@@ -184,15 +195,15 @@ impl ResFilesystem {
         Ok(ResReadDir {
             dir_path: Arc::from(dir_path),
             common: Box::new(CommonReadDir {
-                native_read_dir,
                 package_read_dir: dir_index.map(|dir_index| PackageReadDir {
                     shared: Arc::clone(&self.shared),
                     dir_index,
-                    native_names: HashSet::new(),
                     remaining_names: Vec::new(),
                     last_children_count: 0,
                     last_children_last_node_index: 0,
                 }),
+                native_read_dir,
+                package_names: HashSet::new(),
             }),
         })
     }
@@ -378,10 +389,15 @@ pub struct ResReadDir {
 
 #[derive(Debug)]
 struct CommonReadDir {
-    /// The native read dir result that maybe used for iteration before the package part.
-    native_read_dir: Option<ReadDir>,
-    /// The package read dir mode, yielded after the native read dir if present.
+    /// The package read dir mode, yielded before the native read dir if present.
     package_read_dir: Option<PackageReadDir>,
+    /// The native read dir result that maybe used for iteration after the package part.
+    native_read_dir: Option<ReadDir>,
+    /// Every name already yielded (or queued to be) from the packages. Packages have
+    /// priority over the native directory (see [`ResFilesystem::read()`]), so a native
+    /// entry whose name is in here is skipped, and it also guarantees that a name shipped
+    /// by several packages is only yielded once.
+    package_names: HashSet<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -390,9 +406,6 @@ struct PackageReadDir {
     shared: Arc<Shared>,
     /// Directory index in the node cache.
     dir_index: usize,
-    /// If a native read dir is being used, then this contains names that should not be
-    /// duplicated when returned.
-    native_names: HashSet<Arc<str>>,
     /// A vector containing all names to return on next iterations. Name is associated to
     /// the node index in the cache, this
     remaining_names: Vec<(Arc<str>, usize)>,
@@ -418,42 +431,12 @@ impl Iterator for ResReadDir {
 
     fn next(&mut self) -> Option<Self::Item> {
 
-        if let Some(native_read_dir) = &mut self.common.native_read_dir {
-            match native_read_dir.next() {
-                Some(Ok(entry)) => {
-                    
-                    let file_name = entry.file_name();
-                    let metadata = match entry.metadata() {
-                        Ok(res) => res,
-                        Err(e) => return Some(Err(e)),
-                    };
+        let common = &mut *self.common;
 
-                    let file_name = match file_name.to_str() {
-                        Some(res) => res,
-                        None => return Some(Err(io::ErrorKind::InvalidData.into())),
-                    };
-
-                    let name = Arc::<str>::from(file_name);
-                    if let Some(package_read_dir) = &mut self.common.package_read_dir {
-                        package_read_dir.native_names.insert(Arc::clone(&name));
-                    }
-
-                    return Some(Ok(ResDirEntry { 
-                        dir_path: Arc::clone(&self.dir_path), 
-                        name,
-                        stat: ResStat {
-                            is_dir: metadata.is_dir(),
-                            size: if metadata.is_dir() { 0 } else { metadata.len() },
-                        },
-                    }))
-
-                },
-                Some(Err(e)) => return Some(Err(e)),
-                None => self.common.native_read_dir = None,
-            }
-        }
-
-        if let Some(package_read_dir) = &mut self.common.package_read_dir {
+        // Packages are iterated first because they have priority over the native "res/"
+        // directory (see [`ResFilesystem::read()`]): a name present in both must be
+        // reported with the package's node, and the native entry then skipped.
+        if let Some(package_read_dir) = &mut common.package_read_dir {
 
             // Then we search the directory iteratively, and loop over if a pending package
             // has been opened.
@@ -473,11 +456,15 @@ impl Iterator for ResReadDir {
                     let mut max_child_index = 0;
                     for (child_name, &child_index) in &dir_info.children {
                         max_child_index = max_child_index.max(child_index);
-                        if child_index >= package_read_dir.last_children_last_node_index {
-                            // Don't return names that already have been by native iter.
-                            if !package_read_dir.native_names.contains(child_name) {
-                                package_read_dir.remaining_names.push((Arc::clone(child_name), child_index));
-                            }
+                        // Only nodes created since the last update can be new names. The
+                        // name check is not redundant with it: when a newly opened package
+                        // ships a path an earlier one already had, the child keeps its name
+                        // but gets a brand new -- so greater -- node index, and would else
+                        // be yielded a second time.
+                        if child_index >= package_read_dir.last_children_last_node_index 
+                            && common.package_names.insert(Arc::clone(child_name)) 
+                        {
+                            package_read_dir.remaining_names.push((Arc::clone(child_name), child_index));
                         }
                     }
 
@@ -512,12 +499,55 @@ impl Iterator for ResReadDir {
 
                 // If there are no more file, we try opening more packages.
                 if !mutable.try_open_pending_package() {
-                    return None; // No more package to open, no more file to return.
+                    break; // No more package to open, continue with native entries.
                 }
 
             }
 
         }
+
+        // Exhausted, also releasing the packages' cached state.
+        common.package_read_dir = None;
+
+        if let Some(native_read_dir) = &mut common.native_read_dir {
+            loop {
+                match native_read_dir.next() {
+                    Some(Ok(entry)) => {
+                        
+                        let file_name = entry.file_name();
+                        let file_name = match file_name.to_str() {
+                            Some(res) => res,
+                            None => return Some(Err(io::ErrorKind::InvalidData.into())),
+                        };
+
+                        let name = Arc::<str>::from(file_name);
+                        // Already yielded from a package, which has priority over us.
+                        if common.package_names.contains(&name) {
+                            continue;
+                        }
+
+                        let metadata = match entry.metadata() {
+                            Ok(res) => res,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        return Some(Ok(ResDirEntry { 
+                            dir_path: Arc::clone(&self.dir_path), 
+                            name,
+                            stat: ResStat {
+                                is_dir: metadata.is_dir(),
+                                size: if metadata.is_dir() { 0 } else { metadata.len() },
+                            },
+                        }))
+
+                    },
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => break,
+                }
+            }
+        }
+
+        common.native_read_dir = None;
 
         None
 
@@ -664,10 +694,14 @@ impl NodeCache {
             // NOTE: It is valid to split at 'index == file_path.len()', in this
             // case the 'file_name' will be empty, but this should not happen!
             // Also, 'dir_path' should not start with a sep.
-            let (mut dir_path, file_name) = match file_name.rfind('/') {
+            let (full_dir_path, file_name) = match file_name.rfind('/') {
                 Some(last_sep_index) => file_name.split_at(last_sep_index + 1),
                 None => ("", file_name),
             };
+
+            // 'dir_path' is shortened below to only the part not already walked, while
+            // 'full_dir_path' stays the directory path from the root.
+            let mut dir_path = full_dir_path;
 
             debug_assert!(!file_name.is_empty(), "package names should only contains files");
 
@@ -714,7 +748,10 @@ impl NodeCache {
 
             if last_dir_index != current_dir_index {
                 last_dir_index = current_dir_index;
-                last_dir_path = dir_path;
+                // NOTE: The *full* path, not the shortened 'dir_path': this is the path
+                // of 'last_dir_index' from the root, and the next iteration matches it
+                // against another full path.
+                last_dir_path = full_dir_path;
             }
 
             // NOTE: Same as above!

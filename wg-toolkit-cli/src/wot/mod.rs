@@ -28,23 +28,10 @@ use crate::{CliResult, WotArgs};
 /// Rust source, since `base::App` now resolves everything dynamically against it.
 fn load_script(dir: &std::path::Path) -> CliResult<Script> {
 
-    let version = {
-
-        let version_file = fs::read_to_string(dir.join("version.xml"))
-            .map_err(|e| format!("Failed to read version.xml, reason: {e}"))?;
-
-        version_file
-            .split_once("<version>").ok_or_else(|| format!("Missing <version> from version.xml"))?.1
-            .split_once("</version>").ok_or_else(|| format!("Missing </version> from version.xml"))?.0
-            .trim()
-            .to_string()
-
-    };
-
     let fs = ResFilesystem::new(dir.join("res"))
         .map_err(|e| format!("Failed to open resource filesystem, reason: {e}"))?;
 
-    script::load(&fs, version)
+    script::load(&fs)
         .map_err(|e| format!("Failed to load script model, reason: {e}"))
 
 }

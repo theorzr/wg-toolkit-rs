@@ -10,8 +10,6 @@ use super::ty::{TySystem, Ty};
 /// Represent the a full scripting model.
 #[derive(Debug, Default)]
 pub struct Script {
-    /// The game version of the parsed model.
-    pub version: String,
     /// The type system in this model where all types are defined.
     pub tys: TySystem,
     /// The list of all interfaces available.
