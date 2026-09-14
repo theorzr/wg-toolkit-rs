@@ -23,6 +23,35 @@ use crate::net::codec::SimpleCodec;
 use super::bit::{BitReader, BitWriter};
 
 
+/// WoT's retuned values for the `msgtypes.hpp` volatile-position bit-allocation macros.
+///
+/// BigWorld ships these as `#define`s (`EXPONENTBITS_XZ`, `XZ_MANTISSABITS_XZ`,
+/// `XYZ_MANTISSABITS_XZ`, `XYZ_EXPONENTBITS_Y`, `XYZ_MANTISSABITS_Y`) whose vanilla
+/// values are 3/8/8/4/11; WG recompiled with different ones, which is why the packed
+/// fields on the wire are wider than the stock engine's.
+///
+/// Recovered from `WorldOfTanks.exe` 2.4.0.0 by reading the inlined `unpackFloat`
+/// bodies: each `BitReader::get(n)` call passes `n` in `edx`, and the mantissa's
+/// `shl` immediate is `23 - MANTISSA_BITS`, so both halves of every field are stated
+/// twice and cross-check. Two independent inlinings of each of `unpackXYZ`
+/// (`0x140e369d0`, `0x140e54b10`) and `unpackXZ` (`0x140e36e60`, `0x140e54fa0`) agree.
+/// The resulting totals -- 48 bits for `PackedXyz`, 24 for `PackedXz` -- are exact
+/// multiples of 8, as `msgtypes.hpp`'s `#error Unused bits in ...` guards require, and
+/// match the 6- and 3-byte wire widths already confirmed against the live client.
+///
+/// Note `EXPONENT_BITS_XZ` is one macro shared by [`PackedXyz`] and [`PackedXz`], and
+/// the binary does use 4 in both -- an independent consistency check on the reading.
+const EXPONENT_BITS_XZ: u32 = 4;
+/// Mantissa bits for `x`/`z` in [`PackedXz`] (vanilla `XZ_MANTISSABITS_XZ` = 8).
+const XZ_MANTISSA_BITS_XZ: u32 = 7;
+/// Mantissa bits for `x`/`z` in [`PackedXyz`] (vanilla `XYZ_MANTISSABITS_XZ` = 8).
+const XYZ_MANTISSA_BITS_XZ: u32 = 12;
+/// Exponent bits for `y` in [`PackedXyz`] (vanilla `XYZ_EXPONENTBITS_Y` = 4, unchanged).
+const XYZ_EXPONENT_BITS_Y: u32 = 4;
+/// Mantissa bits for `y` in [`PackedXyz`] (vanilla `XYZ_MANTISSABITS_Y` = 11).
+const XYZ_MANTISSA_BITS_Y: u32 = 9;
+
+
 /// BigWorld's `packFloat<EXPONENT_BITS, MANTISSA_BITS>` (`network/msgtypes.ipp`): packs a
 /// sign bit, then a biased exponent, then a rounded mantissa. The `+2.0` trick on the
 /// absolute value keeps the stored (biased-by-128) exponent non-negative without having
@@ -92,19 +121,19 @@ fn i8_to_half_angle(compressed: i8) -> f32 {
     f32::from(compressed) * (PI / 254.0)
 }
 
-/// A position packed into 5 bytes (BigWorld's `PackedXYZ`, default template params: 3
-/// exponent + 8 mantissa bits for `x`/`z`, 4 exponent + 11 mantissa bits for `y`), used
-/// by the `FullPos` family of `AVATAR_UPDATE_*` elements.
+/// A position packed into 6 bytes (BigWorld's `PackedXYZ`, i.e. `PackedFullPos` with
+/// WoT's retuned template params: 4 exponent + 12 mantissa bits for `x`/`z`, 4 exponent
+/// + 9 mantissa bits for `y`), used by the `FullPos` family of `AVATAR_UPDATE_*`
+/// elements.
 ///
-/// **Width is 6 bytes, bit split is NOT confirmed.** The width is forced by solving the
-/// 24 confirmed `AVATAR_UPDATE_*` element lengths simultaneously (the `Alias`/`NoPos`
-/// row fixes `ref_num`=1 and `id_alias`=1, which then pins `FullPos`=6 via
-/// `AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR` = 8). The bit allocation below still sums to
-/// 40 bits = 5 bytes, i.e. it is the *vanilla* split and cannot be right for a 6-byte
-/// (43-48 bit) WoT field -- so [`Self::unpack`] currently returns wrong coordinates.
-/// Framing is correct; the values are not. Do not trust `unpack` until the real
-/// `PackedFullPos` template parameters are recovered from the client. `CreateEntity` doesn't use this
-/// compressed form -- its own position is a plain unpacked [`Vec3`].
+/// Each component is sign + exponent + mantissa, so the field is
+/// `(1+4+12)*2 + (1+4+9)` = 48 bits = 6 bytes, matching the wire width confirmed
+/// against the live client. The bit counts come from the client binary -- see
+/// [`EXPONENT_BITS_XZ`] for how they were recovered. The stock engine's 3/8/4/11 split
+/// would be 40 bits = 5 bytes, which is why this used to decode to garbage.
+///
+/// `CreateEntity` doesn't use this compressed form -- its own position is a plain
+/// unpacked [`Vec3`].
 #[derive(Debug, Clone, Copy)]
 pub struct PackedXyz(pub [u8; 6]);
 
@@ -117,9 +146,9 @@ impl PackedXyz {
     /// reference (`Y-values in off-Ground updates are always absolute`, `msgtypes.hpp`).
     pub fn unpack(&self, xz_scale: f32) -> Vec3 {
         let mut reader = BitReader::new(&self.0);
-        let x = unpack_float(&mut reader, 3, 8) * xz_scale;
-        let z = unpack_float(&mut reader, 3, 8) * xz_scale;
-        let y = unpack_float(&mut reader, 4, 11);
+        let x = unpack_float(&mut reader, EXPONENT_BITS_XZ, XYZ_MANTISSA_BITS_XZ) * xz_scale;
+        let z = unpack_float(&mut reader, EXPONENT_BITS_XZ, XYZ_MANTISSA_BITS_XZ) * xz_scale;
+        let y = unpack_float(&mut reader, XYZ_EXPONENT_BITS_Y, XYZ_MANTISSA_BITS_Y);
         Vec3::new(x, y, z)
     }
 
@@ -128,9 +157,9 @@ impl PackedXyz {
     pub fn pack(offset: Vec3, xz_scale: f32) -> Self {
         let mut data = [0u8; 6];
         let mut writer = BitWriter::new(&mut data);
-        pack_float(offset.x / xz_scale, 3, 8, &mut writer);
-        pack_float(offset.z / xz_scale, 3, 8, &mut writer);
-        pack_float(offset.y, 4, 11, &mut writer);
+        pack_float(offset.x / xz_scale, EXPONENT_BITS_XZ, XYZ_MANTISSA_BITS_XZ, &mut writer);
+        pack_float(offset.z / xz_scale, EXPONENT_BITS_XZ, XYZ_MANTISSA_BITS_XZ, &mut writer);
+        pack_float(offset.y, XYZ_EXPONENT_BITS_Y, XYZ_MANTISSA_BITS_Y, &mut writer);
         Self(data)
     }
 
@@ -147,10 +176,17 @@ impl SimpleCodec for PackedXyz {
     }
 }
 
-/// A ground-relative position packed into 3 bytes (BigWorld's `PackedXZ`, default
-/// template params: 3 exponent + 8 mantissa bits, same as [`PackedXyz`]'s `x`/`z`), used
-/// by the `OnGround` family of `AVATAR_UPDATE_*` elements -- only the horizontal offset
-/// is sent on the wire, `y` is assumed to come from the terrain at that point.
+/// A ground-relative position packed into 3 bytes (BigWorld's `PackedXZ`, i.e.
+/// `PackedGroundPos` with WoT's retuned template params: 4 exponent + 7 mantissa bits),
+/// used by the `OnGround` family of `AVATAR_UPDATE_*` elements -- only the horizontal
+/// offset is sent on the wire, `y` is assumed to come from the terrain at that point.
+///
+/// `(1+4+7)*2` = 24 bits = 3 bytes. Note this is *not* the same split as [`PackedXyz`]'s
+/// `x`/`z` (which have 12 mantissa bits): the engine keeps two separate mantissa macros
+/// and WG set them differently, so the shared 3-byte width is the only thing these two
+/// have in common. The stock 3/8 split also sums to 3 bytes, which is why this decoded
+/// to plausible-looking but wrong offsets rather than failing outright -- see
+/// [`EXPONENT_BITS_XZ`] for provenance.
 #[derive(Debug, Clone, Copy)]
 pub struct PackedXz(pub [u8; 3]);
 
@@ -160,8 +196,8 @@ impl PackedXz {
     /// position scaled by `xz_scale` -- see [`PackedXyz::unpack`].
     pub fn unpack(&self, xz_scale: f32) -> (f32, f32) {
         let mut reader = BitReader::new(&self.0);
-        let x = unpack_float(&mut reader, 3, 8) * xz_scale;
-        let z = unpack_float(&mut reader, 3, 8) * xz_scale;
+        let x = unpack_float(&mut reader, EXPONENT_BITS_XZ, XZ_MANTISSA_BITS_XZ) * xz_scale;
+        let z = unpack_float(&mut reader, EXPONENT_BITS_XZ, XZ_MANTISSA_BITS_XZ) * xz_scale;
         (x, z)
     }
 
@@ -169,8 +205,8 @@ impl PackedXz {
     pub fn pack(dx: f32, dz: f32, xz_scale: f32) -> Self {
         let mut data = [0u8; 3];
         let mut writer = BitWriter::new(&mut data);
-        pack_float(dx / xz_scale, 3, 8, &mut writer);
-        pack_float(dz / xz_scale, 3, 8, &mut writer);
+        pack_float(dx / xz_scale, EXPONENT_BITS_XZ, XZ_MANTISSA_BITS_XZ, &mut writer);
+        pack_float(dz / xz_scale, EXPONENT_BITS_XZ, XZ_MANTISSA_BITS_XZ, &mut writer);
         Self(data)
     }
 
@@ -291,7 +327,7 @@ mod tests {
     #[test]
     fn xyz_roundtrip() {
         // Tolerance scales with magnitude: this is a floating-point-style compression
-        // (3-bit exponent + 8-bit mantissa for x/z), so absolute error roughly doubles
+        // (4-bit exponent + 12-bit mantissa for x/z), so absolute error roughly doubles
         // per exponent step -- checked against `getError` in `msgtypes.ipp`.
         for &(x, y, z) in &[(0.0f32, 0.0f32, 0.0f32), (12.34, -5.6, 78.9), (-100.0, 30.0, -0.001), (509.9, 511.9, -509.9)] {
             let scale = 1.0f32;
@@ -310,6 +346,28 @@ mod tests {
         let (x, z) = packed.unpack(1.0);
         assert!((x - 12.34).abs() < 0.05);
         assert!((z - (-56.78)).abs() < 0.05);
+    }
+
+    /// The bit allocation recovered from the client must exactly fill the wire widths
+    /// that were independently confirmed against the live client (6 bytes for
+    /// `PackedXyz`, 3 for `PackedXz`). `msgtypes.hpp` enforces this at compile time with
+    /// `#error Unused bits in ... position update`, so a split that leaves slack -- as
+    /// the vanilla 3/8/4/11 one did, summing to 40 bits rather than 48 -- is wrong by
+    /// construction, whatever else it decodes to.
+    #[test]
+    fn packed_position_bit_budget_fills_wire_width() {
+        let xyz_bits = (1 + EXPONENT_BITS_XZ + XYZ_MANTISSA_BITS_XZ) * 2
+            + (1 + XYZ_EXPONENT_BITS_Y + XYZ_MANTISSA_BITS_Y);
+        assert_eq!(xyz_bits, 48, "PackedXyz must be exactly 6 bytes");
+        assert_eq!(xyz_bits % 8, 0, "PackedXyz would trip `#error Unused bits`");
+
+        let xz_bits = (1 + EXPONENT_BITS_XZ + XZ_MANTISSA_BITS_XZ) * 2;
+        assert_eq!(xz_bits, 24, "PackedXz must be exactly 3 bytes");
+        assert_eq!(xz_bits % 8, 0, "PackedXz would trip `#error Unused bits`");
+
+        // And the codecs' buffers must agree with those budgets.
+        assert_eq!(PackedXyz([0; 6]).0.len() * 8, xyz_bits as usize);
+        assert_eq!(PackedXz([0; 3]).0.len() * 8, xz_bits as usize);
     }
 
     #[test]

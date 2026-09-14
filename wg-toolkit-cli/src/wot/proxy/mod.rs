@@ -144,9 +144,12 @@ macro_rules! trace_dbg_alias {
         // all 24 layouts are settled, the parsed values are what's actually wanted.
         //
         // Note `position` prints as `PackedXyz([..6 bytes..])` rather than coordinates on
-        // purpose: the 6-byte width is proven but the bit split is not, so `unpack` would
-        // return confidently wrong floats (see `app/math.rs`). The packed bytes are the
-        // honest thing to record until that is worked out.
+        // purpose. The bit split is now settled (see `app/math.rs`), so `unpack` is
+        // correct -- but it yields an offset from the entity's tracked reference
+        // position, scaled by the space's `packed_xz_scale`, and this proxy tracks
+        // neither. Printing offsets as if they were world coordinates would be the
+        // misleading half of the old problem, so the packed bytes stay until
+        // `RelativePositionReference`/`RelativePosition` are decoded too.
         info!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id, entity_id = ?entity_id,
             "<- {}: {:?} (alias {} -> {:?})", stringify!($ty), e.element, e.element.id_alias, entity_id);
         Ok(true)
