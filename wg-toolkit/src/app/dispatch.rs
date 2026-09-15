@@ -54,9 +54,9 @@ impl ScriptDispatch {
 
         for entity in &script.entities {
             entities.push(EntityDispatch {
-                base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of),
-                cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of),
-                client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of),
+                base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of, &script.static_components),
+                cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of, &script.static_components),
+                client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
                 properties: build_property_table(&script.interfaces, &entity.interface, &script.static_components),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface),
             });
@@ -64,9 +64,9 @@ impl ScriptDispatch {
 
         for component in &script.dynamic_components {
             entities.push(EntityDispatch {
-                base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of),
-                cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of),
-                client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of),
+                base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of, &[]),
+                cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of, &[]),
+                client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of, &[]),
                 properties: build_property_table(&script.interfaces, &component.interface, &[]),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface),
             });
@@ -338,13 +338,10 @@ fn build_method_table(
     interfaces: &[Interface],
     entity_interface: &Interface,
     methods_of: fn(&Interface) -> &[Method],
+    static_components: &[Component],
 ) -> Vec<MethodDef> {
 
-    // Only the entity's own and inherited (`implements`) methods -- a component's methods
-    // are not part of the entity's exposed table, for the same reason its properties
-    // aren't (see [`build_property_table`]). Confirmed against the live client, whose
-    // `MethodDescription` exposed-index field covers exactly this set: 70 client methods
-    // for Avatar, against 86 when components were folded in.
+    // The entity's own and inherited (`implements`) methods occupy the leading slots.
     let mut collected = Vec::new();
     collect_methods(interfaces, entity_interface, methods_of, &mut collected);
 
@@ -364,6 +361,39 @@ fn build_method_table(
     collected.retain(|(method, _)| seen.insert(Arc::clone(&method.name)));
 
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
+
+    // Then each static component targeting this entity, appended after that sort in
+    // component order, its own methods size-sorted among themselves -- exactly as
+    // [`build_property_table`] does for properties, and for the same measured reason.
+    //
+    // Read out of the running client rather than inferred: `MethodDescription`'s exposed
+    // index (int32 at +152, and +148 in declaration order) reports `LaPingerComponent`'s
+    // `pingMeAndThenJustTouchMe` as **43** on `Account`. `Account` owns 41 client methods
+    // (slots 0..40), and the only other component methods targeting it are
+    // `AccountBattleRoyaleTournamentComponent`'s two, which take 41 and 42 -- so 43 is the
+    // single arrangement consistent with the dump. The live server really does address 43:
+    // it stopped 10 bundles in one battle while the table ended at 41.
+    //
+    // The stale claim this replaces ("70 client methods for Avatar, against 86 when
+    // components were folded in") measured only the entity's *own* methods -- the same
+    // blind spot that made `dump_property_table.js` report "Avatar 28" while its two
+    // components quietly held slots 28..33 in their own arrays.
+    let mut seen: HashSet<&str> = collected.iter().map(|(m, _)| &*m.name).collect();
+    let entity_name = &*entity_interface.name;
+    for component in static_components {
+        if !component.of_entities.iter().any(|e| e == entity_name) {
+            continue;
+        }
+        let mut of_component = Vec::new();
+        for method in methods_of(&component.interface) {
+            // As for the entity's own methods, a redeclared name keeps one slot.
+            if seen.insert(&method.name) {
+                of_component.push((method, method_length(method)));
+            }
+        }
+        of_component.sort_by_key(|&(_, length)| length_sort_key(length));
+        collected.extend(of_component);
+    }
 
     collected.into_iter()
         .map(|(method, length)| MethodDef {
@@ -579,6 +609,50 @@ mod tests {
         }
     }
 
+    /// Static-component methods continue the entity's exposed-id space, appended after its
+    /// own slots, one component at a time, each internally size-sorted -- the same rule as
+    /// [`build_property_table`] applies to properties.
+    ///
+    /// Ground truth: `MethodDescription`'s exposed index (int32 at +152) in the running
+    /// client reports `LaPingerComponent::pingMeAndThenJustTouchMe` as **43** on `Account`,
+    /// which owns 41 client methods (0..40) and takes 41/42 from
+    /// `AccountBattleRoyaleTournamentComponent`. The live server addresses 43 and stopped
+    /// 10 bundles in one battle while the table ended at 41.
+    #[test]
+    fn component_methods_continue_the_entity_id_space() {
+
+        let mut tys = TySystem::default();
+        let u8_ty = tys.register(None, TyKind::UInt8);
+        let u64_ty = tys.register(None, TyKind::UInt64);
+
+        let entity = interface("Account", &[], vec![
+            method("own_big", vec![u64_ty.clone()]),
+            method("own_small", vec![u8_ty.clone()]),
+        ]);
+
+        let mut tournament = interface("Tournament", &[], vec![method("setTournamentToken", vec![u8_ty.clone()])]);
+        tournament.base_methods = vec![method("setTournamentToken", vec![u8_ty.clone()])];
+        let mut pinger = interface("LaPinger", &[], vec![method("pingMeAndThenJustTouchMe", vec![u8_ty.clone()])]);
+        pinger.base_methods = vec![method("pingMeAndThenJustTouchMe", vec![u8_ty.clone()])];
+
+        let components = vec![
+            Component { name: "Tournament".into(), of_entities: vec!["Account".into()], interface: tournament },
+            Component { name: "LaPinger".into(), of_entities: vec!["Account".into()], interface: pinger },
+            Component { name: "Elsewhere".into(), of_entities: vec!["Avatar".into()],
+                interface: interface("Elsewhere", &[], vec![method("absent", vec![u8_ty.clone()])]) },
+        ];
+
+        let table = build_method_table(&[], &entity, base_methods_of, &components);
+        let names: Vec<&str> = table.iter().map(|m| &*m.name).collect();
+
+        assert_eq!(names, ["own_small", "own_big", "setTournamentToken", "pingMeAndThenJustTouchMe"],
+            "components append in order after the entity's own size-sorted slots");
+        // The entity's own slots must keep their indices, or every existing id shifts.
+        assert_eq!(&names[..2], &["own_small", "own_big"]);
+        // And `pingMeAndThenJustTouchMe` must be last, as the client reports.
+        assert_eq!(*names.last().unwrap(), "pingMeAndThenJustTouchMe");
+    }
+
     /// A method declared by both an entity and one of its interfaces must occupy a single
     /// exposed slot, as in BigWorld's `EntityMethodDescriptions::init` (which pushes to
     /// `exposedMethods_` only when the name->index insert is new). Live case:
@@ -602,7 +676,7 @@ mod tests {
         ]);
 
         let interfaces = vec![iface];
-        let table = build_method_table(&interfaces, &entity, base_methods_of);
+        let table = build_method_table(&interfaces, &entity, base_methods_of, &[]);
 
         let names: Vec<&str> = table.iter().map(|m| &*m.name).collect();
         assert_eq!(names, ["shared", "big"], "the redeclared method must not be duplicated");
