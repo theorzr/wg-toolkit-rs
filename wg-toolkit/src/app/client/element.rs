@@ -793,9 +793,73 @@ impl SimpleElement for TickSync {
 
 
 pub type TickSyncPeriodic = DebugElementFixed<{ id::TICK_SYNC_PERIODIC }, 2>;
-pub type RelativePositionReference = DebugElementFixed<{ id::RELATIVE_POSITION_REFERENCE }, 1>;
-pub type RelativePosition = DebugElementFixed<{ id::RELATIVE_POSITION }, 12>;
-pub type SetVehicle = DebugElementFixed<{ id::SET_VEHICLE }, 8>;
+
+crate::__struct_simple_codec! {
+    /// Sets the base position that subsequent *relative* volatile updates
+    /// (`AVATAR_UPDATE_*`) are measured from, naming it indirectly: the client is told to
+    /// reuse a position **it previously sent to the server itself**, identified by the
+    /// sequence number it stamped on that outgoing update.
+    ///
+    /// So resolving this requires having tracked the client->server stream:
+    /// `reference = calculate_reference_position(sent_positions[sequence_number])`, where
+    /// `sent_positions` is fed by [`crate::app::base::element::AvatarUpdateImplicit`] and
+    /// [`crate::app::base::element::AvatarUpdateExplicit`] (both carry the matching
+    /// `ref_num`). Confirmed in `ServerConnection::relativePositionReference` and, for
+    /// the sending half, `server_connection.cpp:757`
+    /// (`sentPositions_[ sendingSequenceNumber_ ] = globalPos; ++sendingSequenceNumber_`).
+    ///
+    /// Note the rounding: this path rounds, [`RelativePosition`] does not.
+    #[derive(Debug, Clone, Copy)]
+    pub struct RelativePositionReference {
+        pub sequence_number: u8,
+    }
+}
+
+impl SimpleElement for RelativePositionReference {
+    const ID: u8 = id::RELATIVE_POSITION_REFERENCE;
+    const LEN: ElementLength = ElementLength::Fixed(1);
+}
+
+crate::__struct_simple_codec! {
+    /// Sets the base position for subsequent relative volatile updates directly, rather
+    /// than by reference to something the client sent (see
+    /// [`RelativePositionReference`]).
+    ///
+    /// Assigned **verbatim, without rounding** -- `ServerConnection::relativePosition` is
+    /// just `referencePosition_ = args.position;`, unlike every other writer of that
+    /// field. Preserved here rather than normalised, because rounding it would silently
+    /// shift every position decoded until the next reference change.
+    #[derive(Debug, Clone, Copy)]
+    pub struct RelativePosition {
+        pub position: Vec3,
+    }
+}
+
+impl SimpleElement for RelativePosition {
+    const ID: u8 = id::RELATIVE_POSITION;
+    const LEN: ElementLength = ElementLength::Fixed(12);
+}
+
+crate::__struct_simple_codec! {
+    /// Announces which vehicle an entity is riding, which decides how that entity's
+    /// volatile positions are interpreted: BigWorld's `AVATAR_UPDATE_GET_POS_ORIGIN` uses
+    /// the connection's reference position as the origin only when the entity is *not* on
+    /// a vehicle, and the zero vector when it is (positions are then vehicle-relative).
+    ///
+    /// `vehicle_id == 0` (`NULL_ENTITY_ID`) means "no vehicle", i.e. it clears the
+    /// mapping. Per the SDK's own comment this names the vehicle for the *next* position
+    /// update, which "may not be the one currently associated with that entity".
+    #[derive(Debug, Clone, Copy)]
+    pub struct SetVehicle {
+        pub passenger_id: u32,
+        pub vehicle_id: u32,
+    }
+}
+
+impl SimpleElement for SetVehicle {
+    const ID: u8 = id::SET_VEHICLE;
+    const LEN: ElementLength = ElementLength::Fixed(8);
+}
 
 crate::__struct_simple_codec! {
     /// Sent by the server to inform that subsequent elements will target another entity's

@@ -22,7 +22,7 @@ pub mod login_proxy;
 
 pub mod dispatch;
 
-mod math;
+pub mod math;
 mod bit;
 
 pub mod client;

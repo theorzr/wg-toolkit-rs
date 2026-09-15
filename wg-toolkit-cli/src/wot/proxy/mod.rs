@@ -18,6 +18,8 @@ use wgtk::net::codec::WgSocketAddrV4;
 
 use wgtk::app::{proxy, login_proxy, base, client};
 use wgtk::app::dispatch::{ScriptDispatch, MethodCall, MethodDef};
+use wgtk::app::math::{PackedXyz, PackedXz, calculate_reference_position};
+use glam::Vec3;
 use wgtk::app::base::element::CellMethodTables;
 use wgtk::net::packet::Packet;
 use wgtk::script::{Script, Value};
@@ -111,12 +113,18 @@ macro_rules! trace_dbg {
 macro_rules! trace_dbg_entity {
     ($self:expr, $elt:expr, $addr:expr, $ty:ty) => {{
         let e = $elt.read_simple::<$ty>()?;
-        $self.selected_entity_id = Some(e.element.entity_id);
+        let entity_id = e.element.entity_id;
+        $self.selected_entity_id = Some(entity_id);
+        // Resolve the packed offset into world coordinates (see `PositionTracker`).
+        // `None` means the element carries no position, or the reference/scale isn't
+        // known yet -- in which case the packed bytes below are still the honest record.
+        let world = $self.position.resolve(Some(entity_id), &e.element.position);
         // INFO, like the aliased family, so the values land in `proxy-trace.jsonl`
         // (which is INFO-and-up; TRACE there is transport bookkeeping, not protocol
-        // content). See `trace_dbg_alias` for why `position` shows packed bytes.
+        // content).
         info!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id,
-            entity_id = e.element.entity_id, "<- {}: {:?}", stringify!($ty), e.element);
+            entity_id, world = ?world.map(|w| w.to_string()),
+            "<- {}: {:?}", stringify!($ty), e.element);
         Ok(true)
     }};
 }
@@ -130,6 +138,7 @@ macro_rules! trace_dbg_alias {
     ($self:expr, $elt:expr, $addr:expr, $ty:ty) => {{
         let e = $elt.read_simple::<$ty>()?;
         let entity_id = $self.id_aliases.get(&e.element.id_alias).copied();
+        let world = $self.position.resolve(entity_id, &e.element.position);
         // Re-target exactly like the `NoAlias` family does (see [`trace_dbg_entity`]):
         // `IMPLEMENT_AVUPMSG` sets `selectedEntityID_` unconditionally, and the aliased
         // forms are the *common* case in a battle, so skipping this pins the stream to
@@ -143,15 +152,13 @@ macro_rules! trace_dbg_alias {
         // sampler that existed only while the AVUPMSG field splits were unknown; now that
         // all 24 layouts are settled, the parsed values are what's actually wanted.
         //
-        // Note `position` prints as `PackedXyz([..6 bytes..])` rather than coordinates on
-        // purpose. The bit split is now settled (see `app/math.rs`), so `unpack` is
-        // correct -- but it yields an offset from the entity's tracked reference
-        // position, scaled by the space's `packed_xz_scale`, and this proxy tracks
-        // neither. Printing offsets as if they were world coordinates would be the
-        // misleading half of the old problem, so the packed bytes stay until
-        // `RelativePositionReference`/`RelativePosition` are decoded too.
+        // The packed bytes are still printed alongside `world`: `world` is only as good
+        // as the tracked reference position, and keeping the raw field means a suspect
+        // coordinate can always be re-derived by hand from the same trace line.
         info!(addr = %$addr, id = <$ty as SimpleElement>::ID, request_id = ?e.request_id, entity_id = ?entity_id,
-            "<- {}: {:?} (alias {} -> {:?})", stringify!($ty), e.element, e.element.id_alias, entity_id);
+            world = ?world.map(|w| w.to_string()),
+            "<- {}: {:?} (alias {} -> {:?})", stringify!($ty), e.element,
+            fmt_id_alias(e.element.id_alias), entity_id);
         Ok(true)
     }};
 }
@@ -201,6 +208,7 @@ pub fn run(
         avup_samples: HashMap::new(),
         partial_resources: HashMap::new(),
         session_keys: HashMap::new(),
+        position: PositionTracker::new(),
     };
 
     thread::scope(move |scope| {
@@ -229,6 +237,189 @@ pub fn run(
 #[derive(Debug)]
 struct LoginHandler {
     shared: Arc<Shared>,
+}
+
+/// A volatile position resolved into world space.
+///
+/// `y` is `None` for the `OnGround` family, which genuinely does not send it -- the
+/// client takes that entity's height from the terrain, which this proxy has no access
+/// to. Kept optional rather than defaulted to `0.0` so a trace never shows an altitude
+/// that was never on the wire.
+#[derive(Debug, Clone, Copy)]
+struct WorldPos {
+    x: f32,
+    y: Option<f32>,
+    z: f32,
+}
+
+impl std::fmt::Display for WorldPos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.y {
+            Some(y) => write!(f, "({:.2}, {:.2}, {:.2})", self.x, y, self.z),
+            None => write!(f, "({:.2}, ~ground, {:.2})", self.x, self.z),
+        }
+    }
+}
+
+/// The packed-position field of an `AVATAR_UPDATE_*` element, resolved against an origin.
+///
+/// Implemented for the three shapes the family uses -- [`PackedXyz`] (`FullPos`),
+/// [`PackedXz`] (`OnGround`) and `()` (`NoPos`) -- so the two AVUPMSG macros can resolve
+/// a position generically without matching on the element type.
+trait VolatilePosition {
+    fn resolve(&self, origin: Vec3, xz_scale: f32) -> Option<WorldPos>;
+}
+
+impl VolatilePosition for PackedXyz {
+    fn resolve(&self, origin: Vec3, xz_scale: f32) -> Option<WorldPos> {
+        let o = self.unpack(xz_scale);
+        // `AVATAR_UPDATE_GET_POS_FullPos` adds all three components.
+        Some(WorldPos { x: o.x + origin.x, y: Some(o.y + origin.y), z: o.z + origin.z })
+    }
+}
+
+impl VolatilePosition for PackedXz {
+    fn resolve(&self, origin: Vec3, xz_scale: f32) -> Option<WorldPos> {
+        let (x, z) = self.unpack(xz_scale);
+        // No altitude is reported, because the wire carries none and the client does not
+        // recover one either: in the `OnGround` path it sets `y` to BigWorld's
+        // `NO_POSITION` sentinel (-13000.0), which WoT's build then happens to bias by
+        // the reference's own `y` -- the client binary literally computes
+        // `y = referencePosition_.y - 13000.0` off a vehicle, and the bare `-13000.0` on
+        // one. Either way it is a sentinel meaning "ask the terrain", never a height, so
+        // surfacing it as a coordinate would be pure noise.
+        Some(WorldPos { x: x + origin.x, y: None, z: z + origin.z })
+    }
+}
+
+impl VolatilePosition for () {
+    fn resolve(&self, _origin: Vec3, _xz_scale: f32) -> Option<WorldPos> {
+        None
+    }
+}
+
+/// Everything needed to turn the *relative* positions in the `AVATAR_UPDATE_*` stream
+/// into world coordinates.
+///
+/// WoT runs BigWorld's relative mode (`VOLATILE_POSITIONS_ARE_ABSOLUTE == 0`, confirmed
+/// in the client binary), so a volatile update carries only an offset. The client
+/// reconstructs the absolute position as
+/// `pos = unpack(packed, packed_xz_scale) + origin`, where
+/// `origin = if on a vehicle { ZERO } else { reference_position }`
+/// (`AVATAR_UPDATE_GET_POS_ORIGIN`). This mirrors the connection state that feeds that
+/// expression -- see each field.
+#[derive(Debug)]
+struct PositionTracker {
+    /// The client's own recent outgoing positions, indexed by the `ref_num` it stamped on
+    /// each one. Mirrors `ServerConnection::sentPositions_[256]`, which the client fills
+    /// in `server_connection.cpp:757` and the server later names back at it via
+    /// [`RelativePositionReference`]. Boxed because 256 * 12 bytes is more than belongs
+    /// inline in a handler that is moved around.
+    ///
+    /// Entries start as `None`: a reference naming a slot the proxy never saw (it joined
+    /// mid-session, or the update was lost) must be detectable, not silently read as the
+    /// origin.
+    sent_positions: Box<[Option<Vec3>; 256]>,
+    /// Mirrors `ServerConnection::referencePosition_` (one Vec3 at `this+0x13a8` in the
+    /// client). Deliberately a single global value, **not** per entity: the binary has
+    /// exactly three stores to that field and none of them are keyed by entity.
+    ///
+    /// `None` until a writer has run, so positions decoded before the first reference are
+    /// reported as unresolved instead of silently offset from the origin.
+    reference_position: Option<Vec3>,
+    /// Which vehicle each entity is riding, from [`SetVehicle`]; absent or `0` means
+    /// none. Only used for the `vehicle_id == 0` test that picks the origin.
+    vehicles: HashMap<u32, u32>,
+    /// The space's `packed_xz_scale`, announced by `CreateCellPlayer`. Without it the
+    /// packed x/z cannot be scaled, so positions stay unresolved rather than being
+    /// reported at an arbitrary scale.
+    packed_xz_scale: Option<f32>,
+}
+
+impl PositionTracker {
+
+    fn new() -> Self {
+        Self {
+            sent_positions: Box::new([None; 256]),
+            reference_position: None,
+            vehicles: HashMap::new(),
+            packed_xz_scale: None,
+        }
+    }
+
+    /// Full reset, mirroring the client's connection reset -- the same `memset` that
+    /// clears `idAlias_`, so this belongs wherever that is handled (`ResetEntities`).
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Record one of the client's own outgoing positions (upstream
+    /// `AvatarUpdateImplicit`/`AvatarUpdateExplicit`), so a later
+    /// [`RelativePositionReference`] naming this `ref_num` can resolve.
+    fn record_sent(&mut self, ref_num: u8, position: Vec3) {
+        self.sent_positions[ref_num as usize] = Some(position);
+    }
+
+    /// `ServerConnection::relativePosition`: assigned verbatim, **no rounding**.
+    fn set_reference_exact(&mut self, position: Vec3) {
+        self.reference_position = Some(position);
+    }
+
+    /// `ServerConnection::relativePositionReference`: the reference is a *rounded* copy of
+    /// a position the client itself sent earlier. Returns the resolved position, or `None`
+    /// if that slot was never observed (in which case the reference is left untouched
+    /// rather than being set to something invented).
+    fn set_reference_from_sent(&mut self, sequence_number: u8) -> Option<Vec3> {
+        let sent = self.sent_positions[sequence_number as usize]?;
+        self.reference_position = Some(calculate_reference_position(sent));
+        Some(reference)
+    }
+
+    /// `ServerConnection::detailedPositionReceived`: an accurate, uncompressed position
+    /// re-bases the reference, but **only** for the player's own entity and only while it
+    /// is not on a vehicle. Both conditions are the SDK's, and both matter: without the
+    /// entity test every other vehicle's detailed position would clobber the reference.
+    ///
+    /// Returns whether it applied, so callers can log the distinction.
+    fn detailed_position_received(&mut self, entity_id: u32, player_entity_id: Option<u32>, position: Vec3) -> bool {
+        if player_entity_id != Some(entity_id) || self.vehicle_of(entity_id) != 0 {
+            return false;
+        }
+        self.reference_position = Some(calculate_reference_position(position));
+        true
+    }
+
+    fn set_vehicle(&mut self, passenger_id: u32, vehicle_id: u32) {
+        if vehicle_id == 0 {
+            self.vehicles.remove(&passenger_id);
+        } else {
+            self.vehicles.insert(passenger_id, vehicle_id);
+        }
+    }
+
+    /// The vehicle `entity_id` is riding, or `0` for none (`NULL_ENTITY_ID`).
+    fn vehicle_of(&self, entity_id: u32) -> u32 {
+        self.vehicles.get(&entity_id).copied().unwrap_or(0)
+    }
+
+    /// Resolve a volatile position for `entity_id` into world coordinates, or `None` if
+    /// the element carries no position or the state needed isn't known yet.
+    /// `entity_id` of `None` (an `id_alias` that didn't resolve) yields `None`: which
+    /// origin applies depends on whether *that* entity is on a vehicle, so an unknown
+    /// target means an unknowable position, not one to guess at.
+    fn resolve<P: VolatilePosition>(&self, entity_id: Option<u32>, packed: &P) -> Option<WorldPos> {
+        let xz_scale = self.packed_xz_scale?;
+        // An entity riding a vehicle reports positions relative to that vehicle, so the
+        // origin is zero and no reference is needed -- that case resolves even before the
+        // first reference position arrives.
+        let origin = if self.vehicle_of(entity_id?) != 0 {
+            Vec3::ZERO
+        } else {
+            self.reference_position?
+        };
+        packed.resolve(origin, xz_scale)
+    }
+
 }
 
 #[derive(Debug)]
@@ -293,6 +484,8 @@ struct BaseHandler {
     /// this handshake since its own view of the base app's address never changed, so the
     /// proxy replays it on the client's behalf toward the new real address instead.
     session_keys: HashMap<SocketAddr, u32>,
+    /// Relative-position state: see [`PositionTracker`].
+    position: PositionTracker,
 }
 
 #[derive(Debug)]
@@ -568,8 +761,28 @@ impl BaseHandler {
             // structured codec -- read them through their placeholder type so the bundle
             // can safely keep being read, and trace their raw content.
             PingDatacenter::ID => return trace_dbg!(elt, addr, PingDatacenter),
-            AvatarUpdateImplicit::ID => return trace_dbg!(elt, addr, AvatarUpdateImplicit),
-            AvatarUpdateExplicit::ID => return trace_dbg!(elt, addr, AvatarUpdateExplicit),
+            AvatarUpdateImplicit::ID => {
+                // The client stamps each of its own outgoing positions with a sequence
+                // number and remembers it (`sentPositions_[seq] = globalPos`); the server
+                // later re-names one of those as the base for relative updates, by that
+                // number alone (see `RelativePositionReference`). So this is the only
+                // place the proxy can learn what such a reference will mean.
+                let e = elt.read_simple::<AvatarUpdateImplicit>()?;
+                self.position.record_sent(e.element.ref_num, e.element.position);
+                trace!(%addr, id = AvatarUpdateImplicit::ID, request_id = ?e.request_id,
+                    "-> {}: {:?}", stringify!(AvatarUpdateImplicit), e.element);
+                return Ok(true);
+            }
+            AvatarUpdateExplicit::ID => {
+                // Same as `AvatarUpdateImplicit`, but names the vehicle explicitly. The
+                // SDK records the position either way (the `sentPositions_` write happens
+                // before the implicit/explicit branch), so this does too.
+                let e = elt.read_simple::<AvatarUpdateExplicit>()?;
+                self.position.record_sent(e.element.ref_num, e.element.position);
+                trace!(%addr, id = AvatarUpdateExplicit::ID, request_id = ?e.request_id,
+                    "-> {}: {:?}", stringify!(AvatarUpdateExplicit), e.element);
+                return Ok(true);
+            }
             AckPhysicsCorrection::ID => return trace_dbg!(elt, addr, AckPhysicsCorrection),
             RequestEntityUpdate::ID => return trace_dbg!(elt, addr, RequestEntityUpdate),
             NrlMsgToCell::ID => return trace_dbg!(elt, addr, NrlMsgToCell),
@@ -702,6 +915,11 @@ impl BaseHandler {
                     "<- Reset entities, keep player on base: {}, entities: {}",
                     re.element.keep_player_on_base, self.entities.len());
 
+                // Mirrors the client's connection reset, which clears the position state
+                // along with `idAlias_`. Keeping a stale reference across a space change
+                // would offset every position in the new space by the old space's origin.
+                self.position.reset();
+
                 // Don't delete player entity if requested...
                 let mut player_entity = None;
                 if re.element.keep_player_on_base {
@@ -769,6 +987,15 @@ impl BaseHandler {
 
                 let ccp = elt.read_simple::<CreateCellPlayer>()?;
                 warn!(%addr, id = CreateCellPlayer::ID, request_id = ?ccp.request_id, "<- Create cell player: {:?}", ccp.element);
+
+                // The space's packed-position scale, without which no volatile position can
+                // be resolved at all, plus the initial reference: `createCellPlayer` ends
+                // with `detailedPositionReceived( id_, ... )`, so entering a space bases the
+                // reference on the player's own starting position.
+                self.position.packed_xz_scale = Some(ccp.element.packed_xz_scale);
+                if let Some(id) = self.player_entity_id {
+                    self.position.detailed_position_received(id, Some(id), ccp.element.position);
+                }
 
                 // `vehicle_id` is a distinct `Vehicle` entity, not the player's own base
                 // entity (confirmed live -- see the doc comment on
@@ -1050,12 +1277,16 @@ impl BaseHandler {
                     }
                 };
                 self.created_entity_types.insert(e.element.entity_id, e.element.entity_type_id);
+                // `ServerConnection::createEntity` ends in `detailedPositionReceived`, so a
+                // create for the player's own entity re-bases the reference.
+                self.position.detailed_position_received(e.element.entity_id, self.player_entity_id, e.element.position);
                 trace!(%addr, id = CreateEntity::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(CreateEntity), e.element);
                 return Ok(true);
             }
             CreateEntityDetailed::ID => {
                 let e = elt.read_simple::<CreateEntityDetailed>()?;
                 self.created_entity_types.insert(e.element.entity_id, e.element.entity_type_id);
+                self.position.detailed_position_received(e.element.entity_id, self.player_entity_id, e.element.position);
                 trace!(%addr, id = CreateEntityDetailed::ID, request_id = ?e.request_id, "{}: {:?}", stringify!(CreateEntityDetailed), e.element);
                 return Ok(true);
             }
@@ -1112,9 +1343,37 @@ impl BaseHandler {
                 return Ok(true);
             }
             TickSyncPeriodic::ID => return trace_dbg!(elt, addr, TickSyncPeriodic),
-            RelativePositionReference::ID => return trace_dbg!(elt, addr, RelativePositionReference),
-            RelativePosition::ID => return trace_dbg!(elt, addr, RelativePosition),
-            SetVehicle::ID => return trace_dbg!(elt, addr, SetVehicle),
+            RelativePositionReference::ID => {
+                let e = elt.read_simple::<RelativePositionReference>()?;
+                let seq = e.element.sequence_number;
+                match self.position.set_reference_from_sent(seq) {
+                    Some(reference) => trace!(%addr, id = RelativePositionReference::ID, request_id = ?e.request_id,
+                        "<- Relative position reference: seq {seq} -> {reference:?}"),
+                    // Expected when the proxy joined mid-session or an upstream update was
+                    // lost: the slot was never observed. Leave the old reference in place
+                    // rather than inventing one -- positions stay slightly stale instead of
+                    // jumping to a fabricated origin.
+                    None => warn!(%addr, id = RelativePositionReference::ID,
+                        "<- Relative position reference: seq {seq} names a position never seen upstream; reference unchanged"),
+                }
+                return Ok(true);
+            }
+            RelativePosition::ID => {
+                // Assigned verbatim -- `ServerConnection::relativePosition` does not round,
+                // unlike every other writer of this field.
+                let e = elt.read_simple::<RelativePosition>()?;
+                self.position.set_reference_exact(e.element.position);
+                trace!(%addr, id = RelativePosition::ID, request_id = ?e.request_id,
+                    "<- Relative position: {:?}", e.element.position);
+                return Ok(true);
+            }
+            SetVehicle::ID => {
+                let e = elt.read_simple::<SetVehicle>()?;
+                self.position.set_vehicle(e.element.passenger_id, e.element.vehicle_id);
+                trace!(%addr, id = SetVehicle::ID, request_id = ?e.request_id,
+                    "<- Set vehicle: entity {} -> vehicle {}", e.element.passenger_id, e.element.vehicle_id);
+                return Ok(true);
+            }
             SelectAliasedEntity::ID => {
                 // `ServerConnection::selectAliasedEntity`: `selectedEntityID_ = idAlias_[args.idAlias]`.
                 // The element is a `DebugElementFixed<_, 1>`, so its single data byte *is*
@@ -1133,14 +1392,45 @@ impl BaseHandler {
                 return Ok(true);
             }
             ForcedPosition::ID => return trace_dbg!(elt, addr, ForcedPosition),
-            AvatarUpdateNoAliasDetailed::ID => return trace_dbg_entity!(self, elt, addr, AvatarUpdateNoAliasDetailed),
-            AvatarUpdateAliasDetailed::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasDetailed),
+            AvatarUpdateNoAliasDetailed::ID => {
+                // Re-targets like the rest of the AVUPMSG family (see `trace_dbg_entity`),
+                // and additionally re-bases the reference position: this one carries a
+                // full uncompressed `Vec3`, which is what `detailedPositionReceived`
+                // rounds into `referencePosition_` (for the player's own entity only).
+                let e = elt.read_simple::<AvatarUpdateNoAliasDetailed>()?;
+                let entity_id = e.element.entity_id;
+                self.selected_entity_id = Some(entity_id);
+                let rebased = self.position.detailed_position_received(entity_id, self.player_entity_id, e.element.position);
+                info!(%addr, id = AvatarUpdateNoAliasDetailed::ID, request_id = ?e.request_id, entity_id, rebased,
+                    "<- {}: {:?}", stringify!(AvatarUpdateNoAliasDetailed), e.element);
+                return Ok(true);
+            }
+            AvatarUpdateAliasDetailed::ID => {
+                // As `AvatarUpdateNoAliasDetailed`, but the target arrives as an alias.
+                let e = elt.read_simple::<AvatarUpdateAliasDetailed>()?;
+                let entity_id = self.id_aliases.get(&e.element.id_alias).copied();
+                self.selected_entity_id = entity_id;
+                let rebased = match entity_id {
+                    Some(id) => self.position.detailed_position_received(id, self.player_entity_id, e.element.position),
+                    None => false,
+                };
+                info!(%addr, id = AvatarUpdateAliasDetailed::ID, request_id = ?e.request_id, entity_id = ?entity_id, rebased,
+                    "<- {}: {:?} (alias {} -> {:?})", stringify!(AvatarUpdateAliasDetailed), e.element,
+                    fmt_id_alias(e.element.id_alias), entity_id);
+                return Ok(true);
+            }
             AvatarUpdatePlayerDetailed::ID => {
                 // `ServerConnection::avatarUpdatePlayerDetailed` does `selectedEntityID_ = id_`
                 // -- the player entity, same target as `SelectPlayerEntity`.
                 let e = elt.read_simple::<AvatarUpdatePlayerDetailed>()?;
                 self.selected_entity_id = self.select_player_entity_id();
-                trace!(%addr, id = AvatarUpdatePlayerDetailed::ID, request_id = ?e.request_id,
+                // This one is always the player's own entity, so it re-bases the reference
+                // whenever the player isn't riding a vehicle.
+                let rebased = match self.player_entity_id {
+                    Some(id) => self.position.detailed_position_received(id, self.player_entity_id, e.element.position),
+                    None => false,
+                };
+                trace!(%addr, id = AvatarUpdatePlayerDetailed::ID, request_id = ?e.request_id, rebased,
                     "{}: {:?}", stringify!(AvatarUpdatePlayerDetailed), e.element);
                 return Ok(true);
             }
@@ -1181,7 +1471,19 @@ impl BaseHandler {
             ControlEntity::ID => return trace_dbg!(elt, addr, ControlEntity),
             VoiceData::ID => return trace_dbg!(elt, addr, VoiceData),
             RestoreClient::ID => return trace_dbg!(elt, addr, RestoreClient),
-            DetailedPosition::ID => return trace_dbg!(elt, addr, DetailedPosition),
+            DetailedPosition::ID => {
+                // Carries no id of its own -- it applies to the currently-selected entity,
+                // which is also what `ServerConnection::detailedPosition` uses
+                // (`getVehicleID( selectedEntityID_ )`).
+                let e = elt.read_simple::<DetailedPosition>()?;
+                let rebased = match self.selected_entity_id {
+                    Some(id) => self.position.detailed_position_received(id, self.player_entity_id, e.element.position),
+                    None => false,
+                };
+                trace!(%addr, id = DetailedPosition::ID, request_id = ?e.request_id, rebased,
+                    "<- {}: {:?}", stringify!(DetailedPosition), e.element);
+                return Ok(true);
+            }
             id @ NestedEntityProperty::ID => {
 
                 // Buffer the raw payload first so a decode failure (or a missing dispatch
@@ -1428,4 +1730,133 @@ impl CellMethodTables for CellTables<'_> {
             .or_else(|| self.handler.entities.get(&entity_id).map(|&(type_id, _)| type_id))?;
         Some(&self.handler.shared.dispatch.entity_from_id(type_id)?.cell_methods)
     }
+}
+
+
+#[cfg(test)]
+mod position_tests {
+
+    use super::*;
+
+    /// A tracker with the two things every resolve needs, so each test states only what
+    /// it is actually about.
+    fn ready() -> PositionTracker {
+        let mut t = PositionTracker::new();
+        t.packed_xz_scale = Some(1.0);
+        t.set_reference_exact(Vec3::new(100.0, 20.0, -50.0));
+        t
+    }
+
+    /// The round trip the whole feature rests on: an upstream position, named back by
+    /// sequence number, becomes the (rounded) reference.
+    #[test]
+    fn reference_resolves_through_sent_positions() {
+        let mut t = PositionTracker::new();
+        t.record_sent(7, Vec3::new(10.4, -3.6, 2.5));
+        assert_eq!(t.set_reference_from_sent(7), Some(Vec3::new(10.0, -4.0, 3.0)));
+        assert_eq!(t.reference_position, Some(Vec3::new(10.0, -4.0, 3.0)));
+    }
+
+    /// A reference naming a slot never observed must not silently become the origin, and
+    /// must not discard the reference already in hand.
+    #[test]
+    fn unknown_sequence_number_leaves_reference_untouched() {
+        let mut t = ready();
+        let before = t.reference_position;
+        assert_eq!(t.set_reference_from_sent(200), None);
+        assert_eq!(t.reference_position, before);
+    }
+
+    /// `relativePosition` assigns verbatim; `relativePositionReference` rounds. Getting
+    /// these the same way round would shift every position by up to half a metre.
+    #[test]
+    fn only_the_sequence_path_rounds() {
+        let mut t = PositionTracker::new();
+        t.set_reference_exact(Vec3::new(1.4, 2.6, -0.5));
+        assert_eq!(t.reference_position, Some(Vec3::new(1.4, 2.6, -0.5)), "must not round");
+
+        t.record_sent(0, Vec3::new(1.4, 2.6, -0.5));
+        t.set_reference_from_sent(0);
+        assert_eq!(t.reference_position, Some(Vec3::new(1.0, 3.0, 0.0)), "must round");
+    }
+
+    /// Only the player's own entity re-bases the reference. Without this test the
+    /// regression is invisible: every other vehicle's detailed position would quietly
+    /// clobber the origin and drag every decoded position with it.
+    #[test]
+    fn detailed_position_rebases_only_for_the_player_off_vehicle() {
+        let mut t = ready();
+        let original = t.reference_position;
+
+        assert!(!t.detailed_position_received(42, Some(7), Vec3::new(1.0, 1.0, 1.0)),
+            "another entity must not re-base");
+        assert_eq!(t.reference_position, original);
+
+        t.set_vehicle(7, 99);
+        assert!(!t.detailed_position_received(7, Some(7), Vec3::new(1.0, 1.0, 1.0)),
+            "the player while riding a vehicle must not re-base");
+        assert_eq!(t.reference_position, original);
+
+        t.set_vehicle(7, 0);
+        assert!(t.detailed_position_received(7, Some(7), Vec3::new(1.4, 1.6, -2.5)));
+        assert_eq!(t.reference_position, Some(Vec3::new(1.0, 2.0, -2.0)));
+    }
+
+    /// The origin switches to zero for a passenger, so a vehicle-relative offset is not
+    /// reported as if it were measured from the player's reference.
+    #[test]
+    fn passenger_positions_are_vehicle_relative() {
+        let mut t = ready();
+        let packed = PackedXyz::pack(Vec3::new(3.0, 1.0, 4.0), 1.0);
+
+        let on_foot = t.resolve(Some(7), &packed).expect("reference and scale are set");
+        assert!((on_foot.x - 103.0).abs() < 0.5, "x was {}", on_foot.x);
+        assert!((on_foot.z - (-46.0)).abs() < 0.5, "z was {}", on_foot.z);
+
+        t.set_vehicle(7, 99);
+        let riding = t.resolve(Some(7), &packed).expect("no reference needed on a vehicle");
+        assert!((riding.x - 3.0).abs() < 0.5, "x was {}", riding.x);
+        assert!((riding.z - 4.0).abs() < 0.5, "z was {}", riding.z);
+    }
+
+    /// Everything the resolve depends on must be able to say "I don't know" rather than
+    /// produce a confident wrong coordinate.
+    #[test]
+    fn resolve_reports_unknown_rather_than_guessing() {
+        let packed = PackedXyz::pack(Vec3::new(1.0, 2.0, 3.0), 1.0);
+
+        let mut no_scale = PositionTracker::new();
+        no_scale.set_reference_exact(Vec3::ZERO);
+        assert!(no_scale.resolve(Some(7), &packed).is_none(), "no packed_xz_scale");
+
+        let mut no_reference = PositionTracker::new();
+        no_reference.packed_xz_scale = Some(1.0);
+        assert!(no_reference.resolve(Some(7), &packed).is_none(), "no reference yet");
+
+        assert!(ready().resolve(None, &packed).is_none(), "unresolved id_alias");
+        assert!(ready().resolve(Some(7), &()).is_none(), "NoPos carries no position");
+    }
+
+    /// `OnGround` genuinely omits y, and must not be reported with a fabricated one.
+    #[test]
+    fn on_ground_has_no_altitude() {
+        let t = ready();
+        let w = t.resolve(Some(7), &PackedXz::pack(2.0, 3.0, 1.0)).unwrap();
+        assert!(w.y.is_none(), "OnGround must not invent an altitude");
+        assert!(w.to_string().contains("ground"), "rendered as {w}");
+    }
+
+    /// A space change must not carry the old space's origin into the new one.
+    #[test]
+    fn reset_clears_everything() {
+        let mut t = ready();
+        t.record_sent(3, Vec3::ONE);
+        t.set_vehicle(7, 99);
+        t.reset();
+        assert!(t.reference_position.is_none());
+        assert!(t.packed_xz_scale.is_none());
+        assert_eq!(t.vehicle_of(7), 0);
+        assert_eq!(t.set_reference_from_sent(3), None);
+    }
+
 }

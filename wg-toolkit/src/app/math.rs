@@ -41,15 +41,15 @@ use super::bit::{BitReader, BitWriter};
 ///
 /// Note `EXPONENT_BITS_XZ` is one macro shared by [`PackedXyz`] and [`PackedXz`], and
 /// the binary does use 4 in both -- an independent consistency check on the reading.
-const EXPONENT_BITS_XZ: u32 = 4;
+pub const EXPONENT_BITS_XZ: u32 = 4;
 /// Mantissa bits for `x`/`z` in [`PackedXz`] (vanilla `XZ_MANTISSABITS_XZ` = 8).
-const XZ_MANTISSA_BITS_XZ: u32 = 7;
+pub const XZ_MANTISSA_BITS_XZ: u32 = 7;
 /// Mantissa bits for `x`/`z` in [`PackedXyz`] (vanilla `XYZ_MANTISSABITS_XZ` = 8).
-const XYZ_MANTISSA_BITS_XZ: u32 = 12;
+pub const XYZ_MANTISSA_BITS_XZ: u32 = 12;
 /// Exponent bits for `y` in [`PackedXyz`] (vanilla `XYZ_EXPONENTBITS_Y` = 4, unchanged).
-const XYZ_EXPONENT_BITS_Y: u32 = 4;
+pub const XYZ_EXPONENT_BITS_Y: u32 = 4;
 /// Mantissa bits for `y` in [`PackedXyz`] (vanilla `XYZ_MANTISSABITS_Y` = 11).
-const XYZ_MANTISSA_BITS_Y: u32 = 9;
+pub const XYZ_MANTISSA_BITS_Y: u32 = 9;
 
 
 /// BigWorld's `packFloat<EXPONENT_BITS, MANTISSA_BITS>` (`network/msgtypes.ipp`): packs a
@@ -100,6 +100,27 @@ fn unpack_float(reader: &mut BitReader, exponent_bits: u32, mantissa_bits: u32) 
     f32::from_bits(value.to_bits() | sign)
 }
 
+/// BigWorld's `calculateReferencePosition` (`network/msgtypes.hpp`): rounds a position
+/// to whole metres to produce the base that subsequent *relative* volatile updates are
+/// measured from.
+///
+/// The rounding matters. BigWorld's `BW_ROUNDF` is `floorf(value + 0.5f)`
+/// (`lib/math/mathdef.hpp`), i.e. round-**half-up**, and the WoT client inlines exactly
+/// that (`addss 0.5; cvttss2si; step down when negative and inexact`). Rust's
+/// `f32::round` is round-half-*away-from-zero*, which disagrees on negative halves
+/// (`-2.5` gives `-2` here but `-3` there) -- so do not "simplify" this to `.round()`.
+///
+/// The SDK's own justification for rounding at all: if the reference moved by less than
+/// the least-accurate representable offset, entities that are meant to be stationary
+/// would drift as it moved.
+pub fn calculate_reference_position(pos: Vec3) -> Vec3 {
+    Vec3::new(
+        (pos.x + 0.5).floor(),
+        (pos.y + 0.5).floor(),
+        (pos.z + 0.5).floor(),
+    )
+}
+
 /// BigWorld's `angleToInt<8>`/`intToAngle<8>` (`network/msgtypes.ipp`): a full-range
 /// angle in `[-pi, pi)` packed into a single signed byte.
 fn angle_to_i8(angle: f32) -> i8 {
@@ -139,11 +160,24 @@ pub struct PackedXyz(pub [u8; 6]);
 
 impl PackedXyz {
 
-    /// Decode into `(x, y, z)`: `x`/`z` are offsets in metres from the entity's tracked
-    /// reference position (see `RelativePositionReference`/`RelativePosition`, neither
-    /// decoded by this project yet) scaled by `xz_scale` (the space's
-    /// `CreateCellPlayer::packed_xz_scale`); `y` is absolute and needs neither scale nor
-    /// reference (`Y-values in off-Ground updates are always absolute`, `msgtypes.hpp`).
+    /// Decode into `(x, y, z)`: an **offset** from the entity's reference position, not a
+    /// world coordinate. `x`/`z` are in metres once scaled by `xz_scale` (the space's
+    /// `CreateCellPlayer::packed_xz_scale`); `y` is unscaled -- that, and only that, is
+    /// what `msgtypes.hpp`'s "Y-values in off-Ground updates are always absolute" means.
+    ///
+    /// All three components still need the reference position added:
+    /// `AVATAR_UPDATE_GET_POS_FullPos` ends in `pos += originPos`, where `originPos` is
+    /// the connection's reference position, or the zero vector when the entity is riding
+    /// a vehicle (positions are then vehicle-relative). The WoT client does exactly this
+    /// -- three `addss`es against its `referencePosition_`. So do not treat `y` as a
+    /// finished altitude just because it escaped the scale.
+    ///
+    /// The proxy's `PositionTracker` maintains that reference from
+    /// [`RelativePositionReference`]/[`RelativePosition`] and the detailed-position
+    /// messages; see [`calculate_reference_position`].
+    ///
+    /// [`RelativePositionReference`]: crate::app::client::element::RelativePositionReference
+    /// [`RelativePosition`]: crate::app::client::element::RelativePosition
     pub fn unpack(&self, xz_scale: f32) -> Vec3 {
         let mut reader = BitReader::new(&self.0);
         let x = unpack_float(&mut reader, EXPONENT_BITS_XZ, XYZ_MANTISSA_BITS_XZ) * xz_scale;
@@ -368,6 +402,22 @@ mod tests {
         // And the codecs' buffers must agree with those budgets.
         assert_eq!(PackedXyz([0; 6]).0.len() * 8, xyz_bits as usize);
         assert_eq!(PackedXz([0; 3]).0.len() * 8, xz_bits as usize);
+    }
+
+    /// `BW_ROUNDF` is `floor(v + 0.5)`, not Rust's `f32::round` -- they part ways on
+    /// negative halves, which is exactly where a silent drift bug would hide.
+    #[test]
+    fn reference_position_rounds_half_up() {
+        let r = calculate_reference_position(Vec3::new(-2.5, 2.5, 0.49));
+        assert_eq!(r.x, -2.0, "half-up, not away-from-zero (f32::round gives -3)");
+        assert_eq!(r.y, 3.0);
+        assert_eq!(r.z, 0.0);
+        assert_ne!(r.x, (-2.5f32).round(), "must differ from f32::round here");
+
+        let r = calculate_reference_position(Vec3::new(-0.5, 1.4999, -1.5));
+        assert_eq!(r.x, 0.0);
+        assert_eq!(r.y, 1.0);
+        assert_eq!(r.z, -1.0);
     }
 
     #[test]
