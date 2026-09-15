@@ -288,35 +288,97 @@ fn find_interface<'m>(interfaces: &'m [Interface], name: &str) -> &'m Interface 
         .unwrap_or_else(|| panic!("unknown implemented interface: {name}"))
 }
 
+/// Visit every method reachable from `interface` in BigWorld's own declaration order:
+/// everything pulled in through `<Implements>` first, then the interface's own. Entity
+/// `<Parent>` inheritance is already flattened into `interface` by `script::load`.
+fn walk_methods<'m>(
+    interfaces: &'m [Interface],
+    interface: &'m Interface,
+    methods_of: fn(&Interface) -> &[Method],
+    visit: &mut dyn FnMut(&'m Method),
+) {
+    for implement_name in &interface.implements {
+        walk_methods(interfaces, find_interface(interfaces, implement_name), methods_of, visit);
+    }
+    for method in methods_of(interface) {
+        visit(method);
+    }
+}
+
+/// As [`walk_methods`], for properties.
+fn walk_properties<'m>(
+    interfaces: &'m [Interface],
+    interface: &'m Interface,
+    visit: &mut dyn FnMut(&'m Property),
+) {
+    for implement_name in &interface.implements {
+        walk_properties(interfaces, find_interface(interfaces, implement_name), visit);
+    }
+    for property in &interface.properties {
+        visit(property);
+    }
+}
+
+/// Append `interface`'s exposed methods to `out`, in declaration order and not yet sorted.
+///
+/// `seen` spans every call that feeds one entity's table -- the entity's own members, then
+/// each static component's -- so both rules that decide whether a method gets a slot live
+/// here, once, rather than being restated per phase. Restating them is precisely what left
+/// `is_method_exposed` out of the component phase and pushed
+/// `checkPositionForEquipment` two slots past the id the client sends.
 fn collect_methods<'m>(
     interfaces: &'m [Interface],
     interface: &'m Interface,
     methods_of: fn(&Interface) -> &[Method],
+    seen: &mut HashSet<Arc<str>>,
     out: &mut Vec<(&'m Method, ElementLength)>,
 ) {
-    for implement_name in &interface.implements {
-        collect_methods(interfaces, find_interface(interfaces, implement_name), methods_of, out);
-    }
-    for method in methods_of(interface) {
-        if is_method_exposed(method) {
+    walk_methods(interfaces, interface, methods_of, &mut |method| {
+        // An unexposed method has no exposed id at all. A redeclared name keeps the first
+        // slot: `EntityMethodDescriptions::init` pushes to `exposedMethods_` only when the
+        // name -> index insert is new, and a repeat merely records another implementing
+        // component. Either way a second entry would lengthen the table and shift every
+        // slot after it.
+        if is_method_exposed(method) && seen.insert(Arc::clone(&method.name)) {
             out.push((method, method_length(method)));
         }
-    }
+    });
 }
 
+/// Append `interface`'s exposed, client-visible properties to `out`, in declaration order
+/// and not yet sorted. `seen` spans phases exactly as in [`collect_methods`].
 fn collect_properties<'m>(
     interfaces: &'m [Interface],
     interface: &'m Interface,
+    seen: &mut HashSet<Arc<str>>,
     out: &mut Vec<(&'m Property, ElementLength)>,
 ) {
-    for implement_name in &interface.implements {
-        collect_properties(interfaces, find_interface(interfaces, implement_name), out);
-    }
-    for property in &interface.properties {
-        if is_property_exposed(property) {
-            out.push((property, property_length(property)));
+    // Slots placed by *this* call. A property redeclared within one phase -- by an entity
+    // and one of its interfaces, or by an entity and its `<Parent>` (live:
+    // `ClientSelectableCameraVehicle` redeclares `ClientSelectableObject`'s `modelName`) --
+    // is an override: `parseProperties` finds the name in the property map, reuses the
+    // existing `index` and its already-allocated `clientServerFullIndex`, then overwrites
+    // the slot with `properties_[index] = dataDescription`. So it keeps the first
+    // declaration's place but contributes the last declaration's type, and therefore the
+    // last one's stream size, which is what the caller's sort reads.
+    let mut slot_of: HashMap<Arc<str>, usize> = HashMap::new();
+    walk_properties(interfaces, interface, &mut |property| {
+        // Only a client-server property is ever allocated a `clientServerFullIndex`, so a
+        // redeclaration that merely widens visibility (live: `RepairBase`'s `CELL_PRIVATE`
+        // `team`, made `ALL_CLIENTS` by `StepRepairPoint`) overrides nothing -- the
+        // parent's copy never gets this far.
+        if !is_property_exposed(property) {
+            return;
         }
-    }
+        match slot_of.get(&property.name) {
+            Some(&slot) => out[slot] = (property, property_length(property)),
+            None if seen.insert(Arc::clone(&property.name)) => {
+                slot_of.insert(Arc::clone(&property.name), out.len());
+                out.push((property, property_length(property)));
+            }
+            None => {}
+        }
+    });
 }
 
 /// Selects an interface's client methods, for use with [`build_method_table`].
@@ -342,24 +404,15 @@ fn build_method_table(
 ) -> Vec<MethodDef> {
 
     // The entity's own and inherited (`implements`) methods occupy the leading slots.
-    let mut collected = Vec::new();
-    collect_methods(interfaces, entity_interface, methods_of, &mut collected);
-
-    // A name may be declared by both the entity and one of its interfaces (live example:
-    // `Account::requestToken`, also in `AccountAuthTokenProvider`). BigWorld keeps only
-    // the first: `EntityMethodDescriptions::init` inserts into a name -> index map and
-    // pushes to `internalMethods_`/`exposedMethods_` *only* when the insert is new --
-    // a repeat just records an extra implementing component (and must have an equal
-    // signature). So a redeclared method occupies one exposed slot, not two.
-    //
-    // Deduplicating before the sort matters: an extra entry lengthens the table and
-    // shifts every slot after it, which decodes later methods against the wrong
-    // signature. That is exactly what made `Account`'s exposed id 13 read as
-    // `accountDebugger_registerDebugTaskResult` (20 bytes) when the client means
+    // `seen` then travels with each component call below, so a name the entity already
+    // declares never takes a second slot -- live example: `Account::requestToken`, also in
+    // `AccountAuthTokenProvider`. An extra entry lengthens the table and shifts every slot
+    // after it, which is what made `Account`'s exposed id 13 read as
+    // `accountDebugger_registerDebugTaskResult` (20 bytes) where the client meant
     // `doCmdInt3` (28), leaving 8 bytes unread on every call.
     let mut seen = HashSet::new();
-    collected.retain(|(method, _)| seen.insert(Arc::clone(&method.name)));
-
+    let mut collected = Vec::new();
+    collect_methods(interfaces, entity_interface, methods_of, &mut seen, &mut collected);
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
     // Then each static component targeting this entity, appended after that sort in
@@ -374,23 +427,18 @@ fn build_method_table(
     // single arrangement consistent with the dump. The live server really does address 43:
     // it stopped 10 bundles in one battle while the table ended at 41.
     //
-    // The stale claim this replaces ("70 client methods for Avatar, against 86 when
-    // components were folded in") measured only the entity's *own* methods -- the same
-    // blind spot that made `dump_property_table.js` report "Avatar 28" while its two
-    // components quietly held slots 28..33 in their own arrays.
-    let mut seen: HashSet<&str> = collected.iter().map(|(m, _)| &*m.name).collect();
+    // Going through [`collect_methods`] rather than reading `component.interface` directly
+    // is what keeps the exposure and dedup rules identical to the entity's own. Confirmed
+    // live 2026-09-16: `Avatar`'s cell table went 26 -> 24 entries once
+    // `AvatarInBattleVehicleSwitch`'s two unexposed cell methods stopped taking slots, and
+    // the outbound bundle errors that caused went 191 -> 0 in a full battle.
     let entity_name = &*entity_interface.name;
     for component in static_components {
         if !component.of_entities.iter().any(|e| e == entity_name) {
             continue;
         }
         let mut of_component = Vec::new();
-        for method in methods_of(&component.interface) {
-            // As for the entity's own methods, a redeclared name keeps one slot.
-            if seen.insert(&method.name) {
-                of_component.push((method, method_length(method)));
-            }
-        }
+        collect_methods(interfaces, &component.interface, methods_of, &mut seen, &mut of_component);
         of_component.sort_by_key(|&(_, length)| length_sort_key(length));
         collected.extend(of_component);
     }
@@ -415,41 +463,14 @@ fn build_property_table(
     static_components: &[Component],
 ) -> Vec<PropertyDef> {
 
-    // The entity's own and inherited (`implements`) properties, size-sorted. These occupy
-    // the leading slots, which is why the live client's `DataDescription` set matches this
-    // list name-for-name and in order (Avatar 28, Vehicle 50).
+    // The entity's own and inherited (`implements`, and `<Parent>` -- already flattened in
+    // by `script::load`) properties, size-sorted. These occupy the leading slots, which is
+    // why the live client's `DataDescription` set matches this list name-for-name and in
+    // order (Avatar 28, Vehicle 50). [`collect_properties`] applies the exposure filter and
+    // the override rule; `seen` then travels with each component call below.
+    let mut seen = HashSet::new();
     let mut collected = Vec::new();
-    collect_properties(interfaces, entity_interface, &mut collected);
-
-    // A name declared more than once -- by an entity and one of its interfaces, or by an
-    // entity and its `<Parent>` (live: `ClientSelectableCameraVehicle` redeclares
-    // `ClientSelectableObject`'s `modelName`) -- is an *override*, not a second property.
-    // `EntityDescription::parseProperties` looks the name up in the component's property
-    // map and, on a hit, reuses both the existing `index` and its already-allocated
-    // `clientServerFullIndex`, then overwrites the slot: `properties_[index] =
-    // dataDescription`. So the redeclaration keeps the *first* declaration's place in the
-    // pre-sort order but contributes the *last* declaration's type -- and therefore the
-    // last one's stream size, which is what the sort below reads. Keeping both entries
-    // would instead lengthen the table and shift every slot after it, exactly as a
-    // duplicate method does.
-    //
-    // Only a client-server property is ever allocated a `clientServerFullIndex`, so a
-    // redeclaration that widens visibility (live: `RepairBase`'s `CELL_PRIVATE` `team`,
-    // made `ALL_CLIENTS` by `StepRepairPoint`) is not an override of anything here -- the
-    // parent's copy never reached `collected`, filtered out by `is_property_exposed`.
-    let mut slot_of: HashMap<Arc<str>, usize> = HashMap::new();
-    let mut deduped = Vec::with_capacity(collected.len());
-    for entry in collected {
-        match slot_of.get(&entry.0.name) {
-            Some(&slot) => deduped[slot] = entry,
-            None => {
-                slot_of.insert(Arc::clone(&entry.0.name), deduped.len());
-                deduped.push(entry);
-            }
-        }
-    }
-    let mut collected = deduped;
-
+    collect_properties(interfaces, entity_interface, &mut seen, &mut collected);
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
     // Then each static component targeting this entity, appended after that sort -- never
@@ -469,7 +490,7 @@ fn build_property_table(
     // global sort would put the components' two one-byte booleans among the entity's own
     // small properties and push `ammoViews` from 26 to 28, contradicting its confirmed
     // element id `0xC1`. An earlier attempt to fold components into the sort also inflated
-    // `Vehicle` to 139 entries with 14 duplicate names -- hence the dedup below.
+    // `Vehicle` to 139 entries with 14 duplicate names -- hence the shared `seen`.
     //
     // KNOWN GAP: within one component, properties that are *all* variable-length tie under
     // this sort and so keep declaration order, but the client orders those three in the
@@ -479,20 +500,13 @@ fn build_property_table(
     // effect is confined to *labels*: all three are `Variable8` and therefore
     // self-delimiting, so every element still frames identically and every following
     // element still decodes. Only a name printed for slots 29/31 may be swapped.
-    let mut seen: HashSet<&str> = collected.iter().map(|(p, _)| &*p.name).collect();
     let entity_name = &*entity_interface.name;
     for component in static_components {
         if !component.of_entities.iter().any(|e| e == entity_name) {
             continue;
         }
         let mut of_component = Vec::new();
-        for property in &component.interface.properties {
-            // A name the entity already declares overrides that slot rather than taking a
-            // new one, so it must not lengthen the table.
-            if is_property_exposed(property) && seen.insert(&property.name) {
-                of_component.push((property, property_length(property)));
-            }
-        }
+        collect_properties(interfaces, &component.interface, &mut seen, &mut of_component);
         of_component.sort_by_key(|&(_, length)| length_sort_key(length));
         collected.extend(of_component);
     }
@@ -681,6 +695,68 @@ mod tests {
         assert_eq!(&names[..2], &["own_small", "own_big"]);
         // And `pingMeAndThenJustTouchMe` must be last, as the client reports.
         assert_eq!(*names.last().unwrap(), "pingMeAndThenJustTouchMe");
+    }
+
+    /// A component method with no `<Exposed/>` has no exposed id, so it must not take a
+    /// slot -- exactly as an unexposed method of the entity's own does not.
+    ///
+    /// The shape and the expected index here are the live `Avatar` cell table, and 23 is
+    /// what the running client actually sends. `AvatarInBattleVehicleSwitch` declares five
+    /// cell methods but exposes only three (`confirmVehicleSelection`, `chooseVehicle`,
+    /// `switchSetup`); `sendVehicleSpawnList` and `requestSwitch` have no `<Exposed/>`.
+    /// Counting those two put `StoryModeAvatarComponent`'s `checkPositionForEquipment` at
+    /// 25, so the client's id-23 call (16 bytes: `INT32` + `VECTOR3`) decoded as
+    /// `sendVehicleSpawnList` and overran the element -- 24 stopped outbound bundles in one
+    /// battle, the only errors left in that run.
+    #[test]
+    fn unexposed_component_methods_take_no_slot() {
+
+        let mut tys = TySystem::default();
+        let u8_ty = tys.register(None, TyKind::UInt8);
+        let u32_ty = tys.register(None, TyKind::UInt32);
+        let u64_ty = tys.register(None, TyKind::UInt64);
+
+        fn unexposed(mut method: Method) -> Method {
+            method.exposed_to_all_clients = false;
+            method.exposed_to_own_client = false;
+            method
+        }
+
+        // Stand-ins for `Avatar`'s own 20 exposed cell methods, reduced to the two that
+        // bracket the component slots.
+        let entity = interface("Avatar", &[], vec![
+            method("vehicle_shoot", vec![]),
+            method("reportClientStats", vec![u64_ty.clone()]),
+        ]);
+
+        let mut switcher = interface("AvatarInBattleVehicleSwitch", &[], Vec::new());
+        switcher.base_methods = vec![
+            unexposed(method("sendVehicleSpawnList", vec![u8_ty.clone()])),
+            method("confirmVehicleSelection", vec![]),
+            method("chooseVehicle", vec![u64_ty.clone()]),
+            unexposed(method("requestSwitch", vec![u8_ty.clone()])),
+            method("switchSetup", vec![u32_ty.clone()]),
+        ];
+
+        let mut story = interface("StoryModeAvatarComponent", &[], Vec::new());
+        story.base_methods = vec![method("checkPositionForEquipment", vec![u64_ty.clone(), u64_ty.clone()])];
+
+        let components = vec![
+            Component { name: "AvatarInBattleVehicleSwitch".into(), of_entities: vec!["Avatar".into()], interface: switcher },
+            Component { name: "StoryModeAvatarComponent".into(), of_entities: vec!["Avatar".into()], interface: story },
+        ];
+
+        let table = build_method_table(&[], &entity, base_methods_of, &components);
+        let names: Vec<&str> = table.iter().map(|m| &*m.name).collect();
+
+        assert_eq!(names, [
+            "vehicle_shoot", "reportClientStats",
+            "confirmVehicleSelection", "switchSetup", "chooseVehicle",
+            "checkPositionForEquipment",
+        ], "the two unexposed component methods must not appear at all");
+
+        // The point of the whole test: the unexposed pair would push this slot out by two.
+        assert_eq!(*names.last().unwrap(), "checkPositionForEquipment");
     }
 
     /// A method declared by both an entity and one of its interfaces must occupy a single
