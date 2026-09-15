@@ -371,7 +371,8 @@ impl PositionTracker {
     /// rather than being set to something invented).
     fn set_reference_from_sent(&mut self, sequence_number: u8) -> Option<Vec3> {
         let sent = self.sent_positions[sequence_number as usize]?;
-        self.reference_position = Some(calculate_reference_position(sent));
+        let reference = calculate_reference_position(sent);
+        self.reference_position = Some(reference);
         Some(reference)
     }
 

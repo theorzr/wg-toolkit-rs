@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::net::element::ElementLength;
 use crate::net::codec::Codec;
 use crate::script::{
-    Script, Interface, Method, Property, PropertyFlags, VariableHeaderSize,
+    Script, Interface, Method, Property, PropertyFlags, VariableHeaderSize, Component,
     Ty, TyKind, TyDict, TyDictProp, TySystem, Value,
 };
 
@@ -57,7 +57,7 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of),
                 cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of),
                 client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of),
-                properties: build_property_table(&script.interfaces, &entity.interface),
+                properties: build_property_table(&script.interfaces, &entity.interface, &script.static_components),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface),
             });
         }
@@ -67,7 +67,7 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of),
                 cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of),
                 client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of),
-                properties: build_property_table(&script.interfaces, &component.interface),
+                properties: build_property_table(&script.interfaces, &component.interface, &[]),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface),
             });
         }
@@ -382,23 +382,60 @@ fn build_method_table(
 fn build_property_table(
     interfaces: &[Interface],
     entity_interface: &Interface,
+    static_components: &[Component],
 ) -> Vec<PropertyDef> {
 
-    // Only the entity's own and inherited (`implements`) properties. A component's
-    // properties are NOT part of the entity's client-server table, even when its
-    // `<ofEntity>` names this entity: confirmed against the live client, whose
-    // `DataDescription::clientServerIndex` covers exactly this set (Avatar 28, Vehicle 50)
-    // and gives no index to any component property. Folding them in used to inflate the
-    // table (Vehicle to 139, with 14 duplicate names) and, because they took part in the
-    // sort below, shifted every slot after the first one inserted -- so element ids decoded
-    // against the wrong property and desynced the rest of the bundle.
-    //
-    // A component is addressed as an entity in its own right instead, with its own type id
-    // and table (see [`ScriptDispatch::new`]) selected by `SelectEntity` on the component's
-    // own entity id.
+    // The entity's own and inherited (`implements`) properties, size-sorted. These occupy
+    // the leading slots, which is why the live client's `DataDescription` set matches this
+    // list name-for-name and in order (Avatar 28, Vehicle 50).
     let mut collected = Vec::new();
     collect_properties(interfaces, entity_interface, &mut collected);
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
+
+    // Then each static component targeting this entity, appended after that sort -- never
+    // merged into it -- with its own properties size-sorted among themselves.
+    //
+    // Component properties really are part of the entity's client-server id space. That is
+    // not inferred from the leaked vanilla source (which is ambiguous here) but read out of
+    // the running client: the `clientServerIndex` field (int16 at `DataDescription+108`) of
+    // `Avatar`'s two components reports
+    //   AvatarInBattleVehicleSwitch: isVehicleConfirmed 28, spawnPoints 29,
+    //                                spawnInfoForVehicle 30, vehicleSpawnList 31
+    //   StoryModeAvatarComponent:    isPositionValid 32, wrongApplicationPoint 33
+    // i.e. slots 28.. continuing straight on from the entity's own 28, one component after
+    // the other, each internally ordered fixed-before-variable and ascending by size.
+    //
+    // Appending rather than re-sorting is what keeps the verified leading slots fixed: a
+    // global sort would put the components' two one-byte booleans among the entity's own
+    // small properties and push `ammoViews` from 26 to 28, contradicting its confirmed
+    // element id `0xC1`. An earlier attempt to fold components into the sort also inflated
+    // `Vehicle` to 139 entries with 14 duplicate names -- hence the dedup below.
+    //
+    // KNOWN GAP: within one component, properties that are *all* variable-length tie under
+    // this sort and so keep declaration order, but the client orders those three in the
+    // reverse (`spawnPoints` 29, `spawnInfoForVehicle` 30, `vehicleSpawnList` 31). The rule
+    // behind that is not recoverable from the script model -- every variable type's
+    // `streamSize()` is the same `-1` sentinel, so there is nothing left to sort on. The
+    // effect is confined to *labels*: all three are `Variable8` and therefore
+    // self-delimiting, so every element still frames identically and every following
+    // element still decodes. Only a name printed for slots 29/31 may be swapped.
+    let mut seen: HashSet<&str> = collected.iter().map(|(p, _)| &*p.name).collect();
+    let entity_name = &*entity_interface.name;
+    for component in static_components {
+        if !component.of_entities.iter().any(|e| e == entity_name) {
+            continue;
+        }
+        let mut of_component = Vec::new();
+        for property in &component.interface.properties {
+            // A name the entity already declares overrides that slot rather than taking a
+            // new one, so it must not lengthen the table.
+            if is_property_exposed(property) && seen.insert(&property.name) {
+                of_component.push((property, property_length(property)));
+            }
+        }
+        of_component.sort_by_key(|&(_, length)| length_sort_key(length));
+        collected.extend(of_component);
+    }
 
     collected.into_iter()
         .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length })
@@ -460,6 +497,85 @@ mod tests {
             client_methods: Vec::new(),
             base_methods,
             cell_methods: Vec::new(),
+        }
+    }
+
+    fn property(name: &str, ty: Ty) -> Property {
+        Property {
+            name: name.into(), ty,
+            persistent: false, identifier: false, indexed: false,
+            database_len: None, default: None,
+            flags: PropertyFlags::AllClients,
+        }
+    }
+
+    fn component(name: &str, of_entities: &[&str], properties: Vec<Property>) -> Component {
+        let mut interface = interface(name, &[], Vec::new());
+        interface.properties = properties;
+        Component {
+            name: name.into(),
+            of_entities: of_entities.iter().map(|s| s.to_string()).collect(),
+            interface,
+        }
+    }
+
+    /// Static-component properties continue the entity's client-server id space, appended
+    /// after its own slots, one component at a time, each internally size-sorted.
+    ///
+    /// The shape here mirrors WoT's `Avatar` exactly, and the expected indices are the ones
+    /// read out of the running client (`DataDescription+108`), not derived:
+    ///   `isVehicleConfirmed` 28, `spawnInfoForVehicle` 30, `isPositionValid` 32,
+    ///   `wrongApplicationPoint` 33.
+    /// Slot 32 is the one that matters most -- the live server addresses it (element id
+    /// `0xC7`) after every `SelectPlayerEntity`, and it stopped 24 bundles per battle while
+    /// the table ended at 28.
+    ///
+    /// The two all-variable slots 29/31 are deliberately NOT asserted by name: the client
+    /// orders those in reverse and the rule is unrecoverable (every variable type shares the
+    /// same `-1` stream-size sentinel). They are `Variable8` either way, so framing is
+    /// unaffected -- which is what this test does check.
+    #[test]
+    fn component_properties_continue_the_entity_id_space() {
+
+        let mut tys = TySystem::default();
+        let u8_ty = tys.register(None, TyKind::UInt8);
+        let vec3_ty = tys.register(None, TyKind::Vector3);
+        let str_ty = tys.register(None, TyKind::String);
+
+        let mut entity = interface("Avatar", &[], Vec::new());
+        entity.properties = vec![property("own_fixed", u8_ty.clone()), property("own_var", str_ty.clone())];
+
+        let components = vec![
+            component("AvatarInBattleVehicleSwitch", &["Avatar"], vec![
+                property("vehicleSpawnList", str_ty.clone()),
+                property("isVehicleConfirmed", u8_ty.clone()),
+                property("spawnInfoForVehicle", str_ty.clone()),
+                property("spawnPoints", str_ty.clone()),
+            ]),
+            component("StoryModeAvatarComponent", &["Avatar"], vec![
+                property("wrongApplicationPoint", vec3_ty.clone()),
+                property("isPositionValid", u8_ty.clone()),
+            ]),
+            component("Elsewhere", &["Vehicle"], vec![property("absent", u8_ty.clone())]),
+        ];
+
+        let table = build_property_table(&[], &entity, &components);
+        let names: Vec<&str> = table.iter().map(|p| &*p.name).collect();
+
+        assert_eq!(names.len(), 8, "2 own + 4 + 2 component properties, nothing from `Elsewhere`");
+        assert_eq!(&names[..2], &["own_fixed", "own_var"], "the entity's own slots must not shift");
+        // Ground truth from the client, shifted down by 26: this fixture gives the entity 2
+        // own slots where the real `Avatar` has 28, so client 28 -> 2, 30 -> 4, 32 -> 6, 33 -> 7.
+        assert_eq!(names[2], "isVehicleConfirmed", "client index 28");
+        assert_eq!(names[4], "spawnInfoForVehicle", "client index 30");
+        assert_eq!(names[6], "isPositionValid", "client index 32");
+        assert_eq!(names[7], "wrongApplicationPoint", "client index 33");
+
+        // The two slots whose order we cannot derive must at least stay self-delimiting,
+        // since that is what keeps a mislabel from becoming a desync.
+        for i in [3, 5] {
+            assert!(matches!(table[i].length, ElementLength::Variable8),
+                "slot {i} must be self-delimiting, was {:?}", table[i].length);
         }
     }
 
