@@ -10,7 +10,7 @@
 //! per-game generated Rust type ahead of time.
 
 use std::io::{self, Read, Write};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::net::element::ElementLength;
@@ -420,6 +420,36 @@ fn build_property_table(
     // list name-for-name and in order (Avatar 28, Vehicle 50).
     let mut collected = Vec::new();
     collect_properties(interfaces, entity_interface, &mut collected);
+
+    // A name declared more than once -- by an entity and one of its interfaces, or by an
+    // entity and its `<Parent>` (live: `ClientSelectableCameraVehicle` redeclares
+    // `ClientSelectableObject`'s `modelName`) -- is an *override*, not a second property.
+    // `EntityDescription::parseProperties` looks the name up in the component's property
+    // map and, on a hit, reuses both the existing `index` and its already-allocated
+    // `clientServerFullIndex`, then overwrites the slot: `properties_[index] =
+    // dataDescription`. So the redeclaration keeps the *first* declaration's place in the
+    // pre-sort order but contributes the *last* declaration's type -- and therefore the
+    // last one's stream size, which is what the sort below reads. Keeping both entries
+    // would instead lengthen the table and shift every slot after it, exactly as a
+    // duplicate method does.
+    //
+    // Only a client-server property is ever allocated a `clientServerFullIndex`, so a
+    // redeclaration that widens visibility (live: `RepairBase`'s `CELL_PRIVATE` `team`,
+    // made `ALL_CLIENTS` by `StepRepairPoint`) is not an override of anything here -- the
+    // parent's copy never reached `collected`, filtered out by `is_property_exposed`.
+    let mut slot_of: HashMap<Arc<str>, usize> = HashMap::new();
+    let mut deduped = Vec::with_capacity(collected.len());
+    for entry in collected {
+        match slot_of.get(&entry.0.name) {
+            Some(&slot) => deduped[slot] = entry,
+            None => {
+                slot_of.insert(Arc::clone(&entry.0.name), deduped.len());
+                deduped.push(entry);
+            }
+        }
+    }
+    let mut collected = deduped;
+
     collected.sort_by_key(|&(_, length)| length_sort_key(length));
 
     // Then each static component targeting this entity, appended after that sort -- never
@@ -685,6 +715,46 @@ mod tests {
         // to index 2, and the wire's index 1 would then decode with the wrong signature.
         assert_eq!(table[1].length, ElementLength::Fixed(8));
 
+    }
+
+    /// A property name redeclared by an entity and its `<Parent>` is an override, not a
+    /// second slot. `EntityDescription::parseProperties` reuses the first declaration's
+    /// `index` *and* its already-allocated `clientServerFullIndex` on a name hit, so the
+    /// table must keep exactly one entry, at the position the first declaration earned.
+    ///
+    /// Live shape: `ClientSelectableCameraVehicle` redeclares `ClientSelectableObject`'s
+    /// `modelName` (same `STRING`/`ALL_CLIENTS`, only `Editable` differs). Parent members
+    /// are folded in ahead of the child's by `script::load::apply_parent_chain`, so they
+    /// arrive here already flattened into one interface -- which is exactly what would
+    /// have produced a duplicate without this dedup.
+    #[test]
+    fn overridden_property_keeps_one_slot() {
+
+        let mut tys = TySystem::default();
+        let string_ty = tys.register(None, TyKind::String);
+        let u8_ty = tys.register(None, TyKind::UInt8);
+
+        // As `flatten_parents` leaves it: the parent's `modelName`/`edgeMode` first, then
+        // the child's redeclared `modelName`. The redeclaration is deliberately given a
+        // *different* size here so the two halves of the rule are separable.
+        let mut entity = interface("ClientSelectableCameraVehicle", &[], Vec::new());
+        entity.properties = vec![
+            property("modelName", string_ty.clone()),
+            property("edgeMode", u8_ty.clone()),
+            property("modelName", u8_ty.clone()),
+        ];
+
+        let table = build_property_table(&[], &entity, &[]);
+
+        let names: Vec<&str> = table.iter().map(|p| &*p.name).collect();
+        assert_eq!(names, ["modelName", "edgeMode"],
+            "the overridden property must occupy one slot, not two");
+
+        // `properties_[index] = dataDescription` -- the slot is the first declaration's,
+        // the contents are the last's. The last one is a `UINT8`, which is why `modelName`
+        // now sorts ahead of `edgeMode` instead of trailing it as a variable-length string.
+        assert_eq!(table[0].length, ElementLength::Fixed(1),
+            "the overriding declaration's type must win");
     }
 
 }

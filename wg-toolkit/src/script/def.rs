@@ -66,8 +66,11 @@ pub struct Component {
 pub struct Entity {
     /// The actual storage for the entity, this has the same properties as an interface.
     pub interface: Interface,
-    /// An optional parent entity to import all properties from.
-    #[allow(unused)]  // Not used for generation
+    /// An optional parent entity whose whole def (its `Implements`, properties and
+    /// methods) is folded into `interface` *before* this entity's own members, matching
+    /// BigWorld's `EntityDescription::parse`. Resolved at load time by
+    /// `load::apply_parent_chain`, so `interface` already contains everything inherited;
+    /// this field is kept only to record where it came from.
     pub parent: Option<String>,
     /// The index for network protocol.
     pub id: usize,
@@ -83,7 +86,7 @@ pub struct Entity {
 }
 
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/entity_description.cpp
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Interface {
     pub name: Arc<str>,
     pub implements: Vec<String>,
@@ -94,7 +97,7 @@ pub struct Interface {
     pub cell_methods: Vec<Method>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Method {
     pub name: Arc<str>,
     /// True if this method is exposed to all clients, note that client methods have this
@@ -108,13 +111,13 @@ pub struct Method {
     pub args: Vec<Arg>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Arg {
     pub ty: Ty,
 }
 
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/data_description.cpp
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Property {
     pub name: Arc<str>,
     pub ty: Ty,
