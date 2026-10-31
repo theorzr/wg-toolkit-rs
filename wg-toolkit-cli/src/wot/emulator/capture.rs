@@ -62,6 +62,8 @@ pub struct CapturedBattle {
     pub vehicle_position: Option<AvatarUpdateAliasDetailed>,
     pub vehicle_update: Option<ChangedProperties>,
     pub vehicle_entity: Option<CreateEntity>,
+    /// [`Self::vehicle_entity`]'s properties, decoded.
+    pub vehicle_properties: Option<ChangedProperties>,
     /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
     /// the arena's vehicles.
     pub arena_info: Option<CapturedArenaInfo>,
@@ -343,7 +345,9 @@ impl Extractor<'_> {
                 }
                 CreateEntity::ID => {
                     let e = elt.read_simple::<CreateEntity>()?.element;
+                    let properties = self.dispatch.entity_from_id(e.entity_type_id).map(|d| e.client_properties(&d.properties));
                     if let Some(battle) = self.battle_vehicle(e.entity_id) {
+                        battle.vehicle_properties = properties;
                         battle.vehicle_entity.get_or_insert(e);
                     }
                 }

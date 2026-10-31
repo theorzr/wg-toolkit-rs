@@ -53,6 +53,47 @@ impl AccountData {
         }
     }
 
+    /// A vehicle's compact descriptor, by inventory id.
+    pub fn vehicle_descr(&self, vehicle_id: i64) -> Option<&[u8]> {
+        self.compact_descrs(item_type::VEHICLE).find(|&(id, _)| id == vehicle_id).map(|(_, cd)| cd)
+    }
+
+    /// The compact descriptors of a vehicle's crew, in crew order, by the vehicle's
+    /// inventory id. An empty seat has none.
+    pub fn crew_descrs(&self, vehicle_id: i64) -> Vec<&[u8]> {
+        let crew = self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key("crew"), HashableValue::I64(vehicle_id)]);
+        let Some(Value::List(crew)) = crew else { return Vec::new() };
+        crew.iter().filter_map(|id| match id {
+            Value::I64(id) => self.compact_descrs(item_type::TANKMAN).find(|(tankman, _)| tankman == id).map(|(_, cd)| cd),
+            _ => None,
+        }).collect()
+    }
+
+    /// A vehicle's setups, as the battle gives them to its vehicle: its loadouts of
+    /// shells, equipment, optional devices and boosters, by inventory id.
+    pub fn vehicle_setups(&self, vehicle_id: i64) -> Value {
+        let table = |name: &str| self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key(name), HashableValue::I64(vehicle_id)]);
+        let empty = || Value::List(vec![Value::List(Vec::new())]);
+        // Shell layouts are kept by turret and gun, the mounted ones being the only.
+        let shells = match table("shellsLayout") {
+            Some(Value::Dict(layouts)) => layouts.values().next().cloned(),
+            _ => None,
+        };
+        Value::Dict(BTreeMap::from([
+            (key("boostersSetups"), table("boostersLayout").cloned().unwrap_or_else(empty)),
+            (key("devicesSetups"), table("devicesLayout").cloned().unwrap_or_else(empty)),
+            (key("eqsSetups"), table("eqsLayout").cloned().unwrap_or_else(empty)),
+            (key("shellsSetups"), shells.unwrap_or_else(empty)),
+        ]))
+    }
+
+    /// Which of a vehicle's setups are selected, by inventory id.
+    pub fn vehicle_setup_indexes(&self, vehicle_id: i64) -> Value {
+        self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key("layoutIndexes"), HashableValue::I64(vehicle_id)])
+            .cloned()
+            .unwrap_or_else(|| Value::Dict(BTreeMap::new()))
+    }
+
     /// The compact descriptors of an item type's inventory entries, by inventory id:
     /// `inventory[item_type]['compDescr']`.
     pub fn compact_descrs(&self, item_type: u8) -> impl Iterator<Item = (i64, &[u8])> + '_ {

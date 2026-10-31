@@ -34,9 +34,23 @@ pub struct VehicleDef {
     /// the ammunition.
     pub shells: Vec<(IntCompactDescr, f32)>,
     pub max_ammo: u32,
+    /// Hull plus default turret, before any battle modifier.
+    pub max_health: u32,
 }
 
 impl VehicleDef {
+
+    /// Load a vehicle by nation id and type id, as its descriptors give them.
+    pub fn load_by_id(fs: &ResFilesystem, nation_id: u8, type_id: u16) -> io::Result<Self> {
+        let nation = NATIONS.get(usize::from(nation_id))
+            .ok_or_else(|| invalid(format!("unknown nation id {nation_id}")))?;
+        let list = read_xml(fs, &format!("scripts/item_defs/vehicles/{nation}/list.xml"))?;
+        let name = list.iter_children_all()
+            .find(|(_, vehicle)| vehicle.as_element().and_then(|v| child_int(v, "id")) == Some(type_id.into()))
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| invalid(format!("no vehicle {type_id} in {nation}")))?;
+        Self::load(fs, nation, &name)
+    }
 
     /// Load a vehicle by nation and name, `GB98_T95_FV4201_Chieftain` say, with the
     /// first module of each kind as the default one, as the game does.
@@ -102,6 +116,11 @@ impl VehicleDef {
             shells.push((cd, portion));
         }
 
+        let max_health = child_element(&vehicle, "hull").and_then(|hull| child_int(hull, "maxHealth"))
+            .zip(child_int(turret, "maxHealth"))
+            .map(|(hull, turret)| (hull + turret) as u32)
+            .ok_or_else(|| invalid(format!("{name} has no health")))?;
+
         let crew_roles = child_element(&vehicle, "crew")
             .into_iter()
             .flat_map(|crew| crew.iter_children_all())
@@ -122,7 +141,7 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health })
 
     }
 

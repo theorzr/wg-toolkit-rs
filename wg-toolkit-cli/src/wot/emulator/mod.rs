@@ -1,7 +1,7 @@
 //! The emulator implementation of the login + base applications, we are trying to
 //! reproduce the official server implementation.
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -17,11 +17,16 @@ use blowfish::Blowfish;
 mod account;
 mod capture;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::io;
 
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
-use wgtk::app::client::element::{NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
+use wgtk::app::client::element::{ChangedProperties, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
+use wgtk::script::{PythonValue, StringValue};
+use wgtk::util::io::serde_pickle_ser_options;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use std::io::Write;
 use glam::Vec3;
 use wgtk::script::Value;
 
@@ -86,12 +91,13 @@ pub fn run(
                         .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
                 }
             }
-            reencode_account_data(&mut session, &vehicles)
+            let account = reencode_account_data(&mut session, &vehicles)
                 .map_err(|e| format!("Failed to re-encode the captured account data: {e}"))?;
-            Some(session)
+            (Some(session), account)
         }
-        None => None,
+        None => (None, None),
     };
+    let (session, account) = session;
 
     let shared = Arc::new(Shared {
         login_clients: Mutex::new(HashMap::new()),
@@ -108,10 +114,12 @@ pub fn run(
         app: base_app,
         shared,
         session,
+        account,
+        game_dir: game_dir.to_path_buf(),
         players: HashMap::new(),
-        enqueued: HashSet::new(),
+        enqueued: HashMap::new(),
         pending_switches: HashMap::new(),
-        battle_clients: HashSet::new(),
+        battle_clients: HashMap::new(),
         tick: 0,
     };
 
@@ -138,18 +146,52 @@ struct BaseThread {
     shared: Arc<Shared>,
     /// What to serve, when running from a capture.
     session: Option<CapturedSession>,
+    /// The account's data as served, which the vehicles going to battle are read from.
+    account: Option<AccountData>,
+    /// The game, whose vehicle definitions complete what the account says.
+    game_dir: PathBuf,
     /// Each client's player entity.
     players: HashMap<SocketAddr, base::Handle>,
-    /// Clients waiting in the battle queue.
-    enqueued: HashSet<SocketAddr>,
+    /// Clients waiting in the battle queue, with the inventory id of their vehicle.
+    enqueued: HashMap<SocketAddr, i64>,
     /// Clients told to switch base app for their battle, by the session key they will
-    /// log in again with, with the IP they will come from and their blowfish key.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>)>,
+    /// log in again with, with the IP they will come from, their blowfish key and
+    /// their vehicle.
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Option<PlayerVehicle>)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
-    battle_clients: HashSet<SocketAddr>,
+    battle_clients: HashMap<SocketAddr, BattleClient>,
     /// The game tick, sent to battle clients.
     tick: u8,
 }
+
+/// A client connected for a battle.
+#[derive(Debug)]
+struct BattleClient {
+    /// Its vehicle, the captured one when `None`.
+    vehicle: Option<PlayerVehicle>,
+    /// When its game time started, at 0: the battle's clock, which arena periods end on.
+    joined: Instant,
+    /// The arena period to switch to, and when.
+    next_period: Option<(Instant, u8)>,
+}
+
+impl BattleClient {
+
+    /// The client's game time, in seconds.
+    fn game_time(&self) -> f64 {
+        self.joined.elapsed().as_secs_f64()
+    }
+
+}
+
+/// The arena periods, `ARENA_PERIOD`.
+const ARENA_PERIOD_PREBATTLE: u8 = 2;
+const ARENA_PERIOD_BATTLE: u8 = 3;
+/// The countdown before the battle, and the battle's length.
+const PREBATTLE_LENGTH: Duration = Duration::from_secs(10);
+const BATTLE_LENGTH: Duration = Duration::from_secs(900);
+/// `ARENA_UPDATE.PERIOD`.
+const ARENA_UPDATE_PERIOD: u8 = 3;
 
 #[derive(Debug)]
 struct Shared {
@@ -254,7 +296,7 @@ impl BaseThread {
 
     /// The client's arena is ready: tell its account, then switch it to the base app
     /// holding its avatar, this one, as the captured server did.
-    fn start_battle(&mut self, addr: SocketAddr) -> io::Result<()> {
+    fn start_battle(&mut self, addr: SocketAddr, vehicle_id: i64) -> io::Result<()> {
 
         if self.session.as_ref().and_then(|s| s.battle.as_ref()).is_none() {
             warn!(%addr, "The capture has no battle to enter");
@@ -271,13 +313,71 @@ impl BaseThread {
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        self.pending_switches.insert(session_key, (addr.ip(), blowfish));
+        let vehicle = self.player_vehicle(vehicle_id)
+            .inspect_err(|e| warn!(%addr, "Failed to read vehicle {vehicle_id}, the captured one is used: {e}"))
+            .ok();
+        self.pending_switches.insert(session_key, (addr.ip(), blowfish, vehicle));
         self.app.switch_base_app(addr, base_addr, true)?;
         self.players.remove(&addr);
         info!(%addr, "Arena created, switching to {base_addr}");
 
         Ok(())
 
+    }
+
+    /// Switch a battle client's arena to a period: the countdown, then the battle. The
+    /// update is `(period, end time, length, extra)`, pickled then compressed.
+    fn arena_period(&mut self, addr: SocketAddr, period: u8) -> io::Result<()> {
+
+        let (Some(client), Some(&handle)) = (self.battle_clients.get_mut(&addr), self.players.get(&addr)) else { return Ok(()) };
+        let length = match period {
+            ARENA_PERIOD_PREBATTLE => PREBATTLE_LENGTH,
+            _ => BATTLE_LENGTH,
+        };
+        client.next_period = (period == ARENA_PERIOD_PREBATTLE).then(|| (Instant::now() + length, ARENA_PERIOD_BATTLE));
+        let end = client.game_time() + length.as_secs_f64();
+
+        let info = serde_pickle::Value::Tuple(vec![
+            serde_pickle::Value::I64(period.into()),
+            serde_pickle::Value::F64(end),
+            serde_pickle::Value::I64(length.as_secs() as i64),
+            serde_pickle::Value::List(Vec::new()),
+        ]);
+        let pickled = serde_pickle::value_to_vec(&info, serde_pickle_ser_options())
+            .map_err(|e| invalid_data(&e.to_string()))?;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&pickled)?;
+        let data = encoder.finish()?;
+
+        // As the captured server's own period update carries it.
+        let like = self.session.as_ref().and_then(|s| s.battle.as_ref())
+            .and_then(|b| b.calls.iter().find(|(method, args)| &**method == "updateArena" && args.first().and_then(Value::as_i64) == Some(ARENA_UPDATE_PERIOD.into())))
+            .and_then(|(_, args)| args.get(1).cloned())
+            .unwrap_or(Value::String(StringValue::Raw(Vec::new())));
+        self.app.select_player_entity(handle)?;
+        self.app.call_method(handle, "updateArena", vec![Value::UInt8(ARENA_UPDATE_PERIOD), with_bytes(&like, data)])?;
+        info!(%addr, "Arena period {period} until {end:.1}");
+
+        Ok(())
+
+    }
+
+    /// The vehicle of the given inventory id: its descriptor, crew and setups from the
+    /// account, its health from the game's definitions.
+    fn player_vehicle(&self, vehicle_id: i64) -> io::Result<PlayerVehicle> {
+        let account = self.account.as_ref().ok_or_else(|| invalid_data("no account data"))?;
+        let descr = account.vehicle_descr(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?.to_vec();
+        let decoded = VehicleDescr::decode(&descr).map_err(|e| invalid_data(&e.to_string()))?;
+        let fs = ResFilesystem::new(self.game_dir.join("res"))?;
+        let def = VehicleDef::load_by_id(&fs, decoded.nation, decoded.type_id)?;
+        info!("Battle vehicle {vehicle_id}: {}, {} health", def.name, def.max_health);
+        Ok(PlayerVehicle {
+            descr,
+            max_health: def.max_health,
+            crew: account.crew_descrs(vehicle_id).into_iter().map(<[u8]>::to_vec).collect(),
+            setups: account.vehicle_setups(vehicle_id),
+            setup_indexes: account.vehicle_setup_indexes(vehicle_id),
+        })
     }
 
     /// Bring a client that reconnected for its battle to its avatar.
@@ -341,7 +441,8 @@ impl BaseThread {
                     *value = with_int(value, handle.entity_id().into());
                 }
             }
-            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id)?;
+            let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.as_ref());
+            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, vehicle)?;
             self.app.enter_aoi(addr, arena.entity_id, NO_ID_ALIAS)?;
             self.app.create_entity_detailed(addr, arena.entity_id, *type_id, Vec3::ZERO, Vec3::ZERO, &properties)?;
             self.app.nrl_create_node(addr, stream)?;
@@ -359,13 +460,37 @@ impl BaseThread {
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let Some(entity) = battle.vehicle_entity.as_ref().filter(|e| e.entity_id == entity_id) else { return Ok(()) };
 
+        // The vehicle belongs to our avatar, and is the one the client went to battle with.
+        let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.as_ref());
+        let avatar_id = self.players.get(&addr).map(|handle| handle.entity_id());
+        let mut entity = entity.clone();
+        if let Some(properties) = &battle.vehicle_properties {
+            let mut properties = properties.clone();
+            for (_, name, value) in &mut properties.values {
+                match (&**name, avatar_id) {
+                    ("avatarID", Some(avatar_id)) => *value = with_int(value, avatar_id.into()),
+                    _ => {}
+                }
+            }
+            if let Some(vehicle) = vehicle {
+                vehicle.apply_to_entity(&mut properties);
+            }
+            let dispatch = self.app.dispatch().entity_from_id(entity.entity_type_id)
+                .ok_or_else(|| invalid_data("unknown vehicle entity type"))?;
+            entity.client_data = properties.encode(&dispatch.properties)?;
+        }
+
         info!(%addr, "Creating vehicle {entity_id}");
         self.app.create_entity(addr, entity.clone())?;
         if let (Some(alias), Some(position)) = (battle.vehicle_alias, &battle.vehicle_position) {
             self.app.update_position_detailed(addr, alias, position.position, position.direction)?;
         }
         if let Some(update) = &battle.vehicle_update {
-            self.app.update_entity(addr, entity_id, entity.entity_type_id, update.clone())?;
+            let mut update = update.clone();
+            if let Some(vehicle) = vehicle {
+                vehicle.apply_to_update(&mut update);
+            }
+            self.app.update_entity(addr, entity_id, entity.entity_type_id, update)?;
         }
 
         Ok(())
@@ -426,9 +551,17 @@ impl BaseThread {
             if Instant::now() >= next_tick {
                 next_tick += TICK;
                 self.tick = self.tick.wrapping_add(1);
-                for &addr in &self.battle_clients {
+                for &addr in self.battle_clients.keys() {
                     if let Err(e) = self.app.tick(addr, self.tick) {
                         warn!(%addr, "Failed to tick: {e}");
+                    }
+                }
+                let due: Vec<_> = self.battle_clients.iter()
+                    .filter_map(|(&addr, client)| client.next_period.filter(|&(at, _)| at <= Instant::now()).map(|(_, period)| (addr, period)))
+                    .collect();
+                for (addr, period) in due {
+                    if let Err(e) = self.arena_period(addr, period) {
+                        warn!(%addr, "Failed to change the arena period: {e}");
                     }
                 }
             }
@@ -444,7 +577,7 @@ impl BaseThread {
                 base::Event::Login(login) => {
 
                     // A client coming back for its battle, see `start_battle`.
-                    if let Some((ip, blowfish)) = self.pending_switches.remove(&login.login_key) {
+                    if let Some((ip, blowfish, vehicle)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
                             continue;
@@ -456,7 +589,7 @@ impl BaseThread {
                                 warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
                             }
                         }
-                        self.battle_clients.insert(login.addr);
+                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), next_period: None });
                         continue;
                     }
 
@@ -487,7 +620,7 @@ impl BaseThread {
                 }
                 base::Event::EnableEntities(event) => {
                     info!(addr = %event.addr, "Entities enabled");
-                    if self.battle_clients.contains(&event.addr) {
+                    if self.battle_clients.contains_key(&event.addr) {
                         if let Err(e) = self.enter_battle(event.addr) {
                             warn!(addr = %event.addr, "Failed to create the avatar: {e}");
                         }
@@ -499,6 +632,11 @@ impl BaseThread {
                     match &event.call {
                         MethodCall::Known { name, args } => {
                             info!(addr = %event.addr, "Base method call on entity {}: {name} {args:?}", event.entity_id);
+                            if &**name == "setClientReady" {
+                                if let Err(e) = self.arena_period(event.addr, ARENA_PERIOD_PREBATTLE) {
+                                    warn!(addr = %event.addr, "Failed to start the countdown: {e}");
+                                }
+                            }
                             if let Err(e) = self.answer(event.addr, name, args) {
                                 warn!(addr = %event.addr, "Failed to answer {name}: {e}");
                             }
@@ -506,9 +644,15 @@ impl BaseThread {
                             // queue is going.
                             let command = args.get(1).and_then(Value::as_i64);
                             if command == Some(CMD_ENQUEUE_IN_BATTLE_QUEUE.into()) {
-                                self.enqueued.insert(event.addr);
-                            } else if command == Some(CMD_REQ_QUEUE_INFO.into()) && self.enqueued.remove(&event.addr) {
-                                if let Err(e) = self.start_battle(event.addr) {
+                                // `[queue type, vehicle inventory id, ...]`.
+                                let vehicle_id = match args.get(2) {
+                                    Some(Value::Seq(values)) => values.get(1).and_then(Value::as_i64),
+                                    _ => None,
+                                };
+                                self.enqueued.insert(event.addr, vehicle_id.unwrap_or(0));
+                            } else if let Some(vehicle_id) = (command == Some(CMD_REQ_QUEUE_INFO.into()))
+                                .then(|| self.enqueued.remove(&event.addr)).flatten() {
+                                if let Err(e) = self.start_battle(event.addr, vehicle_id) {
                                     warn!(addr = %event.addr, "Failed to start the battle: {e}");
                                 }
                             }
@@ -546,9 +690,11 @@ impl BaseThread {
 
 /// Serve the captured account data as we encode it rather than as captured: decode
 /// each full sync answer, check that its vehicles and tankmen decode and encode back
-/// the same, give it the vehicles asked for, and encode it back.
-fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[VehicleDef]) -> io::Result<()> {
+/// the same, give it the vehicles asked for, and encode it back. Returns the account
+/// data served.
+fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[VehicleDef]) -> io::Result<Option<AccountData>> {
 
+    let mut served = None;
     for request in &mut session.requests {
 
         let is_full_sync = &*request.method == "doCmdInt3"
@@ -597,18 +743,102 @@ fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[Vehicle
                 account.revision(), account.dict().map_or(0, |d| d.len()), data.len(), new_data.len());
             *description = new_description;
             *data = new_data;
+            served = Some(account);
 
         }
 
     }
 
-    Ok(())
+    Ok(served)
 
+}
+
+/// The vehicle a client went to battle with, as the battle tells about it.
+#[derive(Debug, Clone)]
+struct PlayerVehicle {
+    descr: Vec<u8>,
+    max_health: u32,
+    /// Its crew's compact descriptors, in crew order.
+    crew: Vec<Vec<u8>>,
+    /// Its loadouts and the selected ones, see `AccountData::vehicle_setups`.
+    setups: serde_pickle::Value,
+    setup_indexes: serde_pickle::Value,
+}
+
+impl PlayerVehicle {
+
+    /// Its entry in the arena's `vehiclesInfo`.
+    fn apply_to_arena_entry(&self, fields: &mut BTreeMap<Arc<str>, Value>) {
+        for (name, value) in fields.iter_mut() {
+            match &**name {
+                "compDescr" => *value = with_bytes(value, self.descr.clone()),
+                "maxHealth" => *value = with_int(value, self.max_health.into()),
+                "vehPostProgression" => *value = Value::Seq(Vec::new()),
+                _ => {}
+            }
+        }
+    }
+
+    /// Its vehicle entity's creation properties.
+    fn apply_to_entity(&self, properties: &mut ChangedProperties) {
+        for (_, name, value) in &mut properties.values {
+            match (&**name, &mut *value) {
+                ("health", value) => *value = with_int(value, self.max_health.into()),
+                ("publicInfo", Value::Dict(info)) => {
+                    for (name, value) in info.iter_mut() {
+                        match &**name {
+                            "compDescr" => *value = with_bytes(value, self.descr.clone()),
+                            "maxHealth" => *value = with_int(value, self.max_health.into()),
+                            _ => {}
+                        }
+                    }
+                }
+                ("vehPostProgression", value) => *value = Value::Seq(Vec::new()),
+                _ => {}
+            }
+        }
+    }
+
+    /// The properties its vehicle entity gets once created.
+    fn apply_to_update(&self, update: &mut ChangedProperties) {
+        for (_, name, value) in &mut update.values {
+            match (&**name, &mut *value) {
+                ("crewCompactDescrs", Value::Seq(crew)) => {
+                    let like = crew.first().cloned().unwrap_or(Value::String(StringValue::Raw(Vec::new())));
+                    *crew = self.crew.iter().map(|cd| with_bytes(&like, cd.clone())).collect();
+                }
+                ("setups", value) => *value = with_python(value, self.setups.clone()),
+                ("setupsIndexes", value) => *value = with_python(value, self.setup_indexes.clone()),
+                _ => {}
+            }
+        }
+    }
+
+}
+
+/// The same kind of byte string as `value`, holding `bytes`.
+fn with_bytes(value: &Value, bytes: Vec<u8>) -> Value {
+    match value {
+        Value::Python(_) => Value::Python(PythonValue::Raw(bytes)),
+        _ => Value::String(StringValue::Raw(bytes)),
+    }
+}
+
+/// The same kind of Python value as `value`, holding `python`.
+fn with_python(value: &Value, python: serde_pickle::Value) -> Value {
+    match value {
+        Value::String(_) => Value::String(StringValue::Python(python)),
+        _ => Value::Python(PythonValue::Decoded(python)),
+    }
+}
+
+fn invalid_data(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
 /// The arena info entity's NRL tree, its `vehiclesInfo` reduced to the given vehicle's,
 /// encoded again.
-fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32) -> io::Result<NrlStream> {
+fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, vehicle: Option<&PlayerVehicle>) -> io::Result<NrlStream> {
     let mut messages = captured.to_vec();
     for message in &mut messages {
         let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, data: Some(data), .. }, .. } = &mut message.body else {
@@ -616,9 +846,14 @@ fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id
         };
         let children = data.children.iter().cloned().map(|(id, child)| match child {
             NrlChild::Property { name, value: Value::Seq(entries) } if &*name == "vehiclesInfo" => {
-                let entries = entries.into_iter().filter(|entry| match entry {
-                    Value::Dict(fields) => fields.get("vehicleID").and_then(Value::as_i64) == Some(vehicle_id.into()),
-                    _ => false,
+                let entries = entries.into_iter().filter_map(|entry| match entry {
+                    Value::Dict(mut fields) if fields.get("vehicleID").and_then(Value::as_i64) == Some(vehicle_id.into()) => {
+                        if let Some(vehicle) = vehicle {
+                            vehicle.apply_to_arena_entry(&mut fields);
+                        }
+                        Some(Value::Dict(fields))
+                    }
+                    _ => None,
                 }).collect();
                 (id, NrlChild::Property { name, value: Value::Seq(entries) })
             }
