@@ -63,6 +63,8 @@ pub struct ShotDef {
     pub gravity: f32,
     /// In metres.
     pub max_distance: f32,
+    /// The damage it deals to a vehicle it pierces, on average.
+    pub damage: f32,
 }
 
 /// `SHELL_TYPES_LIST`: a shell kind's index is its position.
@@ -251,6 +253,8 @@ impl VehicleDef {
                 speed: shot_float("speed")? * projectile_speed_factor,
                 gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
                 max_distance: shot_float("maxDistance")?,
+                damage: child_float_at(shell, &["damage", "armor"])
+                    .ok_or_else(|| invalid(format!("shell {shell_name} has no damage")))?,
             });
         }
 

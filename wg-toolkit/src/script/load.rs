@@ -1,7 +1,7 @@
 //! Loads a full script [`Model`] from the game's resources.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, BufReader};
 
 use tracing::debug;
 
@@ -19,7 +19,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
 
     let mut model = Script::default();
 
-    let alias_reader = fs.read("scripts/entity_defs/alias.xml")?;
+    let alias_reader = fs.read("scripts/entity_defs/alias.xml").map(BufReader::new)?;
     let alias_elt = pxml::from_reader(alias_reader).unwrap();
     parse::parse_aliases(&alias_elt, &mut model.tys);
     debug!("read aliases");
@@ -31,7 +31,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
             continue;
         };
 
-        let interface_reader = fs.read(interface_file.path())?;
+        let interface_reader = fs.read(interface_file.path()).map(BufReader::new)?;
         let interface_elt = pxml::from_reader(interface_reader).unwrap();
         let interface = parse::parse_interface(&interface_elt, &mut model.tys, interface_name.to_string());
         model.interfaces.push(interface);
@@ -51,7 +51,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
                 continue;
             };
 
-            let interface_reader = fs.read(interface_file.path())?;
+            let interface_reader = fs.read(interface_file.path()).map(BufReader::new)?;
             let interface_elt = pxml::from_reader(interface_reader).unwrap();
             let interface = parse::parse_interface(&interface_elt, &mut model.tys, interface_name.to_string());
             model.interfaces.push(interface);
@@ -60,12 +60,12 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
         }
     }
 
-    let entities_reader = fs.read("scripts/entities.xml")?;
+    let entities_reader = fs.read("scripts/entities.xml").map(BufReader::new)?;
     let entities_elt = pxml::from_reader(entities_reader).unwrap();
     let entities_elt = entities_elt.get_child("ClientServerEntities").unwrap().as_element().unwrap();
     for (index, (entity_name, _)) in entities_elt.iter_children_all().enumerate() {
 
-        let entity_reader = fs.read(format!("scripts/entity_defs/{entity_name}.def"))?;
+        let entity_reader = fs.read(format!("scripts/entity_defs/{entity_name}.def")).map(BufReader::new)?;
         let entity_elt = pxml::from_reader(entity_reader).unwrap();
         let entity = parse::parse_entity(&entity_elt, &mut model.tys, index + 1, entity_name.to_string(), None);
         debug!("read entity {entity_name}");
@@ -94,7 +94,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
     let mut seen_components = HashSet::new();
 
     {
-        let components_reader = fs.read("scripts/components.xml")?;
+        let components_reader = fs.read("scripts/components.xml").map(BufReader::new)?;
         let components_elt = pxml::from_reader(components_reader).unwrap();
 
         for (list_name, components) in [
@@ -114,7 +114,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
                 }
 
                 let component_path = format!("scripts/component_defs/{component_name}.def");
-                let component_reader = fs.read(&component_path)?;
+                let component_reader = fs.read(&component_path).map(BufReader::new)?;
                 let component_elt = pxml::from_reader(component_reader).unwrap();
 
                 let of_entities = parse::parse_of_entity(&component_elt);
@@ -169,7 +169,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
 
     for ext_name in &ext_names {
 
-        let Ok(ext_reader) = fs.read(format!("{ext_name}/extension.xml")) else {
+        let Ok(ext_reader) = fs.read(format!("{ext_name}/extension.xml")).map(BufReader::new) else {
             continue;
         };
 
@@ -194,7 +194,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
                     }
 
                     let component_path = format!("{ext_name}/scripts/component_defs/{component_name}.def");
-                    let component_reader = fs.read(&component_path)?;
+                    let component_reader = fs.read(&component_path).map(BufReader::new)?;
                     let component_elt = pxml::from_reader(component_reader).unwrap();
 
                     let of_entities = parse::parse_of_entity(&component_elt);
@@ -223,7 +223,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
             for entity_name in parse::parse_names(ext_entities_elt, "ClientServerEntities") {
 
                 let entity_path = format!("{ext_name}/scripts/entity_defs/{entity_name}.def");
-                let entity_reader = fs.read(&entity_path)?;
+                let entity_reader = fs.read(&entity_path).map(BufReader::new)?;
                 let entity_elt = pxml::from_reader(entity_reader).unwrap();
                 let id = model.entities.len() + 1;
                 let entity = parse::parse_entity(&entity_elt, &mut model.tys, id, entity_name.clone(), Some(ext_name.clone()));
@@ -273,11 +273,11 @@ fn read_entity_def(
     name: &str,
 ) -> io::Result<Option<Box<pxml::Element>>> {
     if let Some(ext_name) = ext_name {
-        if let Ok(reader) = fs.read(format!("{ext_name}/scripts/entity_defs/{name}.def")) {
+        if let Ok(reader) = fs.read(format!("{ext_name}/scripts/entity_defs/{name}.def")).map(BufReader::new) {
             return Ok(Some(pxml::from_reader(reader).unwrap()));
         }
     }
-    match fs.read(format!("scripts/entity_defs/{name}.def")) {
+    match fs.read(format!("scripts/entity_defs/{name}.def")).map(BufReader::new) {
         Ok(reader) => Ok(Some(pxml::from_reader(reader).unwrap())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),

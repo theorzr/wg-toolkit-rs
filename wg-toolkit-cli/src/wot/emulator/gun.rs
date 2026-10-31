@@ -1,6 +1,6 @@
 //! A vehicle's gun as the server runs it: its ammunition, the shell loaded, the reload,
-//! and each shot's flight until it hits the terrain or runs out of range. Armour,
-//! vehicles and destructibles are not hit yet.
+//! and each shot's flight until it hits a vehicle, the terrain, or runs out of range.
+//! Vehicles are boxes, without armour; destructibles are not hit yet.
 
 use glam::Vec3;
 use rand::Rng;
@@ -40,8 +40,56 @@ pub struct Shot {
     pub end_velocity: Vec3,
     /// When it gets to `end`, in seconds after firing.
     pub flight_time: f32,
-    /// Whether it ends in the terrain, rather than at its maximum distance.
-    pub hit: bool,
+    pub landing: Landing,
+}
+
+/// What a shell ends its flight on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Landing {
+    /// The vehicle of this entity id.
+    Vehicle(u32),
+    Terrain,
+    /// Nothing, at its maximum distance.
+    Range,
+}
+
+/// A vehicle shells can hit: a box around its hull, turned with its yaw.
+#[derive(Debug, Clone)]
+pub struct VehicleBox {
+    pub entity_id: u32,
+    /// The box's centre.
+    pub center: Vec3,
+    pub yaw: f32,
+    /// Half its width, height and length.
+    pub half_extents: Vec3,
+}
+
+impl VehicleBox {
+
+    /// Where a segment from `from` to `to` enters the box, as a fraction of it.
+    fn entry(&self, from: Vec3, to: Vec3) -> Option<f32> {
+        let rotation = glam::Quat::from_rotation_y(self.yaw).inverse();
+        let (from, to) = (rotation * (from - self.center), rotation * (to - self.center));
+        let delta = to - from;
+        let (mut enter, mut exit) = (0.0f32, 1.0f32);
+        for axis in 0..3 {
+            let (start, step, half) = (from[axis], delta[axis], self.half_extents[axis]);
+            if step.abs() < 1e-9 {
+                if start.abs() > half {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((-half - start) / step, (half - start) / step);
+            enter = enter.max(a.min(b));
+            exit = exit.min(a.max(b));
+            if enter > exit {
+                return None;
+            }
+        }
+        Some(enter)
+    }
+
 }
 
 impl Gun {
@@ -55,7 +103,7 @@ impl Gun {
     /// Fire the loaded shell at game time `now` from `start` toward `direction`, off by a
     /// random angle within `dispersion` radians, if the gun is loaded and has a shell
     /// left. It then reloads.
-    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>) -> Option<Shot> {
+    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[VehicleBox]) -> Option<Shot> {
 
         if now < self.ready_at {
             return None;
@@ -70,8 +118,8 @@ impl Gun {
         self.next_shot_id += 1;
 
         let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
-        let (end, end_velocity, flight_time, hit) = fly(start, velocity, def.gravity, def.max_distance, terrain);
-        Some(Shot { id, def, start, velocity, end, end_velocity, flight_time, hit })
+        let (end, end_velocity, flight_time, landing) = fly(start, velocity, def.gravity, def.max_distance, terrain, vehicles);
+        Some(Shot { id, def, start, velocity, end, end_velocity, flight_time, landing })
 
     }
 
@@ -101,24 +149,30 @@ fn disperse(direction: Vec3, angle: f32, rng: &mut impl Rng) -> Vec3 {
     (direction * off.cos() + (side * around.cos() + up * around.sin()) * off.sin()).normalize()
 }
 
-/// Follow a shell from `start`: where it ends, its velocity and the time then, and
-/// whether it hit the terrain before `max_distance`.
-fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Option<&Terrain>) -> (Vec3, Vec3, f32, bool) {
+/// Follow a shell from `start`: where it ends, its velocity and the time then, and what
+/// it ends on.
+fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Option<&Terrain>, vehicles: &[VehicleBox]) -> (Vec3, Vec3, f32, Landing) {
     let (mut position, mut velocity, mut time) = (start, velocity, 0.0);
     loop {
         let next = position + velocity * FLIGHT_STEP;
         let next_velocity = velocity - Vec3::Y * gravity * FLIGHT_STEP;
+        let hit = vehicles.iter()
+            .filter_map(|vehicle| Some((vehicle.entry(position, next)?, vehicle.entity_id)))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((t, entity_id)) = hit {
+            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Vehicle(entity_id));
+        }
         if let Some(ground) = terrain.and_then(|terrain| terrain.height_at(next.x, next.z)) {
             if next.y <= ground {
                 // Where the step crosses the ground, assumed flat over it.
                 let above = position.y - terrain.and_then(|t| t.height_at(position.x, position.z)).unwrap_or(ground);
                 let below = ground - next.y;
                 let t = (above / (above + below)).clamp(0.0, 1.0);
-                return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, true);
+                return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Terrain);
             }
         }
         if (next - start).length() >= max_distance {
-            return (next, next_velocity, time + FLIGHT_STEP, false);
+            return (next, next_velocity, time + FLIGHT_STEP, Landing::Range);
         }
         (position, velocity, time) = (next, next_velocity, time + FLIGHT_STEP);
     }
@@ -140,23 +194,33 @@ mod tests {
             speed: 800.0,
             gravity: 9.81,
             max_distance: 720.0,
+            damage: 400.0,
         }
     }
 
     #[test]
     fn fires_then_reloads() {
         let mut gun = Gun::new(vec![(shell(), 2)], 10.0);
-        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None).unwrap();
+        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert_eq!(shot.velocity, Vec3::Z * 800.0);
-        assert!(!shot.hit);
+        assert_eq!(shot.landing, Landing::Range);
         assert!((shot.end.length() - 720.0).abs() < 5.0);
-        assert!(gun.fire(5.0, Vec3::ZERO, Vec3::Z, 0.0, None).is_none());
+        assert!(gun.fire(5.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
         assert!(!gun.take_loaded(5.0));
         assert!(gun.take_loaded(10.0));
         assert!(!gun.take_loaded(10.0));
-        assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, 0.0, None).is_some());
+        assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_some());
         // Out of shells.
-        assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, 0.0, None).is_none());
+        assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+    }
+
+    #[test]
+    fn hits_a_vehicle_in_its_way() {
+        let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
+        let target = VehicleBox { entity_id: 7, center: Vec3::new(0.0, 0.0, 100.0), yaw: 0.5, half_extents: Vec3::new(1.7, 1.2, 3.5) };
+        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[target]).unwrap();
+        assert_eq!(shot.landing, Landing::Vehicle(7));
+        assert!(shot.end.z > 95.0 && shot.end.z < 100.0);
     }
 
     #[test]

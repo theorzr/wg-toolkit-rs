@@ -133,7 +133,7 @@ impl Terrain {
     /// Load the terrain of a space, `spaces/08_ruinberg` say.
     pub fn load(fs: &ResFilesystem, space_dir: &str) -> io::Result<Self> {
 
-        let chunk_size = crate::pxml::from_reader(fs.read(format!("{space_dir}/space.settings"))?)
+        let chunk_size = crate::pxml::from_reader(fs.read(format!("{space_dir}/space.settings")).map(io::BufReader::new)?)
             .ok()
             .and_then(|settings| settings.get_child("chunkSize")?.as_float())
             .unwrap_or(DEFAULT_CHUNK_SIZE);

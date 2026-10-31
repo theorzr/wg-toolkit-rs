@@ -117,11 +117,15 @@ impl Hull {
         let delta = (target - self.speed).clamp(-rate * dt, rate * dt);
         self.speed += delta;
 
-        let turn = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
+        let mut turn = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
             ROTATE_LEFT => -1.0,
             ROTATE_RIGHT => 1.0,
             _ => 0.0,
         };
+        // Backing up steers like a car: left swings the rear to the left.
+        if self.flags & BACKWARD != 0 {
+            turn = -turn;
+        }
         self.yaw_rate = turn * self.limits.rotation_speed;
         self.direction.z = wrap_angle(self.direction.z + self.yaw_rate * dt);
 
@@ -392,8 +396,13 @@ mod tests {
         }
         assert_eq!(hull.speed, 0.0);
         assert!((hull.direction.z - 28f32.to_radians()).abs() < 1e-4);
+        // Backing up while steering right turns the hull the other way.
+        hull.flags = movement_flag::BACKWARD | movement_flag::ROTATE_RIGHT;
+        hull.step(0.1);
+        assert!(hull.yaw_rate < 0.0);
         // Standing still with no input reports no movement.
         hull.flags = 0;
+        hull.speed = 0.0;
         assert!(!hull.step(0.1));
     }
 

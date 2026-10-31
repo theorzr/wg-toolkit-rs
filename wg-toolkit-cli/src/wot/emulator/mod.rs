@@ -34,7 +34,7 @@ use wgtk::script::Value;
 
 use account::AccountData;
 use capture::{Answer, CapturedSession};
-use gun::{Gun, Shot};
+use gun::{Gun, Landing, Shot, VehicleBox};
 use physics::{MotionLimits, Vehicle};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
@@ -209,6 +209,9 @@ struct Target {
     entity_id: u32,
     /// Its `vehiclesInfo` entry's fields, which its `publicInfo` repeats.
     info: BTreeMap<Arc<str>, Value>,
+    /// Where it stands and its yaw, once created.
+    placed: Option<(Vec3, f32)>,
+    health: i64,
 }
 
 /// A battle client's vehicle: the vehicle the server simulates, and how the client
@@ -636,6 +639,9 @@ impl BaseThread {
                     for (field, value) in public.iter_mut() {
                         match &**field {
                             "maxHealth" => *value = with_int(value, max_health),
+                            // The player's camouflage and marks are not the target's.
+                            "outfit" => *value = with_bytes(value, Vec::new()),
+                            "marksOnGun" => *value = with_int(value, 0),
                             "compDescr" | "name" | "team" => if let Some(own) = target.info.get(field) {
                                 *value = match (own, &*value) {
                                     (Value::Int8(n), _) => with_int(value, (*n).into()),
@@ -651,18 +657,27 @@ impl BaseThread {
         }
         let dispatch = self.app.dispatch().entity_from_id(entity.entity_type_id)
             .ok_or_else(|| invalid_data("unknown vehicle entity type"))?;
-        let mut entity = entity.clone();
-        entity.entity_id = target.entity_id;
-        entity.client_data = properties.encode(&dispatch.properties)?;
-
         let yaw = start.direction.z;
         let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
         if let Some(height) = self.terrain.as_ref().and_then(|terrain| terrain.height_at(position.x, position.z)) {
             position.y = height;
         }
-        let direction = Vec3::new(0.0, 0.0, yaw + std::f32::consts::PI);
+        // Facing the player's start, in [-pi, pi) as angles are packed.
+        let facing = (yaw + 2.0 * std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let direction = Vec3::new(0.0, 0.0, facing);
+
+        // The client places it where its creation says, not where the position update
+        // that follows does.
+        let mut entity = entity.clone();
+        entity.entity_id = target.entity_id;
+        entity.client_data = properties.encode(&dispatch.properties)?;
+        entity.position = position;
+        entity.direction = wgtk::app::math::PackedYawPitchRoll::pack(direction.z, direction.y, direction.x, false);
 
         info!(%addr, "Creating target {} at {position:?}", target.entity_id);
+        if let Some(target) = self.battle_clients.get_mut(&addr).and_then(|client| client.target.as_mut()) {
+            target.placed = Some((position, direction.z));
+        }
         self.app.create_entity(addr, entity)?;
         self.app.update_position_detailed(addr, TARGET_ALIAS, position, direction)?;
         Ok(())
@@ -677,9 +692,18 @@ impl BaseThread {
         let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
         let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
         let now = client.game_time();
+        let vehicles: Vec<_> = client.target.iter()
+            .filter(|target| target.health > 0)
+            .filter_map(|target| target.placed.map(|(position, yaw)| VehicleBox {
+                entity_id: target.entity_id,
+                center: position + Vec3::Y * TARGET_HALF_EXTENTS.y,
+                yaw,
+                half_extents: TARGET_HALF_EXTENTS,
+            }))
+            .collect();
         let Some(driven) = client.driven.as_mut() else { return Ok(()) };
         let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
-        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref()) else {
+        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref(), &vehicles) else {
             debug!(%addr, "Not loaded, not shooting");
             return Ok(());
         };
@@ -723,13 +747,17 @@ impl BaseThread {
 
     }
 
-    /// A shell gets to its end: it explodes on the terrain, or its tracer stops at its
-    /// maximum distance.
+    /// A shell gets to its end: it damages the vehicle it hits, explodes on the
+    /// terrain, or its tracer stops at its maximum distance.
     fn land_shot(&mut self, addr: SocketAddr, shot: &Shot) -> io::Result<()> {
         let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
-        if shot.hit {
-            let def = &shot.def;
-            self.app.call_method(avatar, "explodeProjectile", vec![
+        let def = &shot.def;
+        match shot.landing {
+            Landing::Vehicle(entity_id) => {
+                self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)])?;
+                self.damage_target(addr, entity_id, def.damage)
+            }
+            Landing::Terrain => self.app.call_method(avatar, "explodeProjectile", vec![
                 Value::Int32(shot.id),
                 Value::UInt8(def.effects_index),
                 Value::UInt8(NO_PREFAB_EFFECTS),
@@ -740,10 +768,59 @@ impl BaseThread {
                 Value::Vector3(shot.end_velocity.normalize()),
                 Value::Float32(shot.end_velocity.length()),
                 Value::Seq(Vec::new()),
-            ])
-        } else {
-            self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)])
+            ]),
+            Landing::Range => self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)]),
         }
+    }
+
+    /// The target takes a shell's damage, varied by up to [`DAMAGE_SPREAD`] either way:
+    /// its health drops, and the player sees the hit, as the captured server shows one.
+    fn damage_target(&mut self, addr: SocketAddr, entity_id: u32, damage: f32) -> io::Result<()> {
+
+        use rand::Rng;
+
+        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
+        let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
+        let shooter_id = client.driven.as_ref().map_or(0, |driven| driven.entity_id);
+        let Some(target) = client.target.as_mut().filter(|target| target.entity_id == entity_id && target.health > 0) else {
+            return Ok(());
+        };
+        let damage = (damage * rand::thread_rng().gen_range(1.0 - DAMAGE_SPREAD..=1.0 + DAMAGE_SPREAD)).round() as i64;
+        let old_health = target.health;
+        target.health = (old_health - damage).max(0);
+        let new_health = target.health;
+        let killed = new_health == 0;
+        info!(%addr, "Target {entity_id} takes {damage} damage, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
+
+        let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
+        let (Some(entity), Some(properties)) = (&battle.vehicle_entity, &battle.vehicle_properties) else { return Ok(()) };
+        let type_id = entity.entity_type_id;
+        let health = properties.values.iter()
+            .find(|(_, name, _)| &**name == "health")
+            .map(|(id, name, value)| (*id, name.clone(), with_int(value, new_health)));
+
+        let mut flags = HIT_FLAGS_PIERCED;
+        if killed {
+            flags |= HIT_FLAG_VEHICLE_KILLED;
+        }
+        self.app.call_method(avatar, "showShotResults", vec![Value::Seq(vec![Value::Dict(BTreeMap::from([
+            (Arc::from("gunInstallationIndex"), Value::UInt8(0)),
+            (Arc::from("hitFlags"), Value::UInt32(flags)),
+            (Arc::from("vehicleID"), Value::UInt32(entity_id)),
+        ]))])])?;
+        if let Some(health) = health {
+            self.app.update_entity(addr, entity_id, type_id, ChangedProperties { values: vec![health], stopped: None })?;
+        }
+        // `ATTACK_REASON.SHOT`, no extended reason.
+        self.app.call_entity_method(addr, entity_id, type_id, "onHealthChanged", vec![
+            Value::Int16(new_health as i16),
+            Value::Int16(old_health as i16),
+            Value::Int32(shooter_id as i32),
+            Value::UInt8(0),
+            Value::Int8(-1),
+        ])?;
+        Ok(())
+
     }
 
     /// Answer a client request with what the captured server answered to the closest
@@ -1262,12 +1339,29 @@ fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
         .and_then(|fields| team(&fields))?;
     entries.iter().filter_map(fields)
         .find(|fields| team(fields).is_some_and(|team| team != own_team))
-        .and_then(|info| Some(Target { entity_id: info.get("vehicleID")?.as_i64()? as u32, info }))
+        .and_then(|info| Some(Target {
+            entity_id: info.get("vehicleID")?.as_i64()? as u32,
+            health: info.get("maxHealth")?.as_i64()?,
+            info,
+            placed: None,
+        }))
 }
 
 /// The target's id alias, apart from the one the captured server gave the player's
 /// vehicle.
 const TARGET_ALIAS: u8 = 200;
+
+/// Half the target's width, height and length: a typical tank's hull, in metres.
+const TARGET_HALF_EXTENTS: Vec3 = Vec3::new(1.7, 1.2, 3.5);
+
+/// How much a shell's damage varies, either way, as a share of it.
+const DAMAGE_SPREAD: f32 = 0.25;
+
+/// `VEHICLE_HIT_FLAGS` of a shell piercing a vehicle, as captured: a direct projectile,
+/// through armour and a module.
+const HIT_FLAGS_PIERCED: u32 = 0x100000 | 0x100 | 0x10;
+/// `VEHICLE_HIT_FLAGS.VEHICLE_KILLED`.
+const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
 
 /// How far in front of the player's start the target stands, in metres.
 const TARGET_DISTANCE: f32 = 40.0;
