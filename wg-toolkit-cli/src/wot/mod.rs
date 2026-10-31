@@ -4,6 +4,7 @@ pub mod proxy;
 pub mod emulator;
 pub mod account_commands;
 pub mod items;
+pub mod item_defs;
 
 use std::sync::Arc;
 use std::fs::File;
@@ -106,7 +107,8 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
             args.capture.as_deref())
 
     } else {
-        emulator::run(args.login_app, args.base_app, encryption_key, script, args.from_capture.as_deref())
+        emulator::run(args.login_app, args.base_app, encryption_key, script, args.from_capture.as_deref(),
+            &args.dir, &args.give_vehicle)
     }
 
 }

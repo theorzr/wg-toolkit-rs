@@ -8,6 +8,7 @@ use std::io::{self, Read, Write};
 use std::num::Wrapping;
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::time::Duration;
 
 use blowfish::Blowfish;
 use rand::rngs::OsRng;
@@ -100,6 +101,9 @@ impl App {
 
             let (packet, addr) = match self.socket.recv() {
                 Ok(ret) => ret,
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    return Event::Timeout;
+                }
                 Err(error) => return Event::IoError(IoErrorEvent { error, addr: None }),
             };
 
@@ -147,7 +151,11 @@ impl App {
             element::id::AVATAR_UPDATE_IMPLICIT => self.skip::<element::AvatarUpdateImplicit>(reader),
             element::id::AVATAR_UPDATE_EXPLICIT => self.skip::<element::AvatarUpdateExplicit>(reader),
             element::id::ACK_PHYSICS_CORRECTION => self.skip::<element::AckPhysicsCorrection>(reader),
-            element::id::REQUEST_ENTITY_UPDATE => self.skip::<element::RequestEntityUpdate>(reader),
+            element::id::REQUEST_ENTITY_UPDATE => {
+                let request = reader.read_simple::<element::RequestEntityUpdate>()?.element;
+                self.events.push_back(Event::RequestEntityUpdate(RequestEntityUpdateEvent { addr, entity_id: request.entity_id }));
+                Ok(())
+            }
             element::id::NRL_MSG_TO_CELL => self.skip::<element::NrlMsgToCell>(reader),
             element::id::AVATAR_UPDATE_WARD_IMPLICIT => self.skip::<element::AvatarUpdateWardImplicit>(reader),
             element::id::AVATAR_UPDATE_WARD_EXPLICIT => self.skip::<element::AvatarUpdateWardExplicit>(reader),
@@ -466,6 +474,136 @@ impl App {
 
     }
 
+    /// Make [`Self::poll`] return [`Event::Timeout`] when no packet arrives within the
+    /// given duration, so the caller gets a chance to send periodic messages (ticks)
+    /// to quiet clients. `None` (the default) waits forever.
+    pub fn set_poll_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_recv_timeout(timeout)
+    }
+
+    /// Send a simple element to a client, alone in a bundle.
+    fn send_simple<E: SimpleElement>(&mut self, addr: SocketAddr, element: E, reliable: bool) -> io::Result<()> {
+        self.bundle.clear();
+        self.bundle.element_writer().write_simple(element)?;
+        self.protocol.channel(addr, None).prepare(&mut self.bundle, reliable);
+        self.socket.send_bundle(&self.bundle, addr)?;
+        Ok(())
+    }
+
+    /// Give a client the server's game time: sent each tick, it also keeps the channel
+    /// alive, a client that hears nothing for a while dropping it.
+    pub fn tick(&mut self, addr: SocketAddr, tick: u8) -> io::Result<()> {
+        // Reliable for now: our unreliable packets carry a sequence number the client
+        // rejects as corrupted.
+        self.send_simple(addr, client::element::TickSync { tick }, true)
+    }
+
+    /// Tell a client where its cell app is, before creating its cell player.
+    pub fn set_cell_app_ext_address(&mut self, addr: SocketAddr, cell_app_addr: SocketAddrV4) -> io::Result<()> {
+        self.send_simple(addr, client::element::SetCellAppExtAddress(cell_app_addr.into()), true)
+    }
+
+    /// Send a client one of its space's properties, still raw, see
+    /// [`client::element::SpaceProperty`].
+    pub fn space_property(&mut self, addr: SocketAddr, data: Vec<u8>) -> io::Result<()> {
+        self.send_simple(addr, client::element::SpaceProperty { data }, true)
+    }
+
+    /// Map a geometry (a map, `spaces/08_ruinberg` say) into a client's space, at the
+    /// identity transform.
+    pub fn add_space_geometry_mapping(&mut self, addr: SocketAddr, space_id: u32, entry_id: SocketAddrV4, path: &str) -> io::Result<()> {
+        let mut transform = [0.0; 16];
+        for i in 0..4 {
+            transform[i * 5] = 1.0;
+        }
+        self.send_simple(addr, client::element::AddSpaceGeometryMapping {
+            space_id,
+            entry_id: entry_id.into(),
+            path: path.to_string(),
+            transform,
+            unk: 1,
+            rest: Vec::new(),
+        }, true)
+    }
+
+    /// An entity enters a client's area of interest, under an id alias the position
+    /// updates use. The client asks for its state next, see
+    /// [`Event::RequestEntityUpdate`], answered with [`Self::create_entity`].
+    pub fn enter_aoi(&mut self, addr: SocketAddr, entity_id: u32, id_alias: u8) -> io::Result<()> {
+        self.send_simple(addr, client::element::EnterAoi { entity_id, id_alias }, true)
+    }
+
+    /// Place an entity of a client's area of interest, by its id alias, with a full
+    /// position and direction (yaw, pitch, roll). Like every position update, it also
+    /// selects the entity for the property updates that follow.
+    pub fn update_position_detailed(&mut self, addr: SocketAddr, id_alias: u8, position: glam::Vec3, direction: glam::Vec3) -> io::Result<()> {
+        self.send_simple(addr, client::element::AvatarUpdateAliasDetailed { ref_num: 0, id_alias, position, direction }, true)
+    }
+
+    /// Create an entity on a client, from its state, and keep track of its type so its
+    /// properties can be updated and calls targeting it decoded.
+    pub fn create_entity(&mut self, addr: SocketAddr, element: client::element::CreateEntity) -> io::Result<()> {
+        let entity_id = element.entity_id;
+        let type_id = element.entity_type_id;
+        self.send_simple(addr, element, true)?;
+        self.entities.insert(entity_id, EntityEntry { addr, type_id, data: Value::None });
+        Ok(())
+    }
+
+    /// Create an entity on a client with a full direction (yaw, pitch, roll) rather than
+    /// a packed one, and its initial properties, given in the entity type's property
+    /// table. The entity is tracked like [`Self::create_entity`]'s.
+    pub fn create_entity_detailed(
+        &mut self,
+        addr: SocketAddr,
+        entity_id: u32,
+        type_id: u16,
+        position: glam::Vec3,
+        direction: glam::Vec3,
+        properties: &client::element::ChangedProperties,
+    ) -> io::Result<()> {
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+        let client_data = properties.encode(&dispatch.properties)?;
+        self.send_simple(addr, client::element::CreateEntityDetailed {
+            entity_id,
+            entity_type_id: type_id,
+            unk_u16: 0,
+            resource_name: "bw.default".to_string(),
+            position,
+            direction,
+            client_data,
+        }, true)?;
+        self.entities.insert(entity_id, EntityEntry { addr, type_id, data: Value::None });
+        Ok(())
+    }
+
+    /// Create NRL nodes on a client: an entity's node and its dynamic components, say.
+    /// The stream's first message must create a node.
+    pub fn nrl_create_node(&mut self, addr: SocketAddr, stream: client::element::NrlStream) -> io::Result<()> {
+        self.send_simple(addr, client::element::NrlCreateNode(stream), true)
+    }
+
+    /// Change some of an entity's client properties on the client owning it, given in
+    /// that entity type's property table.
+    pub fn update_entity(&mut self, addr: SocketAddr, entity_id: u32, type_id: u16, properties: client::element::ChangedProperties) -> io::Result<()> {
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+        self.bundle.clear();
+        self.bundle.element_writer().write_simple(client::element::SelectEntity { entity_id })?;
+        self.bundle.element_writer().write(client::element::UpdateEntity(properties), &dispatch.properties[..])?;
+        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
+        self.socket.send_bundle(&self.bundle, addr)?;
+        Ok(())
+    }
+
+    /// A logged in client's session key and blowfish key. A client told to switch base
+    /// app logs in again with both: the session key as its login key, the blowfish key
+    /// for the new channel.
+    pub fn client_keys(&self, addr: SocketAddr) -> Option<(u32, Arc<Blowfish>)> {
+        self.clients.get(&addr).map(|client| (client.session_key, Arc::clone(&client.blowfish)))
+    }
+
     /// Tell the client to disconnect and reconnect to a (possibly different) base app
     /// address.
     pub fn switch_base_app(&mut self, addr: SocketAddr, base_addr: SocketAddrV4, reset_entities: bool) -> io::Result<()> {
@@ -655,6 +793,10 @@ pub enum Event {
     IoError(IoErrorEvent),
     Login(LoginEvent),
     EnableEntities(EnableEntitiesEvent),
+    /// A client asks for the state of an entity that entered its area of interest.
+    RequestEntityUpdate(RequestEntityUpdateEvent),
+    /// No packet arrived within the poll timeout, see [`App::set_poll_timeout`].
+    Timeout,
     BaseMethod(BaseMethodEvent),
     CellMethod(CellMethodEvent),
 }
@@ -685,6 +827,13 @@ pub struct LoginEvent {
 #[derive(Debug)]
 pub struct EnableEntitiesEvent {
     pub addr: SocketAddr,
+}
+
+/// A client asks for an entity's state, after it entered the client's area of interest.
+#[derive(Debug)]
+pub struct RequestEntityUpdateEvent {
+    pub addr: SocketAddr,
+    pub entity_id: u32,
 }
 
 /// A client called a method on its current base-player entity.

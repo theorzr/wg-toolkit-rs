@@ -5,16 +5,19 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
-use std::io;
+use std::io::{self, Read, Write};
 
 use wgtk::app::client::element::{
-    self as client_el, CreateBasePlayer, EntityMethod, ResourceFragment, ResourceHeader,
-    SelectPlayerEntity, SwitchBaseApp, TickSync, UpdateFrequencyNotification,
+    self as client_el, AddSpaceGeometryMapping, AvatarUpdateAliasDetailed, ChangedProperties, CreateBasePlayer,
+    CreateCellPlayer, CreateEntity, CreateEntityDetailed, EnterAoi, NrlBody, NrlChild, NrlCreateNode,
+    NrlMessage, NrlNode, EntityMethod, ResourceFragment, ResourceHeader,
+    SelectAliasedEntity, SelectEntity, SelectPlayerEntity, SpaceProperty, SwitchBaseApp, TickSync, UpdateEntity,
+    UpdateFrequencyNotification,
 };
 use wgtk::app::base::element::{self as base_el, BaseEntityMethod, EnableEntities, SessionKey};
 use wgtk::app::proxy::{self, capture::CaptureReader, PacketChannel, PacketDirection, Peer};
 use wgtk::net::bundle::{Bundle, NextElementReader};
-use wgtk::net::element::{DebugElementVariable32, SimpleElement};
+use wgtk::net::element::{DebugElementVariable32, Element, ElementLength, SimpleElement};
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
 use wgtk::script::Value;
 
@@ -28,8 +31,51 @@ pub struct CapturedSession {
     pub account: Option<(Value, u8)>,
     /// The arguments of the `showGUI` call that follows the account's creation.
     pub show_gui: Option<Vec<Value>>,
-    /// Each base method call the client made, in order, with the server's answers.
+    /// Each base method call the client made to its account, in order, with the
+    /// server's answers.
     pub requests: Vec<CapturedRequest>,
+    /// The battle the client entered, if it entered one.
+    pub battle: Option<CapturedBattle>,
+}
+
+/// A battle the client entered: the server tells the account `onArenaCreated`, then
+/// switches the client to the base app holding its `Avatar`.
+///
+/// What the server sends the avatar until the map is loaded is kept, for the emulator to
+/// build its own battle from: stand-ins for the values a game server will generate.
+#[derive(Debug, Default)]
+pub struct CapturedBattle {
+    /// The `Avatar` entity's creation data and dynamic components count.
+    pub avatar: Option<(Value, u8)>,
+    /// The avatar's client method calls before the map: the arena's setup
+    /// (`updateArena`), in order.
+    pub calls: Vec<(Arc<str>, Vec<Value>)>,
+    /// The avatar's cell side, which names the space and the player's vehicle.
+    pub cell_player: Option<CreateCellPlayer>,
+    /// The space's properties, still raw, see [`SpaceProperty`].
+    pub space_properties: Vec<Vec<u8>>,
+    /// The map, mapped into the space.
+    pub geometry: Option<AddSpaceGeometryMapping>,
+    /// The player's vehicle: its id alias when entering the area of interest, the
+    /// properties sent to it right after, and its creation, answering the client.
+    pub vehicle_alias: Option<u8>,
+    pub vehicle_position: Option<AvatarUpdateAliasDetailed>,
+    pub vehicle_update: Option<ChangedProperties>,
+    pub vehicle_entity: Option<CreateEntity>,
+    /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
+    /// the arena's vehicles.
+    pub arena_info: Option<CapturedArenaInfo>,
+}
+
+/// The arena's info entity: its type and properties, from its creation, then the NRL
+/// tree creating its node and its component, decoded. Like other entities without an id
+/// alias, it is created right after entering the area of interest, the client asking
+/// for nothing.
+#[derive(Debug)]
+pub struct CapturedArenaInfo {
+    pub entity_id: u32,
+    pub created: Option<(u16, ChangedProperties)>,
+    pub nrl: Vec<NrlMessage>,
 }
 
 /// A base method call the client made, and the answers to it.
@@ -58,6 +104,10 @@ impl CapturedSession {
         let mut extractor = Extractor {
             dispatch,
             player_type: None,
+            in_account: false,
+            in_avatar: false,
+            detailed_entities: HashMap::new(),
+            selected: None,
             session: CapturedSession::default(),
             pending: HashMap::new(),
             latest: None,
@@ -94,6 +144,18 @@ struct Extractor<'d> {
     /// The type of the client's current player entity, which its method calls decode
     /// against in both directions.
     player_type: Option<u16>,
+    /// Whether the player is the avatar, whose battle setup is kept.
+    in_avatar: bool,
+    /// Whether the entity selected for the next method calls and property updates is
+    /// the player, rather than one picked with `SelectEntity`, and that one.
+    selected: Option<u32>,
+    /// The type and properties of the entities created in detail in the battle, by id:
+    /// the arena's info entity among them, before its NRL tree tells which it is.
+    detailed_entities: HashMap<u32, (u16, ChangedProperties)>,
+    /// Whether the player is the account: only its requests are served. Request ids
+    /// start over with each player, so a later player's answers would land on the
+    /// account's requests.
+    in_account: bool,
     session: CapturedSession,
     /// Requests by id, as indices into `session.requests`, until answered.
     pending: HashMap<i64, usize>,
@@ -127,6 +189,37 @@ impl proxy::Handler for Extractor<'_> {
 
 impl Extractor<'_> {
 
+    /// The battle being set up, until its map arrives.
+    fn setting_up_battle(&mut self) -> Option<&mut CapturedBattle> {
+        let battle = self.session.battle.as_mut().filter(|_| self.in_avatar)?;
+        battle.geometry.is_none().then_some(battle)
+    }
+
+    /// The player's vehicle, if it has this alias. Only the vehicle's alias is tracked,
+    /// any other names some other entity.
+    fn vehicle_by_alias(&self, alias: u8) -> Option<u32> {
+        let battle = self.session.battle.as_ref().filter(|_| self.in_avatar)?;
+        battle.cell_player.as_ref().map(|cell| cell.vehicle_id).filter(|_| battle.vehicle_alias == Some(alias))
+    }
+
+    /// The battle, if the given entity is its player's vehicle.
+    fn battle_vehicle(&mut self, entity_id: u32) -> Option<&mut CapturedBattle> {
+        let battle = self.session.battle.as_mut().filter(|_| self.in_avatar)?;
+        let vehicle_id = battle.cell_player.as_ref()?.vehicle_id;
+        (vehicle_id == entity_id).then_some(battle)
+    }
+
+    /// The request a call answers, from its first argument: an answer repeats the
+    /// request id with the same type, which tells it apart from a call whose first
+    /// argument only happens to have the same value (`onEnqueued(1u8)` against a
+    /// chat request `1i64`, say).
+    fn answered_request(&self, args: &[Value]) -> Option<usize> {
+        let first = args.first()?;
+        let &index = self.pending.get(&first.as_i64()?)?;
+        let request_first = self.session.requests[index].args.first()?;
+        (std::mem::discriminant(first) == std::mem::discriminant(request_first)).then_some(index)
+    }
+
     /// Elements from the client: only its base method calls matter.
     fn read_out(&mut self, bundle: &Bundle) -> io::Result<()> {
         let mut reader = bundle.element_reader();
@@ -139,6 +232,9 @@ impl Extractor<'_> {
                     let MethodCall::Known { name, args } = elt.read::<BaseEntityMethod, _>(&dispatch.base_methods)?.element.call else {
                         continue;
                     };
+                    if !self.in_account {
+                        continue;
+                    }
                     if let Some(request_id) = args.first().and_then(Value::as_i64) {
                         self.pending.insert(request_id, self.session.requests.len());
                     }
@@ -170,24 +266,124 @@ impl Extractor<'_> {
                 client_el::id::CREATE_BASE_PLAYER => {
                     let e = elt.read::<CreateBasePlayer, _>(self.dispatch)?.element;
                     self.player_type = Some(e.entity_type_id);
-                    let is_account = self.dispatch.entity_from_name("Account").map(|(t, _)| t) == Some(e.entity_type_id);
-                    if is_account {
+                    let type_named = |name| self.dispatch.entity_from_name(name).map(|(t, _)| t) == Some(e.entity_type_id);
+                    self.in_account = type_named("Account");
+                    self.in_avatar = type_named("Avatar");
+                    self.pending.clear();
+                    self.latest = None;
+                    if type_named("Account") {
                         self.session.account = Some((e.entity_data.into_owned(), e.entity_components_count));
+                    } else if type_named("Avatar") {
+                        let battle = self.session.battle.get_or_insert_with(CapturedBattle::default);
+                        battle.avatar.get_or_insert((e.entity_data.into_owned(), e.entity_components_count));
                     }
                 }
-                SelectPlayerEntity::ID => { elt.read_simple::<SelectPlayerEntity>()?; }
+                SelectPlayerEntity::ID => {
+                    elt.read_simple::<SelectPlayerEntity>()?;
+                    self.selected = None;
+                }
+                SelectEntity::ID => {
+                    self.selected = Some(elt.read_simple::<SelectEntity>()?.element.entity_id);
+                }
+                AvatarUpdateAliasDetailed::ID => {
+                    // A position update also selects its entity.
+                    let e = elt.read_simple::<AvatarUpdateAliasDetailed>()?.element;
+                    self.selected = Some(self.vehicle_by_alias(e.id_alias).unwrap_or(u32::MAX));
+                    if let Some(battle) = self.session.battle.as_mut().filter(|b| b.vehicle_alias == Some(e.id_alias)) {
+                        battle.vehicle_position.get_or_insert(e);
+                    }
+                }
+                SelectAliasedEntity::ID => {
+                    let alias = elt.read_simple::<SelectAliasedEntity>()?.element.id_alias;
+                    self.selected = Some(self.vehicle_by_alias(alias).unwrap_or(u32::MAX));
+                }
+                CreateCellPlayer::ID => {
+                    let e = elt.read_simple::<CreateCellPlayer>()?.element;
+                    if let Some(battle) = self.setting_up_battle() {
+                        battle.cell_player.get_or_insert(e);
+                    }
+                }
+                SpaceProperty::ID => {
+                    let e = elt.read_simple::<SpaceProperty>()?.element;
+                    if let Some(battle) = self.setting_up_battle() {
+                        battle.space_properties.push(e.data);
+                    }
+                }
+                AddSpaceGeometryMapping::ID => {
+                    let e = elt.read_simple::<AddSpaceGeometryMapping>()?.element;
+                    if let Some(battle) = self.setting_up_battle() {
+                        battle.geometry = Some(e);
+                    }
+                }
+                EnterAoi::ID => {
+                    let e = elt.read_simple::<EnterAoi>()?.element;
+                    if let Some(battle) = self.battle_vehicle(e.entity_id) {
+                        battle.vehicle_alias.get_or_insert(e.id_alias);
+                    }
+                }
+                NrlCreateNode::ID => {
+                    let mut stream = elt.read_simple::<NrlCreateNode>()?.element.0;
+                    if self.in_avatar && stream.decode_components(self.dispatch).is_ok() && carries_vehicles_info(&stream.messages) {
+                        let entity_id = stream.messages.iter().find_map(|message| match &message.body {
+                            NrlBody::CreateNode { node: NrlNode::Entity { entity_id }, .. } => Some(*entity_id),
+                            _ => None,
+                        });
+                        if let (Some(battle), Some(entity_id)) = (self.session.battle.as_mut(), entity_id) {
+                            let created = self.detailed_entities.remove(&entity_id);
+                            battle.arena_info.get_or_insert(CapturedArenaInfo { entity_id, created, nrl: stream.messages });
+                        }
+                    }
+                }
+                CreateEntityDetailed::ID => {
+                    let e = elt.read_simple::<CreateEntityDetailed>()?.element;
+                    let properties = self.dispatch.entity_from_id(e.entity_type_id).map(|d| e.client_properties(&d.properties));
+                    if let Some(properties) = properties.filter(|_| self.in_avatar) {
+                        self.detailed_entities.insert(e.entity_id, (e.entity_type_id, properties));
+                    }
+                }
+                CreateEntity::ID => {
+                    let e = elt.read_simple::<CreateEntity>()?.element;
+                    if let Some(battle) = self.battle_vehicle(e.entity_id) {
+                        battle.vehicle_entity.get_or_insert(e);
+                    }
+                }
+                UpdateEntity::ID => {
+                    // Sent to the vehicle before its creation, so its type is assumed.
+                    let vehicle = self.selected.filter(|&id| self.battle_vehicle(id).is_some());
+                    let properties = vehicle.and_then(|_| self.dispatch.entity_from_name("Vehicle")).map(|(_, d)| &d.properties);
+                    match properties {
+                        Some(properties) => {
+                            let UpdateEntity(e) = elt.read::<UpdateEntity, _>(&properties[..])?.element;
+                            if let Some(battle) = self.session.battle.as_mut() {
+                                battle.vehicle_update.get_or_insert(e);
+                            }
+                        }
+                        None => { elt.read::<Skipped, _>(&())?; }
+                    }
+                }
                 TickSync::ID => { elt.read_simple::<TickSync>()?; }
                 SwitchBaseApp::ID => { elt.read_simple::<SwitchBaseApp>()?; }
                 id if client_el::id::ENTITY_METHOD.contains(id) => {
+                    // A call on another entity reads against that entity's methods.
+                    if self.selected.is_some() {
+                        break;
+                    }
                     let Some(dispatch) = self.player_type.and_then(|t| self.dispatch.entity_from_id(t)) else { break };
                     let MethodCall::Known { name, args } = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call else {
                         continue;
                     };
                     if &*name == "showGUI" {
                         self.session.show_gui.get_or_insert(args);
-                    } else if let Some(&index) = args.first().and_then(Value::as_i64).and_then(|id| self.pending.get(&id)) {
+                    } else if &*name == "onArenaCreated" {
+                        // Not an answer: the emulator decides when the arena is ready.
+                        self.session.battle.get_or_insert_with(CapturedBattle::default);
+                    } else if let Some(battle) = self.setting_up_battle() {
+                        battle.calls.push((name, args));
+                    } else if !self.in_account {
+                        continue;
+                    } else if let Some(index) = self.answered_request(&args) {
                         self.session.requests[index].answers.push(Answer::Call { method: name, args });
-                    } else if let Some(index) = self.latest.take() {
+                    } else if let Some(index) = self.latest {
                         self.session.requests[index].answers.push(Answer::Call { method: name, args });
                     }
                 }
@@ -211,10 +407,45 @@ impl Extractor<'_> {
                         }
                     }
                 }
+                id if client_el::known_length(id).is_some() => { elt.read::<Skipped, _>(&())?; }
                 _ => break,
             }
         }
         Ok(())
     }
 
+}
+
+/// An element read only to get past it, by its known length.
+struct Skipped;
+
+impl Element<()> for Skipped {
+
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn write(&self, _write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn read_length(_config: &(), id: u8) -> io::Result<ElementLength> {
+        client_el::known_length(id).ok_or_else(|| io::ErrorKind::InvalidData.into())
+    }
+
+    fn read(read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+        io::copy(read, &mut io::sink())?;
+        Ok(Self)
+    }
+
+}
+
+/// Whether NRL messages create a component with a `vehiclesInfo` property.
+fn carries_vehicles_info(messages: &[NrlMessage]) -> bool {
+    messages.iter().any(|message| {
+        let NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } = &message.body else {
+            return false;
+        };
+        data.children.iter().any(|(_, child)| matches!(child, NrlChild::Property { name, .. } if &**name == "vehiclesInfo"))
+    })
 }

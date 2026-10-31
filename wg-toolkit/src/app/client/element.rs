@@ -150,6 +150,37 @@ pub mod id {
 
 }
 
+/// The wire length of a client element by id, from the table above, for reading past
+/// elements one doesn't decode. `None` for the entity method and property ranges,
+/// whose lengths depend on the selected entity's script model.
+pub fn known_length(id: u8) -> Option<ElementLength> {
+    use id::*;
+    Some(match id {
+        CELL_APP_SUSPENDED | CELL_APP_RESUMED | SELECT_PLAYER_ENTITY | NRL_UNLINK_TREE_FLAG | NRL_UPDATE_NODE_FLAG | LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION => ElementLength::Fixed(0),
+        RESET_ENTITIES | TICK_SYNC | RELATIVE_POSITION_REFERENCE | SELECT_ALIASED_ENTITY | LOGGED_OFF => ElementLength::Fixed(1),
+        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH | AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH => ElementLength::Fixed(10),
+        AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR => ElementLength::Fixed(11),
+        RELATIVE_POSITION | AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL | AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL => ElementLength::Fixed(12),
+        AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH => ElementLength::Fixed(13),
+        AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL => ElementLength::Fixed(15),
+        TICK_SYNC_PERIODIC | AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR => ElementLength::Fixed(2),
+        DETAILED_POSITION => ElementLength::Fixed(24),
+        AVATAR_UPDATE_PLAYER_DETAILED => ElementLength::Fixed(25),
+        AVATAR_UPDATE_ALIAS_DETAILED => ElementLength::Fixed(26),
+        AVATAR_UPDATE_NO_ALIAS_DETAILED => ElementLength::Fixed(29),
+        AVATAR_UPDATE_ALIAS_NO_POS_YAW => ElementLength::Fixed(3),
+        FORCED_POSITION => ElementLength::Fixed(38),
+        AUTHENTICATE | BANDWIDTH_NOTIFICATION | SET_GAME_TIME | CLIENT_SUSPENSION_DETECTION_ENABLED | SELECT_ENTITY | AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH => ElementLength::Fixed(4),
+        ENTER_AOI | AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR | AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR | CONTROL_ENTITY => ElementLength::Fixed(5),
+        AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW | AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL => ElementLength::Fixed(6),
+        UPDATE_FREQUENCY_NOTIFICATION | AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH => ElementLength::Fixed(7),
+        SET_VEHICLE | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR | AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR => ElementLength::Fixed(8),
+        ENTER_AOI_ON_VEHICLE | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW | AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL | AVATAR_UPDATE_ALIAS_FULL_POS_YAW | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL | SWITCH_BASE_APP => ElementLength::Fixed(9),
+        CREATE_BASE_PLAYER | CREATE_CELL_PLAYER | DUMMY_PACKET | SPACE_PROPERTY | ADD_SPACE_GEOMETRY_MAPPING | REMOVE_SPACE_GEOMETRY_MAPPING | CREATE_ENTITY | CREATE_ENTITY_DETAILED | LEAVE_AOI | AVATAR_UPDATE_VOLATILE_PROPERTIES | CHANGE_VOLATILE_PACKER_TYPE | NRL_CREATE_NODE | NRL_UNLINK_TREE | NRL_UPDATE_NODE | NRL_DATA | NRL_MSG_TO_CLIENT | NRL_UNRELIABLE_MSG_TO_CLIENT | VOICE_DATA | RESTORE_CLIENT | RESOURCE_HEADER | RESOURCE_FRAGMENT | NESTED_ENTITY_PROPERTY | SLICE_ENTITY_PROPERTY | UPDATE_ENTITY | SET_CELL_APP_EXT_ADDRESS => ElementLength::Variable16,
+        _ => return None,
+    })
+}
+
 
 // =============================================================================
 // Connection handshake & session bookkeeping
@@ -1373,8 +1404,34 @@ pub struct NrlComponentData {
     raw: Vec<u8>,
 }
 
+impl NrlComponentData {
+
+    /// The initial state of a component, of the given NRL type id, from its present
+    /// children in order, encoded against its schema.
+    pub fn encode(dispatch: &ScriptDispatch, nrl_type_id: u16, children: Vec<(u32, NrlChild)>) -> io::Result<Self> {
+        let (type_id, component) = dispatch.component_from_nrl_id(nrl_type_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData,
+                format!("unknown nrl component type id: {nrl_type_id}")))?;
+        let mut raw = Vec::new();
+        for (_, child) in &children {
+            match child {
+                NrlChild::Property { name, value } => {
+                    let property = component.properties.iter().find(|p| p.name == *name)
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData,
+                            format!("nrl component type id {nrl_type_id} has no property {name}")))?;
+                    value.write(&mut raw, &property.ty)?;
+                }
+                NrlChild::Method { method_index, .. } => raw.write_packed_u24(*method_index)?,
+                NrlChild::Trailing => {}
+            }
+        }
+        Ok(Self { type_id, children, raw })
+    }
+
+}
+
 /// One child of a [`NrlNode::DynComponent`], see [`NrlComponentData`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NrlChild {
     /// A property node, with its initial value.
     Property {
@@ -1428,6 +1485,48 @@ impl fmt::Debug for NrlIdList {
 }
 
 impl NrlIdList {
+
+    /// A list of the given ids, relative to the owning node's id `base`, ending with
+    /// the given presence bitmask (one bit per id, LSB first) or none. Consecutive ids
+    /// are written as runs, small steps as deltas, anything else absolute.
+    pub fn new(base: u32, ids: Vec<u32>, present: Option<Vec<u8>>) -> Self {
+        let mut raw = Vec::new();
+        let mut cur = base;
+        let mut index = 0;
+        while index < ids.len() {
+            let id = ids[index];
+            // A run: consecutive ids from the running one, up to 125 at once.
+            let run = ids[index..].iter().zip(1..)
+                .take_while(|&(&id, step)| id != 0 && id == cur.wrapping_add(step))
+                .count()
+                .min(125);
+            if run >= 2 {
+                raw.push((run as i32 - 126) as i8 as u8);
+                cur = cur.wrapping_add(run as u32);
+                index += run;
+                continue;
+            }
+            if id == 0 {
+                raw.push(0x81);
+            } else if id > cur && id - cur <= 127 {
+                raw.push((id - cur) as u8);
+                cur = id;
+            } else {
+                raw.push(0x80);
+                raw.extend_from_slice(&(id as u16).to_be_bytes());
+                cur = id;
+            }
+            index += 1;
+        }
+        match &present {
+            Some(mask) => {
+                raw.push(0x82);
+                raw.extend_from_slice(mask);
+            }
+            None => raw.push(0),
+        }
+        Self { ids, present, raw }
+    }
 
     /// Decode a list starting at `*pos`, advancing it past the list. `base` is the id
     /// the running counter starts from. `None` if the bytes run out mid-list, in which
@@ -1564,7 +1663,18 @@ impl NrlStream {
             let mut read = &self.rest[..];
             let (type_id, decoded) = read_component_children(&mut read, dispatch, *component_type_id, children)?;
             let consumed = self.rest.len() - read.len();
-            *data = Some(NrlComponentData { type_id, children: decoded, raw: self.rest[..consumed].to_vec() });
+            let raw = self.rest[..consumed].to_vec();
+            // Checks the encoder against every component decoded: a server builds them.
+            match NrlComponentData::encode(dispatch, *component_type_id, decoded.clone()) {
+                Ok(encoded) if encoded.raw == raw => {}
+                // Python values pickle differently but equivalently.
+                Ok(encoded) if read_component_children(&mut &encoded.raw[..], dispatch, *component_type_id, children)
+                    .is_ok_and(|(_, reread)| reread == decoded) => {}
+                Ok(encoded) => warn!("nrl component type id {component_type_id} encodes differently: read {} bytes, encoded {}",
+                    raw.len(), encoded.raw.len()),
+                Err(e) => warn!("nrl component type id {component_type_id} does not encode: {e}"),
+            }
+            *data = Some(NrlComponentData { type_id, children: decoded, raw });
 
             let tail = self.rest.split_off(consumed);
             let pos = Self::frame(&tail, None, &mut self.messages);
@@ -2707,10 +2817,20 @@ pub struct ChangedProperties {
 }
 
 impl ChangedProperties {
+
     /// Whether the whole run decoded and consumed the payload exactly.
     pub fn is_complete(&self) -> bool {
         self.stopped.is_none()
     }
+
+    /// Encode as the entity creation messages carry them, against the entity type's
+    /// property table: a count, then `(exposed id, value)` pairs.
+    pub fn encode(&self, properties: &[PropertyDef]) -> io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        write_changed_properties(self, properties, &mut data)?;
+        Ok(data)
+    }
+
 }
 
 /// Why a [`ChangedProperties`] run didn't decode cleanly, and what was left over.
@@ -3710,6 +3830,28 @@ mod tests {
     /// An entity created with its components in one `CreateChildren`, as a live battle
     /// sends it: the children's nodes are read, framing stops at the first component
     /// (whose initial state needs its schema), and the stream writes back unchanged.
+    /// A built id list reads back as the same ids and mask, whatever mix of runs,
+    /// deltas, absolute and null ids it takes.
+    #[test]
+    fn nrl_id_list_encodes() {
+        let cases: [(u32, Vec<u32>, Option<Vec<u8>>); 4] = [
+            (2173, vec![2174, 2175], Some(vec![2])),
+            (10, vec![11, 12, 13, 20, 0, 5, 300, 301], None),
+            (100, (101..400).collect(), Some(vec![0xFF; 38])),
+            (7, vec![], None),
+        ];
+        for (base, ids, present) in cases {
+            let list = NrlIdList::new(base, ids.clone(), present.clone());
+            let mut pos = 0;
+            let read = NrlIdList::read_from(&list.raw, &mut pos, base).unwrap();
+            assert_eq!(pos, list.raw.len());
+            assert_eq!(read.ids, ids);
+            assert_eq!(read.present, present);
+        }
+        // Consecutive ids from the base cost one byte: a run of 2, `2 - 126`.
+        assert_eq!(NrlIdList::new(2173, vec![2174, 2175], None).raw, [0x84, 0x00]);
+    }
+
     #[test]
     fn nrl_create_children_reads_nodes() {
 

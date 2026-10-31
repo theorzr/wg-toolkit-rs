@@ -231,6 +231,11 @@ pub struct WotArgs {
     /// from this capture, recorded with `--capture`.
     #[arg(long, conflicts_with_all = ["replay", "real_login_app"])]
     pub from_capture: Option<PathBuf>,
+    /// With `--from-capture`, give the account this vehicle too, as `<nation>:<name>`
+    /// (`uk:GB98_T95_FV4201_Chieftain`, names as in the game's
+    /// `scripts/item_defs/vehicles/<nation>/list.xml`). Can be repeated.
+    #[arg(long, requires = "from_capture")]
+    pub give_vehicle: Vec<String>,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output
