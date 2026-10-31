@@ -243,12 +243,29 @@ mirroring entity -> dynamic component -> property/method. See the `Nrl*` section
 `wg-toolkit/src/app/client/element.rs` for the decoded framing, which is validated
 against live captures in both directions.
 
-What is still missing is not the framing but the **schemas**: a property or method node's
-value is encoded per its component's own schema, addressed by a CGF-runtime component
-type id that this project cannot yet resolve (the wire says 113 for
-`EntityMarkerComponent` where `dynamic_components` has it at 67). Those bytes are
-therefore left undecoded in `NrlStream::rest`. Resolving them needs that registry dumped
-from a live client.
+Component creation is decoded against those schemas (`NrlStream::decode_components`):
+a `DynComponent` node's children are the component's properties in property-table order,
+then its client methods in method-table order, then one trailing child of unknown role.
+Each child marked present carries its initial value (a property) or its method's index in
+declaration order (a method), the trailing child nothing. An entity usually gets its
+components through one `CreateChildren`, whose children are each a node type byte and
+payload. On a 2.4.1.1 battle this decodes all 265 `NrlCreateNode` elements (233
+components) with no byte left over.
+
+Still undecoded: later updates to those nodes (`UpdateNode`, and the `NrlData` fragments,
+which look like the same message stream).
+
+The component a `DynComponent` node attaches is now resolved
+(`ScriptDispatch::component_from_nrl_id`). Its `component_type_id` continues the entity
+type ids like a dynamic component's own type id does, except that only components with a
+client script class (a top-level `<Name>.pyc` in `scripts/client/` or an extension's) are
+counted, so the two numberings drift apart after the first component without one. Worked
+out offline from a 2.4.1.1 battle capture: every one of the 10 distinct ids resolves to a
+component whose node has exactly `properties + client methods + 1` children, and the two
+named instances (`ShotsReceiver_*`, `SequenceNetworkSync_*`) resolve to their own names.
+Without the skips, wire 108 would have been `SpamProtectionComponent`. 18 of the 350
+dynamic components have no client class in 2.4.1.1 (e.g. `ExtendedSPG`,
+`ArenaVehiclesInfo`).
 
 Separately, a `CreateBasePlayer` for `Account` has been captured with
 `entity_components_count: 17` (previously only `0` had been seen), and the element

@@ -1309,11 +1309,10 @@ pub type ChangeVolatilePackerType = DebugElementVariable16<{ id::CHANGE_VOLATILE
 /// (the wire carries the discriminant as a single byte). The tree mirrors
 /// entity -> dynamic component -> property/method.
 ///
-/// Only the fields the client reads off the wire in `readCreate` are decoded here. The
-/// value a property or method node reads next is encoded per the *component's own*
-/// schema, addressed by a CGF-runtime component type id this project cannot yet resolve
-/// (see [`NrlNode::DynComponent::component_type_id`]), so those bytes are left in
-/// [`NrlStream::rest`] rather than guessed at.
+/// Only the fields the client reads off the wire in `readCreate` are decoded here. What
+/// a component node's children carry next is encoded per the *component's own* schema,
+/// so framing stops there, leaving those bytes in [`NrlStream::rest`] until
+/// [`NrlStream::decode_components`] decodes them against the script model.
 #[derive(Debug, Clone)]
 pub enum NrlNode {
     /// `BWRootNode`, the tree root. Carries nothing.
@@ -1328,16 +1327,19 @@ pub enum NrlNode {
     /// component property -- their ids come from `children`, and each then reads its
     /// initial value, which is why a `DynComponent` record ends this project's framing.
     DynComponent {
-        /// Index into the client's *CGF* component registry, which is not this
-        /// project's `components.xml`/dispatch ordering: the wire says 113 for
-        /// `EntityMarkerComponent` where `dynamic_components` has it at 67. Resolving
-        /// component property schemas needs that registry dumped from the live client.
+        /// The component's type, resolved with `ScriptDispatch::component_from_nrl_id`:
+        /// numbered like entity type ids but counting only the components the client
+        /// has a script class for.
         component_type_id: u16,
         /// Often empty; otherwise an instance name such as `"EntityMarkerComponent"`,
         /// `"XrayDebuff"` or a vehicle sub-part slot.
         name: String,
-        /// Node ids for the property children created alongside this component.
+        /// Node ids for the children created alongside this component.
         children: NrlIdList,
+        /// The initial state of those children, once decoded against the component with
+        /// [`NrlStream::decode_components`]. Until then those bytes are in
+        /// [`NrlStream::rest`].
+        data: Option<NrlComponentData>,
     },
     /// `ClientPrimitivePropertyNode`: one replicated scalar property of a component.
     /// Which property is decided locally by the parent component, not by the wire.
@@ -1350,6 +1352,41 @@ pub enum NrlNode {
     },
     /// `ServerMethodCallerNode`: the client->server direction, so not expected inbound.
     ServerMethodCaller,
+}
+
+/// The initial state a [`NrlNode::DynComponent`] creates its children with.
+///
+/// The children are the component's properties in property table order, then its client
+/// methods in method table order, then one more child whose role is unknown. Only the
+/// children marked present in [`NrlIdList::present`] carry anything: a property its
+/// value, a method its index. Checked against every component created in a live battle,
+/// each consuming its bytes exactly.
+#[derive(Debug, Clone)]
+pub struct NrlComponentData {
+    /// The component's own type id, see `ScriptDispatch::component_from_nrl_id`.
+    pub type_id: u16,
+    /// Each present child, by node id.
+    pub children: Vec<(u32, NrlChild)>,
+    /// The exact bytes this was decoded from, written back as is.
+    raw: Vec<u8>,
+}
+
+/// One child of a [`NrlNode::DynComponent`], see [`NrlComponentData`].
+#[derive(Debug, Clone)]
+pub enum NrlChild {
+    /// A property node, with its initial value.
+    Property {
+        name: Arc<str>,
+        value: Value,
+    },
+    /// A method node: the index of its method in declaration order, see
+    /// `EntityDispatch::client_method_declared`.
+    Method {
+        name: Arc<str>,
+        method_index: u32,
+    },
+    /// The trailing child every component has, which carries nothing.
+    Trailing,
 }
 
 /// A node-id list in the encoding `readIdList` uses: a sequence of signed bytes read
@@ -1446,11 +1483,13 @@ pub enum NrlBody {
         parent_id: u16,
         node: NrlNode,
     },
-    /// Type 1: create several children of this node in one go. Each id in `children`
-    /// is then followed on the wire by its own node-type byte and creation payload,
-    /// which land in [`NrlStream::rest`] (terminal).
+    /// Type 1: create several children of this node in one go. Each present id in
+    /// `children` is then followed on the wire by its own node-type byte and creation
+    /// payload, read into `nodes` until one needs its component's schema, as a
+    /// [`Self::CreateNode`] would stop.
     CreateChildren {
         children: NrlIdList,
+        nodes: Vec<(u32, NrlNode)>,
     },
     /// Type 2: detach this node and its subtree.
     UnlinkTree,
@@ -1496,10 +1535,55 @@ impl NrlStream {
     pub(crate) fn read_with(read: &mut dyn Read, implied: Option<u8>) -> io::Result<Self> {
         let mut buf = Vec::new();
         read.read_to_end(&mut buf)?;
-
         let mut messages = Vec::new();
+        let pos = Self::frame(&buf, implied, &mut messages);
+        Ok(Self { messages, rest: buf[pos..].to_vec() })
+    }
+
+    /// Decode the initial state of each component this stream creates (see
+    /// [`NrlComponentData`]), which the framing alone stops at, framing on after each
+    /// one. On error the stream is left as it was decoded up to that component.
+    pub fn decode_components(&mut self, dispatch: &ScriptDispatch) -> io::Result<()> {
+        loop {
+
+            let pending = match self.messages.last_mut().map(|message| &mut message.body) {
+                Some(NrlBody::CreateNode { node, .. }) => node,
+                Some(NrlBody::CreateChildren { nodes, .. }) => match nodes.last_mut() {
+                    Some((_, node)) => node,
+                    None => return Ok(()),
+                },
+                _ => return Ok(()),
+            };
+            let NrlNode::DynComponent { component_type_id, children, data: data @ None, .. } = pending else {
+                return Ok(());
+            };
+
+            let mut read = &self.rest[..];
+            let (type_id, decoded) = read_component_children(&mut read, dispatch, *component_type_id, children)?;
+            let consumed = self.rest.len() - read.len();
+            *data = Some(NrlComponentData { type_id, children: decoded, raw: self.rest[..consumed].to_vec() });
+
+            let tail = self.rest.split_off(consumed);
+            let pos = Self::frame(&tail, None, &mut self.messages);
+            self.rest = tail[pos..].to_vec();
+
+        }
+    }
+
+    /// Frame messages from `buf` into `messages`, up to the first terminal one, returning
+    /// the position framing stopped at. A `CreateChildren` left unfinished at the end of
+    /// `messages` is resumed first.
+    fn frame(buf: &[u8], implied: Option<u8>, messages: &mut Vec<NrlMessage>) -> usize {
+
         let mut pos = 0;
         let mut implied = implied;
+
+        if let Some(NrlMessage { body: NrlBody::CreateChildren { children, nodes }, .. }) = messages.last_mut() {
+            match read_child_nodes(buf, &mut pos, children, nodes) {
+                Some(false) => {}
+                _ => return pos,
+            }
+        }
 
         loop {
             let mut at = pos;
@@ -1528,7 +1612,10 @@ impl NrlStream {
                 }
                 1 => {
                     let Some(children) = NrlIdList::read_from(&buf, &mut at, node_id as u32) else { break };
-                    (NrlBody::CreateChildren { children }, true)
+                    let mut nodes = Vec::new();
+                    // Out of bytes mid-list: keep what was read, the rest stays raw.
+                    let terminal = read_child_nodes(buf, &mut at, &children, &mut nodes).unwrap_or(true);
+                    (NrlBody::CreateChildren { children, nodes }, terminal)
                 }
                 2 => (NrlBody::UnlinkTree, false),
                 5 => (NrlBody::Lookup, false),
@@ -1544,7 +1631,8 @@ impl NrlStream {
             }
         }
 
-        Ok(Self { messages, rest: buf[pos..].to_vec() })
+        pos
+
     }
 
     pub(crate) fn write_with(&self, write: &mut dyn Write, implied: bool) -> io::Result<()> {
@@ -1566,13 +1654,95 @@ impl NrlStream {
                     write.write_all(&parent_id.to_be_bytes())?;
                     write_node(node, write)?;
                 }
-                NrlBody::CreateChildren { children } => write.write_all(&children.raw)?,
+                NrlBody::CreateChildren { children, nodes } => {
+                    write.write_all(&children.raw)?;
+                    for (_, node) in nodes {
+                        write_node(node, write)?;
+                    }
+                }
                 NrlBody::UnlinkTree | NrlBody::Lookup
                 | NrlBody::UpdateNode | NrlBody::Other { .. } => {}
             }
         }
         write.write_all(&self.rest)
     }
+
+}
+
+impl NrlIdList {
+
+    /// Whether the child at this index is present, every child being so without a mask.
+    fn is_present(&self, index: usize) -> bool {
+        match &self.present {
+            Some(mask) => mask.get(index / 8).is_some_and(|byte| byte & (1 << (index % 8)) != 0),
+            None => true,
+        }
+    }
+
+}
+
+/// Read the node of each present child of a `CreateChildren` not yet in `nodes`,
+/// advancing `at` past each one read. Returns whether reading stopped on a terminal node,
+/// or `None` if the bytes run out.
+fn read_child_nodes(buf: &[u8], at: &mut usize, children: &NrlIdList, nodes: &mut Vec<(u32, NrlNode)>) -> Option<bool> {
+    let present = children.ids.iter().enumerate()
+        .filter(|&(index, _)| children.is_present(index))
+        .map(|(_, &id)| id);
+    for id in present.skip(nodes.len()) {
+        let mut next = *at;
+        let &node_type = buf.get(next)?;
+        next += 1;
+        let (node, terminal) = read_node(buf, &mut next, node_type, id as u16)?;
+        *at = next;
+        nodes.push((id, node));
+        if terminal {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// Read the initial state of a component's children, see [`NrlComponentData`].
+fn read_component_children(
+    read: &mut &[u8],
+    dispatch: &ScriptDispatch,
+    component_type_id: u16,
+    children: &NrlIdList,
+) -> io::Result<(u16, Vec<(u32, NrlChild)>)> {
+
+    let (type_id, component) = dispatch.component_from_nrl_id(component_type_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData,
+            format!("unknown nrl component type id: {component_type_id}")))?;
+
+    let properties = component.properties.len();
+    let methods = component.client_methods.len();
+    if children.ids.len() != properties + methods + 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+            "nrl component type id {component_type_id} has {} children, expected {}",
+            children.ids.len(), properties + methods + 1)));
+    }
+
+    let mut decoded = Vec::new();
+    for (index, &node_id) in children.ids.iter().enumerate() {
+        if !children.is_present(index) {
+            continue;
+        }
+        let child = if let Some(property) = component.properties.get(index) {
+            NrlChild::Property { name: Arc::clone(&property.name), value: Value::read(read, &property.ty)? }
+        } else if index < properties + methods {
+            let method_index = read.read_packed_u24()?;
+            let name = component.client_method_declared(method_index)
+                .map(|method| Arc::clone(&method.name))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!(
+                    "nrl component type id {component_type_id} has no client method {method_index}")))?;
+            NrlChild::Method { name, method_index }
+        } else {
+            NrlChild::Trailing
+        };
+        decoded.push((node_id, child));
+    }
+
+    Ok((type_id, decoded))
 
 }
 
@@ -1592,7 +1762,7 @@ fn read_node(buf: &[u8], at: &mut usize, node_type: u8, node_id: u16) -> Option<
             let component_type_id = u16::from_le_bytes([type_bytes[0], type_bytes[1]]);
             let name = read_packed_str(buf, at)?;
             let children = NrlIdList::read_from(buf, at, node_id as u32)?;
-            (NrlNode::DynComponent { component_type_id, name, children }, true)
+            (NrlNode::DynComponent { component_type_id, name, children, data: None }, true)
         }
         3 => (NrlNode::PrimitiveProperty, true),
         4 => (NrlNode::CompositeProperty, true),
@@ -1612,11 +1782,15 @@ fn write_node(node: &NrlNode, write: &mut dyn Write) -> io::Result<()> {
             write.write_u8(1)?;
             write.write_u32(*entity_id)
         }
-        NrlNode::DynComponent { component_type_id, name, children } => {
+        NrlNode::DynComponent { component_type_id, name, children, data } => {
             write.write_u8(2)?;
             write.write_u16(*component_type_id)?;
             write.write_string_variable(name)?;
-            write.write_all(&children.raw)
+            write.write_all(&children.raw)?;
+            match data {
+                Some(data) => write.write_all(&data.raw),
+                None => Ok(()),
+            }
         }
         NrlNode::PrimitiveProperty => write.write_u8(3),
         NrlNode::CompositeProperty => write.write_u8(4),
@@ -3336,6 +3510,37 @@ mod tests {
         // And the element-level decode agrees, with nothing left undetermined.
         let outcome = decode_compressed_path(&properties, Some(&tracked), &data, true).unwrap();
         assert!(matches!(outcome, PathOutcome::Slice { start: 2, end: 4, .. }));
+
+    }
+
+    /// An entity created with its components in one `CreateChildren`, as a live battle
+    /// sends it: the children's nodes are read, framing stops at the first component
+    /// (whose initial state needs its schema), and the stream writes back unchanged.
+    #[test]
+    fn nrl_create_children_reads_nodes() {
+
+        let raw = [
+            0x00, 0x05, 0x00, 0x01, 0x01, 0xC5, 0x08, 0x3F, 0x00,  // node 5: entity 4131013
+            0x01, 0x00, 0x05, 0x03, 0x02, 0x03, 0x00,              // its children: 8, 10, 13
+            0x02, 0x4C, 0x00, 0x00, 0x83, 0x82, 0x01,              // 8: component 76
+            0x02, 0x4D, 0x00, 0x00, 0x84, 0x82, 0x02,              // 10: component 77
+        ];
+
+        let NrlCreateNode(stream) = <NrlCreateNode as SimpleCodec>::read(&mut &raw[..]).unwrap();
+        assert_eq!(stream.messages.len(), 2);
+        let NrlBody::CreateChildren { children, nodes } = &stream.messages[1].body else {
+            panic!("expected children: {:?}", stream.messages[1].body);
+        };
+        assert_eq!(children.ids, [8, 10, 13]);
+        assert_eq!(nodes.len(), 1);
+        let (8, NrlNode::DynComponent { component_type_id: 76, data: None, .. }) = &nodes[0] else {
+            panic!("expected component 76: {nodes:?}");
+        };
+        assert_eq!(stream.rest, &raw[23..]);
+
+        let mut written = Vec::new();
+        SimpleCodec::write(&NrlCreateNode(stream), &mut written).unwrap();
+        assert_eq!(written, raw);
 
     }
 

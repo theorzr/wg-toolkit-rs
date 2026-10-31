@@ -40,6 +40,9 @@ use crate::net::codec::Codec;
 pub struct ScriptDispatch {
     pub script: Script,
     pub entities: Vec<EntityDispatch>,
+    /// The type id of each dynamic component that has an NRL component type id, in NRL
+    /// order, see [`Self::component_from_nrl_id`].
+    nrl_components: Vec<u16>,
 }
 
 impl ScriptDispatch {
@@ -56,6 +59,7 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of, &script.static_components),
                 cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of, &script.static_components),
                 client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
+                client_methods_declared: build_declared_order(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
                 properties: build_property_table(&script.interfaces, &entity.interface, &script.static_components),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_cell_property_exposed),
@@ -68,6 +72,7 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of, &[]),
                 cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of, &[]),
                 client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of, &[]),
+                client_methods_declared: build_declared_order(&script.interfaces, &component.interface, client_methods_of, &[]),
                 properties: build_property_table(&script.interfaces, &component.interface, &[]),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_cell_property_exposed),
@@ -75,8 +80,29 @@ impl ScriptDispatch {
             });
         }
 
-        Self { script, entities }
+        let nrl_components = script.dynamic_components.iter().enumerate()
+            .filter(|(_, component)| component.has_client_class)
+            .map(|(index, _)| (script.entities.len() + 1 + index) as u16)
+            .collect();
 
+        Self { script, entities, nrl_components }
+
+    }
+
+    /// Look up a dynamic component by the component type id an NRL `DynComponent` node
+    /// carries, returning its own type id and dispatch tables.
+    ///
+    /// NRL numbers components like [`Self::entity_from_id`] does, continuing after the
+    /// entities, but skips every component the client has no script class for (see
+    /// [`crate::script::Component::has_client_class`]), so the two ids drift apart past
+    /// the first such component. Checked against a live battle: every one of the 10
+    /// distinct ids seen resolves to a component whose property and client method count
+    /// fits the node's children (see `NrlNode::DynComponent`), and the two named
+    /// instances (`ShotsReceiver_*`, `SequenceNetworkSync_*`) resolve to their own name.
+    pub fn component_from_nrl_id(&self, component_type_id: u16) -> Option<(u16, &EntityDispatch)> {
+        let index = usize::from(component_type_id).checked_sub(self.script.entities.len() + 1)?;
+        let type_id = *self.nrl_components.get(index)?;
+        Some((type_id, self.entity_from_id(type_id)?))
     }
 
     /// Look up an entity's dispatch tables by its wire type id (1-based -- see
@@ -107,6 +133,9 @@ pub struct EntityDispatch {
     pub base_methods: Vec<MethodDef>,
     pub cell_methods: Vec<MethodDef>,
     pub client_methods: Vec<MethodDef>,
+    /// The name of each client method in declaration order, which is how NRL numbers a
+    /// component's methods, see [`Self::client_method_declared`].
+    pub client_methods_declared: Vec<Arc<str>>,
     /// This entity's client-visible property table.
     pub properties: Vec<PropertyDef>,
     /// The type describing this entity's `CreateBasePlayer` creation payload.
@@ -126,6 +155,18 @@ pub struct MethodDef {
     pub name: Arc<str>,
     pub args: Vec<Ty>,
     pub length: ElementLength,
+}
+
+impl EntityDispatch {
+
+    /// Look up a client method by its index in declaration order, deduplicated by name
+    /// like the exposed table. An NRL method node carries this index (checked against
+    /// all 11 of a live `OwnVehicle`'s), not the exposed id.
+    pub fn client_method_declared(&self, index: u32) -> Option<&MethodDef> {
+        let name = self.client_methods_declared.get(usize::try_from(index).ok()?)?;
+        self.client_methods.iter().find(|method| method.name == *name)
+    }
+
 }
 
 impl MethodDef {
@@ -458,6 +499,25 @@ fn build_method_table(
 
 }
 
+/// The names [`build_method_table`] collects, in declaration order rather than sorted.
+fn build_declared_order(
+    interfaces: &[Interface],
+    entity_interface: &Interface,
+    methods_of: fn(&Interface) -> &[Method],
+    static_components: &[Component],
+) -> Vec<Arc<str>> {
+    let mut seen = HashSet::new();
+    let mut collected = Vec::new();
+    collect_methods(interfaces, entity_interface, methods_of, &mut seen, &mut collected);
+    let entity_name = &*entity_interface.name;
+    for component in static_components {
+        if component.of_entities.iter().any(|e| e == entity_name) {
+            collect_methods(interfaces, &component.interface, methods_of, &mut seen, &mut collected);
+        }
+    }
+    collected.into_iter().map(|(method, _)| Arc::clone(&method.name)).collect()
+}
+
 /// Build the entity's flat, exposed-id-ordered client-visible property table (covering
 /// either its base or cell slice, both share one id space on the wire), used for
 /// property-update dispatch -- not entity creation, see [`build_entity_data_ty`] for
@@ -631,6 +691,7 @@ mod tests {
             name: name.into(),
             of_entities: of_entities.iter().map(|s| s.to_string()).collect(),
             interface,
+            has_client_class: true,
         }
     }
 
@@ -720,10 +781,11 @@ mod tests {
         pinger.base_methods = vec![method("pingMeAndThenJustTouchMe", vec![u8_ty.clone()])];
 
         let components = vec![
-            Component { name: "Tournament".into(), of_entities: vec!["Account".into()], interface: tournament },
-            Component { name: "LaPinger".into(), of_entities: vec!["Account".into()], interface: pinger },
+            Component { name: "Tournament".into(), of_entities: vec!["Account".into()], interface: tournament, has_client_class: true },
+            Component { name: "LaPinger".into(), of_entities: vec!["Account".into()], interface: pinger, has_client_class: true },
             Component { name: "Elsewhere".into(), of_entities: vec!["Avatar".into()],
-                interface: interface("Elsewhere", &[], vec![method("absent", vec![u8_ty.clone()])]) },
+                interface: interface("Elsewhere", &[], vec![method("absent", vec![u8_ty.clone()])]),
+                has_client_class: true },
         ];
 
         let table = build_method_table(&[], &entity, base_methods_of, &components);
@@ -782,8 +844,8 @@ mod tests {
         story.base_methods = vec![method("checkPositionForEquipment", vec![u64_ty.clone(), u64_ty.clone()])];
 
         let components = vec![
-            Component { name: "AvatarInBattleVehicleSwitch".into(), of_entities: vec!["Avatar".into()], interface: switcher },
-            Component { name: "StoryModeAvatarComponent".into(), of_entities: vec!["Avatar".into()], interface: story },
+            Component { name: "AvatarInBattleVehicleSwitch".into(), of_entities: vec!["Avatar".into()], interface: switcher, has_client_class: true },
+            Component { name: "StoryModeAvatarComponent".into(), of_entities: vec!["Avatar".into()], interface: story, has_client_class: true },
         ];
 
         let table = build_method_table(&[], &entity, base_methods_of, &components);

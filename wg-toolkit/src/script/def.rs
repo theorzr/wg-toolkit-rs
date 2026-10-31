@@ -59,6 +59,10 @@ pub struct Component {
     /// The component's own properties/methods, parsed the same way as a regular
     /// interface.
     pub interface: Interface,
+    /// Whether the client has a script class for this component, a top-level
+    /// `<name>.pyc` in `scripts/client/` or in an extension's. Only those components get
+    /// an NRL component type id, see `ScriptDispatch::component_from_nrl_id`.
+    pub has_client_class: bool,
 }
 
 /// Ref: https://github.com/v2v3v4/BigWorld-Engine-14.4.1/blob/main/programming/bigworld/lib/entitydef/entity_description.cpp

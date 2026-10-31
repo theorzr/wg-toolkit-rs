@@ -124,6 +124,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
                     name: component_name.clone().into(),
                     of_entities,
                     interface,
+                    has_client_class: false,
                 });
                 debug!("read component {component_name} ({list_name})");
 
@@ -166,7 +167,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
         .collect();
     ext_names.sort();
 
-    for ext_name in ext_names {
+    for ext_name in &ext_names {
 
         let Ok(ext_reader) = fs.read(format!("{ext_name}/extension.xml")) else {
             continue;
@@ -203,6 +204,7 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
                         name: component_name.clone().into(),
                         of_entities,
                         interface,
+                        has_client_class: false,
                     });
                     debug!("read component {ext_name}/{component_name} ({list_name})");
 
@@ -232,6 +234,20 @@ pub fn load(fs: &ResFilesystem) -> io::Result<Script> {
 
         }
 
+    }
+
+    // A component's client class can sit in the base game's client scripts or in any
+    // extension's, whichever declared the component.
+    let mut client_dirs = vec!["scripts/client".to_string()];
+    for ext_name in &ext_names {
+        let dir = format!("{ext_name}/scripts/client");
+        if fs.stat(&dir).is_ok() {
+            client_dirs.push(dir);
+        }
+    }
+    for component in model.static_components.iter_mut().chain(&mut model.dynamic_components) {
+        component.has_client_class = client_dirs.iter()
+            .any(|dir| fs.stat(format!("{dir}/{}.pyc", component.name)).is_ok());
     }
 
     // Only now that *every* entity exists can parents be folded in: a `<Parent>` may name

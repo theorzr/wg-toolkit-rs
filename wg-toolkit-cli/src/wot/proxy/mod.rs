@@ -1826,7 +1826,15 @@ impl BaseHandler {
             AvatarUpdateAliasNoPosNoDir::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosNoDir),
             AvatarUpdateVolatileProperties::ID => return sample_dbg!(self, elt, addr, AvatarUpdateVolatileProperties),
             ChangeVolatilePackerType::ID => return sample_dbg!(self, elt, addr, ChangeVolatilePackerType),
-            NrlCreateNode::ID => return trace_dbg!(elt, addr, NrlCreateNode),
+            NrlCreateNode::ID => {
+                let NrlCreateNode(mut stream) = elt.read_simple::<NrlCreateNode>()?.element;
+                match stream.decode_components(&self.shared.dispatch) {
+                    Ok(()) => info!(%addr, id = NrlCreateNode::ID, rest = %hex(&stream.rest),
+                        "<- Nrl create node: {:?}", stream.messages),
+                    Err(e) => warn!(%addr, id = NrlCreateNode::ID, rest = %hex(&stream.rest),
+                        "<- Nrl create node (component failed to decode: {e}): {:?}", stream.messages),
+                }
+            }
             NrlUnlinkTree::ID => return trace_dbg!(elt, addr, NrlUnlinkTree),
             NrlUpdateNode::ID => return trace_dbg!(elt, addr, NrlUpdateNode),
             NrlUnlinkTreeFlag::ID => return trace_dbg!(elt, addr, NrlUnlinkTreeFlag),
