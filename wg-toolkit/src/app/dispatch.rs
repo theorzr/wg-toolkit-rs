@@ -59,7 +59,6 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &entity.interface, base_methods_of, &script.static_components),
                 cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of, &script.static_components),
                 client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
-                client_methods_declared: build_declared_order(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
                 properties: build_property_table(&script.interfaces, &entity.interface, &script.static_components),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_cell_property_exposed),
@@ -72,7 +71,6 @@ impl ScriptDispatch {
                 base_methods: build_method_table(&script.interfaces, &component.interface, base_methods_of, &[]),
                 cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of, &[]),
                 client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of, &[]),
-                client_methods_declared: build_declared_order(&script.interfaces, &component.interface, client_methods_of, &[]),
                 properties: build_property_table(&script.interfaces, &component.interface, &[]),
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_cell_property_exposed),
@@ -133,9 +131,6 @@ pub struct EntityDispatch {
     pub base_methods: Vec<MethodDef>,
     pub cell_methods: Vec<MethodDef>,
     pub client_methods: Vec<MethodDef>,
-    /// The name of each client method in declaration order, which is how NRL numbers a
-    /// component's methods, see [`Self::client_method_declared`].
-    pub client_methods_declared: Vec<Arc<str>>,
     /// This entity's client-visible property table.
     pub properties: Vec<PropertyDef>,
     /// The type describing this entity's `CreateBasePlayer` creation payload.
@@ -155,18 +150,6 @@ pub struct MethodDef {
     pub name: Arc<str>,
     pub args: Vec<Ty>,
     pub length: ElementLength,
-}
-
-impl EntityDispatch {
-
-    /// Look up a client method by its index in declaration order, deduplicated by name
-    /// like the exposed table. An NRL method node carries this index (checked against
-    /// all 11 of a live `OwnVehicle`'s), not the exposed id.
-    pub fn client_method_declared(&self, index: u32) -> Option<&MethodDef> {
-        let name = self.client_methods_declared.get(usize::try_from(index).ok()?)?;
-        self.client_methods.iter().find(|method| method.name == *name)
-    }
-
 }
 
 impl MethodDef {
@@ -497,25 +480,6 @@ fn build_method_table(
         })
         .collect()
 
-}
-
-/// The names [`build_method_table`] collects, in declaration order rather than sorted.
-fn build_declared_order(
-    interfaces: &[Interface],
-    entity_interface: &Interface,
-    methods_of: fn(&Interface) -> &[Method],
-    static_components: &[Component],
-) -> Vec<Arc<str>> {
-    let mut seen = HashSet::new();
-    let mut collected = Vec::new();
-    collect_methods(interfaces, entity_interface, methods_of, &mut seen, &mut collected);
-    let entity_name = &*entity_interface.name;
-    for component in static_components {
-        if component.of_entities.iter().any(|e| e == entity_name) {
-            collect_methods(interfaces, &component.interface, methods_of, &mut seen, &mut collected);
-        }
-    }
-    collected.into_iter().map(|(method, _)| Arc::clone(&method.name)).collect()
 }
 
 /// Build the entity's flat, exposed-id-ordered client-visible property table (covering

@@ -21,6 +21,7 @@ pub mod login;
 pub mod login_proxy;
 
 pub mod dispatch;
+pub mod nrl;
 
 pub mod math;
 mod bit;

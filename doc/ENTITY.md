@@ -247,13 +247,20 @@ Component creation is decoded against those schemas (`NrlStream::decode_componen
 a `DynComponent` node's children are the component's properties in property-table order,
 then its client methods in method-table order, then one trailing child of unknown role.
 Each child marked present carries its initial value (a property) or its method's index in
-declaration order (a method), the trailing child nothing. An entity usually gets its
+the component's client method table (a method), the trailing child nothing. An entity usually gets its
 components through one `CreateChildren`, whose children are each a node type byte and
 payload. On a 2.4.1.1 battle this decodes all 265 `NrlCreateNode` elements (233
 components) with no byte left over.
 
-Still undecoded: later updates to those nodes (`UpdateNode`, and the `NrlData` fragments,
-which look like the same message stream).
+Updates to those nodes are decoded by `wgtk::app::nrl::NrlTree`, which remembers what
+each node is from its creation. `NrlData` fragments are appended to a per-connection
+buffer and each `NrlUpdateNodeFlag` consumes one `[node id: u16 BE][update]` record from
+it. A method node's update is the call's arguments. A property node's is `[kind: u8]
+[packed length][data]`: kind 0 is the whole new value, kind 2 a nested change and kind 1 a
+slice change, both encoded like `NestedEntityProperty`/`SliceEntityProperty` but with the
+path starting at the *component's* property table. A property not present at creation
+holds its type's default (lists start empty, then fill through slices). On the 2.4.1.1
+battle capture this decodes all 3,384 update records.
 
 The component a `DynComponent` node attaches is now resolved
 (`ScriptDispatch::component_from_nrl_id`). Its `component_type_id` continues the entity

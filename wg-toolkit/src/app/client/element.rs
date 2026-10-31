@@ -1356,11 +1356,11 @@ pub enum NrlNode {
 
 /// The initial state a [`NrlNode::DynComponent`] creates its children with.
 ///
-/// The children are the component's properties in property table order, then its client
-/// methods in method table order, then one more child whose role is unknown. Only the
-/// children marked present in [`NrlIdList::present`] carry anything: a property its
-/// value, a method its index. Checked against every component created in a live battle,
-/// each consuming its bytes exactly.
+/// The children are the component's properties in property table order, then one child per
+/// client method, then one more child whose role is unknown. Only the children marked
+/// present in [`NrlIdList::present`] carry anything: a property its value, a method child
+/// the index of its method in the method table. Checked against every component created
+/// in a live battle, each consuming its bytes exactly.
 #[derive(Debug, Clone)]
 pub struct NrlComponentData {
     /// The component's own type id, see `ScriptDispatch::component_from_nrl_id`.
@@ -1379,8 +1379,9 @@ pub enum NrlChild {
         name: Arc<str>,
         value: Value,
     },
-    /// A method node: the index of its method in declaration order, see
-    /// `EntityDispatch::client_method_declared`.
+    /// A method node: the index of its method in the component's client method table,
+    /// in exposed order. The method children are not in that order themselves: on a live
+    /// `OwnVehicle` each later call only decoded against the method this index names.
     Method {
         name: Arc<str>,
         method_index: u32,
@@ -1731,7 +1732,8 @@ fn read_component_children(
             NrlChild::Property { name: Arc::clone(&property.name), value: Value::read(read, &property.ty)? }
         } else if index < properties + methods {
             let method_index = read.read_packed_u24()?;
-            let name = component.client_method_declared(method_index)
+            let name = usize::try_from(method_index).ok()
+                .and_then(|index| component.client_methods.get(index))
                 .map(|method| Arc::clone(&method.name))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!(
                     "nrl component type id {component_type_id} has no client method {method_index}")))?;
@@ -1926,9 +1928,8 @@ impl SimpleElement for NrlData {
 /// Applies an update to one node: its message type is implied, so the element is
 /// `[node_id: u16 big-endian][payload]`.
 ///
-/// The payload's encoding belongs to the owning component's schema, which needs a
-/// component registry this project cannot yet resolve (see
-/// [`NrlNode::DynComponent::component_type_id`]), so it is kept raw. For the *scripted*
+/// The payload's encoding belongs to the owning component's schema, so it is kept raw
+/// here and decoded against the node tree by `wgtk::app::nrl::NrlTree::decode_update`. For the *scripted*
 /// (`PyDynamicComponent`-style) nodes that dominate real traffic it is a packed-length
 /// pickle, which [`Self::python_value`] carries whenever that reading accounts for the
 /// payload exactly: one such node was a Ruinberg mission/objective tracker
@@ -2396,7 +2397,7 @@ fn container_kind(ty: &Ty) -> ContainerKind<'_> {
 
 /// A fully decoded compressed path, as produced by [`walk_path`].
 #[derive(Debug, PartialEq)]
-enum PathOutcome {
+pub enum PathOutcome {
     Single { path: Vec<EntityPropertyPathStep>, value: Value },
     Slice { path: Vec<EntityPropertyPathStep>, start: u32, end: u32, values: Vec<Value> },
 }
@@ -2538,7 +2539,7 @@ fn walk_path<'a>(
 /// Decode a compressed path to the single interpretation consistent with the data, or
 /// fail. Nothing is guessed between candidates: several surviving readings means the
 /// `Array` length is undetermined and the caller is told so.
-fn decode_compressed_path(
+pub(crate) fn decode_compressed_path(
     top: &[PropertyDef],
     values: Option<&HashMap<Arc<str>, Value>>,
     data: &[u8],

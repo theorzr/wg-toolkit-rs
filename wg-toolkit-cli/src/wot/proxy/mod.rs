@@ -17,6 +17,7 @@ use wgtk::app::base::element::{CellMethodTables, BaseAppLoginReply};
 use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
 use wgtk::app::proxy::capture::{CaptureReader, CaptureWriter};
 use wgtk::app::{proxy, login_proxy, base, client};
+use wgtk::app::nrl::NrlTree;
 use wgtk::util::io::serde_pickle_de_options;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use wgtk::net::codec::WgSocketAddrV4;
@@ -600,6 +601,8 @@ struct BaseHandler {
     base_login_seen: HashSet<SocketAddr>,
     /// How many bodies have been surfaced at INFO per element id, for [`sample_dbg`]'s cap.
     sample_counts: HashMap<u8, u32>,
+    /// Each connection's NRL tree, which dynamic-component updates decode against.
+    nrl: HashMap<SocketAddr, NrlTree>,
 }
 
 #[derive(Debug)]
@@ -799,6 +802,7 @@ impl BaseHandler {
             census_pending: 0,
             base_login_seen: HashSet::new(),
             sample_counts: HashMap::new(),
+            nrl: HashMap::new(),
         }
     }
 
@@ -1826,21 +1830,49 @@ impl BaseHandler {
             AvatarUpdateAliasNoPosNoDir::ID => return trace_dbg_alias!(self, elt, addr, AvatarUpdateAliasNoPosNoDir),
             AvatarUpdateVolatileProperties::ID => return sample_dbg!(self, elt, addr, AvatarUpdateVolatileProperties),
             ChangeVolatilePackerType::ID => return sample_dbg!(self, elt, addr, ChangeVolatilePackerType),
-            NrlCreateNode::ID => {
-                let NrlCreateNode(mut stream) = elt.read_simple::<NrlCreateNode>()?.element;
+            id @ (NrlCreateNode::ID | NrlUnlinkTree::ID | NrlMsgToClient::ID) => {
+                let mut stream = match id {
+                    NrlCreateNode::ID => elt.read_simple::<NrlCreateNode>()?.element.0,
+                    NrlUnlinkTree::ID => elt.read_simple::<NrlUnlinkTree>()?.element.0,
+                    _ => elt.read_simple::<NrlMsgToClient>()?.element.0,
+                };
                 match stream.decode_components(&self.shared.dispatch) {
-                    Ok(()) => info!(%addr, id = NrlCreateNode::ID, rest = %hex(&stream.rest),
-                        "<- Nrl create node: {:?}", stream.messages),
-                    Err(e) => warn!(%addr, id = NrlCreateNode::ID, rest = %hex(&stream.rest),
-                        "<- Nrl create node (component failed to decode: {e}): {:?}", stream.messages),
+                    Ok(()) => info!(%addr, id, rest = %hex(&stream.rest),
+                        "<- Nrl messages: {:?}", stream.messages),
+                    Err(e) => warn!(%addr, id, rest = %hex(&stream.rest),
+                        "<- Nrl messages (component failed to decode: {e}): {:?}", stream.messages),
+                }
+                self.nrl.entry(addr).or_default().apply(&stream, &self.shared.dispatch);
+            }
+            NrlData::ID => {
+                let data = elt.read_simple::<NrlData>()?.element;
+                self.nrl.entry(addr).or_default().push_data(&data.fragment);
+            }
+            NrlUpdateNodeFlag::ID => {
+                elt.read_simple::<NrlUpdateNodeFlag>()?;
+                match self.nrl.entry(addr).or_default().update_node(&self.shared.dispatch) {
+                    Ok(update) => info!(%addr, id = NrlUpdateNodeFlag::ID, "<- Nrl update: {update:?}"),
+                    Err(e) => warn!(%addr, id = NrlUpdateNodeFlag::ID, "<- Nrl update (failed to decode, buffer dropped): {e}"),
                 }
             }
-            NrlUnlinkTree::ID => return trace_dbg!(elt, addr, NrlUnlinkTree),
-            NrlUpdateNode::ID => return trace_dbg!(elt, addr, NrlUpdateNode),
-            NrlUnlinkTreeFlag::ID => return trace_dbg!(elt, addr, NrlUnlinkTreeFlag),
-            NrlUpdateNodeFlag::ID => return trace_dbg!(elt, addr, NrlUpdateNodeFlag),
-            NrlData::ID => return trace_dbg!(elt, addr, NrlData),
-            NrlMsgToClient::ID => return trace_dbg!(elt, addr, NrlMsgToClient),
+            NrlUnlinkTreeFlag::ID => {
+                elt.read_simple::<NrlUnlinkTreeFlag>()?;
+                match self.nrl.entry(addr).or_default().unlink_tree_node() {
+                    Ok(node_id) => info!(%addr, id = NrlUnlinkTreeFlag::ID, "<- Nrl unlink tree: {node_id}"),
+                    Err(e) => warn!(%addr, id = NrlUnlinkTreeFlag::ID, "<- Nrl unlink tree (empty buffer): {e}"),
+                }
+            }
+            NrlUpdateNode::ID => {
+                let e = elt.read_simple::<NrlUpdateNode>()?.element;
+                let tree = self.nrl.entry(addr).or_default();
+                let mut payload = &e.payload[..];
+                match tree.decode_update(&self.shared.dispatch, e.node_id, &mut payload) {
+                    Ok(update) if payload.is_empty() => info!(%addr, id = NrlUpdateNode::ID, "<- Nrl update: {update:?}"),
+                    Ok(update) => warn!(%addr, id = NrlUpdateNode::ID, rest = %hex(payload),
+                        "<- Nrl update (bytes left): {update:?}"),
+                    Err(e) => warn!(%addr, id = NrlUpdateNode::ID, "<- Nrl update (failed to decode): {e}"),
+                }
+            }
             NrlUnreliableMsgToClient::ID => return trace_dbg!(elt, addr, NrlUnreliableMsgToClient),
             ControlEntity::ID => return trace_dbg!(elt, addr, ControlEntity),
             VoiceData::ID => return sample_dbg!(self, elt, addr, VoiceData),
