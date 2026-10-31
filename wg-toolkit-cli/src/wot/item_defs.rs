@@ -33,6 +33,8 @@ pub struct VehicleDef {
     /// The default gun's shells, by integer descriptor, with their default share of
     /// the ammunition.
     pub shells: Vec<(IntCompactDescr, f32)>,
+    /// How the default gun fires each of its shells, in the same order.
+    pub shots: Vec<ShotDef>,
     pub max_ammo: u32,
     /// Hull plus default turret, before any battle modifier.
     pub max_health: u32,
@@ -43,6 +45,29 @@ pub struct VehicleDef {
     pub rotation_speed: f32,
     pub aiming: AimingDef,
 }
+
+/// A shell as the default gun fires it: what the client needs to show its tracer.
+#[derive(Debug, Clone)]
+pub struct ShotDef {
+    pub compact_descr: IntCompactDescr,
+    /// Its kind's index in `SHELL_TYPES_LIST`.
+    pub kind_index: u8,
+    /// In millimetres.
+    pub caliber: f32,
+    /// Its effects' index in `common/shot_effects.xml`.
+    pub effects_index: u8,
+    /// In m/s and m/s², scaled by `projectileSpeedFactor` as the client's item loader
+    /// does.
+    pub speed: f32,
+    pub gravity: f32,
+    /// In metres.
+    pub max_distance: f32,
+}
+
+/// `SHELL_TYPES_LIST`: a shell kind's index is its position.
+const SHELL_KINDS: &[&str] = &[
+    "HOLLOW_CHARGE", "HIGH_EXPLOSIVE", "ARMOR_PIERCING", "ARMOR_PIERCING_HE", "ARMOR_PIERCING_CR", "SMOKE",
+];
 
 /// How the default turret and gun aim, in the units the client's own item loader
 /// converts them to: speeds in rad/s, dispersion factors per m/s and per rad/s.
@@ -66,6 +91,8 @@ pub struct AimingDef {
     /// `projectileSpeedFactor` as the client's item loader does.
     pub shot_speed: f32,
     pub shot_gravity: f32,
+    /// Seconds between two shots, before crew and equipment.
+    pub reload_time: f32,
 }
 
 impl AimingDef {
@@ -185,14 +212,40 @@ impl VehicleDef {
             .ok_or_else(|| invalid(format!("no ammunition capacity for {gun_name}")))? as u32;
 
         let shells_components = component_ids("shells")?;
+        // Shells are scaled as `gun_readers.readShot` does.
+        let projectile_speed_factor = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?
+            .get_child("miscParams").and_then(|params| child_float(params.as_element()?, "projectileSpeedFactor"))
+            .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
+        let shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/shot_effects.xml")?;
+        let effects_index = |effects: &str| shot_effects.iter_children_all()
+            .map(|(name, _)| name)
+            .filter(|name| !name.starts_with("xmlns:"))
+            .position(|name| name == effects);
         let mut shells = Vec::new();
+        let mut shots = Vec::new();
         for (shell_name, shot) in child_element(gun_def, "shots").into_iter().flat_map(|shots| shots.iter_children_all()) {
-            let shell_id = child_element(&shells_components, shell_name)
-                .and_then(|shell| child_int(shell, "id"))
+            let shell = child_element(&shells_components, shell_name)
+                .ok_or_else(|| invalid(format!("no definition for shell {shell_name}")))?;
+            let shell_id = child_int(shell, "id")
                 .ok_or_else(|| invalid(format!("no id for shell {shell_name}")))?;
-            let portion = shot.as_element().and_then(|shot| child_float(shot, "defaultPortion")).unwrap_or(0.0);
+            let shot = shot.as_element().ok_or_else(|| invalid(format!("no shot for shell {shell_name}")))?;
+            let portion = child_float(shot, "defaultPortion").unwrap_or(0.0);
             let cd = IntCompactDescr { item_type: item_type::SHELL, nation: nation_id, id: shell_id as u16 };
             shells.push((cd, portion));
+            let shot_float = |name: &str| child_float(shot, name)
+                .ok_or_else(|| invalid(format!("shell {shell_name} has no {name}")));
+            shots.push(ShotDef {
+                compact_descr: cd,
+                kind_index: child_string(shell, "kind").and_then(|kind| SHELL_KINDS.iter().position(|&k| k == kind))
+                    .ok_or_else(|| invalid(format!("shell {shell_name} has no known kind")))? as u8,
+                caliber: child_float(shell, "caliber")
+                    .ok_or_else(|| invalid(format!("shell {shell_name} has no caliber")))?,
+                effects_index: child_string(shell, "effects").and_then(|effects| effects_index(&effects))
+                    .ok_or_else(|| invalid(format!("shell {shell_name} has no known effects")))? as u8,
+                speed: shot_float("speed")? * projectile_speed_factor,
+                gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
+                max_distance: shot_float("maxDistance")?,
+            });
         }
 
         let max_health = child_element(&vehicle, "hull").and_then(|hull| child_int(hull, "maxHealth"))
@@ -225,9 +278,6 @@ impl VehicleDef {
             .and_then(PitchCurve::parse)
             .ok_or_else(|| invalid(format!("no valid {limit} for gun {gun_name}")));
         // The first shell's flight, scaled as every shell is, see `gun_readers.readShot`.
-        let projectile_speed_factor = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?
-            .get_child("miscParams").and_then(|params| child_float(params.as_element()?, "projectileSpeedFactor"))
-            .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
         let first_shot = child_element(gun_def, "shots")
             .and_then(|shots| shots.iter_children_all().next())
             .and_then(|(_, shot)| shot.as_element())
@@ -250,6 +300,7 @@ impl VehicleDef {
             dispersion_angle: (gun_float(&["shotDispersionRadius"])? / 100.0).atan(),
             shot_speed: shot_float("speed")? * projectile_speed_factor,
             shot_gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
+            reload_time: gun_float(&["reloadTime"])?,
         };
 
         let crew_roles = child_element(&vehicle, "crew")
@@ -272,7 +323,7 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming })
 
     }
 

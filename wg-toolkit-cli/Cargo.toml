@@ -16,6 +16,7 @@ wg-toolkit.workspace = true
 thiserror.workspace = true
 indexmap.workspace = true
 glam.workspace = true
+rand.workspace = true
 tracing.workspace = true
 
 blowfish.workspace = true

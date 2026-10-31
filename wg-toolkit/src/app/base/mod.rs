@@ -657,6 +657,25 @@ impl App {
         self.send_simple(addr, client::element::NrlCreateNode(stream), true)
     }
 
+    /// Call a client method of any entity the client knows, given in that entity
+    /// type's client method table.
+    pub fn call_entity_method(&mut self, addr: SocketAddr, entity_id: u32, type_id: u16, method_name: &str, args: Vec<Value>) -> io::Result<()> {
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+        let name = dispatch.client_methods.iter().find(|m| &*m.name == method_name)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
+            .name.clone();
+        self.bundle.clear();
+        self.bundle.element_writer().write_simple(client::element::SelectEntity { entity_id })?;
+        self.bundle.element_writer().write(
+            client::element::EntityMethod { call: MethodCall::Known { name, args } },
+            &dispatch.client_methods,
+        )?;
+        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
+        self.socket.send_bundle(&self.bundle, addr)?;
+        Ok(())
+    }
+
     /// Change some of an entity's client properties on the client owning it, given in
     /// that entity type's property table.
     pub fn update_entity(&mut self, addr: SocketAddr, entity_id: u32, type_id: u16, properties: client::element::ChangedProperties) -> io::Result<()> {

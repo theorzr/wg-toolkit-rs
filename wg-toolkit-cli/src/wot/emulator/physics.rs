@@ -4,7 +4,7 @@
 //! that moves and turns at the vehicle's limits and rests on the terrain, with no
 //! collision, slope resistance or engine model.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use wgtk::space::terrain::Terrain;
 
@@ -146,6 +146,13 @@ impl Hull {
         [mode, self.flags]
     }
 
+    /// The hull's orientation: yaw about Y, then pitch about X (nose down), then roll
+    /// about Z (right side up), as the client's matrices compose them.
+    pub fn rotation(&self) -> Quat {
+        let (roll, pitch, yaw) = (self.direction.x, self.direction.y, self.direction.z);
+        Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch) * Quat::from_rotation_z(roll)
+    }
+
     /// The hull's orientation and its tracks' speeds, as the avatar's
     /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
     /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
@@ -243,10 +250,11 @@ impl Turret {
     /// then update the dispersion.
     pub fn step(&mut self, dt: f32, hull: &Hull) {
         let (yaw, pitch) = match self.target {
+            // In the hull's frame, which the turret and gun turn in.
             Aim::Point(point) => {
-                let to = point - hull.position;
+                let to = hull.rotation().inverse() * (point - gun_position(hull));
                 let horizontal = (to.x * to.x + to.z * to.z).sqrt();
-                (to.x.atan2(to.z) - hull.direction.z, -(to.y - GUN_HEIGHT).atan2(horizontal))
+                (to.x.atan2(to.z), -to.y.atan2(horizontal))
             }
             Aim::Angles(yaw, pitch) => (yaw, pitch),
         };
@@ -281,11 +289,10 @@ impl Turret {
     /// server's gun marker shows. The gun sits `GUN_HEIGHT` above the hull's origin and
     /// the hull's tilt is left out.
     pub fn gun_marker(&self, hull: &Hull) -> (Vec3, Vec3, f32) {
-        let yaw = hull.direction.z + self.yaw;
-        // Positive pitch is downward.
-        let direction = Vec3::new(yaw.sin() * self.pitch.cos(), -self.pitch.sin(), yaw.cos() * self.pitch.cos());
-        let position = hull.position + Vec3::new(0.0, GUN_HEIGHT, 0.0);
-        (position, direction * self.aiming.shot_speed, self.aiming.dispersion_angle * self.dispersion_factor)
+        // Turret yaw, then gun pitch (positive downward), on the hull.
+        let gun = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch);
+        let direction = hull.rotation() * gun * Vec3::Z;
+        (gun_position(hull), direction * self.aiming.shot_speed, self.aiming.dispersion_angle * self.dispersion_factor)
     }
 
     /// The angles as the `gunAnglesPacked` property carries them, see `encodeGunAngles`:
@@ -298,6 +305,11 @@ impl Turret {
         yaw << 6 | (63.0 * t).round() as u16
     }
 
+}
+
+/// Where the gun fires from: [`GUN_HEIGHT`] above the hull, tilted with it.
+fn gun_position(hull: &Hull) -> Vec3 {
+    hull.position + hull.rotation() * Vec3::new(0.0, GUN_HEIGHT, 0.0)
 }
 
 /// A value between bounds on `bits` bits, rounded, as the client's packing does.
@@ -382,6 +394,7 @@ mod tests {
             dispersion_angle: 0.0035,
             shot_speed: 716.0,
             shot_gravity: 6.28,
+            reload_time: 16.0,
         }
     }
 
@@ -408,6 +421,26 @@ mod tests {
             turret.step(1.0, &hull);
         }
         assert_eq!(turret.gun_angles_packed(), 512 << 6 | 32);
+    }
+
+    #[test]
+    fn holding_where_it_tracks_keeps_the_aim_on_a_tilted_hull() {
+        let mut hull = chieftain();
+        hull.direction = Vec3::new(0.05, 0.08, 1.2);
+        let mut turret = Turret::new(chieftain_aiming());
+        let point = Vec3::new(150.0, 5.0, 40.0);
+        turret.track(point);
+        for _ in 0..20 {
+            turret.step(1.0, &hull);
+        }
+        let (position, velocity, _) = turret.gun_marker(&hull);
+        let off = (point - position).normalize().angle_between(velocity.normalize());
+        assert!(off < 1e-4, "aims {off} rad off");
+        // Locking sends back the same hull-relative angles, which change nothing.
+        let (yaw, pitch) = (turret.yaw, turret.pitch);
+        turret.hold(yaw, pitch);
+        turret.step(1.0, &hull);
+        assert_eq!(turret.gun_marker(&hull).1, velocity);
     }
 
     #[test]

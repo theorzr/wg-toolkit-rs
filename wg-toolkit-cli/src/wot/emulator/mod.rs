@@ -16,6 +16,7 @@ use blowfish::Blowfish;
 
 mod account;
 mod capture;
+mod gun;
 mod physics;
 
 use std::path::{Path, PathBuf};
@@ -33,10 +34,11 @@ use wgtk::script::Value;
 
 use account::AccountData;
 use capture::{Answer, CapturedSession};
+use gun::{Gun, Shot};
 use physics::{MotionLimits, Vehicle};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
-use crate::wot::item_defs::{AimingDef, VehicleDef};
+use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::terrain::Terrain;
 use crate::CliResult;
@@ -209,6 +211,15 @@ struct DrivenVehicle {
     gun_marker_node: Option<u16>,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
+    entity_id: u32,
+    gun: Gun,
+    /// The nodes of its `OwnVehicle`'s `vehicleAmmoList` and `vehicleGunReloadTime`.
+    ammo_node: Option<u16>,
+    reload_node: Option<u16>,
+    /// Updates to its NRL nodes, for the next tick.
+    nrl_updates: Vec<NrlUpdateNode>,
+    /// The shells in flight, with the game time they land at.
+    shots: Vec<(f64, Shot)>,
 }
 
 impl BattleClient {
@@ -418,6 +429,8 @@ impl BaseThread {
                 speed_backward: def.speed_backward,
                 rotation_speed: def.rotation_speed,
             },
+            ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
+            shots: def.shots,
             aiming: def.aiming,
         })
     }
@@ -535,6 +548,12 @@ impl BaseThread {
                     vehicle: Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()),
                     gun_marker_node: None,
                     engine_mode: None,
+                    entity_id,
+                    gun: Gun::new(config.shots.iter().cloned().zip(config.ammo.iter().map(|&(_, count)| count)).collect(), config.aiming.reload_time),
+                    ammo_node: None,
+                    reload_node: None,
+                    nrl_updates: Vec::new(),
+                    shots: Vec::new(),
                 });
             }
         }
@@ -554,6 +573,11 @@ impl BaseThread {
         if let (Some(component), Some(config)) = (&battle.own_vehicle, config) {
             let stream = own_vehicle(self.app.dispatch(), component, entity_id, config)?;
             let entity_node = stream.messages[0].node_id;
+            let ammo_node = property_node(self.app.dispatch(), &stream.messages[1], "vehicleAmmoList");
+            let reload_node = property_node(self.app.dispatch(), &stream.messages[1], "vehicleGunReloadTime");
+            if let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|client| client.driven.as_mut()) {
+                (driven.ammo_node, driven.reload_node) = (ammo_node, reload_node);
+            }
             self.app.nrl_create_node(addr, stream)?;
             let (message, property_node) = gun_marker_component(self.app.dispatch(), entity_node)?;
             self.app.nrl_create_node(addr, NrlStream { messages: vec![message], rest: Vec::new() })?;
@@ -564,6 +588,83 @@ impl BaseThread {
 
         Ok(())
 
+    }
+
+    /// Fire the client's gun, if loaded: the shell's tracer and the gun's effects, then
+    /// one shell fewer and the reload. Where the shell lands follows with
+    /// [`Self::land_shot`].
+    fn shoot(&mut self, addr: SocketAddr) -> io::Result<()> {
+
+        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
+        let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
+        let now = client.game_time();
+        let Some(driven) = client.driven.as_mut() else { return Ok(()) };
+        let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
+        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref()) else {
+            debug!(%addr, "Not loaded, not shooting");
+            return Ok(());
+        };
+        info!(%addr, "Shot {} from {:?} lands at {:?} in {:.2} s", shot.id, shot.start, shot.end, shot.flight_time);
+        driven.shots.push((now + f64::from(shot.flight_time), shot.clone()));
+
+        let dispatch = self.app.dispatch();
+        let ammo = ammo_list(driven.gun.ammo.iter().map(|(def, count)| (def.compact_descr.to_int(), *count)));
+        let reload = gun_reload_time(driven.gun.reload_time(), driven.gun.ready_at as f32, driven.gun.reload_time());
+        for (node, name, value) in [(driven.ammo_node, "vehicleAmmoList", ammo), (driven.reload_node, "vehicleGunReloadTime", reload)] {
+            if let Some(node) = node {
+                driven.nrl_updates.push(property_update(dispatch, "OwnVehicle", name, node, &value)?);
+            }
+        }
+        let (vehicle_id, vehicle_type_id) = (driven.entity_id, driven.entity_type_id);
+
+        let def = &shot.def;
+        self.app.call_method(avatar, "showTracer", vec![
+            Value::Int32(vehicle_id as i32),
+            Value::Int32(shot.id),
+            Value::UInt8(0),
+            Value::UInt8(def.effects_index),
+            Value::UInt8(NO_PREFAB_EFFECTS),
+            Value::UInt8(def.kind_index),
+            Value::Float32(def.caliber),
+            Value::Vector3(shot.start),
+            Value::Vector3(shot.velocity),
+            Value::Float32(def.gravity),
+            Value::Float32(def.max_distance),
+            Value::UInt8(0),
+            Value::UInt8(0),
+        ])?;
+        // One shell from the only gun.
+        self.app.call_entity_method(addr, vehicle_id, vehicle_type_id, "showShooting", vec![
+            Value::UInt8(1),
+            Value::Int8(0),
+            Value::UInt8(def.kind_index),
+        ])?;
+
+        Ok(())
+
+    }
+
+    /// A shell gets to its end: it explodes on the terrain, or its tracer stops at its
+    /// maximum distance.
+    fn land_shot(&mut self, addr: SocketAddr, shot: &Shot) -> io::Result<()> {
+        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
+        if shot.hit {
+            let def = &shot.def;
+            self.app.call_method(avatar, "explodeProjectile", vec![
+                Value::Int32(shot.id),
+                Value::UInt8(def.effects_index),
+                Value::UInt8(NO_PREFAB_EFFECTS),
+                Value::UInt8(GROUND_EFFECT_MATERIAL),
+                Value::UInt8(def.kind_index),
+                Value::Float32(def.caliber),
+                Value::Vector3(shot.end),
+                Value::Vector3(shot.end_velocity.normalize()),
+                Value::Float32(shot.end_velocity.length()),
+                Value::Seq(Vec::new()),
+            ])
+        } else {
+            self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)])
+        }
     }
 
     /// Answer a client request with what the captured server answered to the closest
@@ -625,20 +726,26 @@ impl BaseThread {
                 for (&addr, client) in &mut self.battle_clients {
                     let tick = client.ticks as u8;
                     client.ticks = client.ticks.wrapping_add(1);
+                    let now = client.game_time();
                     let vehicle = client.driven.as_mut().map(|driven| {
-                        let DrivenVehicle { id_alias, entity_type_id, vehicle, gun_marker_node, engine_mode } = driven;
+                        let DrivenVehicle { id_alias, entity_type_id, vehicle, gun_marker_node, engine_mode, gun, reload_node, nrl_updates: pending, .. } = driven;
                         vehicle.step(TICK.as_secs_f32(), self.terrain.as_ref());
                         let Vehicle { hull, turret } = vehicle;
                         let gun_marker = gun_marker_node.zip(gun_marker_ty.as_ref())
                             .map(|(node, ty)| gun_marker_update(ty, node, turret.gun_marker(hull)));
-                        let nrl_updates = match gun_marker {
-                            Some(Ok(update)) => vec![update],
-                            Some(Err(e)) => {
-                                warn!(%addr, "Failed to encode the gun marker: {e}");
-                                Vec::new()
+                        let mut nrl_updates = std::mem::take(pending);
+                        if let (Some(node), true) = (*reload_node, gun.take_loaded(now)) {
+                            let loaded = gun_reload_time(gun.reload_time(), 0.0, 0.0);
+                            match property_update(self.app.dispatch(), "OwnVehicle", "vehicleGunReloadTime", node, &loaded) {
+                                Ok(update) => nrl_updates.push(update),
+                                Err(e) => warn!(%addr, "Failed to encode the reload: {e}"),
                             }
-                            None => Vec::new(),
-                        };
+                        }
+                        match gun_marker {
+                            Some(Ok(update)) => nrl_updates.push(update),
+                            Some(Err(e)) => warn!(%addr, "Failed to encode the gun marker: {e}"),
+                            None => {}
+                        }
                         // Every tick, to compare with what the client simulates.
                         debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
                             hull.position, hull.direction, hull.speed, turret.yaw, turret.pitch);
@@ -666,6 +773,22 @@ impl BaseThread {
                     });
                     if let Err(e) = self.app.tick(addr, tick, vehicle.as_ref()) {
                         warn!(%addr, "Failed to tick: {e}");
+                    }
+                }
+                let landed: Vec<_> = self.battle_clients.iter_mut()
+                    .filter_map(|(&addr, client)| {
+                        let now = client.game_time();
+                        let shots = &mut client.driven.as_mut()?.shots;
+                        let (landed, flying) = std::mem::take(shots).into_iter().partition(|&(at, _)| at <= now);
+                        *shots = flying;
+                        Some((addr, landed))
+                    })
+                    .collect();
+                for (addr, landed) in landed {
+                    for (_, shot) in landed {
+                        if let Err(e) = self.land_shot(addr, &shot) {
+                            warn!(%addr, "Failed to land shot {}: {e}", shot.id);
+                        }
                     }
                 }
                 let due: Vec<_> = self.battle_clients.iter()
@@ -781,6 +904,11 @@ impl BaseThread {
                 }
                 base::Event::CellMethod(event) => {
                     match &event.call {
+                        MethodCall::Known { name, .. } if &**name == "vehicle_shoot" => {
+                            if let Err(e) = self.shoot(event.addr) {
+                                warn!(addr = %event.addr, "Failed to shoot: {e}");
+                            }
+                        }
                         MethodCall::Known { name, args } if &**name == "vehicle_moveWith" => {
                             let flags = args.first().and_then(Value::as_i64).unwrap_or(0) as u8;
                             match self.battle_clients.get_mut(&event.addr).and_then(|c| c.driven.as_mut()) {
@@ -916,6 +1044,10 @@ struct VehicleConfig {
     setup_indexes: serde_pickle::Value,
     limits: MotionLimits,
     aiming: AimingDef,
+    /// Its shells, by integer descriptor, and how many of each.
+    ammo: Vec<(i64, u32)>,
+    /// How its gun fires each of its shells, in the order of `ammo`.
+    shots: Vec<ShotDef>,
 }
 
 impl VehicleConfig {
@@ -1034,7 +1166,7 @@ fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32,
     };
 
     let aiming = &config.aiming;
-    let children = data.children.iter().cloned().map(|(id, child)| match child {
+    let mut children: Vec<_> = data.children.iter().cloned().map(|(id, child)| match child {
         NrlChild::Property { name, value: Value::Dict(mut fields) } if &*name == "targetingInfo" => {
             for (field, value) in fields.iter_mut() {
                 let float = match &**field {
@@ -1056,14 +1188,133 @@ fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32,
         other => (id, other),
     }).collect();
 
+    // What the real server sends right after, as updates: the ammunition, the shells
+    // loaded, the reload and the health, given here as the properties' first values.
+    let NrlBody::CreateNode { node: NrlNode::DynComponent { children: ids, .. }, .. } = &captured.body else {
+        unreachable!()
+    };
+    let (_, schema) = dispatch.component_from_nrl_id(*component_type_id)
+        .ok_or_else(|| invalid_data("unknown OwnVehicle component type"))?;
+    let mut present = ids.present.clone().unwrap_or_else(|| vec![0xFF; (ids.ids.len() + 7) / 8]);
+    for (name, value) in own_vehicle_state(entity_id, config) {
+        let Some(index) = schema.properties.iter().position(|property| &*property.name == name) else { continue };
+        let id = ids.ids[index];
+        present[index / 8] |= 1 << (index % 8);
+        children.retain(|&(child_id, _)| child_id != id);
+        children.push((id, NrlChild::Property { name: Arc::from(name), value }));
+    }
+    // In the order of the ids, as the client reads them.
+    children.sort_by_key(|&(id, _)| ids.ids.iter().position(|&i| i == id));
+    let values = children;
+    let ids = NrlIdList::new(captured.node_id.into(), ids.ids.clone(), Some(present));
+
     let mut component = captured.clone();
-    if let NrlBody::CreateNode { node: NrlNode::DynComponent { data, .. }, .. } = &mut component.body {
-        *data = Some(NrlComponentData::encode(dispatch, *component_type_id, children)?);
+    if let NrlBody::CreateNode { node: NrlNode::DynComponent { children, data, .. }, .. } = &mut component.body {
+        *data = Some(NrlComponentData::encode(dispatch, *component_type_id, values)?);
+        *children = ids;
     }
 
     Ok(NrlStream { messages: vec![entity, component], rest: Vec::new() })
 
 }
+
+/// The `OwnVehicle` properties the real server fills in after creating the component,
+/// for a vehicle just entering the battle: its shells, then the standard consumables of
+/// the captured battle (repair kit, first aid kit, fire extinguisher), the first shell
+/// loaded and next, the gun to reload and full health.
+fn own_vehicle_state(entity_id: u32, config: &VehicleConfig) -> Vec<(&'static str, Value)> {
+
+    let shell = config.ammo.first().map_or(0, |&(cd, _)| cd as i32);
+    let setting = |code: u8| Value::Dict(BTreeMap::from([
+        (Arc::from("code"), Value::UInt8(code)),
+        (Arc::from("value"), Value::Int32(shell)),
+        (Arc::from("vehicleID"), Value::Int32(entity_id as i32)),
+    ]));
+
+    vec![
+        ("vehicleAmmoList", ammo_list(config.ammo.iter().copied())),
+        // `VEHICLE_SETTING`: the current shell, then the next one.
+        ("vehicleSettings", Value::Seq(vec![setting(0), setting(1)])),
+        ("vehicleGunReloadTime", gun_reload_time(config.aiming.reload_time, 0.0, 0.0)),
+        ("vehicleHealthInfo", Value::Dict(BTreeMap::from([
+            (Arc::from("deathReasonExtID"), Value::Int8(-1)),
+            (Arc::from("deathReasonID"), Value::Int8(-1)),
+            (Arc::from("health"), Value::Int16(config.max_health as i16)),
+            (Arc::from("id"), Value::Int32(entity_id as i32)),
+            (Arc::from("isCrewActive"), Value::UInt8(1)),
+            (Arc::from("isRespawnActive"), Value::UInt8(0)),
+        ]))),
+    ]
+
+}
+
+/// The `vehicleAmmoList` of a vehicle with these shells, by integer descriptor and
+/// count, and the standard consumables.
+fn ammo_list(shells: impl Iterator<Item = (i64, u32)>) -> Value {
+    let ammo = |compact_descr: i64, quantity: u16, in_clip: u16, stage: u16, total_time: i16| Value::Dict(BTreeMap::from([
+        (Arc::from("compactDescr"), Value::Int32(compact_descr as i32)),
+        (Arc::from("endTime"), Value::Float32(0.0)),
+        (Arc::from("index"), Value::UInt8(0)),
+        (Arc::from("previousStage"), Value::UInt16(stage)),
+        (Arc::from("quantity"), Value::UInt16(quantity)),
+        (Arc::from("quantityInClip"), Value::UInt16(in_clip)),
+        (Arc::from("totalTime"), Value::Int16(total_time)),
+    ]));
+    Value::Seq(shells
+        .map(|(cd, count)| ammo(cd, count as u16, 0, 0, 0))
+        .chain(CONSUMABLES.iter().map(|&cd| ammo(cd, u16::MAX, 3, 3, 60)))
+        .collect())
+}
+
+/// The `vehicleGunReloadTime` of a gun reloading in `base_time` seconds, done at game
+/// time `end_time` with `time_left` seconds to go: both 0 once loaded, -1 before the
+/// battle.
+fn gun_reload_time(base_time: f32, end_time: f32, time_left: f32) -> Value {
+    Value::Dict(BTreeMap::from([
+        (Arc::from("baseTime"), Value::Float32(base_time)),
+        (Arc::from("clipTime"), Value::Float32(0.0)),
+        (Arc::from("endTime"), Value::Float32(end_time)),
+        (Arc::from("timeLeft"), Value::Float32(time_left)),
+    ]))
+}
+
+/// The node of a property of the component a message creates.
+fn property_node(dispatch: &ScriptDispatch, message: &NrlMessage, name: &str) -> Option<u16> {
+    let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, children, .. }, .. } = &message.body else {
+        return None;
+    };
+    let (_, schema) = dispatch.component_from_nrl_id(*component_type_id)?;
+    let index = schema.properties.iter().position(|property| &*property.name == name)?;
+    children.ids.get(index).map(|&id| id as u16)
+}
+
+/// Set a property of an `OwnVehicle`, as the real server does: `[0][packed length]`
+/// then the value, see `NrlTree::decode_update`.
+fn property_update(dispatch: &ScriptDispatch, component: &str, name: &str, node_id: u16, value: &Value) -> io::Result<NrlUpdateNode> {
+    use wgtk::net::codec::Codec;
+    use wgtk::util::io::WgWriteExt;
+    let (_, schema) = dispatch.entity_from_name(component)
+        .ok_or_else(|| invalid_data(&format!("no {component}")))?;
+    let property = schema.properties.iter().find(|property| &*property.name == name)
+        .ok_or_else(|| invalid_data(&format!("{component} has no {name}")))?;
+    let mut data = Vec::new();
+    value.write(&mut data, &property.ty)?;
+    let mut payload = vec![0];
+    payload.write_packed_u24(data.len() as u32)?;
+    payload.extend_from_slice(&data);
+    Ok(NrlUpdateNode { node_id, payload, python_value: None })
+}
+
+/// `INVALID_EFFECT_INDEX`: no prefab effects for a shot, the client then only playing
+/// its shot effects.
+const NO_PREFAB_EFFECTS: u8 = 255;
+
+/// The effect material the captured server gave shells exploding on the ground.
+const GROUND_EFFECT_MATERIAL: u8 = 2;
+
+/// The consumables of the captured battle, by integer descriptor, which every vehicle
+/// gets until accounts have their own.
+const CONSUMABLES: [i64; 3] = [1531, 1019, 507];
 
 /// The NRL node of the vehicle's `GunMarkerComponent`, its children following: above
 /// the ids the captured trees use, up to about 2200.
