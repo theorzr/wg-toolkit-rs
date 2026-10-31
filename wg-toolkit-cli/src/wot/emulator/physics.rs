@@ -198,10 +198,6 @@ impl Hull {
 
 }
 
-/// How high above the vehicle's origin its gun's sight is, for the pitch toward a
-/// point: a typical tank's rather than the vehicle's own.
-const GUN_HEIGHT: f32 = 2.0;
-
 /// A turret and its gun, turning toward what the client aims at at their top speeds,
 /// the gun within its pitch limits at the turret's yaw.
 #[derive(Debug, Clone)]
@@ -250,9 +246,11 @@ impl Turret {
     /// then update the dispersion.
     pub fn step(&mut self, dt: f32, hull: &Hull) {
         let (yaw, pitch) = match self.target {
-            // In the hull's frame, which the turret and gun turn in.
+            // Raised for the shell to drop onto the point, then in the hull's frame,
+            // which the turret and gun turn in.
             Aim::Point(point) => {
-                let to = hull.rotation().inverse() * (point - gun_position(hull));
+                let direction = self.ballistic_direction(point - gun_position(hull, self));
+                let to = hull.rotation().inverse() * direction;
                 let horizontal = (to.x * to.x + to.z * to.z).sqrt();
                 (to.x.atan2(to.z), -to.y.atan2(horizontal))
             }
@@ -272,6 +270,25 @@ impl Turret {
     /// computes it: the ideal factor grows with the hull's speed, its turning and the
     /// turret's turning, and the actual one jumps up to it but only shrinks back over the
     /// aiming time. No crew, equipment or shot bonuses.
+    /// The direction to fire the shell in for it to reach `to`, relative to the gun:
+    /// the lower of the two trajectories, or 45° up when out of reach.
+    fn ballistic_direction(&self, to: Vec3) -> Vec3 {
+        let (speed, gravity) = (self.aiming.shot_speed, self.aiming.shot_gravity);
+        let distance = (to.x * to.x + to.z * to.z).sqrt();
+        if distance < 1e-3 || gravity <= 0.0 {
+            return to.normalize_or(Vec3::Z);
+        }
+        let v2 = speed * speed;
+        let discriminant = v2 * v2 - gravity * (gravity * distance * distance + 2.0 * to.y * v2);
+        let elevation = if discriminant >= 0.0 {
+            ((v2 - discriminant.sqrt()) / (gravity * distance)).atan()
+        } else {
+            std::f32::consts::FRAC_PI_4
+        };
+        let yaw = to.x.atan2(to.z);
+        Vec3::new(yaw.sin() * elevation.cos(), elevation.sin(), yaw.cos() * elevation.cos())
+    }
+
     fn step_dispersion(&mut self, dt: f32, hull: &Hull) {
         let movement = hull.speed * self.aiming.dispersion_movement;
         let rotation = hull.yaw_rate * self.aiming.dispersion_rotation;
@@ -286,13 +303,12 @@ impl Turret {
 
     /// Where the gun fires from and the shell's initial velocity, as the client's
     /// `getCurShotPosition` gives them, and the current dispersion angle: what the
-    /// server's gun marker shows. The gun sits `GUN_HEIGHT` above the hull's origin and
-    /// the hull's tilt is left out.
+    /// server's gun marker shows.
     pub fn gun_marker(&self, hull: &Hull) -> (Vec3, Vec3, f32) {
         // Turret yaw, then gun pitch (positive downward), on the hull.
         let gun = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch);
         let direction = hull.rotation() * gun * Vec3::Z;
-        (gun_position(hull), direction * self.aiming.shot_speed, self.aiming.dispersion_angle * self.dispersion_factor)
+        (gun_position(hull, self), direction * self.aiming.shot_speed, self.aiming.dispersion_angle * self.dispersion_factor)
     }
 
     /// The angles as the `gunAnglesPacked` property carries them, see `encodeGunAngles`:
@@ -307,9 +323,10 @@ impl Turret {
 
 }
 
-/// Where the gun fires from: [`GUN_HEIGHT`] above the hull, tilted with it.
-fn gun_position(hull: &Hull) -> Vec3 {
-    hull.position + hull.rotation() * Vec3::new(0.0, GUN_HEIGHT, 0.0)
+/// Where the gun fires from: its pivot on the turret, turned with it, on the hull.
+fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
+    let aiming = &turret.aiming;
+    hull.position + hull.rotation() * (aiming.turret_position + Quat::from_rotation_y(turret.yaw) * aiming.gun_position)
 }
 
 /// A value between bounds on `bits` bits, rounded, as the client's packing does.
@@ -338,6 +355,9 @@ fn wrap_angle(angle: f32) -> f32 {
 mod tests {
 
     use super::*;
+
+    /// How high the test gun is above the vehicle's origin.
+    const GUN_HEIGHT: f32 = 1.7;
 
     fn chieftain() -> Hull {
         Hull::new(Vec3::ZERO, Vec3::ZERO, MotionLimits {
@@ -395,6 +415,9 @@ mod tests {
             shot_speed: 716.0,
             shot_gravity: 6.28,
             reload_time: 16.0,
+            // Straight above the origin, to keep the tests' geometry simple.
+            turret_position: Vec3::new(0.0, 1.4, 0.0),
+            gun_position: Vec3::new(0.0, GUN_HEIGHT - 1.4, 0.0),
         }
     }
 
@@ -410,7 +433,8 @@ mod tests {
             turret.step(1.0, &hull);
         }
         assert!((turret.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
-        assert!(turret.pitch.abs() < 1e-5);
+        // Raised a little for the shell to drop onto it.
+        assert!(turret.pitch < 0.0 && turret.pitch > -0.01);
         // The point stays put in the world as the vehicle drives past it.
         hull.position = Vec3::new(0.0, 0.0, 200.0);
         turret.step(1.0, &hull);
@@ -433,9 +457,13 @@ mod tests {
         for _ in 0..20 {
             turret.step(1.0, &hull);
         }
+        // The shell's arc goes through the point.
         let (position, velocity, _) = turret.gun_marker(&hull);
-        let off = (point - position).normalize().angle_between(velocity.normalize());
-        assert!(off < 1e-4, "aims {off} rad off");
+        let to = point - position;
+        let horizontal = Vec3::new(velocity.x, 0.0, velocity.z);
+        let time = Vec3::new(to.x, 0.0, to.z).length() / horizontal.length();
+        let at = position + velocity * time - Vec3::Y * 0.5 * turret.aiming.shot_gravity * time * time;
+        assert!((at - point).length() < 0.05, "lands at {at}, not {point}");
         // Locking sends back the same hull-relative angles, which change nothing.
         let (yaw, pitch) = (turret.yaw, turret.pitch);
         turret.hold(yaw, pitch);

@@ -4,6 +4,7 @@
 //! modules' definitions (in a `shared` section), guns with their shells. `components/shells.xml` gives each
 //! shell's id.
 
+use glam::Vec3;
 use std::io;
 
 use wgtk::pxml::{self, Element};
@@ -93,6 +94,11 @@ pub struct AimingDef {
     pub shot_gravity: f32,
     /// Seconds between two shots, before crew and equipment.
     pub reload_time: f32,
+    /// Where the turret turns, from the vehicle's origin: the chassis' `hullPosition`
+    /// plus the hull's turret position.
+    pub turret_position: Vec3,
+    /// Where the gun pitches, from the turret's pivot, turning with it.
+    pub gun_position: Vec3,
 }
 
 impl AimingDef {
@@ -301,6 +307,16 @@ impl VehicleDef {
             shot_speed: shot_float("speed")? * projectile_speed_factor,
             shot_gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
             reload_time: gun_float(&["reloadTime"])?,
+            turret_position: child_element(&vehicle, "chassis")
+                .and_then(|chassis| chassis.iter_children_all().next())
+                .and_then(|(_, chassis)| child_vec3(chassis.as_element()?, "hullPosition"))
+                .ok_or_else(|| invalid(format!("{name} has no hull position")))?
+                + child_element(&vehicle, "hull")
+                .and_then(|hull| child_element(hull, "turretPositions"))
+                .and_then(|positions| child_vec3(positions, "turret"))
+                .ok_or_else(|| invalid(format!("{name} has no turret position")))?,
+            gun_position: child_vec3(turret, "gunPosition")
+                .ok_or_else(|| invalid(format!("{name} has no gun position")))?,
         };
 
         let crew_roles = child_element(&vehicle, "crew")
@@ -376,6 +392,23 @@ fn child_string<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
 
 fn child_float(element: &Element, name: &str) -> Option<f32> {
     element.get_child(name)?.as_float()
+}
+
+/// A child holding three floats, as a packed vector or as space-separated text.
+fn child_vec3(element: &Element, name: &str) -> Option<Vec3> {
+    let value = match element.get_child(name)? {
+        pxml::Value::Element(child) => &child.value,
+        value => value,
+    };
+    let floats: Vec<f32> = match value {
+        pxml::Value::Vector(vector) => (0..vector.len()).filter_map(|i| vector.get(i)).collect(),
+        pxml::Value::String(text) => text.split_whitespace().filter_map(|n| n.parse().ok()).collect(),
+        _ => return None,
+    };
+    match floats[..] {
+        [x, y, z] => Some(Vec3::new(x, y, z)),
+        _ => None,
+    }
 }
 
 /// A float down a path of children.

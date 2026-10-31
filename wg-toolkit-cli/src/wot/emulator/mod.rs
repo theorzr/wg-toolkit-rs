@@ -198,6 +198,17 @@ struct BattleClient {
     next_period: Option<(Instant, u8)>,
     /// Its vehicle once created, moving as the client drives it.
     driven: Option<DrivenVehicle>,
+    /// The enemy vehicle standing in front of it, to shoot at.
+    target: Option<Target>,
+}
+
+/// An enemy vehicle the server places in front of the player, standing still: one of
+/// the captured arena's, with its entry in `vehiclesInfo`.
+#[derive(Debug, Clone)]
+struct Target {
+    entity_id: u32,
+    /// Its `vehiclesInfo` entry's fields, which its `publicInfo` repeats.
+    info: BTreeMap<Arc<str>, Value>,
 }
 
 /// A battle client's vehicle: the vehicle the server simulates, and how the client
@@ -483,6 +494,17 @@ impl BaseThread {
             self.app.enter_aoi(addr, cell.vehicle_id, alias)?;
         }
 
+        // An enemy to shoot at, created likewise once the client asks, see
+        // `create_target`.
+        let target = battle.arena_info.as_ref().and_then(|arena| enemy_of(&arena.nrl, cell.vehicle_id));
+        if let Some(target) = &target {
+            self.app.enter_aoi(addr, target.entity_id, TARGET_ALIAS)?;
+            info!(%addr, "Target {} ({:?})", target.entity_id, target.info.get("name"));
+        }
+        if let Some(client) = self.battle_clients.get_mut(&addr) {
+            client.target = target.clone();
+        }
+
         // The arena's info entity, created right away as entities without an alias are,
         // then given its vehicles: only the player's, the arena having no one else yet.
         if let Some(arena) = &battle.arena_info {
@@ -497,7 +519,8 @@ impl BaseThread {
                 }
             }
             let config = self.battle_clients.get(&addr).and_then(|client| client.config.as_ref());
-            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, config)?;
+            let target_id = target.as_ref().map(|target| target.entity_id);
+            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, target_id, config)?;
             self.app.enter_aoi(addr, arena.entity_id, NO_ID_ALIAS)?;
             self.app.create_entity_detailed(addr, arena.entity_id, *type_id, Vec3::ZERO, Vec3::ZERO, &properties)?;
             self.app.nrl_create_node(addr, stream)?;
@@ -586,6 +609,62 @@ impl BaseThread {
             }
         }
 
+        Ok(())
+
+    }
+
+    /// Create the target once the client asks for it, from the player's captured
+    /// vehicle: its own id, descriptor, name, team and health, no avatar, then place it
+    /// [`TARGET_DISTANCE`] in front of the player's start, facing it.
+    fn create_target(&mut self, addr: SocketAddr) -> io::Result<()> {
+
+        let Some(target) = self.battle_clients.get(&addr).and_then(|client| client.target.clone()) else { return Ok(()) };
+        let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
+        let (Some(entity), Some(properties), Some(start)) = (&battle.vehicle_entity, &battle.vehicle_properties, &battle.vehicle_position) else {
+            warn!(%addr, "The capture has no vehicle to make the target from");
+            return Ok(());
+        };
+
+        let max_health = target.info.get("maxHealth").and_then(Value::as_i64).unwrap_or(1000);
+        let mut properties = properties.clone();
+        for (_, name, value) in &mut properties.values {
+            match (&**name, &mut *value) {
+                ("health", value) => *value = with_int(value, max_health),
+                ("avatarID", value) => *value = with_int(value, 0),
+                ("vehPostProgression", value) => *value = Value::Seq(Vec::new()),
+                ("publicInfo", Value::Dict(public)) => {
+                    for (field, value) in public.iter_mut() {
+                        match &**field {
+                            "maxHealth" => *value = with_int(value, max_health),
+                            "compDescr" | "name" | "team" => if let Some(own) = target.info.get(field) {
+                                *value = match (own, &*value) {
+                                    (Value::Int8(n), _) => with_int(value, (*n).into()),
+                                    _ => own.clone(),
+                                };
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let dispatch = self.app.dispatch().entity_from_id(entity.entity_type_id)
+            .ok_or_else(|| invalid_data("unknown vehicle entity type"))?;
+        let mut entity = entity.clone();
+        entity.entity_id = target.entity_id;
+        entity.client_data = properties.encode(&dispatch.properties)?;
+
+        let yaw = start.direction.z;
+        let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
+        if let Some(height) = self.terrain.as_ref().and_then(|terrain| terrain.height_at(position.x, position.z)) {
+            position.y = height;
+        }
+        let direction = Vec3::new(0.0, 0.0, yaw + std::f32::consts::PI);
+
+        info!(%addr, "Creating target {} at {position:?}", target.entity_id);
+        self.app.create_entity(addr, entity)?;
+        self.app.update_position_detailed(addr, TARGET_ALIAS, position, direction)?;
         Ok(())
 
     }
@@ -830,7 +909,7 @@ impl BaseThread {
                                 warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
                             }
                         }
-                        self.battle_clients.insert(login.addr, BattleClient { config, joined: Instant::now(), ticks: 0, next_period: None, driven: None });
+                        self.battle_clients.insert(login.addr, BattleClient { config, joined: Instant::now(), ticks: 0, next_period: None, driven: None, target: None });
                         continue;
                     }
 
@@ -927,9 +1006,14 @@ impl BaseThread {
                                         debug!(addr = %event.addr, "Tracking {point:?} from {:?}", hull.position);
                                         turret.track(hull.position + *point);
                                     }
+                                    // Where our turret is rather than the client's angles,
+                                    // which its own rotator computes slightly apart: the
+                                    // gun would move as it locks.
                                     (_, [Value::Float32(yaw), Value::Float32(pitch)]) => {
-                                        debug!(addr = %event.addr, "Holding the gun at yaw {yaw:.3}, pitch {pitch:.3}");
-                                        driven.vehicle.turret.hold(*yaw, *pitch);
+                                        let turret = &mut driven.vehicle.turret;
+                                        debug!(addr = %event.addr, "Holding the gun at yaw {:.4}, pitch {:.4} (client: {yaw:.4}, {pitch:.4})",
+                                            turret.yaw, turret.pitch);
+                                        turret.hold(turret.yaw, turret.pitch);
                                     }
                                     _ => warn!(addr = %event.addr, "Unexpected {name} arguments: {args:?}"),
                                 }
@@ -943,8 +1027,14 @@ impl BaseThread {
                     debug!(addr = %event.addr, "Avatar update on {:?}: {:?}, direction {:?}", event.vehicle_id, event.position, event.direction);
                 }
                 base::Event::RequestEntityUpdate(event) => {
-                    // Only the player's vehicle enters the area of interest for now.
-                    if let Err(e) = self.create_vehicle(event.addr, event.entity_id) {
+                    let is_target = self.battle_clients.get(&event.addr)
+                        .and_then(|client| client.target.as_ref())
+                        .is_some_and(|target| target.entity_id == event.entity_id);
+                    if is_target {
+                        if let Err(e) = self.create_target(event.addr) {
+                            warn!(addr = %event.addr, "Failed to create the target: {e}");
+                        }
+                    } else if let Err(e) = self.create_vehicle(event.addr, event.entity_id) {
                         warn!(addr = %event.addr, "Failed to create vehicle {}: {e}", event.entity_id);
                     }
                 }
@@ -1121,9 +1211,9 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-/// The arena info entity's NRL tree, its `vehiclesInfo` reduced to the given vehicle's,
-/// encoded again.
-fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, config: Option<&VehicleConfig>) -> io::Result<NrlStream> {
+/// The arena info entity's NRL tree, its `vehiclesInfo` reduced to the given vehicle's
+/// and the target's, encoded again.
+fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, target_id: Option<u32>, config: Option<&VehicleConfig>) -> io::Result<NrlStream> {
     let mut messages = captured.to_vec();
     for message in &mut messages {
         let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, data: Some(data), .. }, .. } = &mut message.body else {
@@ -1138,6 +1228,9 @@ fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id
                         }
                         Some(Value::Dict(fields))
                     }
+                    Value::Dict(fields) if target_id.is_some() && fields.get("vehicleID").and_then(Value::as_i64) == target_id.map(i64::from) => {
+                        Some(Value::Dict(fields))
+                    }
                     _ => None,
                 }).collect();
                 (id, NrlChild::Property { name, value: Value::Seq(entries) })
@@ -1148,6 +1241,36 @@ fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id
     }
     Ok(NrlStream { messages, rest: Vec::new() })
 }
+
+/// The first vehicle of the captured arena not in the given vehicle's team, as a
+/// target.
+fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
+    let entries = arena.iter().find_map(|message| match &message.body {
+        NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } => data.children.iter().find_map(|(_, child)| match child {
+            NrlChild::Property { name, value: Value::Seq(entries) } if &**name == "vehiclesInfo" => Some(entries),
+            _ => None,
+        }),
+        _ => None,
+    })?;
+    let fields = |entry: &Value| match entry {
+        Value::Dict(fields) => Some(fields.clone()),
+        _ => None,
+    };
+    let team = |fields: &BTreeMap<Arc<str>, Value>| fields.get("team").and_then(Value::as_i64);
+    let own_team = entries.iter().filter_map(fields)
+        .find(|fields| fields.get("vehicleID").and_then(Value::as_i64) == Some(vehicle_id.into()))
+        .and_then(|fields| team(&fields))?;
+    entries.iter().filter_map(fields)
+        .find(|fields| team(fields).is_some_and(|team| team != own_team))
+        .and_then(|info| Some(Target { entity_id: info.get("vehicleID")?.as_i64()? as u32, info }))
+}
+
+/// The target's id alias, apart from the one the captured server gave the player's
+/// vehicle.
+const TARGET_ALIAS: u8 = 200;
+
+/// How far in front of the player's start the target stands, in metres.
+const TARGET_DISTANCE: f32 = 40.0;
 
 /// The NRL node every entity node goes under.
 const NRL_ROOT_NODE: u16 = 1;
