@@ -3,6 +3,7 @@
 pub mod proxy;
 pub mod emulator;
 pub mod account_commands;
+pub mod items;
 
 use std::sync::Arc;
 use std::fs::File;

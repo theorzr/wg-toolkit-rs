@@ -13,6 +13,7 @@ use wgtk::script::Script;
 use rsa::RsaPrivateKey;
 use blowfish::Blowfish;
 
+mod account;
 mod capture;
 
 use std::path::Path;
@@ -21,7 +22,10 @@ use std::io;
 use wgtk::app::dispatch::MethodCall;
 use wgtk::script::Value;
 
+use account::AccountData;
 use capture::{Answer, CapturedSession};
+use crate::wot::account_commands::CMD_SYNC_DATA;
+use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::CliResult;
 
 
@@ -45,7 +49,7 @@ pub fn run(
 
     let session = match from_capture {
         Some(path) => {
-            let session = CapturedSession::load(path, base_app.dispatch())
+            let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             info!("Serving from capture {}: account {}, {} requests",
                 path.display(), if session.account.is_some() { "found" } else { "missing" }, session.requests.len());
@@ -56,6 +60,8 @@ pub fn run(
                 }).collect();
                 debug!("  {} {:?} -> {}", request.method, request.args.get(..2), answers.join(", "));
             }
+            reencode_account_data(&mut session)
+                .map_err(|e| format!("Failed to re-encode the captured account data: {e}"))?;
             Some(session)
         }
         None => None,
@@ -318,6 +324,63 @@ impl BaseThread {
         }
 
     }
+
+}
+
+/// Serve the captured account data as we encode it rather than as captured: decode
+/// each full sync answer, check that its vehicles and tankmen decode and encode back
+/// the same, and encode it back.
+fn reencode_account_data(session: &mut CapturedSession) -> io::Result<()> {
+
+    for request in &mut session.requests {
+
+        let is_full_sync = &*request.method == "doCmdInt3"
+            && request.args.get(1).and_then(Value::as_i64) == Some(CMD_SYNC_DATA.into())
+            && request.args.get(2).and_then(Value::as_i64) == Some(0);
+        if !is_full_sync {
+            continue;
+        }
+
+        for answer in &mut request.answers {
+
+            let Answer::Resource { description, data } = answer else { continue };
+
+            if account::resource_description(data)? != *description {
+                warn!("The captured account data description differs from ours: {description:02X?}");
+            }
+
+            let account = AccountData::decode(data)?;
+            let invalid = |what: &str, id: i64, e: &dyn std::fmt::Display| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("{what} {id}: {e}"))
+            };
+            let mut vehicles = 0;
+            for (id, cd) in account.compact_descrs(item_type::VEHICLE) {
+                let descr = VehicleDescr::decode(cd).map_err(|e| invalid("vehicle", id, &e))?;
+                if descr.encode() != cd {
+                    return Err(invalid("vehicle", id, &"encodes differently"));
+                }
+                vehicles += 1;
+            }
+            let mut tankmen = 0;
+            for (id, cd) in account.compact_descrs(item_type::TANKMAN) {
+                let descr = TankmanDescr::decode(cd).map_err(|e| invalid("tankman", id, &e))?;
+                if descr.encode() != cd {
+                    return Err(invalid("tankman", id, &"encodes differently"));
+                }
+                tankmen += 1;
+            }
+
+            let (new_description, new_data) = account.encode()?;
+            info!("Account data: revision {:?}, {} sections, {vehicles} vehicles, {tankmen} tankmen, {} bytes re-encoded to {}",
+                account.revision(), account.dict().map_or(0, |d| d.len()), data.len(), new_data.len());
+            *description = new_description;
+            *data = new_data;
+
+        }
+
+    }
+
+    Ok(())
 
 }
 
