@@ -222,6 +222,11 @@ pub struct WotArgs {
     /// first packet does not come from the same network as the real login app.
     #[arg(long)]
     pub replay: Option<PathBuf>,
+    /// With `--replay`, also encode every decoded element again and compare it with the
+    /// captured bytes, then print which element types round-trip, which differ and
+    /// which have no encoder yet.
+    #[arg(long, requires = "replay")]
+    pub round_trip: bool,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output

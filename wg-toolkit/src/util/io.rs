@@ -582,10 +582,12 @@ impl<'a> SliceCursor<'a> {
 
 #[inline]
 pub fn serde_pickle_de_options() -> serde_pickle::DeOptions {
-    serde_pickle::DeOptions::new().decode_strings_relaxed().replace_recursive_structures()
+    // Python 2 `str` stays bytes, distinct from `unicode`, so it encodes back as `str`.
+    serde_pickle::DeOptions::new().replace_recursive_structures()
 }
 
 #[inline]
 pub fn serde_pickle_ser_options() -> serde_pickle::SerOptions {
-    serde_pickle::SerOptions::new().proto_v2()
+    // The client unpickles with Python 2.
+    serde_pickle::SerOptions::new().proto_v2().python2_strings()
 }

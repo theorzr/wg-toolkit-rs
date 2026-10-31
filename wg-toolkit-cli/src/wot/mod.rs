@@ -67,7 +67,7 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
     let script = load_script(&args.dir)?;
 
     if let Some(replay_path) = args.replay.as_deref() {
-        return proxy::replay(replay_path, args.real_login_app, script);
+        return proxy::replay(replay_path, args.real_login_app, script, args.round_trip);
     }
 
     // Start by decoding the private key...

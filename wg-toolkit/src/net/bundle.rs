@@ -618,6 +618,79 @@ impl<'a> BundleElementWriter<'a> {
 }
 
 
+/// How an element re-encoded, see [`set_round_trip_check`].
+#[derive(Debug)]
+pub enum RoundTrip {
+    /// The same id, length style and body as read.
+    Same,
+    /// The element encoded to something else than it was read from.
+    Different { reason: &'static str, original: Vec<u8>, encoded: Vec<u8> },
+    /// Encoding returned an error.
+    Failed(io::Error),
+    /// The element has no encoder: its write panics (`unreachable!`).
+    NotEncodable,
+}
+
+/// The callback a round-trip check reports to: the element id, the element's Rust type
+/// and the outcome.
+pub type RoundTripCheck = Box<dyn FnMut(u8, &'static str, RoundTrip)>;
+
+thread_local! {
+    static ROUND_TRIP: std::cell::RefCell<Option<RoundTripCheck>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Enable (or with `None` disable) a check of every element read on this thread: once
+/// decoded, it is encoded again and compared with what it was read from. Meant for
+/// checking encoders against captured traffic, which a server relies on but nothing
+/// else exercises. Elements of undefined length are not checked.
+///
+/// An element with no encoder panics when written; that panic is caught and reported as
+/// [`RoundTrip::NotEncodable`], but still goes through the panic hook, which the caller
+/// may want to silence.
+pub fn set_round_trip_check(check: Option<RoundTripCheck>) {
+    ROUND_TRIP.with(|cell| *cell.borrow_mut() = check);
+}
+
+fn round_trip_enabled() -> bool {
+    ROUND_TRIP.with(|cell| cell.borrow().is_some())
+}
+
+fn check_round_trip<E: Element<C>, C: ?Sized>(element: &E, config: &C, elt_id: u8, elt_len_kind: ElementLength, original: Vec<u8>) {
+
+    let mut encoded = Vec::new();
+    let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Ok::<_, io::Error>((element.write_length(config)?, element.write(&mut encoded, config)?))
+    }));
+
+    let outcome = match written {
+        Err(_) => RoundTrip::NotEncodable,
+        Ok(Err(e)) => RoundTrip::Failed(e),
+        Ok(Ok((len_kind, id))) => {
+            let reason = if id != elt_id {
+                Some("element id")
+            } else if len_kind != elt_len_kind {
+                Some("length style")
+            } else if encoded != original {
+                Some("body")
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => RoundTrip::Different { reason, original, encoded },
+                None => RoundTrip::Same,
+            }
+        }
+    };
+
+    let type_name = std::any::type_name::<E>();
+    ROUND_TRIP.with(|cell| {
+        if let Some(check) = cell.borrow_mut().as_mut() {
+            check(elt_id, type_name, outcome);
+        }
+    });
+
+}
+
 /// The structure used to iterate over a bundle's elements, providing
 /// a developer-friendly API that automatically handle reply elements.
 /// 
@@ -743,6 +816,18 @@ impl<'a> BundleElementReader<'a> {
             moved_bytes = &mut [];
         }
 
+        // With a round-trip check enabled, keep the element's body as it is on the wire.
+        let original = if next && elt_len_kind != ElementLength::Undefined && round_trip_enabled() {
+            let mut original = moved_bytes.to_vec();
+            let mut body_reader = self.bundle_reader.clone();
+            let mut rest = vec![0; elt_len as usize - original.len()];
+            body_reader.read_exact(&mut rest)?;
+            original.extend_from_slice(&rest);
+            Some(original)
+        } else {
+            None
+        };
+
         // We avoid branching to two kind of readers so we chain with moved bytes when
         // oversized, or empty slice if not necessary.
         let elt_reader = moved_bytes.chain(&mut self.bundle_reader);
@@ -771,6 +856,10 @@ impl<'a> BundleElementReader<'a> {
                 return Err(e);
             }
         };
+
+        if let Some(original) = original {
+            check_round_trip(&element, config, elt_id, elt_len_kind, original);
+        }
 
         if next {
             // Don't do anything for undefined length, we let the element advance were

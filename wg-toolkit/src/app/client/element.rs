@@ -12,10 +12,10 @@ use glam::Vec3;
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
 use crate::app::dispatch::{ScriptDispatch, EntityDispatch, MethodDef, PropertyDef, MethodCall};
-use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options};
+use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options, serde_pickle_ser_options};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::script::{Ty, TyKind, TyDict, Value, PythonValue};
-use crate::app::bit::BitReader;
+use crate::app::bit::{BitReader, BitWriter};
 use crate::util::AsciiFmt;
 
 pub use crate::app::math::{PackedXyz, PackedXz, PackedYawPitch, PackedYawPitchRoll, PackedYaw};
@@ -440,11 +440,13 @@ impl CreateBasePlayer<'_> {
 impl Element<ScriptDispatch> for CreateBasePlayer<'_> {
 
     fn write_length(&self, _config: &ScriptDispatch) -> io::Result<ElementLength> {
-        unreachable!("CreateBasePlayer<ScriptDispatch> is read-only")
+        Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &ScriptDispatch) -> io::Result<u8> {
-        unreachable!("CreateBasePlayer<ScriptDispatch> is read-only")
+    fn write(&self, write: &mut dyn Write, config: &ScriptDispatch) -> io::Result<u8> {
+        let dispatch = config.entity_from_id(self.entity_type_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown entity type id: 0x{:02X}", self.entity_type_id)))?;
+        self.write_to(write, &dispatch.data_ty)
     }
 
     fn read_length(_config: &ScriptDispatch, _id: u8) -> io::Result<ElementLength> {
@@ -2576,6 +2578,117 @@ pub(crate) fn decode_compressed_path(
 
 }
 
+/// The leaf of a path to encode, see [`encode_compressed_path`].
+enum PathLeaf<'v> {
+    Single(&'v Value),
+    Slice { start: u32, end: u32, values: &'v [Value] },
+}
+
+impl<'a> PathContainer<'a> {
+
+    /// The index of `step` in this container, the inverse of [`Self::child`].
+    fn index_of(&self, step: &EntityPropertyPathStep) -> Option<u32> {
+        match (self, step) {
+            (Self::Top(props), EntityPropertyPathStep::Field(name)) =>
+                props.iter().position(|p| p.name == *name).map(|index| index as u32),
+            (Self::Dict(dict), EntityPropertyPathStep::Field(name)) =>
+                dict.properties.iter().position(|p| p.name == *name).map(|index| index as u32),
+            (Self::Seq(_, count), EntityPropertyPathStep::Index(index)) => (index < count).then_some(*index),
+            _ => None,
+        }
+    }
+
+}
+
+/// The inverse of [`decode_compressed_path`]: write `path` as `[continue bit][index]`
+/// pairs, then the leaf, against the same table and tracked values the decode would use.
+/// For a single value the path's last step is the leaf's index; for a slice the path
+/// leads to the `Array` itself.
+fn encode_compressed_path(
+    top: &[PropertyDef],
+    values: Option<&HashMap<Arc<str>, Value>>,
+    path: &[EntityPropertyPathStep],
+    leaf: PathLeaf<'_>,
+    write: &mut dyn Write,
+) -> io::Result<()> {
+
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidData, format!("entity property path {path:?}: {message}"));
+
+    let descend = match leaf {
+        PathLeaf::Single(_) => &path[..path.len().checked_sub(1).ok_or_else(|| invalid("empty"))?],
+        PathLeaf::Slice { .. } => path,
+    };
+
+    let mut bits = Vec::new();
+    let mut container = PathContainer::Top(top);
+    let mut live: Option<&Value> = None;
+
+    for step in descend {
+        let index = container.index_of(step).ok_or_else(|| invalid("a step not in its container"))?;
+        bits.push((1, 1));
+        bits.push((bits_required(container.count()), index));
+        let (_, child_ty) = container.child(index).ok_or_else(|| invalid("a step not in its container"))?;
+        // Same tracked value lookup as `walk_path`, for the `Array` lengths below.
+        let live_child = match (&container, step) {
+            (PathContainer::Top(_), EntityPropertyPathStep::Field(name)) => values.and_then(|values| values.get(name)),
+            (_, EntityPropertyPathStep::Field(name)) => match live {
+                Some(Value::Dict(dict)) => dict.get(name),
+                _ => None,
+            },
+            (_, EntityPropertyPathStep::Index(index)) => match live {
+                Some(Value::Seq(items)) => items.get(*index as usize),
+                _ => None,
+            },
+        };
+        container = match container_kind(child_ty) {
+            ContainerKind::Resolved(child) => child,
+            ContainerKind::UnresolvedArray(elem_ty) => match live_child {
+                Some(Value::Seq(items)) => PathContainer::Seq(elem_ty, items.len() as u32),
+                _ => return Err(invalid("an Array whose live length isn't tracked")),
+            },
+            ContainerKind::NotAContainer => return Err(invalid("a step into a non-container")),
+        };
+        live = live_child;
+    }
+
+    bits.push((1, 0));
+    let leaf_values: Vec<(&Value, &Ty)> = match leaf {
+        PathLeaf::Single(value) => {
+            let step = path.last().unwrap();
+            let index = container.index_of(step).ok_or_else(|| invalid("a leaf not in its container"))?;
+            bits.push((bits_required(container.count()), index));
+            vec![(value, container.child(index).unwrap().1)]
+        }
+        PathLeaf::Slice { start, end, values } => {
+            let PathContainer::Seq(elem_ty, count) = container else {
+                return Err(invalid("a slice of something else than an Array"));
+            };
+            if start > end || end > count {
+                return Err(invalid("a slice outside the Array"));
+            }
+            let idx_bits = bits_required(count + 1);
+            bits.push((idx_bits, start));
+            bits.push((idx_bits, end));
+            values.iter().map(|value| (value, elem_ty)).collect()
+        }
+    };
+
+    let total: u32 = bits.iter().map(|&(n, _)| n).sum();
+    let mut buf = vec![0; total.div_ceil(8) as usize];
+    let mut writer = BitWriter::new(&mut buf);
+    for (n, value) in bits {
+        writer.add(n, value);
+    }
+    write.write_all(&buf)?;
+
+    for (value, ty) in leaf_values {
+        Codec::write(value, write, ty)?;
+    }
+
+    Ok(())
+
+}
+
 /// What a run of client-visible property values decoded to, whole or not.
 ///
 /// Decoding stops at the first exposed id the property table doesn't cover, or the first
@@ -2631,6 +2744,38 @@ pub struct ChangedPropertiesStop {
 /// Never fails: anything it can't read becomes a [`ChangedPropertiesStop`] alongside
 /// whatever did read, because a partially understood entity is still worth seeding and a
 /// malformed run must not abort the bundle around it.
+/// The inverse of [`read_changed_properties`]. A run that stopped early writes back the
+/// count it announced and the bytes it could not read, so it encodes as it was read.
+fn write_changed_properties(changed: &ChangedProperties, properties: &[PropertyDef], write: &mut dyn Write) -> io::Result<()> {
+
+    if changed.values.is_empty() && changed.stopped.is_none() {
+        return Ok(());
+    }
+
+    let count = match &changed.stopped {
+        Some(stop) => stop.expected,
+        None => u8::try_from(changed.values.len()).map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+            format!("{} changed properties, at most 255 fit", changed.values.len())))?,
+    };
+    write.write_u8(count)?;
+
+    for (exposed_id, name, value) in &changed.values {
+        let property = properties.get(*exposed_id as usize)
+            .filter(|property| property.name == *name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData,
+                format!("property {name} is not exposed id {exposed_id}")))?;
+        write.write_u8(*exposed_id)?;
+        Codec::write(value, write, &property.ty)?;
+    }
+
+    if let Some(stop) = &changed.stopped {
+        write.write_all(&stop.rest)?;
+    }
+
+    Ok(())
+
+}
+
 fn read_changed_properties(data: &[u8], properties: &[PropertyDef]) -> ChangedProperties {
 
     // An empty payload is valid and means "nothing changed": `addChangedProperties`
@@ -2766,11 +2911,16 @@ impl NestedEntityProperty {
 impl Element<PropertyPathConfig<'_>> for NestedEntityProperty {
 
     fn write_length(&self, _config: &PropertyPathConfig<'_>) -> io::Result<ElementLength> {
-        unreachable!("NestedEntityProperty is read-only")
+        Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &PropertyPathConfig<'_>) -> io::Result<u8> {
-        unreachable!("NestedEntityProperty is read-only")
+    fn write(&self, write: &mut dyn Write, config: &PropertyPathConfig<'_>) -> io::Result<u8> {
+        match self {
+            Self::Known { path, value } =>
+                encode_compressed_path(config.table, config.values, path, PathLeaf::Single(value), write)?,
+            Self::Unknown { data, .. } => write.write_all(data)?,
+        }
+        Ok(id::NESTED_ENTITY_PROPERTY)
     }
 
     fn read_length(_config: &PropertyPathConfig<'_>, _id: u8) -> io::Result<ElementLength> {
@@ -2823,11 +2973,16 @@ impl SliceEntityProperty {
 impl Element<PropertyPathConfig<'_>> for SliceEntityProperty {
 
     fn write_length(&self, _config: &PropertyPathConfig<'_>) -> io::Result<ElementLength> {
-        unreachable!("SliceEntityProperty is read-only")
+        Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &PropertyPathConfig<'_>) -> io::Result<u8> {
-        unreachable!("SliceEntityProperty is read-only")
+    fn write(&self, write: &mut dyn Write, config: &PropertyPathConfig<'_>) -> io::Result<u8> {
+        match self {
+            Self::Known { path, start, end, values } => encode_compressed_path(config.table, config.values, path,
+                PathLeaf::Slice { start: *start, end: *end, values }, write)?,
+            Self::Unknown { data, .. } => write.write_all(data)?,
+        }
+        Ok(id::SLICE_ENTITY_PROPERTY)
     }
 
     fn read_length(_config: &PropertyPathConfig<'_>, _id: u8) -> io::Result<ElementLength> {
@@ -2868,11 +3023,12 @@ impl UpdateEntity {
 impl Element<[PropertyDef]> for UpdateEntity {
 
     fn write_length(&self, _config: &[PropertyDef]) -> io::Result<ElementLength> {
-        unreachable!("UpdateEntity is read-only")
+        Ok(ElementLength::Variable16)
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &[PropertyDef]) -> io::Result<u8> {
-        unreachable!("UpdateEntity is read-only")
+    fn write(&self, write: &mut dyn Write, config: &[PropertyDef]) -> io::Result<u8> {
+        write_changed_properties(&self.0, config, write)?;
+        Ok(id::UPDATE_ENTITY)
     }
 
     fn read_length(_config: &[PropertyDef], _id: u8) -> io::Result<ElementLength> {
@@ -3061,14 +3217,39 @@ pub struct EntityProperty {
     pub value: Value,
 }
 
+/// Find a property's exposed id in a property table, refusing one past the full slots of
+/// the `ENTITY_PROPERTY` range: its sub-id byte would not be read back, see
+/// [`EntityProperty::read_length`].
+fn find_property<'p>(config: &'p [PropertyDef], name: &str) -> io::Result<(u16, &'p PropertyDef)> {
+    let (exposed_id, def) = config.iter().enumerate()
+        .find(|(_, def)| &*def.name == name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown property: {name}")))?;
+    let exposed_id = exposed_id as u16;
+    match id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id) {
+        (_, None) => Ok((exposed_id, def)),
+        (_, Some(_)) => Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("property {name} needs a sub-id, which is not supported"))),
+    }
+}
+
 impl Element<[PropertyDef]> for EntityProperty {
 
-    fn write_length(&self, _config: &[PropertyDef]) -> io::Result<ElementLength> {
-        unreachable!("EntityProperty is read-only")
+    fn write_length(&self, config: &[PropertyDef]) -> io::Result<ElementLength> {
+        Ok(find_property(config, &self.name)?.1.length)
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &[PropertyDef]) -> io::Result<u8> {
-        unreachable!("EntityProperty is read-only")
+    fn write(&self, write: &mut dyn Write, config: &[PropertyDef]) -> io::Result<u8> {
+        let (exposed_id, def) = find_property(config, &self.name)?;
+        // A top-level `PYTHON` value is written without its own length, the element's
+        // being enough, exactly as `read` takes it.
+        match (def.ty.kind(), &self.value) {
+            (TyKind::Python, Value::Python(PythonValue::Raw(raw))) => write.write_all(raw)?,
+            (TyKind::Python, Value::Python(PythonValue::Decoded(value))) =>
+                write.write_all(&serde_pickle::value_to_vec(value, serde_pickle_ser_options())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)?,
+            _ => Codec::write(&self.value, write, &def.ty)?,
+        }
+        Ok(id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id).0)
     }
 
     fn read_length(config: &[PropertyDef], id: u8) -> io::Result<ElementLength> {

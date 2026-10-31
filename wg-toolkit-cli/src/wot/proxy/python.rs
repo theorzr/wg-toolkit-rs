@@ -147,7 +147,7 @@ fn token_label(ty: i64) -> String {
 }
 
 fn is_empty_string(debug: &str) -> bool {
-    matches!(debug, "\"\"" | "String(\"\")" | "Raw([])")
+    matches!(debug, "\"\"" | "String(\"\")" | "Bytes(b\"\")" | "Raw([])")
 }
 
 
