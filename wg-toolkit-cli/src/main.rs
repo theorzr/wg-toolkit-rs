@@ -227,6 +227,10 @@ pub struct WotArgs {
     /// which have no encoder yet.
     #[arg(long, requires = "replay")]
     pub round_trip: bool,
+    /// In emulator mode, serve the account and the answers to the client's requests
+    /// from this capture, recorded with `--capture`.
+    #[arg(long, conflicts_with_all = ["replay", "real_login_app"])]
+    pub from_capture: Option<PathBuf>,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output

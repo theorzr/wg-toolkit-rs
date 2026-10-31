@@ -79,6 +79,11 @@ impl App {
         })
     }
 
+    /// The dispatch tables of the script model this app was created with.
+    pub fn dispatch(&self) -> &ScriptDispatch {
+        &self.dispatch
+    }
+
     /// Get the address this app is bound to.
     pub fn addr(&self) -> io::Result<SocketAddr> {
         self.socket.addr()
@@ -132,7 +137,11 @@ impl App {
         match reader.id() {
             LoginKey::ID => self.handle_client_auth(addr, reader),
             SessionKey::ID => self.handle_client_session_key(addr, reader),
-            element::id::ENABLE_ENTITIES => self.skip::<element::EnableEntities>(reader),
+            element::id::ENABLE_ENTITIES => {
+                reader.read_simple::<element::EnableEntities>()?;
+                self.events.push_back(Event::EnableEntities(EnableEntitiesEvent { addr }));
+                Ok(())
+            }
             element::id::DISCONNECT_CLIENT => self.skip::<element::DisconnectClient>(reader),
             element::id::PING_DATACENTER => self.skip::<element::PingDatacenter>(reader),
             element::id::AVATAR_UPDATE_IMPLICIT => self.skip::<element::AvatarUpdateImplicit>(reader),
@@ -271,6 +280,17 @@ impl App {
 
         true
 
+    }
+
+    /// Tell a client the server's update frequency and game time, which the real server
+    /// does right after the login reply. `unknown` is a field of unknown meaning, see
+    /// [`client::element::UpdateFrequencyNotification`].
+    pub fn update_frequency(&mut self, addr: SocketAddr, frequency: u8, unknown: u16, game_time: u32) -> io::Result<()> {
+        self.bundle.clear();
+        self.bundle.element_writer().write_simple(client::element::UpdateFrequencyNotification { frequency, unknown, game_time })?;
+        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
+        self.socket.send_bundle(&self.bundle, addr)?;
+        Ok(())
     }
 
     /// Create a new base-player entity for the given (already logged in) client, and
@@ -465,13 +485,19 @@ impl App {
     /// compression/framing (e.g. WoT's zlib+pickle blobs) is the caller's job, since
     /// this library has no opinion on it.
     ///
-    /// Sent as many small reliable bundles rather than one giant multi-packet bundle:
-    /// `Protocol`'s own bundle-fragment reassembly has a hardcoded 10s timeout
+    /// Sent as one reliable bundle per fragment rather than one giant multi-packet
+    /// bundle: `Protocol`'s own bundle-fragment reassembly has a hardcoded 10s timeout
     /// (`FRAGMENT_TIMEOUT`), and real captured traffic paces large resources over
-    /// several seconds of separate fragments rather than one burst.
+    /// several seconds of separate fragments rather than one burst. Fragments are 8 KB,
+    /// like the real server's (up to 9.8 KB for a 443 KB account cache), so that a
+    /// resource that large fits the 256 fragments a one-byte sequence number can count.
     pub fn push_resource(&mut self, addr: SocketAddr, res_id: u16, description: Vec<u8>, data: &[u8]) -> io::Result<()> {
 
-        const CHUNK_SIZE: usize = 1024;
+        const CHUNK_SIZE: usize = 8192;
+
+        if data.len() > CHUNK_SIZE * 256 {
+            return Err(io_invalid_data(format_args!("resource of {} bytes, more than 256 fragments", data.len())));
+        }
 
         self.bundle.clear();
         self.bundle.element_writer().write_simple(client::element::ResourceHeader { id: res_id, description })?;
@@ -484,11 +510,6 @@ impl App {
             data.chunks(CHUNK_SIZE).collect()
         };
 
-        // NOTE: `ResourceFragment::sequence_num` is a plain `u8` on the wire, so this
-        // can't correctly address more than 256 fragments (~256KB at this chunk size) --
-        // fine for the small fabricated payloads this is used for today, but a real
-        // multi-hundred-KB resource (like WoT's ~368KB account cache) would need a
-        // larger chunk size or isn't representable as-is.
         let last_seq = (chunks.len() - 1) as u8;
 
         for (seq, chunk) in chunks.into_iter().enumerate() {
@@ -633,6 +654,7 @@ impl Handle {
 pub enum Event {
     IoError(IoErrorEvent),
     Login(LoginEvent),
+    EnableEntities(EnableEntitiesEvent),
     BaseMethod(BaseMethodEvent),
     CellMethod(CellMethodEvent),
 }
@@ -655,6 +677,14 @@ pub struct LoginEvent {
     pub login_key: u32,
     /// The attempt number.
     pub attempt_num: u8,
+}
+
+/// A logged in client is ready for entities: the server may now create its player. The
+/// client sends this once its logon is complete, and anything sent to it before is not
+/// handled as it would be: a player created earlier is never read.
+#[derive(Debug)]
+pub struct EnableEntitiesEvent {
+    pub addr: SocketAddr,
 }
 
 /// A client called a method on its current base-player entity.

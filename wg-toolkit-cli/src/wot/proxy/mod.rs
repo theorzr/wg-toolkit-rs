@@ -378,8 +378,9 @@ fn start_round_trip_check() -> Rc<RefCell<BTreeMap<&'static str, RoundTripStats>
                 entry.failed += 1;
                 entry.example.get_or_insert_with(|| format!("id 0x{id:02X}: {e}"));
             }
-            RoundTrip::Different { reason: "body", original, encoded } if pickle_equal(&original, &encoded) =>
-                entry.pickle_equal += 1,
+            RoundTrip::Different { reason: "body", original, encoded } if pickle_equal(&original, &encoded) => {
+                entry.pickle_equal += 1
+            }
             RoundTrip::Different { reason, original, encoded } => {
                 entry.different += 1;
                 entry.example.get_or_insert_with(|| format!("id 0x{id:02X}, {reason}: read {} encoded {}\n    {}",
