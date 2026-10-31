@@ -1,4 +1,5 @@
-//! A vehicle's movement, driven by the client's `vehicle_moveWith` flags. The real
+//! A vehicle as the server simulates it: its hull driven by the client's
+//! `vehicle_moveWith` flags, its turret turning toward what the client aims at. The real
 //! server simulates the vehicle's physics and streams the result; this is a stand-in
 //! that moves and turns at the vehicle's limits and rests on the terrain, with no
 //! collision, slope resistance or engine model.
@@ -37,9 +38,35 @@ pub struct MotionLimits {
     pub rotation_speed: f32,
 }
 
-/// A moving vehicle.
+/// A live vehicle: its hull and its turret.
 #[derive(Debug, Clone)]
-pub struct VehicleMotion {
+pub struct Vehicle {
+    pub hull: Hull,
+    pub turret: Turret,
+}
+
+impl Vehicle {
+
+    pub fn new(position: Vec3, direction: Vec3, limits: MotionLimits, aiming: AimingDef) -> Self {
+        Self { hull: Hull::new(position, direction, limits), turret: Turret::new(aiming) }
+    }
+
+    /// Advance by `dt` seconds: the hull moves and rests on the terrain, if any, then the
+    /// turret turns. Returns whether the hull moved or turned.
+    pub fn step(&mut self, dt: f32, terrain: Option<&Terrain>) -> bool {
+        let moved = self.hull.step(dt);
+        if let Some(terrain) = terrain.filter(|_| moved) {
+            self.hull.settle(terrain);
+        }
+        self.turret.step(dt, &self.hull);
+        moved
+    }
+
+}
+
+/// A vehicle's hull, moving as the client drives it.
+#[derive(Debug, Clone)]
+pub struct Hull {
     pub position: Vec3,
     /// Roll, pitch and yaw, in radians, the order position updates carry them. A yaw
     /// of 0 faces +Z, and turning right increases it.
@@ -53,7 +80,7 @@ pub struct VehicleMotion {
     pub limits: MotionLimits,
 }
 
-impl VehicleMotion {
+impl Hull {
 
     pub fn new(position: Vec3, direction: Vec3, limits: MotionLimits) -> Self {
         Self { position, direction, speed: 0.0, yaw_rate: 0.0, flags: 0, limits }
@@ -79,7 +106,7 @@ impl VehicleMotion {
         }
     }
 
-    /// Advance by `dt` seconds. Returns whether the vehicle moved or turned.
+    /// Advance by `dt` seconds. Returns whether the hull moved or turned.
     pub fn step(&mut self, dt: f32) -> bool {
 
         use movement_flag::*;
@@ -105,6 +132,20 @@ impl VehicleMotion {
 
     }
 
+    /// The vehicle's `engineMode`, which the client's track scroll follows: idle (1)
+    /// without flags, accelerating (3) until at the speed the flags ask for, then
+    /// cruising (2), and the flags themselves.
+    pub fn engine_mode(&self) -> [u8; 2] {
+        let mode = if self.flags == 0 {
+            1
+        } else if (self.target_speed() - self.speed).abs() > 0.01 {
+            3
+        } else {
+            2
+        };
+        [mode, self.flags]
+    }
+
     /// The hull's orientation and its tracks' speeds, as the avatar's
     /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
     /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
@@ -126,7 +167,7 @@ impl VehicleMotion {
     }
 
     /// Rest on the terrain: at its height, rolled and pitched with its slope. Off the
-    /// terrain, the vehicle stays as it is.
+    /// terrain, the hull stays as it is.
     pub fn settle(&mut self, terrain: &Terrain) {
 
         let height = |offset: Vec3| {
@@ -164,6 +205,11 @@ pub struct Turret {
     pub pitch: f32,
     target: Aim,
     aiming: AimingDef,
+    /// How fast the turret turned in the last step, in rad/s.
+    yaw_rate: f32,
+    /// The dispersion as a factor of the gun's base one, shrinking back to its ideal
+    /// over the aiming time.
+    dispersion_factor: f32,
 }
 
 /// What the turret turns toward.
@@ -180,7 +226,7 @@ enum Aim {
 impl Turret {
 
     pub fn new(aiming: AimingDef) -> Self {
-        Self { yaw: 0.0, pitch: 0.0, target: Aim::Angles(0.0, 0.0), aiming }
+        Self { yaw: 0.0, pitch: 0.0, target: Aim::Angles(0.0, 0.0), aiming, yaw_rate: 0.0, dispersion_factor: 1.0 }
     }
 
     /// Turn toward a point in the world.
@@ -193,26 +239,58 @@ impl Turret {
         self.target = Aim::Angles(yaw, pitch);
     }
 
-    /// Advance by `dt` seconds, the vehicle being at the given position and yaw.
-    pub fn step(&mut self, dt: f32, position: Vec3, hull_yaw: f32) {
+    /// Advance by `dt` seconds on the given hull, already advanced: turn toward the aim,
+    /// then update the dispersion.
+    pub fn step(&mut self, dt: f32, hull: &Hull) {
         let (yaw, pitch) = match self.target {
             Aim::Point(point) => {
-                let to = point - position;
+                let to = point - hull.position;
                 let horizontal = (to.x * to.x + to.z * to.z).sqrt();
-                (to.x.atan2(to.z) - hull_yaw, -(to.y - GUN_HEIGHT).atan2(horizontal))
+                (to.x.atan2(to.z) - hull.direction.z, -(to.y - GUN_HEIGHT).atan2(horizontal))
             }
             Aim::Angles(yaw, pitch) => (yaw, pitch),
         };
         let max_yaw_step = self.aiming.turret_rotation_speed * dt;
-        self.yaw = wrap_angle(self.yaw + wrap_angle(yaw - self.yaw).clamp(-max_yaw_step, max_yaw_step));
+        let yaw_step = wrap_angle(yaw - self.yaw).clamp(-max_yaw_step, max_yaw_step);
+        self.yaw = wrap_angle(self.yaw + yaw_step);
+        self.yaw_rate = yaw_step.abs() / dt;
         let pitch = pitch.clamp(self.aiming.min_pitch.at(self.yaw), self.aiming.max_pitch.at(self.yaw));
         let max_pitch_step = self.aiming.gun_rotation_speed * dt;
         self.pitch += (pitch - self.pitch).clamp(-max_pitch_step, max_pitch_step);
+        self.step_dispersion(dt, hull);
+    }
+
+    /// The dispersion's part of a step, as the client's `getOwnVehicleShotDispersionAngle`
+    /// computes it: the ideal factor grows with the hull's speed, its turning and the
+    /// turret's turning, and the actual one jumps up to it but only shrinks back over the
+    /// aiming time. No crew, equipment or shot bonuses.
+    fn step_dispersion(&mut self, dt: f32, hull: &Hull) {
+        let movement = hull.speed * self.aiming.dispersion_movement;
+        let rotation = hull.yaw_rate * self.aiming.dispersion_rotation;
+        let turret = self.yaw_rate * self.aiming.dispersion_turret_rotation;
+        let ideal = (1.0 + movement * movement + rotation * rotation + turret * turret).sqrt();
+        self.dispersion_factor = if ideal >= self.dispersion_factor {
+            ideal
+        } else {
+            ideal + (self.dispersion_factor - ideal) * (-dt / self.aiming.aiming_time).exp()
+        };
+    }
+
+    /// Where the gun fires from and the shell's initial velocity, as the client's
+    /// `getCurShotPosition` gives them, and the current dispersion angle: what the
+    /// server's gun marker shows. The gun sits `GUN_HEIGHT` above the hull's origin and
+    /// the hull's tilt is left out.
+    pub fn gun_marker(&self, hull: &Hull) -> (Vec3, Vec3, f32) {
+        let yaw = hull.direction.z + self.yaw;
+        // Positive pitch is downward.
+        let direction = Vec3::new(yaw.sin() * self.pitch.cos(), -self.pitch.sin(), yaw.cos() * self.pitch.cos());
+        let position = hull.position + Vec3::new(0.0, GUN_HEIGHT, 0.0);
+        (position, direction * self.aiming.shot_speed, self.aiming.dispersion_angle * self.dispersion_factor)
     }
 
     /// The angles as the `gunAnglesPacked` property carries them, see `encodeGunAngles`:
     /// the yaw on 10 bits over a turn, the pitch on 6 bits over its absolute limits.
-    pub fn packed(&self) -> u16 {
+    pub fn gun_angles_packed(&self) -> u16 {
         use std::f32::consts::{PI, TAU};
         let yaw = ((1024.0 * (self.yaw + PI) / TAU).round() as u16) & 1023;
         let (min_pitch, max_pitch) = self.aiming.absolute_pitch_limits();
@@ -249,8 +327,8 @@ mod tests {
 
     use super::*;
 
-    fn chieftain() -> VehicleMotion {
-        VehicleMotion::new(Vec3::ZERO, Vec3::ZERO, MotionLimits {
+    fn chieftain() -> Hull {
+        Hull::new(Vec3::ZERO, Vec3::ZERO, MotionLimits {
             speed_forward: 40.0 / 3.6,
             speed_backward: 15.0 / 3.6,
             rotation_speed: 28f32.to_radians(),
@@ -259,32 +337,32 @@ mod tests {
 
     #[test]
     fn drives_forward_along_heading() {
-        let mut motion = chieftain();
-        motion.direction.z = 2.771;
-        motion.flags = movement_flag::FORWARD;
+        let mut hull = chieftain();
+        hull.direction.z = 2.771;
+        hull.flags = movement_flag::FORWARD;
         for _ in 0..100 {
-            motion.step(0.1);
+            hull.step(0.1);
         }
         // At top speed after accelerating, heading south-east as captured.
-        assert!((motion.speed - 40.0 / 3.6).abs() < 1e-3);
-        assert!(motion.position.x > 0.0 && motion.position.z < 0.0);
-        assert_eq!(motion.position.y, 0.0);
+        assert!((hull.speed - 40.0 / 3.6).abs() < 1e-3);
+        assert!(hull.position.x > 0.0 && hull.position.z < 0.0);
+        assert_eq!(hull.position.y, 0.0);
     }
 
     #[test]
     fn stops_and_turns() {
-        let mut motion = chieftain();
-        motion.flags = movement_flag::FORWARD;
-        motion.step(1.0);
-        motion.flags = movement_flag::ROTATE_RIGHT;
+        let mut hull = chieftain();
+        hull.flags = movement_flag::FORWARD;
+        hull.step(1.0);
+        hull.flags = movement_flag::ROTATE_RIGHT;
         for _ in 0..10 {
-            motion.step(0.1);
+            hull.step(0.1);
         }
-        assert_eq!(motion.speed, 0.0);
-        assert!((motion.direction.z - 28f32.to_radians()).abs() < 1e-4);
+        assert_eq!(hull.speed, 0.0);
+        assert!((hull.direction.z - 28f32.to_radians()).abs() < 1e-4);
         // Standing still with no input reports no movement.
-        motion.flags = 0;
-        assert!(!motion.step(0.1));
+        hull.flags = 0;
+        assert!(!hull.step(0.1));
     }
 
     fn chieftain_aiming() -> AimingDef {
@@ -294,37 +372,42 @@ mod tests {
             turret_rotation_speed: 30f32.to_radians(),
             gun_rotation_speed: 26f32.to_radians(),
             aiming_time: 2.1,
-            dispersion_turret_rotation: 0.0,
-            dispersion_after_shot: 0.0,
-            dispersion_movement: 0.0,
-            dispersion_rotation: 0.0,
+            dispersion_turret_rotation: 0.11f32.to_degrees(),
+            dispersion_after_shot: 4.0,
+            dispersion_movement: 0.14 * 3.6,
+            dispersion_rotation: 0.14f32.to_degrees(),
             min_pitch: curve(&[(0.0, -20.0), (1.0, -20.0)]),
             // 10° of depression at the front, -1° over the engine deck at the back.
             max_pitch: curve(&[(0.0, 10.0), (0.4, 10.0), (0.45, -1.0), (0.55, -1.0), (0.6, 10.0), (1.0, 10.0)]),
+            dispersion_angle: 0.0035,
+            shot_speed: 716.0,
+            shot_gravity: 6.28,
         }
     }
 
     #[test]
     fn turret_turns_toward_point() {
+        let mut hull = chieftain();
         let mut turret = Turret::new(chieftain_aiming());
         // Straight to the right of a hull facing +Z, level with the gun.
         turret.track(Vec3::new(100.0, GUN_HEIGHT, 0.0));
-        turret.step(1.0, Vec3::ZERO, 0.0);
+        turret.step(1.0, &hull);
         assert!((turret.yaw - 30f32.to_radians()).abs() < 1e-5);
         for _ in 0..10 {
-            turret.step(1.0, Vec3::ZERO, 0.0);
+            turret.step(1.0, &hull);
         }
         assert!((turret.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
         assert!(turret.pitch.abs() < 1e-5);
         // The point stays put in the world as the vehicle drives past it.
-        turret.step(1.0, Vec3::new(0.0, 0.0, 200.0), 0.0);
+        hull.position = Vec3::new(0.0, 0.0, 200.0);
+        turret.step(1.0, &hull);
         assert!(turret.yaw > std::f32::consts::FRAC_PI_2);
         // Yaw 0 and the middle of the pitch range, as `encodeGunAngles` packs them.
         turret.hold(0.0, -5f32.to_radians());
         for _ in 0..10 {
-            turret.step(1.0, Vec3::ZERO, 0.0);
+            turret.step(1.0, &hull);
         }
-        assert_eq!(turret.packed(), 512 << 6 | 32);
+        assert_eq!(turret.gun_angles_packed(), 512 << 6 | 32);
     }
 
     #[test]
@@ -332,24 +415,46 @@ mod tests {
         // A captured value, standing still after driving: yaw 2.7713, pitch and roll
         // near 0, both tracks at 1.76 m/s, the ignored last byte 0xaf.
         let captured: u64 = 0xaf5f5f813c00f875;
-        let mut motion = chieftain();
-        motion.direction = Vec3::new(0.0299, 0.0012, 2.7713);
-        motion.speed = 1.76;
-        assert_eq!(motion.aux_physics_data(), captured & 0x00ff_ffff_ffff_ffff);
+        let mut hull = chieftain();
+        hull.direction = Vec3::new(0.0299, 0.0012, 2.7713);
+        hull.speed = 1.76;
+        assert_eq!(hull.aux_physics_data(), captured & 0x00ff_ffff_ffff_ffff);
+    }
+
+    #[test]
+    fn dispersion_widens_then_shrinks_over_aiming_time() {
+        let mut hull = chieftain();
+        let mut turret = Turret::new(chieftain_aiming());
+        hull.speed = 10.0;
+        turret.step(0.1, &hull);
+        let moving = turret.dispersion_factor;
+        assert!(moving > 1.0);
+        hull.speed = 0.0;
+        // After one aiming time, the excess shrinks by e.
+        for _ in 0..21 {
+            turret.step(0.1, &hull);
+        }
+        assert!(((turret.dispersion_factor - 1.0) - (moving - 1.0) / std::f32::consts::E).abs() < 1e-3);
+        // Aimed straight ahead, the shell leaves at the shot speed.
+        let (position, velocity, angle) = turret.gun_marker(&hull);
+        assert_eq!(position, Vec3::new(0.0, GUN_HEIGHT, 0.0));
+        assert!((velocity - Vec3::new(0.0, 0.0, 716.0)).length() < 1e-3);
+        assert!((angle - 0.0035 * turret.dispersion_factor).abs() < 1e-6);
     }
 
     #[test]
     fn gun_depression_depends_on_turret_yaw() {
+        let hull = chieftain();
         let mut turret = Turret::new(chieftain_aiming());
         // Far below, in front then behind.
         turret.track(Vec3::new(0.0, -100.0, 10.0));
         for _ in 0..10 {
-            turret.step(1.0, Vec3::ZERO, 0.0);
+            turret.step(1.0, &hull);
         }
         assert!((turret.pitch - 10f32.to_radians()).abs() < 1e-5);
         turret.track(Vec3::new(0.0, -100.0, -10.0));
         for _ in 0..20 {
-            turret.step(1.0, Vec3::ZERO, 0.0);
+            turret.step(1.0, &hull);
         }
         assert!((turret.pitch + 1f32.to_radians()).abs() < 1e-5);
     }

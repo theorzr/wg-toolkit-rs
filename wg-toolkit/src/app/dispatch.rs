@@ -103,6 +103,13 @@ impl ScriptDispatch {
         Some((type_id, self.entity_from_id(type_id)?))
     }
 
+    /// The component type id an NRL `DynComponent` node carries for a dynamic component of
+    /// the given type id, the reverse of [`Self::component_from_nrl_id`].
+    pub fn component_nrl_id(&self, type_id: u16) -> Option<u16> {
+        let index = self.nrl_components.iter().position(|&t| t == type_id)?;
+        Some((self.script.entities.len() + 1 + index) as u16)
+    }
+
     /// Look up an entity's dispatch tables by its wire type id (1-based -- see
     /// [`crate::script::Entity::id`]). Returns `None` for a type id out of range,
     /// including `0` (never a valid entity id), instead of panicking.

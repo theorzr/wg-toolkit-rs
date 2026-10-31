@@ -547,6 +547,14 @@ impl App {
                     writer.write(property.clone(), &dispatch.properties[..])?;
                 }
             }
+            // As the real server sends updates: the record goes to the client's NRL buffer,
+            // then a flag applies it. The client rejects them as `NrlUpdateNode` elements.
+            for update in &vehicle.nrl_updates {
+                let mut fragment = update.node_id.to_be_bytes().to_vec();
+                fragment.extend_from_slice(&update.payload);
+                writer.write_simple(client::element::NrlData { fragment })?;
+                writer.write_simple(client::element::NrlUpdateNodeFlag)?;
+            }
             if let Some((type_id, properties)) = &vehicle.player_properties {
                 let dispatch = self.dispatch.entity_from_id(*type_id)
                     .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
@@ -841,6 +849,8 @@ pub struct TickVehicle {
     /// The player entity's properties about its vehicle, `ownVehicleAuxPhysicsData`
     /// say, with the player entity's type.
     pub player_properties: Option<(u16, Vec<client::element::EntityProperty>)>,
+    /// Updates to the vehicle's components, its server gun marker say.
+    pub nrl_updates: Vec<client::element::NrlUpdateNode>,
 }
 
 /// One entity this app has created: its wire type id, its data (a [`Value::Dict`]

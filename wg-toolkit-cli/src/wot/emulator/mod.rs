@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::io;
 
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
-use wgtk::app::client::element::{ChangedProperties, EntityProperty, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
+use wgtk::app::client::element::{ChangedProperties, EntityProperty, NrlIdList, NrlUpdateNode, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
 use wgtk::script::{PythonValue, StringValue};
 use wgtk::util::io::serde_pickle_ser_options;
 use flate2::write::ZlibEncoder;
@@ -33,7 +33,7 @@ use wgtk::script::Value;
 
 use account::AccountData;
 use capture::{Answer, CapturedSession};
-use physics::{MotionLimits, Turret, VehicleMotion};
+use physics::{MotionLimits, Vehicle};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, VehicleDef};
@@ -178,7 +178,7 @@ struct BaseThread {
     /// Clients told to switch base app for their battle, by the session key they will
     /// log in again with, with the IP they will come from, their blowfish key and
     /// their vehicle.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Option<PlayerVehicle>)>,
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Option<VehicleConfig>)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
     battle_clients: HashMap<SocketAddr, BattleClient>,
 }
@@ -186,8 +186,8 @@ struct BaseThread {
 /// A client connected for a battle.
 #[derive(Debug)]
 struct BattleClient {
-    /// Its vehicle, the captured one when `None`.
-    vehicle: Option<PlayerVehicle>,
+    /// Its vehicle's configuration, the captured vehicle's when `None`.
+    config: Option<VehicleConfig>,
     /// When its game time started, at 0: the battle's clock, which arena periods end on.
     joined: Instant,
     /// The ticks sent to it, the first being tick 0.
@@ -198,13 +198,17 @@ struct BattleClient {
     driven: Option<DrivenVehicle>,
 }
 
-/// A battle client's vehicle, as the server simulates it.
+/// A battle client's vehicle: the vehicle the server simulates, and how the client
+/// knows it.
 #[derive(Debug)]
 struct DrivenVehicle {
     id_alias: u8,
     entity_type_id: u16,
-    motion: VehicleMotion,
-    turret: Turret,
+    vehicle: Vehicle,
+    /// The node of its `GunMarkerComponent`'s `gunMarker` property, once created.
+    gun_marker_node: Option<u16>,
+    /// The `engineMode` last sent, sent again only once it changes.
+    engine_mode: Option<[u8; 2]>,
 }
 
 impl BattleClient {
@@ -345,10 +349,10 @@ impl BaseThread {
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        let vehicle = self.player_vehicle(vehicle_id)
+        let config = self.vehicle_config(vehicle_id)
             .inspect_err(|e| warn!(%addr, "Failed to read vehicle {vehicle_id}, the captured one is used: {e}"))
             .ok();
-        self.pending_switches.insert(session_key, (addr.ip(), blowfish, vehicle));
+        self.pending_switches.insert(session_key, (addr.ip(), blowfish, config));
         self.app.switch_base_app(addr, base_addr, true)?;
         self.players.remove(&addr);
         info!(%addr, "Arena created, switching to {base_addr}");
@@ -394,16 +398,16 @@ impl BaseThread {
 
     }
 
-    /// The vehicle of the given inventory id: its descriptor, crew and setups from the
-    /// account, its health from the game's definitions.
-    fn player_vehicle(&self, vehicle_id: i64) -> io::Result<PlayerVehicle> {
+    /// The configuration of the vehicle of the given inventory id: its descriptor, crew
+    /// and setups from the account, the rest from the game's definitions.
+    fn vehicle_config(&self, vehicle_id: i64) -> io::Result<VehicleConfig> {
         let account = self.account.as_ref().ok_or_else(|| invalid_data("no account data"))?;
         let descr = account.vehicle_descr(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?.to_vec();
         let decoded = VehicleDescr::decode(&descr).map_err(|e| invalid_data(&e.to_string()))?;
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
         let def = VehicleDef::load_by_id(&fs, decoded.nation, decoded.type_id)?;
         info!("Battle vehicle {vehicle_id}: {}, {} health", def.name, def.max_health);
-        Ok(PlayerVehicle {
+        Ok(VehicleConfig {
             descr,
             max_health: def.max_health,
             crew: account.crew_descrs(vehicle_id).into_iter().map(<[u8]>::to_vec).collect(),
@@ -479,8 +483,8 @@ impl BaseThread {
                     *value = with_int(value, handle.entity_id().into());
                 }
             }
-            let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.as_ref());
-            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, vehicle)?;
+            let config = self.battle_clients.get(&addr).and_then(|client| client.config.as_ref());
+            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, config)?;
             self.app.enter_aoi(addr, arena.entity_id, NO_ID_ALIAS)?;
             self.app.create_entity_detailed(addr, arena.entity_id, *type_id, Vec3::ZERO, Vec3::ZERO, &properties)?;
             self.app.nrl_create_node(addr, stream)?;
@@ -499,8 +503,8 @@ impl BaseThread {
         let Some(entity) = battle.vehicle_entity.as_ref().filter(|e| e.entity_id == entity_id) else { return Ok(()) };
 
         // The vehicle belongs to our avatar, and is the one the client went to battle with.
-        let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.clone());
-        let vehicle = vehicle.as_ref();
+        let config = self.battle_clients.get(&addr).and_then(|client| client.config.clone());
+        let config = config.as_ref();
         let avatar_id = self.players.get(&addr).map(|handle| handle.entity_id());
         let mut entity = entity.clone();
         if let Some(properties) = &battle.vehicle_properties {
@@ -511,8 +515,8 @@ impl BaseThread {
                     _ => {}
                 }
             }
-            if let Some(vehicle) = vehicle {
-                vehicle.apply_to_entity(&mut properties);
+            if let Some(config) = config {
+                config.apply_to_entity(&mut properties);
             }
             let dispatch = self.app.dispatch().entity_from_id(entity.entity_type_id)
                 .ok_or_else(|| invalid_data("unknown vehicle entity type"))?;
@@ -524,28 +528,38 @@ impl BaseThread {
         if let (Some(alias), Some(position)) = (battle.vehicle_alias, &battle.vehicle_position) {
             self.app.update_position_detailed(addr, alias, position.position, position.direction)?;
             // From there on it moves as the client drives it.
-            if let (Some(client), Some(vehicle)) = (self.battle_clients.get_mut(&addr), vehicle) {
+            if let (Some(client), Some(config)) = (self.battle_clients.get_mut(&addr), config) {
                 client.driven = Some(DrivenVehicle {
                     id_alias: alias,
                     entity_type_id: entity.entity_type_id,
-                    motion: VehicleMotion::new(position.position, position.direction, vehicle.limits),
-                    turret: Turret::new(vehicle.aiming.clone()),
+                    vehicle: Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()),
+                    gun_marker_node: None,
+                    engine_mode: None,
                 });
             }
         }
         if let Some(update) = &battle.vehicle_update {
             let mut update = update.clone();
-            if let Some(vehicle) = vehicle {
-                vehicle.apply_to_update(&mut update);
+            if let Some(config) = config {
+                config.apply_to_update(&mut update);
             }
             self.app.update_entity(addr, entity_id, entity.entity_type_id, update)?;
         }
 
         // Its `OwnVehicle` component, under an entity node of its own: the client only
         // turns its turret once it knows how fast it can.
-        if let (Some(component), Some(vehicle)) = (&battle.own_vehicle, vehicle) {
-            let stream = own_vehicle(self.app.dispatch(), component, entity_id, vehicle)?;
+        // Its `GunMarkerComponent` too, beside it, for the client's server reticle: in
+        // an element of its own, the client reading no further than the first component
+        // of one.
+        if let (Some(component), Some(config)) = (&battle.own_vehicle, config) {
+            let stream = own_vehicle(self.app.dispatch(), component, entity_id, config)?;
+            let entity_node = stream.messages[0].node_id;
             self.app.nrl_create_node(addr, stream)?;
+            let (message, property_node) = gun_marker_component(self.app.dispatch(), entity_node)?;
+            self.app.nrl_create_node(addr, NrlStream { messages: vec![message], rest: Vec::new() })?;
+            if let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|client| client.driven.as_mut()) {
+                driven.gun_marker_node = Some(property_node);
+            }
         }
 
         Ok(())
@@ -605,31 +619,49 @@ impl BaseThread {
             while Instant::now() >= next_tick {
                 next_tick += TICK;
                 let avatar_type_id = self.app.dispatch().entity_from_name("Avatar").map(|(type_id, _)| type_id);
+                let gun_marker_ty = self.app.dispatch().entity_from_name("GunMarkerComponent")
+                    .and_then(|(_, component)| component.properties.first())
+                    .map(|property| property.ty.clone());
                 for (&addr, client) in &mut self.battle_clients {
                     let tick = client.ticks as u8;
                     client.ticks = client.ticks.wrapping_add(1);
                     let vehicle = client.driven.as_mut().map(|driven| {
-                        let DrivenVehicle { id_alias, entity_type_id, motion, turret } = driven;
-                        if motion.step(TICK.as_secs_f32()) {
-                            if let Some(terrain) = &self.terrain {
-                                motion.settle(terrain);
+                        let DrivenVehicle { id_alias, entity_type_id, vehicle, gun_marker_node, engine_mode } = driven;
+                        vehicle.step(TICK.as_secs_f32(), self.terrain.as_ref());
+                        let Vehicle { hull, turret } = vehicle;
+                        let gun_marker = gun_marker_node.zip(gun_marker_ty.as_ref())
+                            .map(|(node, ty)| gun_marker_update(ty, node, turret.gun_marker(hull)));
+                        let nrl_updates = match gun_marker {
+                            Some(Ok(update)) => vec![update],
+                            Some(Err(e)) => {
+                                warn!(%addr, "Failed to encode the gun marker: {e}");
+                                Vec::new()
                             }
-                        }
-                        turret.step(TICK.as_secs_f32(), motion.position, motion.direction.z);
+                            None => Vec::new(),
+                        };
                         // Every tick, to compare with what the client simulates.
                         debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
-                            motion.position, motion.direction, motion.speed, turret.yaw, turret.pitch);
-                        let gun_angles = EntityProperty { name: "gunAnglesPacked".into(), value: Value::UInt16(turret.packed()) };
+                            hull.position, hull.direction, hull.speed, turret.yaw, turret.pitch);
+                        let mut properties = vec![EntityProperty { name: "gunAnglesPacked".into(), value: Value::UInt16(turret.gun_angles_packed()) }];
+                        let mode = hull.engine_mode();
+                        if *engine_mode != Some(mode) {
+                            *engine_mode = Some(mode);
+                            properties.push(EntityProperty {
+                                name: "engineMode".into(),
+                                value: Value::Seq(mode.iter().map(|&n| Value::UInt8(n)).collect()),
+                            });
+                        }
                         base::TickVehicle {
                             id_alias: *id_alias,
-                            position: motion.position,
-                            direction: motion.direction,
-                            properties: Some((*entity_type_id, vec![gun_angles])),
+                            position: hull.position,
+                            direction: hull.direction,
+                            properties: Some((*entity_type_id, properties)),
                             // What the client aims from, so it must turn with the hull.
                             player_properties: avatar_type_id.map(|type_id| (type_id, vec![EntityProperty {
                                 name: "ownVehicleAuxPhysicsData".into(),
-                                value: Value::UInt64(motion.aux_physics_data()),
+                                value: Value::UInt64(hull.aux_physics_data()),
                             }])),
+                            nrl_updates,
                         }
                     });
                     if let Err(e) = self.app.tick(addr, tick, vehicle.as_ref()) {
@@ -663,7 +695,7 @@ impl BaseThread {
                 base::Event::Login(login) => {
 
                     // A client coming back for its battle, see `start_battle`.
-                    if let Some((ip, blowfish, vehicle)) = self.pending_switches.remove(&login.login_key) {
+                    if let Some((ip, blowfish, config)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
                             continue;
@@ -675,7 +707,7 @@ impl BaseThread {
                                 warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
                             }
                         }
-                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), ticks: 0, next_period: None, driven: None });
+                        self.battle_clients.insert(login.addr, BattleClient { config, joined: Instant::now(), ticks: 0, next_period: None, driven: None });
                         continue;
                     }
 
@@ -754,7 +786,7 @@ impl BaseThread {
                             match self.battle_clients.get_mut(&event.addr).and_then(|c| c.driven.as_mut()) {
                                 Some(driven) => {
                                     info!(addr = %event.addr, "Moving with flags {flags:#04x}");
-                                    driven.motion.flags = flags;
+                                    driven.vehicle.hull.flags = flags;
                                 }
                                 None => warn!(addr = %event.addr, "Moving with flags {flags:#04x}, but the vehicle can't move"),
                             }
@@ -763,12 +795,13 @@ impl BaseThread {
                             if let Some(driven) = self.battle_clients.get_mut(&event.addr).and_then(|c| c.driven.as_mut()) {
                                 match (&**name, &args[..]) {
                                     ("trackRelativePointWithGun", [Value::Vector3(point)]) => {
-                                        debug!(addr = %event.addr, "Tracking {point:?} from {:?}", driven.motion.position);
-                                        driven.turret.track(driven.motion.position + *point);
+                                        let Vehicle { hull, turret } = &mut driven.vehicle;
+                                        debug!(addr = %event.addr, "Tracking {point:?} from {:?}", hull.position);
+                                        turret.track(hull.position + *point);
                                     }
                                     (_, [Value::Float32(yaw), Value::Float32(pitch)]) => {
                                         debug!(addr = %event.addr, "Holding the gun at yaw {yaw:.3}, pitch {pitch:.3}");
-                                        driven.turret.hold(*yaw, *pitch);
+                                        driven.vehicle.turret.hold(*yaw, *pitch);
                                     }
                                     _ => warn!(addr = %event.addr, "Unexpected {name} arguments: {args:?}"),
                                 }
@@ -870,9 +903,10 @@ fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[Vehicle
 
 }
 
-/// The vehicle a client went to battle with, as the battle tells about it.
+/// The configuration of the vehicle a client went to battle with: what the battle tells
+/// about it, and what the server simulates it with.
 #[derive(Debug, Clone)]
-struct PlayerVehicle {
+struct VehicleConfig {
     descr: Vec<u8>,
     max_health: u32,
     /// Its crew's compact descriptors, in crew order.
@@ -884,7 +918,7 @@ struct PlayerVehicle {
     aiming: AimingDef,
 }
 
-impl PlayerVehicle {
+impl VehicleConfig {
 
     /// Its entry in the arena's `vehiclesInfo`.
     fn apply_to_arena_entry(&self, fields: &mut BTreeMap<Arc<str>, Value>) {
@@ -957,7 +991,7 @@ fn invalid_data(message: &str) -> io::Error {
 
 /// The arena info entity's NRL tree, its `vehiclesInfo` reduced to the given vehicle's,
 /// encoded again.
-fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, vehicle: Option<&PlayerVehicle>) -> io::Result<NrlStream> {
+fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, config: Option<&VehicleConfig>) -> io::Result<NrlStream> {
     let mut messages = captured.to_vec();
     for message in &mut messages {
         let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, data: Some(data), .. }, .. } = &mut message.body else {
@@ -967,8 +1001,8 @@ fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id
             NrlChild::Property { name, value: Value::Seq(entries) } if &*name == "vehiclesInfo" => {
                 let entries = entries.into_iter().filter_map(|entry| match entry {
                     Value::Dict(mut fields) if fields.get("vehicleID").and_then(Value::as_i64) == Some(vehicle_id.into()) => {
-                        if let Some(vehicle) = vehicle {
-                            vehicle.apply_to_arena_entry(&mut fields);
+                        if let Some(config) = config {
+                            config.apply_to_arena_entry(&mut fields);
                         }
                         Some(Value::Dict(fields))
                     }
@@ -989,7 +1023,7 @@ const NRL_ROOT_NODE: u16 = 1;
 /// The vehicle's entity node, then its captured `OwnVehicle` component with the
 /// vehicle's own `targetingInfo`: turret and gun at rest, their speeds and dispersion
 /// factors from its definitions, without the crew's and equipment's bonuses.
-fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32, vehicle: &PlayerVehicle) -> io::Result<NrlStream> {
+fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32, config: &VehicleConfig) -> io::Result<NrlStream> {
 
     let NrlBody::CreateNode { parent_id, node: NrlNode::DynComponent { component_type_id, data: Some(data), .. } } = &captured.body else {
         return Err(invalid_data("the captured OwnVehicle message creates no component"));
@@ -999,7 +1033,7 @@ fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32,
         body: NrlBody::CreateNode { parent_id: NRL_ROOT_NODE, node: NrlNode::Entity { entity_id } },
     };
 
-    let aiming = &vehicle.aiming;
+    let aiming = &config.aiming;
     let children = data.children.iter().cloned().map(|(id, child)| match child {
         NrlChild::Property { name, value: Value::Dict(mut fields) } if &*name == "targetingInfo" => {
             for (field, value) in fields.iter_mut() {
@@ -1029,6 +1063,57 @@ fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32,
 
     Ok(NrlStream { messages: vec![entity, component], rest: Vec::new() })
 
+}
+
+/// The NRL node of the vehicle's `GunMarkerComponent`, its children following: above
+/// the ids the captured trees use, up to about 2200.
+const GUN_MARKER_NODE: u16 = 0x2000;
+
+/// Create the vehicle's `GunMarkerComponent` under its entity node, its `gunMarker`
+/// None: its children are that property then the trailing child, both present, as
+/// the components whose properties the real server updates start. The client has no
+/// node for an absent property, and misreads an update to it. Returns the message and
+/// the property's node, which updates go to.
+fn gun_marker_component(dispatch: &ScriptDispatch, entity_node: u16) -> io::Result<(NrlMessage, u16)> {
+    let (type_id, _) = dispatch.entity_from_name("GunMarkerComponent")
+        .ok_or_else(|| invalid_data("no GunMarkerComponent"))?;
+    let nrl_type_id = dispatch.component_nrl_id(type_id)
+        .ok_or_else(|| invalid_data("GunMarkerComponent is not a network component"))?;
+    let base = u32::from(GUN_MARKER_NODE);
+    let (property, trailing) = (base + 1, base + 2);
+    let message = NrlMessage {
+        node_id: GUN_MARKER_NODE,
+        body: NrlBody::CreateNode {
+            parent_id: entity_node,
+            node: NrlNode::DynComponent {
+                component_type_id: nrl_type_id,
+                name: String::new(),
+                children: NrlIdList::new(base, vec![property, trailing], Some(vec![0b11])),
+                data: Some(NrlComponentData::encode(dispatch, nrl_type_id, vec![
+                    (property, NrlChild::Property { name: Arc::from("gunMarker"), value: Value::None }),
+                    (trailing, NrlChild::Trailing),
+                ])?),
+            },
+        },
+    };
+    Ok((message, property as u16))
+}
+
+/// Set the `gunMarker` property at the given node: where the gun fires from, the
+/// shell's velocity and the dispersion angle. Unlike the properties the captured server
+/// updates, `[kind][packed length][value]` (see `NrlTree::decode_update`), this one is
+/// the value alone: its `ClientCompositePropertyNode::update` has the node's flag at
+/// `+0x5c` set and streams the whole value instead.
+fn gun_marker_update(ty: &wgtk::script::Ty, node_id: u16, (position, velocity, dispersion): (Vec3, Vec3, f32)) -> io::Result<NrlUpdateNode> {
+    use wgtk::net::codec::Codec;
+    let value = Value::Dict(BTreeMap::from([
+        (Arc::from("gunPosition"), Value::Vector3(position)),
+        (Arc::from("shotVector"), Value::Vector3(velocity)),
+        (Arc::from("dispersion"), Value::Float32(dispersion)),
+    ]));
+    let mut payload = Vec::new();
+    value.write(&mut payload, ty)?;
+    Ok(NrlUpdateNode { node_id, payload, python_value: None })
 }
 
 /// The id alias given to an entity entering the area of interest without one: entities

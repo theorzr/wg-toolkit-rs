@@ -60,6 +60,12 @@ pub struct AimingDef {
     /// and the deepest depression for each turret yaw.
     pub min_pitch: PitchCurve,
     pub max_pitch: PitchCurve,
+    /// The base dispersion angle, in radians: `atan(shotDispersionRadius / 100)`.
+    pub dispersion_angle: f32,
+    /// The first shell's speed in m/s and gravity in m/s², scaled by the game's
+    /// `projectileSpeedFactor` as the client's item loader does.
+    pub shot_speed: f32,
+    pub shot_gravity: f32,
 }
 
 impl AimingDef {
@@ -218,6 +224,17 @@ impl VehicleDef {
             .find_map(|gun| child_string(child_element(gun, "pitchLimits")?, limit))
             .and_then(PitchCurve::parse)
             .ok_or_else(|| invalid(format!("no valid {limit} for gun {gun_name}")));
+        // The first shell's flight, scaled as every shell is, see `gun_readers.readShot`.
+        let projectile_speed_factor = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?
+            .get_child("miscParams").and_then(|params| child_float(params.as_element()?, "projectileSpeedFactor"))
+            .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
+        let first_shot = child_element(gun_def, "shots")
+            .and_then(|shots| shots.iter_children_all().next())
+            .and_then(|(_, shot)| shot.as_element())
+            .ok_or_else(|| invalid(format!("gun {gun_name} has no shot")))?;
+        let shot_float = |name: &str| child_float(first_shot, name)
+            .ok_or_else(|| invalid(format!("gun {gun_name}'s first shot has no {name}")));
+
         let aiming = AimingDef {
             turret_rotation_speed: child_float(turret, "rotationSpeed")
                 .ok_or_else(|| invalid(format!("{name} has no turret rotation speed")))?
@@ -230,6 +247,9 @@ impl VehicleDef {
             dispersion_rotation: chassis_float(&["shotDispersionFactors", "vehicleRotation"])?.to_degrees(),
             min_pitch: pitch_curve("minPitch")?,
             max_pitch: pitch_curve("maxPitch")?,
+            dispersion_angle: (gun_float(&["shotDispersionRadius"])? / 100.0).atan(),
+            shot_speed: shot_float("speed")? * projectile_speed_factor,
+            shot_gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
         };
 
         let crew_roles = child_element(&vehicle, "crew")
