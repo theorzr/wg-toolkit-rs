@@ -164,7 +164,7 @@ impl App {
             .ok_or_else(|| io_invalid_data(format_args!("ping should be a request")))?;
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple_reply(ping.element, request_id);
+        self.bundle.element_writer().write_simple_reply(ping.element, request_id)?;
         self.protocol.off_channel(addr).prepare(&mut self.bundle, false);
         self.socket.send_bundle_without_encryption(&self.bundle, addr)?;
 
@@ -331,7 +331,7 @@ impl App {
     fn send_response(&mut self, response: PendingResponse) -> io::Result<()> {
 
         self.bundle.clear();
-        self.bundle.element_writer().write_reply(response.inner, response.request.request_id, &*response.request.blowfish);
+        self.bundle.element_writer().write_reply(response.inner, response.request.request_id, &*response.request.blowfish)?;
 
         self.protocol.off_channel(response.addr).prepare(&mut self.bundle, false);
         self.socket.send_bundle_without_encryption(&self.bundle, response.addr)?;

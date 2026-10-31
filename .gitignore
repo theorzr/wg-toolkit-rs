@@ -3,4 +3,5 @@
 Cargo.lock
 /proxy-dump*
 /proxy-trace.jsonl*
+/replay-trace.jsonl*
 /re-work

@@ -5,7 +5,7 @@ use std::fmt;
 
 use tracing::warn;
 
-use crate::util::io::{WgReadExt, WgWriteExt, IoCounter};
+use crate::util::io::{WgReadExt, WgWriteExt};
 use crate::net::element::ElementLength;
 use crate::util::AsciiFmt;
 
@@ -478,26 +478,26 @@ impl<'a> BundleElementWriter<'a> {
 
     /// Add an element to this bundle.
     #[inline]
-    pub fn write<E: Element<C>, C: ?Sized>(&mut self, element: E, config: &C) {
+    pub fn write<E: Element<C>, C: ?Sized>(&mut self, element: E, config: &C) -> io::Result<()> {
         self.write_raw(BundleElement { element, request_id: None }, config)
     }
 
     /// Add a simple element to this bundle. Such elements have no config.
     #[inline]
-    pub fn write_simple<E: Element<()>>(&mut self, element: E) {
+    pub fn write_simple<E: Element<()>>(&mut self, element: E) -> io::Result<()> {
         self.write(element, &())
     }
 
     /// Add a request element to this bundle, with a given request ID.
     #[inline]
-    pub fn write_request<E: Element<C>, C: ?Sized>(&mut self, element: E, request_id: u32, config: &C) {
+    pub fn write_request<E: Element<C>, C: ?Sized>(&mut self, element: E, request_id: u32, config: &C) -> io::Result<()> {
         self.write_raw(BundleElement { element, request_id: Some(request_id) }, config)
     }
 
     /// Add a request element to this bundle, with a given request ID. 
     /// Such elements have no config.
     #[inline]
-    pub fn write_simple_request<E: Element<()>>(&mut self, element: E, request_id: u32) {
+    pub fn write_simple_request<E: Element<()>>(&mut self, element: E, request_id: u32) -> io::Result<()> {
         self.write_request(element, request_id, &())
     }
 
@@ -507,22 +507,38 @@ impl<'a> BundleElementWriter<'a> {
     /// are always of  a 32-bit variable length and prefixed with the 
     /// request ID.
     #[inline]
-    pub fn write_reply<D: Codec<C>, C: ?Sized>(&mut self, data: D, request_id: u32, config: &C) {
+    pub fn write_reply<D: Codec<C>, C: ?Sized>(&mut self, data: D, request_id: u32, config: &C) -> io::Result<()> {
         self.write(Reply::new(request_id, data), config)
     }
 
     /// Add a reply element to this bundle, for a given request ID.
     /// Such elements have no config.
     #[inline]
-    pub fn write_simple_reply<D: Codec<()>>(&mut self, data: D, request_id: u32) {
+    pub fn write_simple_reply<D: Codec<()>>(&mut self, data: D, request_id: u32) -> io::Result<()> {
         self.write_reply(data, request_id, &())
     }
 
     /// Raw method to add an element to this bundle, given an ID, the 
     /// element and its config. With an optional request ID.
-    pub fn write_raw<E: Element<C>, C: ?Sized>(&mut self, element: BundleElement<E>, config: &C) {
+    ///
+    /// The element is encoded before anything is added to the bundle, so an element
+    /// that fails to encode returns its error and leaves the bundle as it was.
+    pub fn write_raw<E: Element<C>, C: ?Sized>(&mut self, element: BundleElement<E>, config: &C) -> io::Result<()> {
 
-        let elt_len_kind = element.element.write_length(config).unwrap();  // FIXME: NO UNWRAP!!
+        let elt_len_kind = element.element.write_length(config)?;
+        let mut elt_data = Vec::new();
+        let elt_id = element.element.write(&mut elt_data, config)?;
+        let elt_len = u32::try_from(elt_data.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "element larger than u32::MAX bytes"))?;
+
+        // A fixed-length element is sent without its length, so an encoder that disagrees
+        // with its declared length would shift every element after it.
+        if let ElementLength::Fixed(expected_len) = elt_len_kind {
+            if expected_len != elt_len {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!(
+                    "element 0x{elt_id:02X} has fixed length {expected_len} but encoded {elt_len} bytes")));
+            }
+        }
 
         // Allocate element's header, +1 for element's ID, +6 reply_id and link offset.
         // Using reserve exact so all the header is contiguous.
@@ -558,18 +574,15 @@ impl<'a> BundleElementWriter<'a> {
             
         }
 
-        // Write the actual element's content. For now we just unwrap the encode result,
-        // because no IO error should be produced by a BundleWriter.
-        let mut writer = IoCounter::new(BundleWriter::new(&mut *self.bundle));
-        let elt_id = element.element.write(&mut writer, config).unwrap();
-        let elt_len = u32::try_from(writer.count()).expect("too many bytes written at once, more that u32::MAX");
+        // Write the actual element's content, a bundle writer never fails.
+        BundleWriter::new(&mut *self.bundle).write_all(&elt_data).unwrap();
 
         // Finally write id and length, we can unwrap because we know that enough length is available.
         let header_len_slice = &mut self.bundle.packets[init_packet_index].slice_mut()[init_packet_elt_offset..];
         header_len_slice[0] = elt_id;
         // Early return if no oversize!
         if elt_len_kind.write(&mut header_len_slice[1..], elt_len).unwrap() {
-            return;
+            return Ok(());
         }
 
         // If we land here then we need to handle oversize length compression...
@@ -597,6 +610,8 @@ impl<'a> BundleElementWriter<'a> {
             *self.bundle.reserve_single() = moved_byte;
 
         }
+
+        Ok(())
 
     }
 
@@ -966,4 +981,117 @@ impl fmt::Debug for ReplyReader<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReplyReader").field("request_id", &self.1).finish()
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::net::element::{DebugElementFixed, DebugElementVariable8};
+
+    /// Fails to encode after writing some bytes, like a value that doesn't fit its type.
+    struct Failing;
+
+    impl Element<()> for Failing {
+
+        fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+            Ok(ElementLength::Variable16)
+        }
+
+        fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+            write.write_all(&[0xAA; 8])?;
+            Err(io::Error::new(io::ErrorKind::InvalidData, "cannot encode"))
+        }
+
+        fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+            unreachable!()
+        }
+
+        fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+            unreachable!()
+        }
+
+    }
+
+    /// Declares a fixed length but encodes something else.
+    struct WrongFixedLength;
+
+    impl Element<()> for WrongFixedLength {
+
+        fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+            Ok(ElementLength::Fixed(4))
+        }
+
+        fn write(&self, write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+            write.write_all(&[0; 3])?;
+            Ok(0x02)
+        }
+
+        fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+            unreachable!()
+        }
+
+        fn read(_read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+            unreachable!()
+        }
+
+    }
+
+    fn content(bundle: &Bundle) -> Vec<Vec<u8>> {
+        bundle.iter().map(|p| p.slice().to_vec()).collect()
+    }
+
+    #[test]
+    fn written_elements_read_back() {
+
+        let small = vec![1, 2, 3];
+        // Past Variable8's 0xFF, so the length takes the oversize path.
+        let oversized: Vec<u8> = (0..300).map(|i| i as u8).collect();
+
+        let mut bundle = Bundle::new();
+        let mut writer = bundle.element_writer();
+        writer.write_simple(DebugElementVariable8::<0x10> { data: small.clone() }).unwrap();
+        writer.write_simple(DebugElementVariable8::<0x11> { data: oversized.clone() }).unwrap();
+        writer.write_simple_request(DebugElementFixed::<0x12, 2> { data: [7, 8] }, 42).unwrap();
+
+        let mut reader = bundle.element_reader();
+
+        let Some(NextElementReader::Element(elt)) = reader.next() else { panic!("expected an element") };
+        assert_eq!(elt.read_simple::<DebugElementVariable8<0x10>>().unwrap().element.data, small);
+
+        let Some(NextElementReader::Element(elt)) = reader.next() else { panic!("expected an element") };
+        assert_eq!(elt.read_simple::<DebugElementVariable8<0x11>>().unwrap().element.data, oversized);
+
+        let Some(NextElementReader::Element(elt)) = reader.next() else { panic!("expected an element") };
+        let elt = elt.read_simple::<DebugElementFixed<0x12, 2>>().unwrap();
+        assert_eq!(elt.request_id, Some(42));
+        assert_eq!(elt.element.data, [7, 8]);
+
+        assert!(reader.next().is_none());
+
+    }
+
+    #[test]
+    fn failed_element_leaves_bundle_untouched() {
+
+        let mut bundle = Bundle::new();
+        bundle.element_writer().write_simple_request(DebugElementFixed::<0x10, 1> { data: [5] }, 1).unwrap();
+        let before = content(&bundle);
+
+        assert!(bundle.element_writer().write_request(Failing, 2, &()).is_err());
+        assert!(bundle.element_writer().write(WrongFixedLength, &()).is_err());
+        assert_eq!(content(&bundle), before);
+
+        // The request chain must be intact too: a later request still links from the first.
+        bundle.element_writer().write_simple_request(DebugElementFixed::<0x11, 1> { data: [6] }, 3).unwrap();
+        let mut reader = bundle.element_reader();
+        let Some(NextElementReader::Element(elt)) = reader.next() else { panic!("expected an element") };
+        assert_eq!(elt.read_simple::<DebugElementFixed<0x10, 1>>().unwrap().request_id, Some(1));
+        let Some(NextElementReader::Element(elt)) = reader.next() else { panic!("expected an element") };
+        assert_eq!(elt.read_simple::<DebugElementFixed<0x11, 1>>().unwrap().request_id, Some(3));
+        assert!(reader.next().is_none());
+
+    }
+
 }

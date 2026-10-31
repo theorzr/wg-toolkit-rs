@@ -253,12 +253,13 @@ impl SimpleElement for ResetEntities {
 /// a leading byte and a 2-byte field between `space_id` and `vehicle_id`. `packed_xz_scale` is
 /// constant per server configuration, identical across battles.
 ///
-/// `direction` is assumed to be 3 raw `f32`s (yaw/pitch/roll, BigWorld's conventional
-/// `Direction3D` layout); nothing establishes that beyond the values falling in a
-/// plausible radian range. There's also no generated per-entity "cell properties" struct
-/// yet (unlike `entity_data: Codec<()>` on [`CreateBasePlayer`], entities only have
-/// base-exposed properties modelled today), so the trailing property-dict stream is
-/// carried as a raw pre-encoded blob (`cell_data`) the caller must build.
+/// `direction` is BigWorld's `Direction3D`, streamed as roll, pitch then yaw
+/// (`network/basictypes.cpp`); in a live battle only the last one, the heading, is set.
+///
+/// The trailing `cell_data` is the player entity's cell-hosted, client-visible properties
+/// (`Witness::Witness` streams `FROM_CELL_TO_CLIENT_DATA`), which only the entity's type
+/// can decode, so it is kept raw here and decoded on demand with
+/// [`Self::read_cell_data`].
 #[derive(Debug, Clone)]
 pub struct CreateCellPlayer {
     /// Always `0` in observed traffic; meaning unknown.
@@ -270,18 +271,49 @@ pub struct CreateCellPlayer {
     /// The id of a distinct `Vehicle` entity, not the player's own base entity. A later
     /// `SelectEntity` targets this id for the vehicle's own property and method updates
     /// (see `wg-toolkit-cli`'s proxy `CreateCellPlayer` handling, which registers it).
-    /// The same value appears again inside `cell_data`, right after a constant marker
-    /// byte.
+    /// For an `Avatar`, the same value is its `playerVehicleID` property in `cell_data`.
     pub vehicle_id: u32,
     pub position: Vec3,
     /// The server's packed-XZ compression scale, needed by the client to decode any
     /// later packed-XZ position updates -- this project doesn't send those (no compressed
     /// `AvatarUpdate*` elements are implemented), so this value has no effect today.
     pub packed_xz_scale: f32,
-    /// Yaw/pitch/roll -- see the struct doc comment for why this encoding is unconfirmed.
+    /// Roll, pitch and yaw, in this order.
     pub direction: Vec3,
-    /// Raw pre-encoded cell-exposed property dict bytes -- see the struct doc comment.
+    /// The player entity's cell properties, encoded -- see [`Self::read_cell_data`].
     pub cell_data: Vec<u8>,
+}
+
+impl CreateCellPlayer {
+
+    /// Decode [`Self::cell_data`] against the player entity's own type: its cell-hosted,
+    /// client-visible properties, then a count byte, then those of its static
+    /// components. Bytes left over after that are an error, the layout did not fit.
+    pub fn read_cell_data(&self, dispatch: &EntityDispatch) -> io::Result<CellPlayerData> {
+        let mut read = &self.cell_data[..];
+        let properties = Value::read(&mut read, &dispatch.cell_data_ty)?;
+        let components_count = read.read_u8()?;
+        let components_properties = Value::read(&mut read, &dispatch.cell_components_data_ty)?;
+        if !read.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("{} bytes left after the cell data", read.len())));
+        }
+        Ok(CellPlayerData { properties, components_count, components_properties })
+    }
+
+}
+
+/// The decoded [`CreateCellPlayer::cell_data`].
+#[derive(Debug, Clone)]
+pub struct CellPlayerData {
+    /// The entity's own cell-hosted, client-visible properties, as a dict.
+    pub properties: Value,
+    /// Matches the number of the entity's static components in the one live sample (2,
+    /// for `Avatar`), which is also `CreateBasePlayer`'s `entity_components_count` for
+    /// that same entity, so which components it counts is not settled.
+    pub components_count: u8,
+    /// The static components' cell-hosted, client-visible properties, as one dict.
+    pub components_properties: Value,
 }
 
 impl SimpleCodec for CreateCellPlayer {

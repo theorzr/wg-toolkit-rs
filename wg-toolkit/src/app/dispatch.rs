@@ -57,7 +57,9 @@ impl ScriptDispatch {
                 cell_methods: build_method_table(&script.interfaces, &entity.interface, cell_methods_of, &script.static_components),
                 client_methods: build_method_table(&script.interfaces, &entity.interface, client_methods_of, &script.static_components),
                 properties: build_property_table(&script.interfaces, &entity.interface, &script.static_components),
-                data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface),
+                data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_base_property_exposed),
+                cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_cell_property_exposed),
+                cell_components_data_ty: build_components_data_ty(&mut script.tys, &script.interfaces, &entity.interface, &script.static_components, is_cell_property_exposed),
             });
         }
 
@@ -67,7 +69,9 @@ impl ScriptDispatch {
                 cell_methods: build_method_table(&script.interfaces, &component.interface, cell_methods_of, &[]),
                 client_methods: build_method_table(&script.interfaces, &component.interface, client_methods_of, &[]),
                 properties: build_property_table(&script.interfaces, &component.interface, &[]),
-                data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface),
+                data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_base_property_exposed),
+                cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_cell_property_exposed),
+                cell_components_data_ty: build_components_data_ty(&mut script.tys, &script.interfaces, &component.interface, &[], is_cell_property_exposed),
             });
         }
 
@@ -107,6 +111,12 @@ pub struct EntityDispatch {
     pub properties: Vec<PropertyDef>,
     /// The type describing this entity's `CreateBasePlayer` creation payload.
     pub data_ty: Ty,
+    /// The type describing this entity's own part of the `CreateCellPlayer` creation
+    /// payload.
+    pub cell_data_ty: Ty,
+    /// The type describing the static components' part of the `CreateCellPlayer` creation
+    /// payload, which follows [`Self::cell_data_ty`] and a count byte.
+    pub cell_components_data_ty: Ty,
 }
 
 /// One exposed method slot in a dynamically-computed, exposed-id-ordered method table --
@@ -192,6 +202,13 @@ fn is_property_exposed(property: &Property) -> bool {
 /// property-change broadcast can originate from either side.
 fn is_base_property_exposed(property: &Property) -> bool {
     matches!(property.flags, PropertyFlags::BaseAndClient)
+}
+
+/// The cell-hosted counterpart of [`is_base_property_exposed`]: client-visible and
+/// cell-hosted, BigWorld's `FROM_CELL_TO_CLIENT_DATA` domain that `Witness::Witness`
+/// streams into `CreateCellPlayer`'s `cell_data`.
+fn is_cell_property_exposed(property: &Property) -> bool {
+    matches!(property.flags, PropertyFlags::OwnClient | PropertyFlags::AllClients)
 }
 
 /// Return the fixed on-wire size of this type in bytes, or `None` if it has no fixed
@@ -505,31 +522,67 @@ fn build_property_table(
 
 }
 
-/// Build the [`Ty`] (always a [`TyKind::Dict`]) describing an entity's base creation
-/// payload (`CreateBasePlayer`'s `entity_data`): every *base-hosted*, client-visible
-/// property reachable through `implements` (see [`is_base_property_exposed`] -- cell-hosted
-/// properties arrive later, opaque, inside `CreateCellPlayer`'s `cell_data`), in plain
+/// Build the [`Ty`] (always a [`TyKind::Dict`]) describing an entity's own part of a
+/// creation payload: every property reachable through `implements` that `exposed`
+/// selects, either the *base-hosted* client-visible ones of `CreateBasePlayer`'s
+/// `entity_data` (see [`is_base_property_exposed`]) or the *cell-hosted* ones of
+/// `CreateCellPlayer`'s `cell_data` (see [`is_cell_property_exposed`]), in plain
 /// declaration order (recursed depth-first, NOT sorted by stream size -- unlike
 /// [`build_property_table`], this must match the nested-struct field order the wire's
 /// `Codec` actually walks, not the method/property *exposed id* table). Registers (and
 /// returns) a fresh anonymous type in `tys`.
-fn build_entity_data_ty(tys: &mut TySystem, interfaces: &[Interface], entity_interface: &Interface) -> Ty {
+fn build_entity_data_ty(
+    tys: &mut TySystem,
+    interfaces: &[Interface],
+    entity_interface: &Interface,
+    exposed: fn(&Property) -> bool,
+) -> Ty {
 
-    fn collect(interfaces: &[Interface], interface: &Interface, out: &mut Vec<TyDictProp>) {
-        for implement_name in &interface.implements {
-            collect(interfaces, find_interface(interfaces, implement_name), out);
-        }
-        for property in &interface.properties {
-            if is_base_property_exposed(property) {
-                out.push(TyDictProp { name: property.name.clone(), ty: property.ty.clone(), default: None });
-            }
+    let mut properties = Vec::new();
+    collect_data_props(interfaces, entity_interface, exposed, &mut properties);
+    tys.register(None, TyKind::Dict(TyDict { properties, allow_none: false }))
+
+}
+
+/// Build the [`Ty`] (always a [`TyKind::Dict`]) describing the static components' part of
+/// an entity's creation payload: the properties `exposed` selects of each static
+/// component targeting this entity, in component order, each in declaration order.
+///
+/// Only `CreateCellPlayer` is known to carry this part, after the entity's own properties
+/// and a count byte. Checked against a live `Avatar`: its two components'
+/// properties at default values account for the 17 bytes after that count, and no
+/// other arrangement does.
+fn build_components_data_ty(
+    tys: &mut TySystem,
+    interfaces: &[Interface],
+    entity_interface: &Interface,
+    static_components: &[Component],
+    exposed: fn(&Property) -> bool,
+) -> Ty {
+
+    let mut properties = Vec::new();
+    let entity_name = &*entity_interface.name;
+    for component in static_components {
+        if component.of_entities.iter().any(|e| e == entity_name) {
+            collect_data_props(interfaces, &component.interface, exposed, &mut properties);
         }
     }
 
-    let mut properties = Vec::new();
-    collect(interfaces, entity_interface, &mut properties);
     tys.register(None, TyKind::Dict(TyDict { properties, allow_none: false }))
 
+}
+
+/// The properties `exposed` selects, reachable through `implements`, in declaration order
+/// (recursed depth-first), see [`build_entity_data_ty`].
+fn collect_data_props(interfaces: &[Interface], interface: &Interface, exposed: fn(&Property) -> bool, out: &mut Vec<TyDictProp>) {
+    for implement_name in &interface.implements {
+        collect_data_props(interfaces, find_interface(interfaces, implement_name), exposed, out);
+    }
+    for property in &interface.properties {
+        if exposed(property) {
+            out.push(TyDictProp { name: property.name.clone(), ty: property.ty.clone(), default: None });
+        }
+    }
 }
 
 

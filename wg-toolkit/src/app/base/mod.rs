@@ -20,7 +20,7 @@ use crate::net::socket::PacketSocket;
 use crate::script::{Script, Value};
 use crate::net::proto::Protocol;
 
-use super::dispatch::{ScriptDispatch, PropertyDef, MethodCall};
+use super::dispatch::{ScriptDispatch, PropertyDef, MethodCall, MethodDef};
 use super::io_invalid_data;
 use super::client;
 
@@ -217,35 +217,27 @@ impl App {
 
     }
 
-    /// Same as [`Self::handle_base_entity_method`], but for a call targeting the
-    /// client's current cell-side entity. The client has no direct connection to a cell
-    /// app, so these calls arrive here to be forwarded in real BigWorld; this project has
-    /// no `cell::App` to forward to yet, but decoding still works today, dispatched via
-    /// the same stored entity data (an entity's base and cell slices share one id).
-    /// `Client::cell_entity_id` isn't populated by anything yet, so until it is, this
-    /// always takes the skip path below.
+    /// Same as [`Self::handle_base_entity_method`], but for a cell-directed call. The
+    /// client has no direct connection to a cell app, so these calls arrive here to be
+    /// forwarded in real BigWorld; this project has no `cell::App` to forward to yet, but
+    /// decoding still works today, dispatched via the same stored entity data (an
+    /// entity's base and cell slices share one id).
+    ///
+    /// Unlike a base call, a cell call names its target, which is not necessarily the
+    /// client's own entity (see [`element::CellMethodTables`]), so the table is resolved
+    /// from that target. A client with no cell entity yet has no business sending one.
     fn handle_cell_entity_method(&mut self, addr: SocketAddr, reader: ElementReader<'_, '_>) -> io::Result<()> {
 
-        let Some(entity_id) = self.clients.get(&addr).and_then(|c| c.cell_entity_id) else {
+        let Some(cell_entity_id) = self.clients.get(&addr).and_then(|c| c.cell_entity_id) else {
             return self.skip::<RawEntityMethod>(reader);
         };
 
-        let Some(entry) = self.entities.get(&entity_id) else {
-            return self.skip::<RawEntityMethod>(reader);
-        };
+        let tables = CellTables { entities: &self.entities, dispatch: &self.dispatch, cell_entity_id };
+        let method = reader.read::<element::CellEntityMethod, _>(&tables)?.element;
+        let entity_id = if method.entity_id == 0 { cell_entity_id } else { method.entity_id };
+        self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, call: method.call }));
 
-        let Some(dispatch) = self.dispatch.entity_from_id(entry.type_id) else {
-            return self.skip::<RawEntityMethod>(reader);
-        };
-
-        // // This server knows which entity its client is, so the wire target adds nothing
-        // // to resolve -- unlike the proxy, which observes calls aimed at other entities.
-        // let tables = element::FixedCellMethods(&dispatch.cell_methods);
-        // let call = reader.read::<element::CellEntityMethod, _>(&element::CellMethodLookup(&tables))?.element.call;
-        // self.events.push_back(Event::CellMethod(CellMethodEvent { addr, entity_id, call }));
-        // Ok(())
-        
-        todo!()
+        Ok(())
 
     }
 
@@ -273,7 +265,7 @@ impl App {
         self.socket.set_encryption(addr, blowfish);
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple_reply(SessionKey { session_key }, request_id);
+        let _ = self.bundle.element_writer().write_simple_reply(SessionKey { session_key }, request_id);
         self.protocol.off_channel(addr).prepare(&mut self.bundle, false);
         let _ = self.socket.send_bundle(&self.bundle, addr);
 
@@ -324,7 +316,7 @@ impl App {
                 entity_components_count,
             },
             dispatch,
-        );
+        )?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -370,7 +362,7 @@ impl App {
             packed_xz_scale,
             direction,
             cell_data,
-        });
+        })?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -402,7 +394,7 @@ impl App {
         self.bundle.element_writer().write(
             client::element::EntityMethod { call: MethodCall::Known { name, args } },
             &dispatch.client_methods,
-        );
+        )?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -418,7 +410,7 @@ impl App {
             .addr;
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SelectPlayerEntity {});
+        self.bundle.element_writer().write_simple(client::element::SelectPlayerEntity {})?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -433,7 +425,7 @@ impl App {
     pub fn reset_entities(&mut self, addr: SocketAddr, keep_player_on_base: bool) -> io::Result<()> {
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::ResetEntities { keep_player_on_base });
+        self.bundle.element_writer().write_simple(client::element::ResetEntities { keep_player_on_base })?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -459,7 +451,7 @@ impl App {
     pub fn switch_base_app(&mut self, addr: SocketAddr, base_addr: SocketAddrV4, reset_entities: bool) -> io::Result<()> {
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SwitchBaseApp { base_addr: base_addr.into(), reset_entities });
+        self.bundle.element_writer().write_simple(client::element::SwitchBaseApp { base_addr: base_addr.into(), reset_entities })?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -482,7 +474,7 @@ impl App {
         const CHUNK_SIZE: usize = 1024;
 
         self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::ResourceHeader { id: res_id, description });
+        self.bundle.element_writer().write_simple(client::element::ResourceHeader { id: res_id, description })?;
         self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
         self.socket.send_bundle(&self.bundle, addr)?;
 
@@ -506,7 +498,7 @@ impl App {
                 sequence_num: seq as u8,
                 last: seq as u8 == last_seq,
                 data: chunk.to_vec(),
-            });
+            })?;
             self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
             self.socket.send_bundle(&self.bundle, addr)?;
         }
@@ -538,6 +530,23 @@ impl App {
         self.dispatch.entity_from_id(entry.type_id).map(|dispatch| dispatch.properties.as_slice())
     }
 
+}
+
+/// Resolves a client-to-cell call's method table from the entity it names, for
+/// [`element::CellEntityMethod`].
+struct CellTables<'a> {
+    entities: &'a HashMap<u32, EntityEntry>,
+    dispatch: &'a ScriptDispatch,
+    /// Substituted for a wire entity id of 0, exactly as the real base app does.
+    cell_entity_id: u32,
+}
+
+impl element::CellMethodTables for CellTables<'_> {
+    fn cell_methods(&self, entity_id: u32) -> Option<&[MethodDef]> {
+        let entity_id = if entity_id == 0 { self.cell_entity_id } else { entity_id };
+        let entry = self.entities.get(&entity_id)?;
+        Some(&self.dispatch.entity_from_id(entry.type_id)?.cell_methods)
+    }
 }
 
 /// Read the raw wire payload of a `CELL_ENTITY_METHOD`/`BASE_ENTITY_METHOD`-range
@@ -658,10 +667,11 @@ pub struct BaseMethodEvent {
     pub call: MethodCall,
 }
 
-/// A client called a method on its current cell-side entity.
+/// A client called a cell method, on its own cell entity or on another one it targets.
 #[derive(Debug)]
 pub struct CellMethodEvent {
     pub addr: SocketAddr,
+    /// The target entity, with the wire's `0` already resolved to the client's own.
     pub entity_id: u32,
     /// The decoded call, resolved dynamically against the entity's own cell-method
     /// table (see [`crate::app::script::EntityDispatch`]).

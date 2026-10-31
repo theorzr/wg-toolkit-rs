@@ -301,7 +301,7 @@ impl Inner {
             kind: PeerLastRequestKind::Ping {  },
         });
         
-        self.bundle.element_writer().write_simple_request(ping.element, request_id);
+        self.bundle.element_writer().write_simple_request(ping.element, request_id)?;
 
         Ok(())
 
@@ -330,9 +330,9 @@ impl Inner {
         });
 
         if let Some(encryption_key) = self.real_encryption_key.as_deref() {
-            self.bundle.element_writer().write_request(login.element.clone(), request_id, encryption_key);
+            self.bundle.element_writer().write_request(login.element.clone(), request_id, encryption_key)?;
         } else {
-            self.bundle.element_writer().write_simple_request(login.element.clone(), request_id);
+            self.bundle.element_writer().write_simple_request(login.element.clone(), request_id)?;
         }
 
         Ok(())
@@ -341,7 +341,7 @@ impl Inner {
 
     fn handle_challenge_response(&mut self, _peer: &mut Peer, elt: ElementReader) -> io::Result<()> {
         let challenge = elt.read_simple::<ChallengeResponse<CuckooCycleResponse>>()?;
-        self.bundle.element_writer().write_simple(challenge.element);
+        self.bundle.element_writer().write_simple(challenge.element)?;
         Ok(())
     }
 
@@ -403,7 +403,7 @@ impl Inner {
                 handler.receive_ping(peer.addr, latency)?;
 
                 let ping = elt.read_simple::<Ping>()?;
-                self.bundle.element_writer().write_simple_reply(ping, request_id);
+                self.bundle.element_writer().write_simple_reply(ping, request_id)?;
                 
             }
             PeerLastRequestKind::Login { blowfish } => {
@@ -427,7 +427,7 @@ impl Inner {
 
                 }
 
-                self.bundle.element_writer().write_reply(login, request_id, &*blowfish);
+                self.bundle.element_writer().write_reply(login, request_id, &*blowfish)?;
                 
             }
         }

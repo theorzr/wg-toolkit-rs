@@ -1332,16 +1332,46 @@ impl BaseHandler {
             }
             CreateCellPlayer::ID => {
 
-                let ccp = elt.read_simple::<CreateCellPlayer>()?;
-                warn!(%addr, id = CreateCellPlayer::ID, request_id = ?ccp.request_id, "<- Create cell player: {:?}", ccp.element);
+                let ccp = elt.read_simple::<CreateCellPlayer>()?.element;
+                info!(%addr, id = CreateCellPlayer::ID, unk_flag = ccp.unk_flag, unk_short = ccp.unk_short,
+                    "<- Create cell player: space {}, vehicle {}, position {:?}, direction {:?}, packed xz scale {}",
+                    ccp.space_id, ccp.vehicle_id, ccp.position, ccp.direction, ccp.packed_xz_scale);
+
+                // The rest is the player entity's own cell-hosted, client-visible properties,
+                // decoded against its type -- the player entity being the one this cell
+                // part is created for.
+                let player = self.player_entity_id.and_then(|entity_id| {
+                    let &(type_id, _) = self.entities.get(&entity_id)?;
+                    Some((entity_id, self.shared.dispatch.entity_from_id(type_id)?))
+                });
+                match player {
+                    Some((entity_id, dispatch)) => match ccp.read_cell_data(dispatch) {
+                        Ok(data) => {
+                            info!(%addr, id = CreateCellPlayer::ID, components_count = data.components_count,
+                                "<- Create cell player: ({entity_id}) {:?} {:?}", data.properties, data.components_properties);
+                            // Seeds the tracked values that compressed property paths are
+                            // decoded against, see `entity_properties`.
+                            let tracked = self.entity_properties.entry(entity_id).or_default();
+                            for properties in [data.properties, data.components_properties] {
+                                if let Value::Dict(properties) = properties {
+                                    tracked.extend(properties);
+                                }
+                            }
+                        }
+                        Err(e) => warn!(%addr, id = CreateCellPlayer::ID, data = %hex(&ccp.cell_data),
+                            "<- Create cell player: ({entity_id}) cell data failed to decode: {e}"),
+                    },
+                    None => warn!(%addr, id = CreateCellPlayer::ID, data = %hex(&ccp.cell_data),
+                        "<- Create cell player: no dispatch table for the player entity"),
+                }
 
                 // The space's packed-position scale, without which no volatile position can
                 // be resolved at all, plus the initial reference: `createCellPlayer` ends
                 // with `detailedPositionReceived( id_, ... )`, so entering a space bases the
                 // reference on the player's own starting position.
-                self.position.packed_xz_scale = Some(ccp.element.packed_xz_scale);
+                self.position.packed_xz_scale = Some(ccp.packed_xz_scale);
                 if let Some(id) = self.player_entity_id {
-                    self.position.detailed_position_received(id, Some(id), ccp.element.position);
+                    self.position.detailed_position_received(id, Some(id), ccp.position);
                 }
 
                 // `vehicle_id` is a distinct `Vehicle` entity, not the player's own base
@@ -1350,7 +1380,7 @@ impl BaseHandler {
                 // table rather than whatever entity was selected before.
                 match self.shared.dispatch.entity_from_name("Vehicle") {
                     Some((vehicle_type_id, _)) => {
-                        self.entities.insert(ccp.element.vehicle_id, (vehicle_type_id, Value::Dict(BTreeMap::new())));
+                        self.entities.insert(ccp.vehicle_id, (vehicle_type_id, Value::Dict(BTreeMap::new())));
                     }
                     None => warn!(%addr, "<- Create cell player: no 'Vehicle' entity type in the loaded script model"),
                 }
