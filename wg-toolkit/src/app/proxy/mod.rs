@@ -113,8 +113,8 @@ impl App {
             inner: AppInner {
                 socket_poll,
                 socket: Some(socket),
-                out_protocol: Protocol::new(),
-                in_protocol: Protocol::new(),
+                out_protocol: Protocol::new_forwarding(),
+                in_protocol: Protocol::new_forwarding(),
             },
             peers: HashMap::new(),
             capture: None,
@@ -301,8 +301,8 @@ where
     let mut app = AppInner {
         socket_poll: ThreadPoll::new(),
         socket: None,
-        out_protocol: Protocol::new(),
-        in_protocol: Protocol::new(),
+        out_protocol: Protocol::new_forwarding(),
+        in_protocol: Protocol::new_forwarding(),
     };
 
     let mut peers = HashMap::new();

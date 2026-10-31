@@ -13,7 +13,7 @@ use std::time::Duration;
 use blowfish::Blowfish;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::net::bundle::{Bundle, NextElementReader, ElementReader};
 use crate::net::element::{Element, ElementLength, SimpleElement};
@@ -97,6 +97,17 @@ impl App {
             // Empty the events before.
             while let Some(event) = self.events.pop_front() {
                 return event;
+            }
+
+            // Reliable packets the clients haven't acknowledged yet, likely lost.
+            let resends = self.protocol.take_resends(RESEND_TIMEOUT, RESEND_GIVE_UP);
+            if !resends.is_empty() {
+                debug!("Resending {} unacknowledged packets", resends.len());
+            }
+            for (addr, packet) in resends {
+                if let Err(error) = self.socket.send(&packet, addr) {
+                    return Event::IoError(IoErrorEvent { error, addr: Some(addr) });
+                }
             }
 
             let (packet, addr) = match self.socket.recv() {
@@ -762,6 +773,12 @@ impl Element<()> for RawEntityMethod {
     }
 
 }
+
+/// How long a reliable packet waits for its acknowledgment before being sent again, and
+/// for how long it is sent again before its client is assumed gone. A poll timeout (see
+/// [`App::set_poll_timeout`]) lets resends go out while no packet comes in.
+const RESEND_TIMEOUT: Duration = Duration::from_millis(400);
+const RESEND_GIVE_UP: Duration = Duration::from_secs(20);
 
 /// An active logged in client in the base application.
 #[derive(Debug)]

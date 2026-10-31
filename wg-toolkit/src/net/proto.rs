@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::cmp::Ordering;
 use std::num::NonZero;
 
-use tracing::{instrument, trace, trace_span, warn};
+use tracing::{debug, instrument, trace, trace_span, warn};
 
 use super::packet::{Packet, PacketConfig, PacketLocked, PacketConfigError};
 use super::seq::{Seq, SeqAlloc};
@@ -38,6 +38,9 @@ struct ProtocolShared {
     last_accepted_prefix: u32,
     /// The current prefix offset being used for updating all packets' prefixes.
     prefix_offset: u32,
+    /// Whether accepted reliable packets advance the channel's own sequence allocator,
+    /// see [`Protocol::new_forwarding`].
+    follows_accepted: bool,
 }
 
 impl Protocol {
@@ -48,10 +51,23 @@ impl Protocol {
                 off_seq_alloc: SeqAlloc::new(Seq::ZERO + 1),
                 last_accepted_prefix: 0,
                 prefix_offset: 0,
+                follows_accepted: false,
             },
             off_channels: HashMap::new(),
             channels: HashMap::new(),
         }
+    }
+
+    /// A protocol for one direction of a stream being forwarded, as a proxy does: the
+    /// packets it accepts and the ones it may inject belong to the same stream, so its
+    /// sequence allocator follows the accepted reliable packets, so an injected packet
+    /// continues from them. An endpoint must not: what it accepts and what it sends are
+    /// two streams numbered independently, and following the other end's numbers would
+    /// skip some of its own, which that end then waits for forever.
+    pub fn new_forwarding() -> Self {
+        let mut protocol = Self::new();
+        protocol.shared.follows_accepted = true;
+        protocol
     }
 
     /// Return the off-channel handle, the off-channel isn't a real channel and bundles
@@ -96,6 +112,35 @@ impl Protocol {
             }
         }
 
+    }
+
+    /// The reliable packets sent at least `timeout` ago and still not acknowledged, to
+    /// send again, with their address: a lost one would otherwise hold back every later
+    /// one at the other end. Each is then due again after another `timeout`, and dropped
+    /// once unacknowledged for `give_up`, its peer most likely gone.
+    pub fn take_resends(&mut self, timeout: Duration, give_up: Duration) -> Vec<(SocketAddr, Packet)> {
+        let now = Instant::now();
+        let offs = self.off_channels.iter_mut().map(|(&addr, channel)| (addr, &mut channel.off));
+        let ons = self.channels.iter_mut().map(|(&(addr, _), channel)| (addr, &mut channel.off));
+        let mut resends = Vec::new();
+        for (addr, off) in offs.chain(ons) {
+            off.out_reliable_packets.retain(|packet| {
+                let keep = now.duration_since(packet.time) < give_up;
+                if !keep && packet.packet.is_some() {
+                    warn!(%addr, "Gave up resending reliable packet #{}, never acknowledged", packet.sequence_num);
+                }
+                keep
+            });
+            for packet in &mut off.out_reliable_packets {
+                let Some(data) = &packet.packet else { continue };
+                if now.duration_since(packet.sent) >= timeout {
+                    debug!(%addr, "Resending reliable packet #{}", packet.sequence_num);
+                    packet.sent = now;
+                    resends.push((addr, data.clone()));
+                }
+            }
+        }
+        resends
     }
 
     /// Reset the prefix offset to zero.
@@ -236,12 +281,14 @@ impl Protocol {
             // When on-channel with reliable packets, we must track the cumulative ack
             // and buffer any packet that is received out-of-order!
             if let Some(on) = channel.on.as_deref_mut() {
-                // Keep this channel's own sequence allocator in sync with numbers we
-                // merely observe passing through (as opposed to allocating ourselves),
-                // so that if we ever need to inject a packet of our own on this channel
-                // (e.g. a proxy substituting a rewritten packet) it continues seamlessly
-                // from here instead of colliding with or lagging behind this stream.
-                on.seq_alloc.observe(sequence_num);
+                // Forwarding, keep this channel's own sequence allocator in sync with
+                // numbers we merely observe passing through (as opposed to allocating
+                // ourselves), so that if we ever need to inject a packet of our own on
+                // this channel (e.g. a proxy substituting a rewritten packet) it
+                // continues seamlessly from here, see `Protocol::new_forwarding`.
+                if channel.shared.follows_accepted {
+                    on.seq_alloc.observe(sequence_num);
+                }
                 on.add_in_reliable_packet(packet);
                 while let Some(bundle) = on.pop_in_reliable_bundle() {
                     channel.off.in_bundles.push_back(bundle);
@@ -427,15 +474,12 @@ impl Channel<'_> {
 
         packet_config.set_reliable(reliable);
 
+        let mut sequence_num = None;
         if bundle_len > 1 || reliable {
-            let sequence_num = self.inner.alloc_sequence_num(bundle_len, reliable);
-            trace!("Allocated sequence numbers: {}..{}", sequence_num, sequence_num + bundle_len);
-            packet_config.set_sequence_num(sequence_num);
-            if reliable {
-                for i in 0..bundle_len {
-                    self.inner.off.add_out_reliable_packet(sequence_num + i, time);
-                }
-            }
+            let first = self.inner.alloc_sequence_num(bundle_len, reliable);
+            trace!("Allocated sequence numbers: {}..{}", first, first + bundle_len);
+            packet_config.set_sequence_num(first);
+            sequence_num = Some(first);
         }
         
         if let Some(on) = self.inner.on.as_deref_mut() {
@@ -470,6 +514,13 @@ impl Channel<'_> {
         // Now we need to restore acks that have not been sent: swap back (read above).
         std::mem::swap(&mut self.inner.off.in_reliable_packets, packet_config.single_acks_mut());
         debug_assert!(packet_config.single_acks().is_empty(), "packet config acks should be empty");
+
+        // Kept as finished, to be sent again until acknowledged.
+        if let (true, Some(first)) = (reliable, sequence_num) {
+            for (i, packet) in bundle.iter().enumerate() {
+                self.inner.off.add_out_reliable_packet(first + i as u32, time, packet.clone());
+            }
+        }
 
         if !self.inner.off.in_reliable_packets.is_empty() {
             trace!("Remaining single acks: {:?}", self.inner.off.in_reliable_packets)
@@ -531,6 +582,11 @@ struct OutReliablePacket {
     sequence_num: Seq,
     /// The time this sequence has been sent.
     time: Instant,
+    /// The packet as sent, to send again while it isn't acknowledged. Only packets this
+    /// end prepared have one: a proxy forwards the other end's resends instead.
+    packet: Option<Packet>,
+    /// When it was last sent.
+    sent: Instant,
 }
 
 impl OffChannelData {
@@ -544,9 +600,8 @@ impl OffChannelData {
         }
     }
 
-    /// TODO: We'll also need to automatically resend the packet's content after some 
-    /// time.
-    fn add_out_reliable_packet(&mut self, sequence_num: Seq, time: Instant) {
+    /// Register a reliable packet just sent, see [`Protocol::take_resends`].
+    fn add_out_reliable_packet(&mut self, sequence_num: Seq, time: Instant, packet: Packet) {
     
         // We are keeping reliable packets ordered by their sequence number and also by
         // their time (Instant::now() can only grow).
@@ -559,6 +614,8 @@ impl OffChannelData {
         self.out_reliable_packets.push(OutReliablePacket {
             sequence_num,
             time,
+            packet: Some(packet),
+            sent: time,
         });
 
     }
@@ -586,6 +643,8 @@ impl OffChannelData {
         self.out_reliable_packets.insert(insert_index, OutReliablePacket {
             sequence_num,
             time,
+            packet: None,
+            sent: time,
         });
 
     }
@@ -615,7 +674,7 @@ impl OffChannelData {
             .position(|packet| sequence_num.wrapping_cmp(packet.sequence_num).is_le())
             .unwrap_or(self.out_reliable_packets.len());
 
-        trace!("Cumulative ack for reliable packets: ..{sequence_num}");
+        debug!("Cumulative ack for reliable packets: ..{sequence_num}");
         for reliable_packet in self.out_reliable_packets.drain(..drain_len) {
             trace!("Cumulative ack for a previous packet: {}, after: {:?}", 
                 reliable_packet.sequence_num, reliable_packet.time.elapsed());
@@ -966,6 +1025,56 @@ impl Fragments {
         self.fragments.into_iter()
             .map(|o| o.unwrap())
             .collect()
+    }
+
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    use super::*;
+    use crate::net::element::DebugElementFixed;
+
+    /// The sequence number the next reliable packet on the channel would get.
+    fn next_reliable(protocol: &mut Protocol, addr: SocketAddr) -> Seq {
+        protocol.channel(addr, None).inner.alloc_sequence_num(1, true)
+    }
+
+    /// The other end's ten reliable packets, accepted by `protocol`.
+    fn accept_ten(protocol: &mut Protocol, addr: SocketAddr) {
+        let mut peer = Protocol::new();
+        for _ in 0..10 {
+            let mut bundle = Bundle::new();
+            bundle.element_writer().write_simple(DebugElementFixed::<0x10, 1> { data: [0] }).unwrap();
+            peer.channel(addr, None).prepare(&mut bundle, true);
+            for packet in bundle.iter() {
+                assert!(protocol.accept(packet.clone(), addr).is_ok());
+            }
+        }
+    }
+
+    /// What an endpoint receives doesn't number what it sends: the other end would wait
+    /// forever for the numbers skipped.
+    #[test]
+    fn endpoint_numbers_independently() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        let first = next_reliable(&mut Protocol::new(), addr);
+        let mut server = Protocol::new();
+        accept_ten(&mut server, addr);
+        assert_eq!(next_reliable(&mut server, addr), first);
+    }
+
+    /// Forwarding, the stream accepted is the one sent, so its numbers carry on.
+    #[test]
+    fn forwarding_follows_accepted() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        let first = next_reliable(&mut Protocol::new(), addr);
+        let mut proxy = Protocol::new_forwarding();
+        accept_ten(&mut proxy, addr);
+        assert_eq!(next_reliable(&mut proxy, addr), first + 10);
     }
 
 }
