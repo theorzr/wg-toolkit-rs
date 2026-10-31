@@ -122,7 +122,6 @@ pub fn run(
         enqueued: HashMap::new(),
         pending_switches: HashMap::new(),
         battle_clients: HashMap::new(),
-        tick: 0,
     };
 
     thread::scope(move |scope| {
@@ -162,8 +161,6 @@ struct BaseThread {
     pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Option<PlayerVehicle>)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
     battle_clients: HashMap<SocketAddr, BattleClient>,
-    /// The game tick, sent to battle clients.
-    tick: u8,
 }
 
 /// A client connected for a battle.
@@ -403,19 +400,19 @@ impl BaseThread {
         self.players.insert(addr, handle);
         info!(%addr, "Created avatar {}", handle.entity_id());
 
-        // The battle's setup, as the captured server sent it, but for the cell app's
-        // address, which is ours: the arena, the avatar's cell side in the space, the
-        // space and its map, then the player's vehicle entering the area of interest.
+        // The battle's setup, as the captured server sent it: the arena, the avatar's
+        // cell side in the space, the space and its map, then the player's vehicle
+        // entering the area of interest.
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         for (method, args) in &battle.calls {
             self.app.select_player_entity(handle)?;
             self.app.call_method(handle, method, args.clone())?;
         }
 
-        let SocketAddr::V4(cell_app_addr) = self.app.addr()? else {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
-        };
-        self.app.set_cell_app_ext_address(addr, cell_app_addr)?;
+        // No `SetCellAppExtAddress`, which the captured server sends: given one, the
+        // client opens a direct connection to the cell app and waits for a cell login we
+        // can't answer yet, holding back its cell traffic. Without one, everything
+        // comes through this base app.
 
         let Some(cell) = &battle.cell_player else {
             warn!(%addr, "The capture has no cell player");
@@ -565,17 +562,17 @@ impl BaseThread {
 
             if Instant::now() >= next_tick {
                 next_tick += TICK;
-                self.tick = self.tick.wrapping_add(1);
                 for (&addr, client) in &mut self.battle_clients {
-                    if let Err(e) = self.app.tick(addr, self.tick) {
-                        warn!(%addr, "Failed to tick: {e}");
-                    }
-                    if let Some((alias, motion)) = &mut client.motion {
+                    // The client's game time started at 0 when it joined.
+                    let tick = (client.joined.elapsed().as_millis() / TICK.as_millis()) as u8;
+                    let vehicle = client.motion.as_mut().map(|(alias, motion)| {
                         if motion.step(TICK.as_secs_f32()) {
-                            if let Err(e) = self.app.update_position_detailed(addr, *alias, motion.position, motion.direction) {
-                                warn!(%addr, "Failed to move the vehicle: {e}");
-                            }
+                            debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}", motion.position, motion.direction, motion.speed);
                         }
+                        base::TickVehicle { id_alias: *alias, position: motion.position, direction: motion.direction }
+                    });
+                    if let Err(e) = self.app.tick(addr, tick, vehicle.as_ref()) {
+                        warn!(%addr, "Failed to tick: {e}");
                     }
                 }
                 let due: Vec<_> = self.battle_clients.iter()
@@ -687,8 +684,12 @@ impl BaseThread {
                     match &event.call {
                         MethodCall::Known { name, args } if &**name == "vehicle_moveWith" => {
                             let flags = args.first().and_then(Value::as_i64).unwrap_or(0) as u8;
-                            if let Some((_, motion)) = self.battle_clients.get_mut(&event.addr).and_then(|c| c.motion.as_mut()) {
-                                motion.flags = flags;
+                            match self.battle_clients.get_mut(&event.addr).and_then(|c| c.motion.as_mut()) {
+                                Some((_, motion)) => {
+                                    info!(addr = %event.addr, "Moving with flags {flags:#04x}");
+                                    motion.flags = flags;
+                                }
+                                None => warn!(addr = %event.addr, "Moving with flags {flags:#04x}, but the vehicle can't move"),
                             }
                         }
                         MethodCall::Known { name, .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {name}", event.entity_id),

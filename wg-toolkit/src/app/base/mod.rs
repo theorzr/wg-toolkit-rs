@@ -492,10 +492,34 @@ impl App {
 
     /// Give a client the server's game time: sent each tick, it also keeps the channel
     /// alive, a client that hears nothing for a while dropping it.
-    pub fn tick(&mut self, addr: SocketAddr, tick: u8) -> io::Result<()> {
+    ///
+    /// With the client's vehicle, the same bundle places it, as the client times the
+    /// position updates in a bundle by the tick opening it: a reference point at the
+    /// vehicle's position rounded to the metre, the player entity on that point, then
+    /// the vehicle's exact position.
+    pub fn tick(&mut self, addr: SocketAddr, tick: u8, vehicle: Option<&TickVehicle>) -> io::Result<()> {
+        self.bundle.clear();
+        let mut writer = self.bundle.element_writer();
+        writer.write_simple(client::element::TickSync { tick })?;
+        if let Some(vehicle) = vehicle {
+            writer.write_simple(client::element::RelativePosition { position: vehicle.position.round() })?;
+            writer.write_simple(client::element::AvatarUpdatePlayerDetailed {
+                ref_num: 0,
+                position: glam::Vec3::ZERO,
+                direction: glam::Vec3::ZERO,
+            })?;
+            writer.write_simple(client::element::AvatarUpdateAliasDetailed {
+                ref_num: 0,
+                id_alias: vehicle.id_alias,
+                position: vehicle.position,
+                direction: vehicle.direction,
+            })?;
+        }
         // Reliable for now: our unreliable packets carry a sequence number the client
         // rejects as corrupted.
-        self.send_simple(addr, client::element::TickSync { tick }, true)
+        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
+        self.socket.send_bundle(&self.bundle, addr)?;
+        Ok(())
     }
 
     /// Tell a client where its cell app is, before creating its cell player.
@@ -755,6 +779,15 @@ struct Client {
     /// both a base and a cell entity live at once -- not populated by anything yet since
     /// no `cell::App` exists in this project.
     cell_entity_id: Option<u32>,
+}
+
+/// A client's vehicle, as each tick places it, see [`App::tick`].
+#[derive(Debug, Clone, Copy)]
+pub struct TickVehicle {
+    pub id_alias: u8,
+    pub position: glam::Vec3,
+    /// Roll, pitch and yaw.
+    pub direction: glam::Vec3,
 }
 
 /// One entity this app has created: its wire type id, its data (a [`Value::Dict`]
