@@ -314,6 +314,7 @@ pub fn replay(
     if truncated {
         warn!("The packet capture ends on an incomplete record, it was not finished properly");
     }
+    handler.log_census();
     info!("Replay complete");
 
     Ok(())
@@ -827,17 +828,21 @@ impl BaseHandler {
         self.census_pending += 1;
         if self.census_pending >= 10_000 {
             self.census_pending = 0;
-            let fmt = |census: &HashMap<u8, u32>| {
-                let mut counts: Vec<(u32, u8)> =
-                    census.iter().map(|(&id, &n)| (n, id)).collect();
-                counts.sort_unstable_by(|a, b| b.cmp(a));
-                counts.iter().map(|(n, id)| format!("0x{id:02X}:{n}"))
-                    .collect::<Vec<_>>().join(" ")
-            };
-            info!("element census <- {}", fmt(&self.census_in));
-            info!("element census -> {}", fmt(&self.census_out));
+            self.log_census();
         }
 
+    }
+
+    fn log_census(&self) {
+        let fmt = |census: &HashMap<u8, u32>| {
+            let mut counts: Vec<(u32, u8)> =
+                census.iter().map(|(&id, &n)| (n, id)).collect();
+            counts.sort_unstable_by(|a, b| b.cmp(a));
+            counts.iter().map(|(n, id)| format!("0x{id:02X}:{n}"))
+                .collect::<Vec<_>>().join(" ")
+        };
+        info!("element census <- {}", fmt(&self.census_in));
+        info!("element census -> {}", fmt(&self.census_out));
     }
 
     /// Seed [`Self::entity_properties`] from an entity-creation payload's initial property
