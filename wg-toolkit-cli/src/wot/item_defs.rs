@@ -36,6 +36,11 @@ pub struct VehicleDef {
     pub max_ammo: u32,
     /// Hull plus default turret, before any battle modifier.
     pub max_health: u32,
+    /// Top speeds forward and backward, in m/s.
+    pub speed_forward: f32,
+    pub speed_backward: f32,
+    /// How fast the default chassis turns the vehicle, in rad/s.
+    pub rotation_speed: f32,
 }
 
 impl VehicleDef {
@@ -121,6 +126,18 @@ impl VehicleDef {
             .map(|(hull, turret)| (hull + turret) as u32)
             .ok_or_else(|| invalid(format!("{name} has no health")))?;
 
+        let speed_limit = |direction| child_element(&vehicle, "speedLimits")
+            .and_then(|limits| child_float(limits, direction))
+            .map(|kmh| kmh / 3.6)
+            .ok_or_else(|| invalid(format!("{name} has no {direction} speed")));
+        let speed_forward = speed_limit("forward")?;
+        let speed_backward = speed_limit("backward")?;
+        let rotation_speed = child_element(&vehicle, "chassis")
+            .and_then(|chassis| chassis.iter_children_all().next())
+            .and_then(|(_, chassis)| child_float(chassis.as_element()?, "rotationSpeed"))
+            .map(f32::to_radians)
+            .ok_or_else(|| invalid(format!("{name} has no chassis rotation speed")))?;
+
         let crew_roles = child_element(&vehicle, "crew")
             .into_iter()
             .flat_map(|crew| crew.iter_children_all())
@@ -141,7 +158,7 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health, speed_forward, speed_backward, rotation_speed })
 
     }
 

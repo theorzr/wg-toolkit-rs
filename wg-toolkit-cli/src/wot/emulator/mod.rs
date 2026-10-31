@@ -16,6 +16,7 @@ use blowfish::Blowfish;
 
 mod account;
 mod capture;
+mod physics;
 
 use std::path::{Path, PathBuf};
 use std::io;
@@ -32,6 +33,7 @@ use wgtk::script::Value;
 
 use account::AccountData;
 use capture::{Answer, CapturedSession};
+use physics::{MotionLimits, VehicleMotion};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::VehicleDef;
@@ -173,6 +175,8 @@ struct BattleClient {
     joined: Instant,
     /// The arena period to switch to, and when.
     next_period: Option<(Instant, u8)>,
+    /// Its vehicle's movement once created, with the vehicle's id alias.
+    motion: Option<(u8, VehicleMotion)>,
 }
 
 impl BattleClient {
@@ -377,6 +381,11 @@ impl BaseThread {
             crew: account.crew_descrs(vehicle_id).into_iter().map(<[u8]>::to_vec).collect(),
             setups: account.vehicle_setups(vehicle_id),
             setup_indexes: account.vehicle_setup_indexes(vehicle_id),
+            limits: MotionLimits {
+                speed_forward: def.speed_forward,
+                speed_backward: def.speed_backward,
+                rotation_speed: def.rotation_speed,
+            },
         })
     }
 
@@ -461,7 +470,8 @@ impl BaseThread {
         let Some(entity) = battle.vehicle_entity.as_ref().filter(|e| e.entity_id == entity_id) else { return Ok(()) };
 
         // The vehicle belongs to our avatar, and is the one the client went to battle with.
-        let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.as_ref());
+        let vehicle = self.battle_clients.get(&addr).and_then(|client| client.vehicle.clone());
+        let vehicle = vehicle.as_ref();
         let avatar_id = self.players.get(&addr).map(|handle| handle.entity_id());
         let mut entity = entity.clone();
         if let Some(properties) = &battle.vehicle_properties {
@@ -484,6 +494,11 @@ impl BaseThread {
         self.app.create_entity(addr, entity.clone())?;
         if let (Some(alias), Some(position)) = (battle.vehicle_alias, &battle.vehicle_position) {
             self.app.update_position_detailed(addr, alias, position.position, position.direction)?;
+            // From there on it moves as the client drives it.
+            let limits = vehicle.map(|vehicle| vehicle.limits);
+            if let (Some(client), Some(limits)) = (self.battle_clients.get_mut(&addr), limits) {
+                client.motion = Some((alias, VehicleMotion::new(position.position, position.direction, limits)));
+            }
         }
         if let Some(update) = &battle.vehicle_update {
             let mut update = update.clone();
@@ -551,9 +566,16 @@ impl BaseThread {
             if Instant::now() >= next_tick {
                 next_tick += TICK;
                 self.tick = self.tick.wrapping_add(1);
-                for &addr in self.battle_clients.keys() {
+                for (&addr, client) in &mut self.battle_clients {
                     if let Err(e) = self.app.tick(addr, self.tick) {
                         warn!(%addr, "Failed to tick: {e}");
+                    }
+                    if let Some((alias, motion)) = &mut client.motion {
+                        if motion.step(TICK.as_secs_f32()) {
+                            if let Err(e) = self.app.update_position_detailed(addr, *alias, motion.position, motion.direction) {
+                                warn!(%addr, "Failed to move the vehicle: {e}");
+                            }
+                        }
                     }
                 }
                 let due: Vec<_> = self.battle_clients.iter()
@@ -589,7 +611,7 @@ impl BaseThread {
                                 warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
                             }
                         }
-                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), next_period: None });
+                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), next_period: None, motion: None });
                         continue;
                     }
 
@@ -662,7 +684,16 @@ impl BaseThread {
                     }
                 }
                 base::Event::CellMethod(event) => {
-                    info!(addr = %event.addr, "Cell method call on entity {}", event.entity_id);
+                    match &event.call {
+                        MethodCall::Known { name, args } if &**name == "vehicle_moveWith" => {
+                            let flags = args.first().and_then(Value::as_i64).unwrap_or(0) as u8;
+                            if let Some((_, motion)) = self.battle_clients.get_mut(&event.addr).and_then(|c| c.motion.as_mut()) {
+                                motion.flags = flags;
+                            }
+                        }
+                        MethodCall::Known { name, .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {name}", event.entity_id),
+                        MethodCall::Unknown { .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {:?}", event.entity_id, event.call),
+                    }
                 }
                 base::Event::RequestEntityUpdate(event) => {
                     // Only the player's vehicle enters the area of interest for now.
@@ -763,6 +794,7 @@ struct PlayerVehicle {
     /// Its loadouts and the selected ones, see `AccountData::vehicle_setups`.
     setups: serde_pickle::Value,
     setup_indexes: serde_pickle::Value,
+    limits: MotionLimits,
 }
 
 impl PlayerVehicle {
