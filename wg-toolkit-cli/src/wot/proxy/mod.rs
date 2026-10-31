@@ -1873,7 +1873,15 @@ impl BaseHandler {
                     Err(e) => warn!(%addr, id = NrlUpdateNode::ID, "<- Nrl update (failed to decode): {e}"),
                 }
             }
-            NrlUnreliableMsgToClient::ID => return trace_dbg!(elt, addr, NrlUnreliableMsgToClient),
+            NrlUnreliableMsgToClient::ID => {
+                let e = elt.read_simple::<NrlUnreliableMsgToClient>()?.element;
+                if let client::element::NrlUnreliableMsgToClientPayload::Raw(data) = &e.payload {
+                    warn!(%addr, id = NrlUnreliableMsgToClient::ID, kind = e.kind, data = %hex(data),
+                        "<- Nrl unreliable msg (unknown payload): tick {}", e.tick);
+                } else {
+                    trace!(%addr, id = NrlUnreliableMsgToClient::ID, "<- Nrl unreliable msg: {e:?}");
+                }
+            }
             ControlEntity::ID => return trace_dbg!(elt, addr, ControlEntity),
             VoiceData::ID => return sample_dbg!(self, elt, addr, VoiceData),
             RestoreClient::ID => return sample_dbg!(self, elt, addr, RestoreClient),

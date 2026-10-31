@@ -2014,27 +2014,38 @@ impl SimpleElement for NrlUpdateNodeFlag {
 /// The decoded body of an [`NrlUnreliableMsgToClient`], keyed off its `kind` byte.
 #[derive(Debug, Clone)]
 pub enum NrlUnreliableMsgToClientPayload {
-    /// The one decoded shape (`kind` `0x30`): 9 constant bytes of unknown
-    /// meaning, 7 little-endian `f32`s, then 2 more constant bytes. **None of the 7
-    /// floats' meaning is confirmed.** `floats[3..6]` looked like a raw position at
-    /// first (plausible in-map values), but its norm stays a constant `~792.0` across
-    /// every sample despite each component changing continuously -- it traces a
-    /// sphere, not free movement, so it's some fixed-radius/normalized direction
-    /// vector instead. `floats[0..3]` only jump occasionally (a rarely-updated
-    /// reference point?) and `floats[6]` stays near-zero.
-    SevenFloats {
+    /// `kind` `0x30`: the server-side gun marker of the player's vehicle, what BigWorld
+    /// WoT once sent as `updateGunMarker(shotPos, shotVec, dispersionAngle)`. Identified
+    /// on a 2.4.1.1 battle against the vehicle's own position updates: `shot_position`
+    /// stays within 2.5 m of the vehicle, about 2 m up; `shot_velocity`'s length takes
+    /// only the values 870.4 and 696.0, the T110E4's APCR and AP shell speeds (1.25
+    /// ratio), switching exactly when the player switched shells, and its heading
+    /// follows the vehicle's yaw; `dispersion_angle` grows from
+    /// 0.003 at rest to 0.025 on the move. The bytes around them never changed.
+    GunMarker {
         unk_prefix: [u8; 9],
-        floats: [f32; 7],
+        shot_position: Vec3,
+        shot_velocity: Vec3,
+        dispersion_angle: f32,
         unk_suffix: [u8; 2],
     },
-    /// Any other `(kind, payload)` shape, such as the 8-byte `kind=0x11` one, not
-    /// decoded.
+    /// `kind` `0x11`: no new gun marker this tick. Sent for whole stretches where it
+    /// cannot move (the pre-battle countdown, after the vehicle is out), and for single
+    /// ticks in between where the marker barely moved: across one, the full messages on
+    /// either side differ by 0 to 1.2, against a median 1.8 between consecutive full
+    /// ones, which always differ. Its 8 bytes never changed.
+    Unchanged(Vec<u8>),
+    /// Any other `(kind, payload)` shape.
     Raw(Vec<u8>),
 }
 
 /// WoT's own CGF "unreliable" node message (delivered best-effort, no
-/// retransmission) -- originates from a single subject (`unk_id_a`/`unk_id_b`
-/// constant for a whole battle) sent roughly every 100ms. `tick`/`prev_tick` are a
+/// retransmission): an update of the NRL root node (the `06 00 01` header is message
+/// type 6 on node 1, as in [`NrlMsgToCell`]) carrying the server-side gun marker, see
+/// [`NrlUnreliableMsgToClientPayload::GunMarker`], every tick (roughly 100ms).
+/// `unk_id_a`/`unk_id_b` were constant for a whole battle, and look like hashes rather
+/// than network ids, which are small integers; one battle cannot say whether they change
+/// between battles. `tick`/`prev_tick` are a
 /// client-interpolation pair (this message's tick, and the last tick it has data
 /// for); `prev_tick` normally trails `tick` by 1 but skipped once in one capture --
 /// consistent with the channel actually being unreliable. `flags` bit `0x20` tracks
@@ -2042,14 +2053,13 @@ pub enum NrlUnreliableMsgToClientPayload {
 /// first message of a capture); no other bit was ever observed set.
 #[derive(Debug, Clone)]
 pub struct NrlUnreliableMsgToClient {
-    /// Constant for one subject across a whole battle -- likely a per-subject id
-    /// pair, wider than [`NrlCreateNode::network_id`] and unconfirmed if related.
+    /// Constant across a whole battle, see the struct documentation.
     pub unk_id_a: u32,
     pub unk_id_b: u32,
     pub tick: u32,
     pub prev_tick: u32,
     /// Correlates 1:1 with the payload shape: `0x30` for
-    /// [`NrlUnreliableMsgToClientPayload::SevenFloats`], `0x11` for the 8-byte
+    /// [`NrlUnreliableMsgToClientPayload::GunMarker`], `0x11` for the 8-byte
     /// not-yet-decoded shape.
     pub kind: u8,
     /// Bit `0x20`: whether `prev_tick` holds real data. See the struct-level doc.
@@ -2070,15 +2080,16 @@ impl SimpleCodec for NrlUnreliableMsgToClient {
         write.write_u8(self.flags)?;
         write.write_u8(0x00)?;
         match &self.payload {
-            NrlUnreliableMsgToClientPayload::SevenFloats { unk_prefix, floats, unk_suffix } => {
+            NrlUnreliableMsgToClientPayload::GunMarker { unk_prefix, shot_position, shot_velocity, dispersion_angle, unk_suffix } => {
                 write.write_u8(9 + 4 * 7 + 2)?;
                 write.write_all(unk_prefix)?;
-                for f in floats {
-                    write.write_f32(*f)?;
-                }
+                write.write_vec3(*shot_position)?;
+                write.write_vec3(*shot_velocity)?;
+                write.write_f32(*dispersion_angle)?;
                 write.write_all(unk_suffix)?;
             }
-            NrlUnreliableMsgToClientPayload::Raw(bytes) => {
+            NrlUnreliableMsgToClientPayload::Unchanged(bytes)
+            | NrlUnreliableMsgToClientPayload::Raw(bytes) => {
                 write.write_u8(bytes.len().try_into().map_err(|_| io::Error::new(
                     io::ErrorKind::InvalidData, "NrlUnreliableMsgToClient: payload too long for its 1-byte length prefix"))?)?;
                 write.write_all(bytes)?;
@@ -2121,13 +2132,14 @@ impl SimpleCodec for NrlUnreliableMsgToClient {
             let mut cur = &payload_bytes[..];
             let mut unk_prefix = [0u8; 9];
             cur.read_exact(&mut unk_prefix)?;
-            let mut floats = [0f32; 7];
-            for f in &mut floats {
-                *f = cur.read_f32()?;
-            }
+            let shot_position = cur.read_vec3()?;
+            let shot_velocity = cur.read_vec3()?;
+            let dispersion_angle = cur.read_f32()?;
             let mut unk_suffix = [0u8; 2];
             cur.read_exact(&mut unk_suffix)?;
-            NrlUnreliableMsgToClientPayload::SevenFloats { unk_prefix, floats, unk_suffix }
+            NrlUnreliableMsgToClientPayload::GunMarker { unk_prefix, shot_position, shot_velocity, dispersion_angle, unk_suffix }
+        } else if kind == 0x11 {
+            NrlUnreliableMsgToClientPayload::Unchanged(payload_bytes)
         } else {
             NrlUnreliableMsgToClientPayload::Raw(payload_bytes)
         };
