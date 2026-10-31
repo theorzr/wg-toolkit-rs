@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::io;
 
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
-use wgtk::app::client::element::{ChangedProperties, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
+use wgtk::app::client::element::{ChangedProperties, EntityProperty, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
 use wgtk::script::{PythonValue, StringValue};
 use wgtk::util::io::serde_pickle_ser_options;
 use flate2::write::ZlibEncoder;
@@ -33,11 +33,12 @@ use wgtk::script::Value;
 
 use account::AccountData;
 use capture::{Answer, CapturedSession};
-use physics::{MotionLimits, VehicleMotion};
+use physics::{MotionLimits, Turret, VehicleMotion};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
-use crate::wot::item_defs::VehicleDef;
+use crate::wot::item_defs::{AimingDef, VehicleDef};
 use wgtk::res::fs::ResFilesystem;
+use wgtk::space::terrain::Terrain;
 use crate::CliResult;
 
 
@@ -66,11 +67,12 @@ pub fn run(
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             let battle = match &session.battle {
-                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, update {}, entity {}, arena info {:?}",
+                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, update {}, entity {}, arena info {:?}, own vehicle {}",
                     battle.calls.len(), battle.cell_player.is_some(), battle.space_properties.len(),
                     battle.geometry.as_ref().map(|g| &g.path), battle.vehicle_alias,
                     battle.vehicle_position.is_some(), battle.vehicle_update.is_some(), battle.vehicle_entity.is_some(),
-                    battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len()))))),
+                    battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len())))),
+                    battle.own_vehicle.is_some()),
                 None => "none".to_string(),
             };
             info!("Serving from capture {}: account {}, {} requests, battle: {battle}",
@@ -101,6 +103,21 @@ pub fn run(
     };
     let (session, account) = session;
 
+    // The battle's map, for vehicles to rest on.
+    let geometry = session.as_ref().and_then(|s| s.battle.as_ref()).and_then(|b| b.geometry.as_ref());
+    let terrain = match geometry {
+        Some(geometry) => {
+            let start = Instant::now();
+            let fs = ResFilesystem::new(game_dir.join("res"))
+                .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
+            let terrain = Terrain::load(&fs, &geometry.path)
+                .map_err(|e| format!("Failed to load the terrain of {}: {e}", geometry.path))?;
+            info!("Loaded the terrain of {} in {:.1?}", geometry.path, start.elapsed());
+            Some(terrain)
+        }
+        None => None,
+    };
+
     let shared = Arc::new(Shared {
         login_clients: Mutex::new(HashMap::new()),
     });
@@ -118,6 +135,7 @@ pub fn run(
         session,
         account,
         game_dir: game_dir.to_path_buf(),
+        terrain,
         players: HashMap::new(),
         enqueued: HashMap::new(),
         pending_switches: HashMap::new(),
@@ -151,6 +169,8 @@ struct BaseThread {
     account: Option<AccountData>,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
+    /// The battle map's terrain.
+    terrain: Option<Terrain>,
     /// Each client's player entity.
     players: HashMap<SocketAddr, base::Handle>,
     /// Clients waiting in the battle queue, with the inventory id of their vehicle.
@@ -170,10 +190,21 @@ struct BattleClient {
     vehicle: Option<PlayerVehicle>,
     /// When its game time started, at 0: the battle's clock, which arena periods end on.
     joined: Instant,
+    /// The ticks sent to it, the first being tick 0.
+    ticks: u32,
     /// The arena period to switch to, and when.
     next_period: Option<(Instant, u8)>,
-    /// Its vehicle's movement once created, with the vehicle's id alias.
-    motion: Option<(u8, VehicleMotion)>,
+    /// Its vehicle once created, moving as the client drives it.
+    driven: Option<DrivenVehicle>,
+}
+
+/// A battle client's vehicle, as the server simulates it.
+#[derive(Debug)]
+struct DrivenVehicle {
+    id_alias: u8,
+    entity_type_id: u16,
+    motion: VehicleMotion,
+    turret: Turret,
 }
 
 impl BattleClient {
@@ -383,6 +414,7 @@ impl BaseThread {
                 speed_backward: def.speed_backward,
                 rotation_speed: def.rotation_speed,
             },
+            aiming: def.aiming,
         })
     }
 
@@ -492,9 +524,13 @@ impl BaseThread {
         if let (Some(alias), Some(position)) = (battle.vehicle_alias, &battle.vehicle_position) {
             self.app.update_position_detailed(addr, alias, position.position, position.direction)?;
             // From there on it moves as the client drives it.
-            let limits = vehicle.map(|vehicle| vehicle.limits);
-            if let (Some(client), Some(limits)) = (self.battle_clients.get_mut(&addr), limits) {
-                client.motion = Some((alias, VehicleMotion::new(position.position, position.direction, limits)));
+            if let (Some(client), Some(vehicle)) = (self.battle_clients.get_mut(&addr), vehicle) {
+                client.driven = Some(DrivenVehicle {
+                    id_alias: alias,
+                    entity_type_id: entity.entity_type_id,
+                    motion: VehicleMotion::new(position.position, position.direction, vehicle.limits),
+                    turret: Turret::new(vehicle.aiming.clone()),
+                });
             }
         }
         if let Some(update) = &battle.vehicle_update {
@@ -503,6 +539,13 @@ impl BaseThread {
                 vehicle.apply_to_update(&mut update);
             }
             self.app.update_entity(addr, entity_id, entity.entity_type_id, update)?;
+        }
+
+        // Its `OwnVehicle` component, under an entity node of its own: the client only
+        // turns its turret once it knows how fast it can.
+        if let (Some(component), Some(vehicle)) = (&battle.own_vehicle, vehicle) {
+            let stream = own_vehicle(self.app.dispatch(), component, entity_id, vehicle)?;
+            self.app.nrl_create_node(addr, stream)?;
         }
 
         Ok(())
@@ -551,25 +594,43 @@ impl BaseThread {
 
         info!("Running on: {}", self.app.addr().unwrap());
 
-        // Battle clients need to hear from the server every tick, 10 Hz as captured.
+        // Battle clients need to hear from the server every tick, 10 Hz as captured, and
+        // regularly: the client times what it hears by the tick it comes with.
         const TICK: Duration = Duration::from_millis(100);
-        if let Err(e) = self.app.set_poll_timeout(Some(TICK)) {
-            warn!("Failed to set the poll timeout, no ticks: {e}");
-        }
         let mut next_tick = Instant::now() + TICK;
 
         loop {
 
-            if Instant::now() >= next_tick {
+            // Every tick due, late ones included, so that no tick number is skipped.
+            while Instant::now() >= next_tick {
                 next_tick += TICK;
+                let avatar_type_id = self.app.dispatch().entity_from_name("Avatar").map(|(type_id, _)| type_id);
                 for (&addr, client) in &mut self.battle_clients {
-                    // The client's game time started at 0 when it joined.
-                    let tick = (client.joined.elapsed().as_millis() / TICK.as_millis()) as u8;
-                    let vehicle = client.motion.as_mut().map(|(alias, motion)| {
+                    let tick = client.ticks as u8;
+                    client.ticks = client.ticks.wrapping_add(1);
+                    let vehicle = client.driven.as_mut().map(|driven| {
+                        let DrivenVehicle { id_alias, entity_type_id, motion, turret } = driven;
                         if motion.step(TICK.as_secs_f32()) {
-                            debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}", motion.position, motion.direction, motion.speed);
+                            if let Some(terrain) = &self.terrain {
+                                motion.settle(terrain);
+                            }
                         }
-                        base::TickVehicle { id_alias: *alias, position: motion.position, direction: motion.direction }
+                        turret.step(TICK.as_secs_f32(), motion.position, motion.direction.z);
+                        // Every tick, to compare with what the client simulates.
+                        debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
+                            motion.position, motion.direction, motion.speed, turret.yaw, turret.pitch);
+                        let gun_angles = EntityProperty { name: "gunAnglesPacked".into(), value: Value::UInt16(turret.packed()) };
+                        base::TickVehicle {
+                            id_alias: *id_alias,
+                            position: motion.position,
+                            direction: motion.direction,
+                            properties: Some((*entity_type_id, vec![gun_angles])),
+                            // What the client aims from, so it must turn with the hull.
+                            player_properties: avatar_type_id.map(|type_id| (type_id, vec![EntityProperty {
+                                name: "ownVehicleAuxPhysicsData".into(),
+                                value: Value::UInt64(motion.aux_physics_data()),
+                            }])),
+                        }
                     });
                     if let Err(e) = self.app.tick(addr, tick, vehicle.as_ref()) {
                         warn!(%addr, "Failed to tick: {e}");
@@ -583,6 +644,12 @@ impl BaseThread {
                         warn!(%addr, "Failed to change the arena period: {e}");
                     }
                 }
+            }
+
+            // Wait for packets until the next tick is due, no longer.
+            let wait = next_tick.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            if let Err(e) = self.app.set_poll_timeout(Some(wait)) {
+                warn!("Failed to set the poll timeout: {e}");
             }
 
             match self.app.poll() {
@@ -608,7 +675,7 @@ impl BaseThread {
                                 warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
                             }
                         }
-                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), next_period: None, motion: None });
+                        self.battle_clients.insert(login.addr, BattleClient { vehicle, joined: Instant::now(), ticks: 0, next_period: None, driven: None });
                         continue;
                     }
 
@@ -684,17 +751,35 @@ impl BaseThread {
                     match &event.call {
                         MethodCall::Known { name, args } if &**name == "vehicle_moveWith" => {
                             let flags = args.first().and_then(Value::as_i64).unwrap_or(0) as u8;
-                            match self.battle_clients.get_mut(&event.addr).and_then(|c| c.motion.as_mut()) {
-                                Some((_, motion)) => {
+                            match self.battle_clients.get_mut(&event.addr).and_then(|c| c.driven.as_mut()) {
+                                Some(driven) => {
                                     info!(addr = %event.addr, "Moving with flags {flags:#04x}");
-                                    motion.flags = flags;
+                                    driven.motion.flags = flags;
                                 }
                                 None => warn!(addr = %event.addr, "Moving with flags {flags:#04x}, but the vehicle can't move"),
+                            }
+                        }
+                        MethodCall::Known { name, args } if matches!(&**name, "trackRelativePointWithGun" | "stopTrackingWithGun" | "vehicle_stopTrackingWithGun") => {
+                            if let Some(driven) = self.battle_clients.get_mut(&event.addr).and_then(|c| c.driven.as_mut()) {
+                                match (&**name, &args[..]) {
+                                    ("trackRelativePointWithGun", [Value::Vector3(point)]) => {
+                                        debug!(addr = %event.addr, "Tracking {point:?} from {:?}", driven.motion.position);
+                                        driven.turret.track(driven.motion.position + *point);
+                                    }
+                                    (_, [Value::Float32(yaw), Value::Float32(pitch)]) => {
+                                        debug!(addr = %event.addr, "Holding the gun at yaw {yaw:.3}, pitch {pitch:.3}");
+                                        driven.turret.hold(*yaw, *pitch);
+                                    }
+                                    _ => warn!(addr = %event.addr, "Unexpected {name} arguments: {args:?}"),
+                                }
                             }
                         }
                         MethodCall::Known { name, .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {name}", event.entity_id),
                         MethodCall::Unknown { .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {:?}", event.entity_id, event.call),
                     }
+                }
+                base::Event::AvatarUpdate(event) => {
+                    debug!(addr = %event.addr, "Avatar update on {:?}: {:?}, direction {:?}", event.vehicle_id, event.position, event.direction);
                 }
                 base::Event::RequestEntityUpdate(event) => {
                     // Only the player's vehicle enters the area of interest for now.
@@ -796,6 +881,7 @@ struct PlayerVehicle {
     setups: serde_pickle::Value,
     setup_indexes: serde_pickle::Value,
     limits: MotionLimits,
+    aiming: AimingDef,
 }
 
 impl PlayerVehicle {
@@ -895,6 +981,54 @@ fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id
         *data = NrlComponentData::encode(dispatch, *component_type_id, children)?;
     }
     Ok(NrlStream { messages, rest: Vec::new() })
+}
+
+/// The NRL node every entity node goes under.
+const NRL_ROOT_NODE: u16 = 1;
+
+/// The vehicle's entity node, then its captured `OwnVehicle` component with the
+/// vehicle's own `targetingInfo`: turret and gun at rest, their speeds and dispersion
+/// factors from its definitions, without the crew's and equipment's bonuses.
+fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32, vehicle: &PlayerVehicle) -> io::Result<NrlStream> {
+
+    let NrlBody::CreateNode { parent_id, node: NrlNode::DynComponent { component_type_id, data: Some(data), .. } } = &captured.body else {
+        return Err(invalid_data("the captured OwnVehicle message creates no component"));
+    };
+    let entity = NrlMessage {
+        node_id: *parent_id,
+        body: NrlBody::CreateNode { parent_id: NRL_ROOT_NODE, node: NrlNode::Entity { entity_id } },
+    };
+
+    let aiming = &vehicle.aiming;
+    let children = data.children.iter().cloned().map(|(id, child)| match child {
+        NrlChild::Property { name, value: Value::Dict(mut fields) } if &*name == "targetingInfo" => {
+            for (field, value) in fields.iter_mut() {
+                let float = match &**field {
+                    "turretYaw" | "gunPitch" => 0.0,
+                    "maxTurretRotationSpeed" => aiming.turret_rotation_speed,
+                    "maxGunRotationSpeed" => aiming.gun_rotation_speed,
+                    "shotDispMultiplierFactor" => 1.0,
+                    "gunShotDispersionFactorsTurretRotation" => aiming.dispersion_turret_rotation,
+                    "chassisShotDispersionFactorsMovement" => aiming.dispersion_movement,
+                    "chassisShotDispersionFactorsRotation" => aiming.dispersion_rotation,
+                    "gunShotDispersionFactorsAfterShot" => aiming.dispersion_after_shot,
+                    "aimingTime" => aiming.aiming_time,
+                    _ => continue,
+                };
+                *value = Value::Float32(float);
+            }
+            (id, NrlChild::Property { name, value: Value::Dict(fields) })
+        }
+        other => (id, other),
+    }).collect();
+
+    let mut component = captured.clone();
+    if let NrlBody::CreateNode { node: NrlNode::DynComponent { data, .. }, .. } = &mut component.body {
+        *data = Some(NrlComponentData::encode(dispatch, *component_type_id, children)?);
+    }
+
+    Ok(NrlStream { messages: vec![entity, component], rest: Vec::new() })
+
 }
 
 /// The id alias given to an entity entering the area of interest without one: entities

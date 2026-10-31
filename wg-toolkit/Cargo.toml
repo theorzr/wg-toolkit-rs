@@ -19,6 +19,7 @@ glam.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
 flate2.workspace = true
+png.workspace = true
 
 serde.workspace = true
 serde-pickle.workspace = true

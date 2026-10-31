@@ -45,3 +45,4 @@ crc32fast = "1.4.1"
 
 # Compression:
 flate2 = "1.0.34"
+png = "0.17"

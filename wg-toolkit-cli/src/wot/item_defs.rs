@@ -41,6 +41,74 @@ pub struct VehicleDef {
     pub speed_backward: f32,
     /// How fast the default chassis turns the vehicle, in rad/s.
     pub rotation_speed: f32,
+    pub aiming: AimingDef,
+}
+
+/// How the default turret and gun aim, in the units the client's own item loader
+/// converts them to: speeds in rad/s, dispersion factors per m/s and per rad/s.
+#[derive(Debug, Clone)]
+pub struct AimingDef {
+    pub turret_rotation_speed: f32,
+    pub gun_rotation_speed: f32,
+    /// Seconds for the dispersion to shrink by e.
+    pub aiming_time: f32,
+    pub dispersion_turret_rotation: f32,
+    pub dispersion_after_shot: f32,
+    pub dispersion_movement: f32,
+    pub dispersion_rotation: f32,
+    /// The gun's pitch limits, in radians, positive downward: the highest elevation
+    /// and the deepest depression for each turret yaw.
+    pub min_pitch: PitchCurve,
+    pub max_pitch: PitchCurve,
+}
+
+impl AimingDef {
+
+    /// The lowest and highest pitch over all turret yaws, `pitchLimits['absolute']`.
+    pub fn absolute_pitch_limits(&self) -> (f32, f32) {
+        (self.min_pitch.lowest(), self.max_pitch.highest())
+    }
+
+}
+
+/// A gun pitch limit over the turret's yaw, as `(yaw, pitch)` points in radians, the yaw
+/// going from 0 (forward) to 2π, both ends having the same pitch.
+#[derive(Debug, Clone)]
+pub struct PitchCurve(pub Vec<(f32, f32)>);
+
+impl PitchCurve {
+
+    /// Parse a curve as the game's definitions write it, `position angle` pairs with the
+    /// position a fraction of a turn and the angle in degrees.
+    fn parse(curve: &str) -> Option<Self> {
+        let numbers = curve.split_whitespace().map(str::parse::<f32>).collect::<Result<Vec<_>, _>>().ok()?;
+        let points: Vec<_> = numbers.chunks_exact(2)
+            .map(|pair| (pair[0] * std::f32::consts::TAU, pair[1].to_radians()))
+            .collect();
+        (points.len() >= 2 && numbers.len() % 2 == 0).then_some(Self(points))
+    }
+
+    /// The limit at a turret yaw, interpolated between the points around it.
+    pub fn at(&self, yaw: f32) -> f32 {
+        let yaw = yaw.rem_euclid(std::f32::consts::TAU);
+        self.0.windows(2)
+            .find(|pair| yaw <= pair[1].0)
+            .map(|pair| {
+                let ((from_yaw, from), (to_yaw, to)) = (pair[0], pair[1]);
+                let t = if to_yaw > from_yaw { (yaw - from_yaw) / (to_yaw - from_yaw) } else { 0.0 };
+                from + (to - from) * t
+            })
+            .unwrap_or(self.0[0].1)
+    }
+
+    fn lowest(&self) -> f32 {
+        self.0.iter().map(|&(_, pitch)| pitch).fold(f32::INFINITY, f32::min)
+    }
+
+    fn highest(&self) -> f32 {
+        self.0.iter().map(|&(_, pitch)| pitch).fold(f32::NEG_INFINITY, f32::max)
+    }
+
 }
 
 impl VehicleDef {
@@ -138,6 +206,32 @@ impl VehicleDef {
             .map(f32::to_radians)
             .ok_or_else(|| invalid(format!("{name} has no chassis rotation speed")))?;
 
+        // The vehicle may set its own values for a shared gun.
+        let gun_float = |path: &[&str]| [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| child_float_at(gun, path))
+            .ok_or_else(|| invalid(format!("no {} for gun {gun_name}", path.join("/"))));
+        let chassis_float = |path: &[&str]| child_element(&vehicle, "chassis")
+            .and_then(|chassis| chassis.iter_children_all().next())
+            .and_then(|(_, chassis)| child_float_at(chassis.as_element()?, path))
+            .ok_or_else(|| invalid(format!("{name} has no chassis {}", path.join("/"))));
+        let pitch_curve = |limit: &str| [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| child_string(child_element(gun, "pitchLimits")?, limit))
+            .and_then(PitchCurve::parse)
+            .ok_or_else(|| invalid(format!("no valid {limit} for gun {gun_name}")));
+        let aiming = AimingDef {
+            turret_rotation_speed: child_float(turret, "rotationSpeed")
+                .ok_or_else(|| invalid(format!("{name} has no turret rotation speed")))?
+                .to_radians(),
+            gun_rotation_speed: gun_float(&["rotationSpeed"])?.to_radians(),
+            aiming_time: gun_float(&["aimingTime"])?,
+            dispersion_turret_rotation: gun_float(&["shotDispersionFactors", "turretRotation"])?.to_degrees(),
+            dispersion_after_shot: gun_float(&["shotDispersionFactors", "afterShot"])?,
+            dispersion_movement: chassis_float(&["shotDispersionFactors", "vehicleMovement"])? * 3.6,
+            dispersion_rotation: chassis_float(&["shotDispersionFactors", "vehicleRotation"])?.to_degrees(),
+            min_pitch: pitch_curve("minPitch")?,
+            max_pitch: pitch_curve("maxPitch")?,
+        };
+
         let crew_roles = child_element(&vehicle, "crew")
             .into_iter()
             .flat_map(|crew| crew.iter_children_all())
@@ -158,7 +252,7 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health, speed_forward, speed_backward, rotation_speed })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming })
 
     }
 
@@ -202,8 +296,22 @@ fn child_int(element: &Element, name: &str) -> Option<i64> {
     }
 }
 
+fn child_string<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+    match element.get_child(name)? {
+        pxml::Value::Element(child) => child.value.as_string(),
+        value => value.as_string(),
+    }
+}
+
 fn child_float(element: &Element, name: &str) -> Option<f32> {
     element.get_child(name)?.as_float()
+}
+
+/// A float down a path of children.
+fn child_float_at(element: &Element, path: &[&str]) -> Option<f32> {
+    let (last, parents) = path.split_last()?;
+    let parent = parents.iter().try_fold(element, |element, name| child_element(element, name))?;
+    child_float(parent, last)
 }
 
 fn invalid(message: String) -> io::Error {

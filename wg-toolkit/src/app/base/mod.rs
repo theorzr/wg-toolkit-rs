@@ -159,8 +159,22 @@ impl App {
             }
             element::id::DISCONNECT_CLIENT => self.skip::<element::DisconnectClient>(reader),
             element::id::PING_DATACENTER => self.skip::<element::PingDatacenter>(reader),
-            element::id::AVATAR_UPDATE_IMPLICIT => self.skip::<element::AvatarUpdateImplicit>(reader),
-            element::id::AVATAR_UPDATE_EXPLICIT => self.skip::<element::AvatarUpdateExplicit>(reader),
+            element::id::AVATAR_UPDATE_IMPLICIT => {
+                let update = reader.read_simple::<element::AvatarUpdateImplicit>()?.element;
+                let (yaw, pitch, roll) = update.direction.unpack(true);
+                self.events.push_back(Event::AvatarUpdate(AvatarUpdateEvent {
+                    addr, vehicle_id: None, position: update.position, direction: glam::Vec3::new(roll, pitch, yaw),
+                }));
+                Ok(())
+            }
+            element::id::AVATAR_UPDATE_EXPLICIT => {
+                let update = reader.read_simple::<element::AvatarUpdateExplicit>()?.element;
+                let (yaw, pitch, roll) = update.direction.unpack(true);
+                self.events.push_back(Event::AvatarUpdate(AvatarUpdateEvent {
+                    addr, vehicle_id: Some(update.vehicle_id), position: update.position, direction: glam::Vec3::new(roll, pitch, yaw),
+                }));
+                Ok(())
+            }
             element::id::ACK_PHYSICS_CORRECTION => self.skip::<element::AckPhysicsCorrection>(reader),
             element::id::REQUEST_ENTITY_UPDATE => {
                 let request = reader.read_simple::<element::RequestEntityUpdate>()?.element;
@@ -525,6 +539,22 @@ impl App {
                 position: vehicle.position,
                 direction: vehicle.direction,
             })?;
+            // The position update selected the vehicle, its properties follow.
+            if let Some((type_id, properties)) = &vehicle.properties {
+                let dispatch = self.dispatch.entity_from_id(*type_id)
+                    .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+                for property in properties {
+                    writer.write(property.clone(), &dispatch.properties[..])?;
+                }
+            }
+            if let Some((type_id, properties)) = &vehicle.player_properties {
+                let dispatch = self.dispatch.entity_from_id(*type_id)
+                    .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+                writer.write_simple(client::element::SelectPlayerEntity {})?;
+                for property in properties {
+                    writer.write(property.clone(), &dispatch.properties[..])?;
+                }
+            }
         }
         // Reliable for now: our unreliable packets carry a sequence number the client
         // rejects as corrupted.
@@ -799,12 +829,18 @@ struct Client {
 }
 
 /// A client's vehicle, as each tick places it, see [`App::tick`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TickVehicle {
     pub id_alias: u8,
     pub position: glam::Vec3,
     /// Roll, pitch and yaw.
     pub direction: glam::Vec3,
+    /// Properties changing every tick, `gunAnglesPacked` say, with the vehicle's entity
+    /// type.
+    pub properties: Option<(u16, Vec<client::element::EntityProperty>)>,
+    /// The player entity's properties about its vehicle, `ownVehicleAuxPhysicsData`
+    /// say, with the player entity's type.
+    pub player_properties: Option<(u16, Vec<client::element::EntityProperty>)>,
 }
 
 /// One entity this app has created: its wire type id, its data (a [`Value::Dict`]
@@ -849,6 +885,20 @@ pub enum Event {
     Timeout,
     BaseMethod(BaseMethodEvent),
     CellMethod(CellMethodEvent),
+    /// A client reports where its player entity is.
+    AvatarUpdate(AvatarUpdateEvent),
+}
+
+/// A client reports where its player entity is, see
+/// [`element::AvatarUpdateImplicit`] and [`element::AvatarUpdateExplicit`].
+#[derive(Debug)]
+pub struct AvatarUpdateEvent {
+    pub addr: SocketAddr,
+    /// The vehicle it says it is on, when explicit.
+    pub vehicle_id: Option<u32>,
+    pub position: glam::Vec3,
+    /// Roll, pitch and yaw.
+    pub direction: glam::Vec3,
 }
 
 /// Some IO error happened internally and optionally related to a client.

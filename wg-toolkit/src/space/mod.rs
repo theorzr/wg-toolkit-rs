@@ -1,6 +1,7 @@
 //! Compiled space codec, use it to open and read sections of a compiled space binaries.
 
 pub mod section;
+pub mod terrain;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
