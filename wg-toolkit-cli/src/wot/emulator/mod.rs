@@ -370,7 +370,6 @@ impl BaseThread {
         info!(%addr, "Created account {}", handle.entity_id());
 
         if let Some(args) = &session.show_gui {
-            self.app.select_player_entity(handle)?;
             self.app.call_method(handle, "showGUI", args.clone())?;
         }
 
@@ -391,7 +390,6 @@ impl BaseThread {
             return Ok(());
         };
 
-        self.app.select_player_entity(handle)?;
         self.app.call_method(handle, "onArenaCreated", Vec::new())?;
 
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
@@ -438,7 +436,6 @@ impl BaseThread {
             .and_then(|b| b.calls.iter().find(|(method, args)| &**method == "updateArena" && args.first().and_then(Value::as_i64) == Some(ARENA_UPDATE_PERIOD.into())))
             .and_then(|(_, args)| args.get(1).cloned())
             .unwrap_or(Value::String(StringValue::Raw(Vec::new())));
-        self.app.select_player_entity(handle)?;
         self.app.call_method(handle, "updateArena", vec![Value::UInt8(ARENA_UPDATE_PERIOD), with_bytes(&like, data)])?;
         info!(%addr, "Arena period {period} until {end:.1}");
 
@@ -507,7 +504,6 @@ impl BaseThread {
         // entering the area of interest.
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         for (method, args) in &battle.calls {
-            self.app.select_player_entity(handle)?;
             self.app.call_method(handle, method, args.clone())?;
         }
 
@@ -921,7 +917,6 @@ impl BaseThread {
                         *first = with_int(first, request_id);
                     }
                     info!(%addr, "Answering with {method} {}", format!("{args:?}").chars().take(200).collect::<String>());
-                    self.app.select_player_entity(handle)?;
                     self.app.call_method(handle, method, args)?;
                 }
                 Answer::Resource { description, data } => {
@@ -1084,12 +1079,7 @@ impl BaseThread {
             }
 
             // Wait for packets until the next tick is due, no longer.
-            let wait = next_tick.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
-            if let Err(e) = self.app.set_poll_timeout(Some(wait)) {
-                warn!("Failed to set the poll timeout: {e}");
-            }
-
-            match self.app.poll() {
+            match self.app.poll_until(next_tick) {
                 base::Event::IoError(error) => {
                     if let Some(addr) = error.addr {
                         warn!(%addr, "Error: {}", error.error);

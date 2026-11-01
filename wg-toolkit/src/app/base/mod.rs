@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::num::Wrapping;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blowfish::Blowfish;
 use rand::rngs::OsRng;
@@ -22,6 +22,7 @@ use crate::script::{Script, Value};
 use crate::net::proto::Protocol;
 
 use super::dispatch::{ScriptDispatch, PropertyDef, MethodCall, MethodDef};
+use super::outbox::Outbox;
 use super::io_invalid_data;
 use super::client;
 
@@ -45,7 +46,10 @@ pub struct App {
     protocol: Protocol,
     /// Queue of events that are waiting to be returned.
     events: VecDeque<Event>,
-    /// A temporary bundle for sending.
+    /// What waits to be sent to each client, until the next poll.
+    outbox: Outbox,
+    /// A bundle for what is sent right away rather than through the outbox: the login
+    /// reply, before the client has a channel, and resource fragments.
     bundle: Bundle,
     /// Clients that have made an initial client connection, associated to the request id.
     pending_clients: HashMap<SocketAddr, u32>,
@@ -72,6 +76,7 @@ impl App {
             socket: PacketSocket::bind(addr)?,
             protocol: Protocol::new(),
             events: VecDeque::new(),
+            outbox: Outbox::default(),
             bundle: Bundle::new(),
             pending_clients: HashMap::new(),
             clients: HashMap::new(),
@@ -90,12 +95,31 @@ impl App {
         self.socket.addr()
     }
 
-    /// Poll for the next event of this login app, blocking.
+    /// Poll for the next event of this app, blocking until one comes.
+    ///
+    /// What was written to clients since the last poll is sent first, one bundle per
+    /// client.
     pub fn poll(&mut self) -> Event {
+        self.poll_inner(None)
+    }
+
+    /// Same as [`Self::poll`], but returns [`Event::Timeout`] once the deadline passes
+    /// with no event, so the caller gets a chance to send periodic messages (ticks) to
+    /// quiet clients. A deadline already passed still reads a packet waiting, if any.
+    pub fn poll_until(&mut self, deadline: Instant) -> Event {
+        self.poll_inner(Some(deadline))
+    }
+
+    fn poll_inner(&mut self, deadline: Option<Instant>) -> Event {
+
+        for (addr, error) in self.outbox.flush_all(&mut self.protocol, &self.socket) {
+            self.events.push_back(Event::IoError(IoErrorEvent { error, addr: Some(addr) }));
+        }
+
         loop {
 
             // Empty the events before.
-            while let Some(event) = self.events.pop_front() {
+            if let Some(event) = self.events.pop_front() {
                 return event;
             }
 
@@ -108,6 +132,13 @@ impl App {
                 if let Err(error) = self.socket.send(&packet, addr) {
                     return Event::IoError(IoErrorEvent { error, addr: Some(addr) });
                 }
+            }
+
+            let timeout = deadline.map(|deadline| deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)));
+            if let Err(error) = self.socket.set_recv_timeout(timeout) {
+                return Event::IoError(IoErrorEvent { error, addr: None });
             }
 
             let (packet, addr) = match self.socket.recv() {
@@ -319,11 +350,7 @@ impl App {
     /// does right after the login reply. `unknown` is a field of unknown meaning, see
     /// [`client::element::UpdateFrequencyNotification`].
     pub fn update_frequency(&mut self, addr: SocketAddr, frequency: u8, unknown: u16, game_time: u32) -> io::Result<()> {
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::UpdateFrequencyNotification { frequency, unknown, game_time })?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-        Ok(())
+        self.outbox.client(addr, &mut self.protocol, &self.socket)?.write_simple(client::element::UpdateFrequencyNotification { frequency, unknown, game_time })
     }
 
     /// Create a new base-player entity for the given (already logged in) client, and
@@ -360,8 +387,7 @@ impl App {
             }
         };
 
-        self.bundle.clear();
-        self.bundle.element_writer().write(
+        self.outbox.client(addr, &mut self.protocol, &self.socket)?.write(
             client::element::CreateBasePlayer {
                 entity_id,
                 entity_type_id,
@@ -370,8 +396,6 @@ impl App {
             },
             dispatch,
         )?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
 
         self.entities.insert(entity_id, EntityEntry { addr, type_id: entity_type_id, data: entity_data });
 
@@ -405,8 +429,7 @@ impl App {
             .ok_or_else(|| io_invalid_data(format_args!("no such entity: {}", handle.entity_id)))?
             .addr;
 
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::CreateCellPlayer {
+        self.outbox.client(addr, &mut self.protocol, &self.socket)?.write_simple(client::element::CreateCellPlayer {
             unk_flag: 0,
             space_id,
             unk_short: 0,
@@ -416,8 +439,6 @@ impl App {
             direction,
             cell_data,
         })?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
 
         if let Some(client) = self.clients.get_mut(&addr) {
             client.cell_entity_id = Some(handle.entity_id);
@@ -428,7 +449,7 @@ impl App {
     }
 
     /// Call a method, resolved by name against the target entity's client-method table,
-    /// on the client owning the given entity.
+    /// on the client owning the given entity, selecting it first if needed.
     pub fn call_method(&mut self, handle: Handle, method_name: &str, args: Vec<Value>) -> io::Result<()> {
 
         let entry = self.entities.get(&handle.entity_id)
@@ -443,31 +464,17 @@ impl App {
             .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
             .name.clone();
 
-        self.bundle.clear();
-        self.bundle.element_writer().write(
+        let is_player = self.clients.get(&addr).and_then(|c| c.base_entity_id) == Some(handle.entity_id);
+        let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
+        if is_player {
+            out.select_player()?;
+        } else {
+            out.select_entity(handle.entity_id)?;
+        }
+        out.write_selected(
             client::element::EntityMethod { call: MethodCall::Known { name, args } },
             &dispatch.client_methods,
-        )?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-
-        Ok(())
-
-    }
-
-    /// Tell the client that subsequent elements target the given entity's player slot.
-    pub fn select_player_entity(&mut self, handle: Handle) -> io::Result<()> {
-
-        let addr = self.entities.get(&handle.entity_id)
-            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {}", handle.entity_id)))?
-            .addr;
-
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SelectPlayerEntity {})?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-
-        Ok(())
+        )
 
     }
 
@@ -477,10 +484,7 @@ impl App {
     /// arbitrary entity, only "reset everything" (see `re-work/doc/ENTITY.md`).
     pub fn reset_entities(&mut self, addr: SocketAddr, keep_player_on_base: bool) -> io::Result<()> {
 
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::ResetEntities { keep_player_on_base })?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
+        self.outbox.client(addr, &mut self.protocol, &self.socket)?.write_simple(client::element::ResetEntities { keep_player_on_base })?;
 
         let keep_entity_id = keep_player_on_base
             .then(|| self.clients.get(&addr).and_then(|c| c.base_entity_id))
@@ -499,20 +503,9 @@ impl App {
 
     }
 
-    /// Make [`Self::poll`] return [`Event::Timeout`] when no packet arrives within the
-    /// given duration, so the caller gets a chance to send periodic messages (ticks)
-    /// to quiet clients. `None` (the default) waits forever.
-    pub fn set_poll_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        self.socket.set_recv_timeout(timeout)
-    }
-
-    /// Send a simple element to a client, alone in a bundle.
-    fn send_simple<E: SimpleElement>(&mut self, addr: SocketAddr, element: E, reliable: bool) -> io::Result<()> {
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(element)?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, reliable);
-        self.socket.send_bundle(&self.bundle, addr)?;
-        Ok(())
+    /// Write a simple element to a client's outbox.
+    fn send_simple<E: SimpleElement>(&mut self, addr: SocketAddr, element: E) -> io::Result<()> {
+        self.outbox.client(addr, &mut self.protocol, &self.socket)?.write_simple(element)
     }
 
     /// Give a client the server's game time: sent each tick, it also keeps the channel
@@ -523,9 +516,13 @@ impl App {
     /// vehicle's position rounded to the metre, the player entity on that point, then
     /// the vehicle's exact position. Then the other vehicles, by their alias, with their
     /// properties; their `player_properties` and `nrl_updates` are not sent.
+    ///
+    /// What was written to the client before is sent first, so that the tick opens a
+    /// bundle of its own; what is written after it, until the next poll, follows it in
+    /// that bundle.
     pub fn tick(&mut self, addr: SocketAddr, tick: u8, vehicle: Option<&TickVehicle>, others: &[TickVehicle]) -> io::Result<()> {
-        self.bundle.clear();
-        let mut writer = self.bundle.element_writer();
+        self.outbox.flush(addr, &mut self.protocol, &self.socket)?;
+        let writer = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
         writer.write_simple(client::element::TickSync { tick })?;
         if let Some(vehicle) = vehicle {
             writer.write_simple(client::element::RelativePosition { position: vehicle.position.round() })?;
@@ -545,7 +542,7 @@ impl App {
                 let dispatch = self.dispatch.entity_from_id(*type_id)
                     .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
                 for property in properties {
-                    writer.write(property.clone(), &dispatch.properties[..])?;
+                    writer.write_selected(property.clone(), &dispatch.properties[..])?;
                 }
             }
             // As the real server sends updates: the record goes to the client's NRL buffer,
@@ -559,9 +556,9 @@ impl App {
             if let Some((type_id, properties)) = &vehicle.player_properties {
                 let dispatch = self.dispatch.entity_from_id(*type_id)
                     .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
-                writer.write_simple(client::element::SelectPlayerEntity {})?;
+                writer.select_player()?;
                 for property in properties {
-                    writer.write(property.clone(), &dispatch.properties[..])?;
+                    writer.write_selected(property.clone(), &dispatch.properties[..])?;
                 }
             }
         }
@@ -577,26 +574,22 @@ impl App {
                 let dispatch = self.dispatch.entity_from_id(*type_id)
                     .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
                 for property in properties {
-                    writer.write(property.clone(), &dispatch.properties[..])?;
+                    writer.write_selected(property.clone(), &dispatch.properties[..])?;
                 }
             }
         }
-        // Reliable for now: our unreliable packets carry a sequence number the client
-        // rejects as corrupted.
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
         Ok(())
     }
 
     /// Tell a client where its cell app is, before creating its cell player.
     pub fn set_cell_app_ext_address(&mut self, addr: SocketAddr, cell_app_addr: SocketAddrV4) -> io::Result<()> {
-        self.send_simple(addr, client::element::SetCellAppExtAddress(cell_app_addr.into()), true)
+        self.send_simple(addr, client::element::SetCellAppExtAddress(cell_app_addr.into()))
     }
 
     /// Send a client one of its space's properties, still raw, see
     /// [`client::element::SpaceProperty`].
     pub fn space_property(&mut self, addr: SocketAddr, data: Vec<u8>) -> io::Result<()> {
-        self.send_simple(addr, client::element::SpaceProperty { data }, true)
+        self.send_simple(addr, client::element::SpaceProperty { data })
     }
 
     /// Map a geometry (a map, `spaces/08_ruinberg` say) into a client's space, at the
@@ -613,21 +606,21 @@ impl App {
             transform,
             unk: 1,
             rest: Vec::new(),
-        }, true)
+        })
     }
 
     /// An entity enters a client's area of interest, under an id alias the position
     /// updates use. The client asks for its state next, see
     /// [`Event::RequestEntityUpdate`], answered with [`Self::create_entity`].
     pub fn enter_aoi(&mut self, addr: SocketAddr, entity_id: u32, id_alias: u8) -> io::Result<()> {
-        self.send_simple(addr, client::element::EnterAoi { entity_id, id_alias }, true)
+        self.send_simple(addr, client::element::EnterAoi { entity_id, id_alias })
     }
 
     /// Place an entity of a client's area of interest, by its id alias, with a full
     /// position and direction (yaw, pitch, roll). Like every position update, it also
     /// selects the entity for the property updates that follow.
     pub fn update_position_detailed(&mut self, addr: SocketAddr, id_alias: u8, position: glam::Vec3, direction: glam::Vec3) -> io::Result<()> {
-        self.send_simple(addr, client::element::AvatarUpdateAliasDetailed { ref_num: 0, id_alias, position, direction }, true)
+        self.send_simple(addr, client::element::AvatarUpdateAliasDetailed { ref_num: 0, id_alias, position, direction })
     }
 
     /// Create an entity on a client, from its state, and keep track of its type so its
@@ -635,7 +628,7 @@ impl App {
     pub fn create_entity(&mut self, addr: SocketAddr, element: client::element::CreateEntity) -> io::Result<()> {
         let entity_id = element.entity_id;
         let type_id = element.entity_type_id;
-        self.send_simple(addr, element, true)?;
+        self.send_simple(addr, element)?;
         self.entities.insert(entity_id, EntityEntry { addr, type_id, data: Value::None });
         Ok(())
     }
@@ -663,7 +656,7 @@ impl App {
             position,
             direction,
             client_data,
-        }, true)?;
+        })?;
         self.entities.insert(entity_id, EntityEntry { addr, type_id, data: Value::None });
         Ok(())
     }
@@ -671,7 +664,7 @@ impl App {
     /// Create NRL nodes on a client: an entity's node and its dynamic components, say.
     /// The stream's first message must create a node.
     pub fn nrl_create_node(&mut self, addr: SocketAddr, stream: client::element::NrlStream) -> io::Result<()> {
-        self.send_simple(addr, client::element::NrlCreateNode(stream), true)
+        self.send_simple(addr, client::element::NrlCreateNode(stream))
     }
 
     /// Call a client method of any entity the client knows, given in that entity
@@ -682,15 +675,12 @@ impl App {
         let name = dispatch.client_methods.iter().find(|m| &*m.name == method_name)
             .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
             .name.clone();
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SelectEntity { entity_id })?;
-        self.bundle.element_writer().write(
+        let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
+        out.select_entity(entity_id)?;
+        out.write_selected(
             client::element::EntityMethod { call: MethodCall::Known { name, args } },
             &dispatch.client_methods,
-        )?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-        Ok(())
+        )
     }
 
     /// Change some of an entity's client properties on the client owning it, given in
@@ -698,12 +688,9 @@ impl App {
     pub fn update_entity(&mut self, addr: SocketAddr, entity_id: u32, type_id: u16, properties: client::element::ChangedProperties) -> io::Result<()> {
         let dispatch = self.dispatch.entity_from_id(type_id)
             .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SelectEntity { entity_id })?;
-        self.bundle.element_writer().write(client::element::UpdateEntity(properties), &dispatch.properties[..])?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-        Ok(())
+        let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
+        out.select_entity(entity_id)?;
+        out.write_selected(client::element::UpdateEntity(properties), &dispatch.properties[..])
     }
 
     /// A logged in client's session key and blowfish key. A client told to switch base
@@ -716,14 +703,7 @@ impl App {
     /// Tell the client to disconnect and reconnect to a (possibly different) base app
     /// address.
     pub fn switch_base_app(&mut self, addr: SocketAddr, base_addr: SocketAddrV4, reset_entities: bool) -> io::Result<()> {
-
-        self.bundle.clear();
-        self.bundle.element_writer().write_simple(client::element::SwitchBaseApp { base_addr: base_addr.into(), reset_entities })?;
-        self.protocol.channel(addr, None).prepare(&mut self.bundle, true);
-        self.socket.send_bundle(&self.bundle, addr)?;
-
-        Ok(())
-
+        self.send_simple(addr, client::element::SwitchBaseApp { base_addr: base_addr.into(), reset_entities })
     }
 
     /// Push a resource to the client (`ResourceHeader` followed by one or more
@@ -738,6 +718,8 @@ impl App {
     /// several seconds of separate fragments rather than one burst. Fragments are 8 KB,
     /// like the real server's (up to 9.8 KB for a 443 KB account cache), so that a
     /// resource that large fits the 256 fragments a one-byte sequence number can count.
+    /// What waits in the client's outbox is sent before, to keep the order it was written
+    /// in.
     pub fn push_resource(&mut self, addr: SocketAddr, res_id: u16, description: Vec<u8>, data: &[u8]) -> io::Result<()> {
 
         const CHUNK_SIZE: usize = 8192;
@@ -745,6 +727,8 @@ impl App {
         if data.len() > CHUNK_SIZE * 256 {
             return Err(io_invalid_data(format_args!("resource of {} bytes, more than 256 fragments", data.len())));
         }
+
+        self.outbox.flush(addr, &mut self.protocol, &self.socket)?;
 
         self.bundle.clear();
         self.bundle.element_writer().write_simple(client::element::ResourceHeader { id: res_id, description })?;
@@ -850,7 +834,7 @@ impl Element<()> for RawEntityMethod {
 
 /// How long a reliable packet waits for its acknowledgment before being sent again, and
 /// for how long it is sent again before its client is assumed gone. A poll timeout (see
-/// [`App::set_poll_timeout`]) lets resends go out while no packet comes in.
+/// [`App::poll_until`]) lets resends go out while no packet comes in.
 const RESEND_TIMEOUT: Duration = Duration::from_millis(400);
 const RESEND_GIVE_UP: Duration = Duration::from_secs(20);
 
@@ -927,7 +911,7 @@ pub enum Event {
     EnableEntities(EnableEntitiesEvent),
     /// A client asks for the state of an entity that entered its area of interest.
     RequestEntityUpdate(RequestEntityUpdateEvent),
-    /// No packet arrived within the poll timeout, see [`App::set_poll_timeout`].
+    /// No event came before the deadline, see [`App::poll_until`].
     Timeout,
     BaseMethod(BaseMethodEvent),
     CellMethod(CellMethodEvent),

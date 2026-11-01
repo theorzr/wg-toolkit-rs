@@ -25,6 +25,7 @@ pub mod nrl;
 
 pub mod math;
 mod bit;
+mod outbox;
 
 pub mod client;
 pub mod base;
