@@ -465,7 +465,7 @@ impl Element<[MethodDef]> for BaseEntityMethod {
         }
 
         let call = match config.get(exposed_id as usize) {
-            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            Some(def) => MethodCall::Known { exposed_id, name: def.name.clone(), args: def.read_args(read)? },
             None => {
                 let mut data = vec![0; len];
                 read.read_exact(&mut data)?;
@@ -573,7 +573,7 @@ impl<'t> Element<dyn CellMethodTables + 't> for CellEntityMethod {
         }
 
         let call = match config.get(exposed_id as usize) {
-            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            Some(def) => MethodCall::Known { exposed_id, name: def.name.clone(), args: def.read_args(read)? },
             None => {
                 let mut data = vec![0; len];
                 read.read_exact(&mut data)?;

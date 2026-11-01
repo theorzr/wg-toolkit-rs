@@ -3205,13 +3205,10 @@ pub struct EntityMethod {
     pub call: MethodCall,
 }
 
-/// Find a method by name in an exposed-id-ordered table, for [`EntityMethod`]'s write
-/// side (the read side instead looks up by exposed id, see [`EntityMethod::read`]).
-fn find_method<'m>(config: &'m [MethodDef], name: &str) -> io::Result<(u16, &'m MethodDef)> {
-    config.iter().enumerate()
-        .find(|(_, def)| &*def.name == name)
-        .map(|(exposed_id, def)| (exposed_id as u16, def))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown method: {name}")))
+/// The method a known call's exposed id names in the table it is written against.
+fn known_method(config: &[MethodDef], exposed_id: u16) -> io::Result<&MethodDef> {
+    config.get(exposed_id as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("no method of exposed id {exposed_id}")))
 }
 
 impl Element<[MethodDef]> for EntityMethod {
@@ -3219,10 +3216,7 @@ impl Element<[MethodDef]> for EntityMethod {
     fn write_length(&self, config: &[MethodDef]) -> io::Result<ElementLength> {
         
         let (exposed_id, preferred_len) = match &self.call {
-            MethodCall::Known { name, .. } => {
-                let (exposed_id, def) = find_method(config, name)?;
-                (exposed_id, def.length)
-            }
+            MethodCall::Known { exposed_id, .. } => (*exposed_id, known_method(config, *exposed_id)?.length),
             MethodCall::Unknown { exposed_id, .. } => (*exposed_id, ElementLength::Variable8),
         };
 
@@ -3237,8 +3231,7 @@ impl Element<[MethodDef]> for EntityMethod {
     fn write(&self, write: &mut dyn Write, config: &[MethodDef]) -> io::Result<u8> {
         
         let exposed_id = match &self.call {
-            MethodCall::Known { name, .. } => find_method(config, name)?.0,
-            MethodCall::Unknown { exposed_id, .. } => *exposed_id,
+            MethodCall::Known { exposed_id, .. } | MethodCall::Unknown { exposed_id, .. } => *exposed_id,
         };
         
         let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
@@ -3247,7 +3240,7 @@ impl Element<[MethodDef]> for EntityMethod {
         }
         
         match &self.call {
-            MethodCall::Known { args, .. } => config[exposed_id as usize].write_args(write, args)?,
+            MethodCall::Known { args, .. } => known_method(config, exposed_id)?.write_args(write, args)?,
             MethodCall::Unknown { data, .. } => write.write_all(data)?,
         }
 
@@ -3299,7 +3292,7 @@ impl Element<[MethodDef]> for EntityMethod {
         }
 
         let call = match config.get(exposed_id as usize) {
-            Some(def) => MethodCall::Known { name: def.name.clone(), args: def.read_args(read)? },
+            Some(def) => MethodCall::Known { exposed_id, name: def.name.clone(), args: def.read_args(read)? },
             None => {
                 let mut data = vec![0; len];
                 read.read_exact(&mut data)?;
@@ -3341,15 +3334,36 @@ pub struct EntityProperty {
 /// the `ENTITY_PROPERTY` range: its sub-id byte would not be read back, see
 /// [`EntityProperty::read_length`].
 fn find_property<'p>(config: &'p [PropertyDef], name: &str) -> io::Result<(u16, &'p PropertyDef)> {
-    let (exposed_id, def) = config.iter().enumerate()
-        .find(|(_, def)| &*def.name == name)
+    let exposed_id = config.iter().position(|def| &*def.name == name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown property: {name}")))?;
-    let exposed_id = exposed_id as u16;
+    Ok((exposed_id as u16, property_by_id(config, exposed_id as u16)?))
+}
+
+/// The property of the given exposed id, which must not need a sub-id, see
+/// [`find_property`].
+fn property_by_id(config: &[PropertyDef], exposed_id: u16) -> io::Result<&PropertyDef> {
+    let def = config.get(exposed_id as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("no property of exposed id {exposed_id}")))?;
     match id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id) {
-        (_, None) => Ok((exposed_id, def)),
+        (_, None) => Ok(def),
         (_, Some(_)) => Err(io::Error::new(io::ErrorKind::InvalidData,
-            format!("property {name} needs a sub-id, which is not supported"))),
+            format!("property {} needs a sub-id, which is not supported", def.name))),
     }
+}
+
+/// Write a property's value as an [`EntityProperty`] element carries it, returning the
+/// element id.
+fn write_property(write: &mut dyn Write, config: &[PropertyDef], exposed_id: u16, def: &PropertyDef, value: &Value) -> io::Result<u8> {
+    // A top-level `PYTHON` value is written without its own length, the element's
+    // being enough, exactly as `read` takes it.
+    match (def.ty.kind(), value) {
+        (TyKind::Python, Value::Python(PythonValue::Raw(raw))) => write.write_all(raw)?,
+        (TyKind::Python, Value::Python(PythonValue::Decoded(value))) =>
+            write.write_all(&serde_pickle::value_to_vec(value, serde_pickle_ser_options())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)?,
+        _ => Codec::write(value, write, &def.ty)?,
+    }
+    Ok(id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id).0)
 }
 
 impl Element<[PropertyDef]> for EntityProperty {
@@ -3360,16 +3374,7 @@ impl Element<[PropertyDef]> for EntityProperty {
 
     fn write(&self, write: &mut dyn Write, config: &[PropertyDef]) -> io::Result<u8> {
         let (exposed_id, def) = find_property(config, &self.name)?;
-        // A top-level `PYTHON` value is written without its own length, the element's
-        // being enough, exactly as `read` takes it.
-        match (def.ty.kind(), &self.value) {
-            (TyKind::Python, Value::Python(PythonValue::Raw(raw))) => write.write_all(raw)?,
-            (TyKind::Python, Value::Python(PythonValue::Decoded(value))) =>
-                write.write_all(&serde_pickle::value_to_vec(value, serde_pickle_ser_options())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)?,
-            _ => Codec::write(&self.value, write, &def.ty)?,
-        }
-        Ok(id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id).0)
+        write_property(write, config, exposed_id, def, &self.value)
     }
 
     fn read_length(config: &[PropertyDef], id: u8) -> io::Result<ElementLength> {
@@ -3430,12 +3435,42 @@ impl Element<[PropertyDef]> for EntityProperty {
 
 }
 
+/// An [`EntityProperty`] given by its exposed id rather than its name, as bound schemas
+/// write them (see [`crate::app::schema`]). Write-only: what is read is an
+/// [`EntityProperty`].
+#[derive(Debug, Clone)]
+pub struct IndexedEntityProperty {
+    pub exposed_id: u16,
+    pub value: Value,
+}
+
+impl Element<[PropertyDef]> for IndexedEntityProperty {
+
+    fn write_length(&self, config: &[PropertyDef]) -> io::Result<ElementLength> {
+        Ok(property_by_id(config, self.exposed_id)?.length)
+    }
+
+    fn write(&self, write: &mut dyn Write, config: &[PropertyDef]) -> io::Result<u8> {
+        let def = property_by_id(config, self.exposed_id)?;
+        write_property(write, config, self.exposed_id, def, &self.value)
+    }
+
+    fn read_length(_config: &[PropertyDef], _id: u8) -> io::Result<ElementLength> {
+        unreachable!("IndexedEntityProperty is write-only")
+    }
+
+    fn read(_read: &mut dyn Read, _config: &[PropertyDef], _len: usize, _id: u8) -> io::Result<Self> {
+        unreachable!("IndexedEntityProperty is write-only")
+    }
+
+}
+
 
 #[cfg(test)]
 mod tests {
 
     use crate::app::bit::BitWriter;
-    use crate::script::{TySystem, TyDictProp, TySeq, StringValue};
+    use crate::script::{TySystem, TyDictProp, TySeq, StringValue, PropertyFlags};
 
     use super::*;
 
@@ -3578,8 +3613,8 @@ mod tests {
         }));
         let bar_ty = sys.register(None, TyKind::Array(TySeq { ty: string_ty.clone(), size: None }));
         let properties = vec![
-            PropertyDef { name: Arc::from("foo"), ty: foo_ty, length: ElementLength::Variable16 },
-            PropertyDef { name: Arc::from("bar"), ty: bar_ty, length: ElementLength::Variable16 },
+            PropertyDef { name: Arc::from("foo"), ty: foo_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients },
+            PropertyDef { name: Arc::from("bar"), ty: bar_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients },
         ];
         (properties, u16_ty, string_ty, u8_ty)
     }
@@ -3600,10 +3635,10 @@ mod tests {
         // AreaOfEffect's client-visible properties, in the order `build_property_table`
         // produces (two 4-byte, then two 8-byte).
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty.clone(), length: ElementLength::Fixed(4) },
-            PropertyDef { name: Arc::from("equipmentID"), ty: i32_ty, length: ElementLength::Fixed(4) },
-            PropertyDef { name: Arc::from("launchTime"), ty: f64_ty.clone(), length: ElementLength::Fixed(8) },
-            PropertyDef { name: Arc::from("strikeTime"), ty: f64_ty, length: ElementLength::Fixed(8) },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
+            PropertyDef { name: Arc::from("equipmentID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
+            PropertyDef { name: Arc::from("launchTime"), ty: f64_ty.clone(), length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients },
+            PropertyDef { name: Arc::from("strikeTime"), ty: f64_ty, length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients },
         ];
 
         let data = const_hex("0400e729890001e53600000266666666b66601410366666666e6660141");
@@ -3646,7 +3681,7 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4) },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
         ];
 
         // Three properties promised; the second id (0x62 = 98, as seen live) is past the
@@ -3674,8 +3709,8 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("a"), ty: i32_ty.clone(), length: ElementLength::Fixed(4) },
-            PropertyDef { name: Arc::from("b"), ty: i32_ty, length: ElementLength::Fixed(4) },
+            PropertyDef { name: Arc::from("a"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
+            PropertyDef { name: Arc::from("b"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
         ];
 
         // Two properties, but the second id repeats the first. `addChangedProperties`
@@ -3696,7 +3731,7 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4) },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients },
         ];
 
         let data = const_hex("0100e7298900ff");

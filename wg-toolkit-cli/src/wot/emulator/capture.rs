@@ -235,7 +235,7 @@ impl Extractor<'_> {
                 EnableEntities::ID => { elt.read_simple::<EnableEntities>()?; }
                 id if base_el::id::BASE_ENTITY_METHOD.contains(id) => {
                     let Some(dispatch) = self.player_type.and_then(|t| self.dispatch.entity_from_id(t)) else { break };
-                    let MethodCall::Known { name, args } = elt.read::<BaseEntityMethod, _>(&dispatch.base_methods)?.element.call else {
+                    let MethodCall::Known { name, args, .. } = elt.read::<BaseEntityMethod, _>(&dispatch.base_methods)?.element.call else {
                         continue;
                     };
                     if !self.in_account {
@@ -384,7 +384,7 @@ impl Extractor<'_> {
                         break;
                     }
                     let Some(dispatch) = self.player_type.and_then(|t| self.dispatch.entity_from_id(t)) else { break };
-                    let MethodCall::Known { name, args } = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call else {
+                    let MethodCall::Known { name, args, .. } = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call else {
                         continue;
                     };
                     if &*name == "showGUI" {

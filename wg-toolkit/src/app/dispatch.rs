@@ -183,6 +183,8 @@ pub struct PropertyDef {
     pub name: Arc<str>,
     pub ty: Ty,
     pub length: ElementLength,
+    /// Which side hosts it and which clients see it.
+    pub flags: PropertyFlags,
 }
 
 /// The dynamically-decoded result of a method call (base- or cell-directed), produced by
@@ -192,6 +194,8 @@ pub enum MethodCall {
     /// A call whose exposed id is present in the entity's method table for this
     /// direction.
     Known {
+        /// Its index in that table.
+        exposed_id: u16,
         name: Arc<str>,
         args: Vec<Value>,
     },
@@ -548,7 +552,7 @@ fn build_property_table(
     }
 
     collected.into_iter()
-        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length })
+        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags })
         .collect()
 
 }

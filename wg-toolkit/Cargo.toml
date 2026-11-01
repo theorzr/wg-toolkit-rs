@@ -24,6 +24,7 @@ png.workspace = true
 serde.workspace = true
 serde-pickle.workspace = true
 bitflags.workspace = true
+paste.workspace = true
 
 crossbeam-channel.workspace = true
 

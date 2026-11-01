@@ -23,6 +23,7 @@ use crate::net::proto::Protocol;
 
 use super::dispatch::{ScriptDispatch, PropertyDef, MethodCall, MethodDef};
 use super::outbox::Outbox;
+use super::schema::{self, BindError, Bound, Calls, Entity, EntitySchema, RawEntity};
 use super::io_invalid_data;
 use super::client;
 
@@ -40,6 +41,8 @@ pub struct App {
     /// The scripting model for this app, and its per entity-type dispatch tables
     /// computed from it at construction time.
     dispatch: ScriptDispatch,
+    /// The schema registered for each entity type, by type id, see [`Self::register`].
+    bindings: Vec<Option<Bound>>,
     /// Internal socket for this application.
     socket: PacketSocket,
     /// The channel tracker.
@@ -71,8 +74,10 @@ pub struct App {
 impl App {
 
     pub fn new(addr: SocketAddr, script: Script) -> io::Result<Self> {
+        let dispatch = ScriptDispatch::new(script);
         Ok(Self {
-            dispatch: ScriptDispatch::new(script),
+            bindings: (0..=dispatch.entities.len()).map(|_| None).collect(),
+            dispatch,
             socket: PacketSocket::bind(addr)?,
             protocol: Protocol::new(),
             events: VecDeque::new(),
@@ -93,6 +98,40 @@ impl App {
     /// Get the address this app is bound to.
     pub fn addr(&self) -> io::Result<SocketAddr> {
         self.socket.addr()
+    }
+
+    /// Bind a schema to its entity type of the loaded script, checking every member it
+    /// declares, see [`schema`]. Its entities can then be viewed through it with
+    /// [`Self::entity`], and their calls decoded with [`Self::decode`].
+    pub fn register<T: EntitySchema>(&mut self) -> Result<(), BindError> {
+        let Some((type_id, dispatch)) = self.dispatch.entity_from_name(T::NAME) else {
+            return Err(BindError { schema: T::NAME, errors: vec![format!("no entity type {}", T::NAME)] });
+        };
+        self.bindings[usize::from(type_id)] = Some(schema::bind::<T>(dispatch)?);
+        Ok(())
+    }
+
+    /// View an entity of a client through its type's registered schema, which must be
+    /// the given one.
+    pub fn entity<T: EntitySchema>(&mut self, entity_id: u32) -> io::Result<Entity<'_, T>> {
+        let entry = self.entities.get(&entity_id)
+            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {entity_id}")))?;
+        let (addr, type_id) = (entry.addr, entry.type_id);
+        let bound = self.bindings.get(usize::from(type_id)).and_then(Option::as_ref)
+            .filter(|bound| bound.is::<T>())
+            .ok_or_else(|| io_invalid_data(format_args!("entity {entity_id} is not a registered {}", T::NAME)))?;
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+        let is_player = self.clients.get(&addr).and_then(|c| c.base_entity_id) == Some(entity_id);
+        let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
+        Ok(Entity::new(RawEntity { out, dispatch, bound, entity_id, is_player }))
+    }
+
+    /// Decode a call a client made to one of an entity's base or cell methods, if the
+    /// entity is of the given calls' schema and the method one they declare.
+    pub fn decode<C: Calls>(&self, entity_id: u32, call: &MethodCall) -> Option<C> {
+        let type_id = self.entities.get(&entity_id)?.type_id;
+        self.bindings.get(usize::from(type_id))?.as_ref()?.decode(call)
     }
 
     /// Poll for the next event of this app, blocking until one comes.
@@ -460,9 +499,10 @@ impl App {
         let dispatch = self.dispatch.entity_from_id(type_id)
             .ok_or_else(|| io_invalid_data(format_args!("no dispatch table for entity: {}", handle.entity_id)))?;
 
-        let name = dispatch.client_methods.iter().find(|m| &*m.name == method_name)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
-            .name.clone();
+        let (exposed_id, name) = dispatch.client_methods.iter().enumerate()
+            .find(|(_, m)| &*m.name == method_name)
+            .map(|(exposed_id, m)| (exposed_id as u16, m.name.clone()))
+            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?;
 
         let is_player = self.clients.get(&addr).and_then(|c| c.base_entity_id) == Some(handle.entity_id);
         let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
@@ -472,7 +512,7 @@ impl App {
             out.select_entity(handle.entity_id)?;
         }
         out.write_selected(
-            client::element::EntityMethod { call: MethodCall::Known { name, args } },
+            client::element::EntityMethod { call: MethodCall::Known { exposed_id, name, args } },
             &dispatch.client_methods,
         )
 
@@ -665,22 +705,6 @@ impl App {
     /// The stream's first message must create a node.
     pub fn nrl_create_node(&mut self, addr: SocketAddr, stream: client::element::NrlStream) -> io::Result<()> {
         self.send_simple(addr, client::element::NrlCreateNode(stream))
-    }
-
-    /// Call a client method of any entity the client knows, given in that entity
-    /// type's client method table.
-    pub fn call_entity_method(&mut self, addr: SocketAddr, entity_id: u32, type_id: u16, method_name: &str, args: Vec<Value>) -> io::Result<()> {
-        let dispatch = self.dispatch.entity_from_id(type_id)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
-        let name = dispatch.client_methods.iter().find(|m| &*m.name == method_name)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?
-            .name.clone();
-        let out = self.outbox.client(addr, &mut self.protocol, &self.socket)?;
-        out.select_entity(entity_id)?;
-        out.write_selected(
-            client::element::EntityMethod { call: MethodCall::Known { name, args } },
-            &dispatch.client_methods,
-        )
     }
 
     /// Change some of an entity's client properties on the client owning it, given in

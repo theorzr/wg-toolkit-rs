@@ -25,6 +25,9 @@ tracing = "0.1"
 serde = "1.0"
 bitflags = "2.6"
 
+# Macros:
+paste = "1.0"
+
 # Data structures and math:
 smallvec = "1.13"
 indexmap = "2.6"

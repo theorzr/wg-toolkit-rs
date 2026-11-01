@@ -1286,7 +1286,7 @@ impl BaseHandler {
                     // bundle reader always safely advances here.
                     let call = elt.read::<BaseEntityMethod, _>(&dispatch.base_methods)?.element.call;
                     match &call {
-                        MethodCall::Known { name, args } => {
+                        MethodCall::Known { name, args, .. } => {
                             info!(%addr, id, "-> Base entity method: ({entity_id}) {call:?}");
                             if let Some(meaning) = self.requests.on_base_call(name, args) {
                                 info!(target: PYTHON_TARGET, %addr, entity_id, "-> {meaning}");
@@ -2217,7 +2217,7 @@ impl BaseHandler {
                     // an `Err`.
                     let call = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call;
                     return Ok(match &call {
-                        MethodCall::Known { name, args } => {
+                        MethodCall::Known { name, args, .. } => {
                             info!(%addr, id, "<- Entity method: ({entity_id}) {call:?}");
                             if let Some(meaning) = self.requests.on_client_call(name, args) {
                                 info!(target: PYTHON_TARGET, %addr, entity_id, "<- {meaning}");
