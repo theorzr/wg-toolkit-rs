@@ -808,18 +808,24 @@ impl BaseThread {
                     self.damage_target(addr, entity_id, shot, &hit)
                 }
             }
-            Landing::Terrain => self.app.call_method(avatar, "explodeProjectile", vec![
-                Value::Int32(shot.id),
+            Landing::Terrain => {
+                // EXPERIMENT: the tracer stops, and the explosion comes for a shot the
+                // client does not know, so that it shows it from these arguments alone.
+                self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)])?;
+                self.app.call_method(avatar, "explodeProjectile", vec![
+                Value::Int32(shot.id | 0x4000_0000),
                 Value::UInt8(def.effects_index),
-                Value::UInt8(NO_PREFAB_EFFECTS),
+                Value::UInt8(def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS)),
                 Value::UInt8(GROUND_EFFECT_MATERIAL),
                 Value::UInt8(def.kind_index),
                 Value::Float32(def.caliber),
                 Value::Vector3(shot.end),
-                Value::Vector3(shot.end_velocity.normalize()),
+                // Its last step: the client projects the crater along it, both ways.
+                Value::Vector3(shot.end_velocity * EXPLOSION_STEP),
                 Value::Float32(shot.end_velocity.length()),
                 Value::Seq(Vec::new()),
-            ]),
+            ])
+            }
             Landing::Range => self.app.call_method(avatar, "stopTracer", vec![Value::Int32(shot.id), Value::Vector3(shot.end)]),
         }
     }
@@ -1623,7 +1629,7 @@ fn show_shot(app: &mut base::App, addr: SocketAddr, avatar: base::Handle, shoote
         Value::Int32(shot.id),
         Value::UInt8(0),
         Value::UInt8(def.effects_index),
-        Value::UInt8(NO_PREFAB_EFFECTS),
+        Value::UInt8(def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS)),
         Value::UInt8(def.kind_index),
         Value::Float32(def.caliber),
         Value::Vector3(shot.start),
@@ -1663,7 +1669,7 @@ fn damage_from_shot_args(shooter_id: u32, shot: &Shot, hit: &VehicleHit, bounds:
         Value::Int32(shooter_id as i32),
         Value::Seq(vec![hit_point]),
         Value::UInt8(def.effects_index),
-        Value::UInt8(NO_PREFAB_EFFECTS),
+        Value::UInt8(def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS)),
         Value::Int32(damage as i32),
         Value::UInt8(damage_factor),
         Value::UInt8(0), // The last material is not a shield.
@@ -1790,11 +1796,17 @@ fn property_update(dispatch: &ScriptDispatch, component: &str, name: &str, node_
 }
 
 /// `INVALID_EFFECT_INDEX`: no prefab effects for a shot, the client then only playing
-/// its shot effects.
+/// its legacy shot effects.
 const NO_PREFAB_EFFECTS: u8 = 255;
 
-/// The effect material the captured server gave shells exploding on the ground.
-const GROUND_EFFECT_MATERIAL: u8 = 2;
+/// How long the last step `explodeProjectile` gives is, in seconds. The captured
+/// server's are up to its 0.1 s ticks; the client projects the ground effects, the
+/// crater with them, along that step, so it must reach the client's ground.
+const EXPLOSION_STEP: f32 = 0.05;
+
+/// The `ground` effect material, its index in `EFFECT_MATERIALS`: effect materials in the
+/// order `system/data/material_kinds.xml` first names them.
+const GROUND_EFFECT_MATERIAL: u8 = 0;
 
 /// The consumables of the captured battle, by integer descriptor, which every vehicle
 /// gets until accounts have their own.

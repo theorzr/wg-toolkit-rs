@@ -175,6 +175,7 @@ mod tests {
             caliber: 120.0,
             effects_index: 0,
             pierced_sticker: None,
+            prefab_effects_index: None,
             speed: 800.0,
             gravity: 9.81,
             max_distance: 720.0,

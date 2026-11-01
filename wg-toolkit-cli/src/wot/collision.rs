@@ -308,6 +308,8 @@ mod tests {
             Vec3::ZERO, def.collision.hull_position, aiming.turret_position, aiming.turret_position + aiming.gun_position,
         ].map(Affine3A::from_translation);
         assert!(def.shots.iter().all(|shot| shot.pierced_sticker.is_some()), "{:?}", def.shots);
+        // Its APDS shells get the APCR prefab effects (3), its HESH the HE ones (1).
+        assert_eq!(def.shots.iter().map(|shot| shot.prefab_effects_index).collect::<Vec<_>>(), [Some(3), Some(3), Some(1)]);
         let collision = &def.collision;
         for model in &collision.parts {
             assert!(model.groups.iter().any(|group| !group.triangles.is_empty()), "{model:?}");

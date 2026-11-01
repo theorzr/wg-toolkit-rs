@@ -64,6 +64,9 @@ pub struct ShotDef {
     /// The damage sticker a pierce leaves, as its effects give it: its index in
     /// `common/damage_stickers.xml`.
     pub pierced_sticker: Option<u8>,
+    /// Its prefab effects' index in `common/prefab_effects/shot_effects.xml`: its own
+    /// `prefabEffects`, else its kind's default in `common/vehicle.xml`.
+    pub prefab_effects_index: Option<u8>,
     /// In m/s and m/s², scaled by `projectileSpeedFactor` as the client's item loader
     /// does.
     pub speed: f32,
@@ -228,7 +231,8 @@ impl VehicleDef {
 
         let shells_components = component_ids("shells")?;
         // Shells are scaled as `gun_readers.readShot` does.
-        let projectile_speed_factor = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?
+        let common = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?;
+        let projectile_speed_factor = common
             .get_child("miscParams").and_then(|params| child_float(params.as_element()?, "projectileSpeedFactor"))
             .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
         let shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/shot_effects.xml")?;
@@ -245,6 +249,12 @@ impl VehicleDef {
         let pierced_sticker = |effects: &str| child_element(&shot_effects, effects)
             .and_then(|effects| child_string(child_element(effects, "targetStickers")?, "armorPierced"))
             .and_then(|sticker| sticker_index(sticker))
+            .map(|index| index as u8);
+        let prefab_shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/prefab_effects/shot_effects.xml")?;
+        let default_prefab_effects = child_element(&common, "defaultPrefabEffects").and_then(|defaults| child_element(defaults, "shot"));
+        let prefab_effects_index = |shell: &Element, kind: &str| child_string(shell, "prefabEffects")
+            .or_else(|| child_string(default_prefab_effects?, kind))
+            .and_then(|effects| prefab_shot_effects.iter_children_all().position(|(name, _)| name == effects))
             .map(|index| index as u8);
         let mut shells = Vec::new();
         let mut shots = Vec::new();
@@ -268,6 +278,7 @@ impl VehicleDef {
                 effects_index: child_string(shell, "effects").and_then(|effects| effects_index(&effects))
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no known effects")))? as u8,
                 pierced_sticker: child_string(shell, "effects").and_then(|effects| pierced_sticker(effects)),
+                prefab_effects_index: child_string(shell, "kind").and_then(|kind| prefab_effects_index(shell, kind)),
                 speed: shot_float("speed")? * projectile_speed_factor,
                 gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
                 max_distance: shot_float("maxDistance")?,
