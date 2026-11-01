@@ -4,7 +4,7 @@
 //! that moves and turns at the vehicle's limits and rests on the terrain, with no
 //! collision, slope resistance or engine model.
 
-use glam::{Quat, Vec3};
+use glam::{Affine3A, Quat, Vec3};
 
 use wgtk::space::terrain::Terrain;
 
@@ -28,6 +28,11 @@ const BRAKING: f32 = 10.0;
 /// Where the hull is sampled to tilt it with the ground: half its length and width, a
 /// typical tank's rather than the vehicle's own.
 const HULL_HALF_LENGTH: f32 = 3.0;
+/// The engine's relative RPM at idle, and just after shifting up, as captured.
+const IDLE_RPM: f32 = 0.2;
+const SHIFT_RPM: f32 = 0.3;
+/// The shares of the top speed the gearbox shifts up at, as captured: 4 gears.
+const GEAR_SHIFTS: [f32; 3] = [0.27, 0.52, 0.8];
 const HULL_HALF_WIDTH: f32 = 1.7;
 
 /// A vehicle's movement limits, see `VehicleDef`.
@@ -60,6 +65,17 @@ impl Vehicle {
         }
         self.turret.step(dt, &self.hull);
         moved
+    }
+
+    /// Where its chassis, hull, turret and gun are in the world, as transforms from
+    /// each part's frame, the hull sitting at `hull_position` on the chassis.
+    pub fn part_transforms(&self, hull_position: Vec3) -> [Affine3A; 4] {
+        let aiming = &self.turret.aiming;
+        let chassis = Affine3A::from_rotation_translation(self.hull.rotation(), self.hull.position);
+        let hull = chassis * Affine3A::from_translation(hull_position);
+        let turret = chassis * Affine3A::from_rotation_translation(Quat::from_rotation_y(self.turret.yaw), aiming.turret_position);
+        let gun = turret * Affine3A::from_rotation_translation(Quat::from_rotation_x(self.turret.pitch), aiming.gun_position);
+        [chassis, hull, turret, gun]
     }
 
 }
@@ -150,6 +166,28 @@ impl Hull {
         [mode, self.flags]
     }
 
+    /// The engine's gear and its RPM relative to its maximum, which the client's engine
+    /// sound follows. As the captured server does: in neutral (gear 0) at idle RPM when
+    /// still, else the speed's share of the top speed picks one of [`GEAR_SHIFTS`]'s
+    /// gears, the RPM going from [`SHIFT_RPM`] to 1 across it; turning in place, the RPM
+    /// follows the turn rate in first gear.
+    pub fn engine(&self) -> (u8, f32) {
+        let top_speed = if self.speed < 0.0 { self.limits.speed_backward } else { self.limits.speed_forward };
+        let share = (self.speed.abs() / top_speed.max(0.1)).min(1.0);
+        let turn_share = (self.yaw_rate.abs() / self.limits.rotation_speed.max(0.01)).min(1.0);
+        if share < 0.02 {
+            if turn_share < 0.02 {
+                return (0, IDLE_RPM);
+            }
+            return (1, SHIFT_RPM + (1.0 - SHIFT_RPM) * turn_share);
+        }
+        let gear = GEAR_SHIFTS.iter().take_while(|&&shift| share >= shift).count();
+        let low = if gear == 0 { 0.0 } else { GEAR_SHIFTS[gear - 1] };
+        let high = GEAR_SHIFTS.get(gear).copied().unwrap_or(1.0);
+        let in_gear = ((share - low) / (high - low)).clamp(0.0, 1.0);
+        (gear as u8 + 1, SHIFT_RPM + (1.0 - SHIFT_RPM) * in_gear)
+    }
+
     /// The hull's orientation: yaw about Y, then pitch about X (nose down), then roll
     /// about Z (right side up), as the client's matrices compose them.
     pub fn rotation(&self) -> Quat {
@@ -161,15 +199,15 @@ impl Hull {
     /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
     /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
     /// bits over a turn, pitch on 12 bits over ±π/2, roll on 13 bits over a turn, the left
-    /// then right track speeds on 8 bits each over -15..30 m/s, and 8 bits the client
-    /// ignores, over 0..1.2, left at 0.
+    /// then right track speeds on 8 bits each over -15..30 m/s, and the engine's relative
+    /// RPM on 8 bits over 0..1.2, see [`Self::engine`].
     pub fn aux_physics_data(&self) -> u64 {
         use std::f32::consts::FRAC_PI_2;
         // The inner track goes slower, the outer one faster.
         let turning = self.yaw_rate * HULL_HALF_WIDTH;
         let (left, right) = (self.speed + turning, self.speed - turning);
         let (roll, pitch, yaw) = (self.direction.x, self.direction.y, self.direction.z);
-        pack_range(0.0, 0.0, 1.2, 8) << 56
+        pack_range(self.engine().1, 0.0, 1.2, 8) << 56
             | pack_range(right, -15.0, 30.0, 8) << 48
             | pack_range(left, -15.0, 30.0, 8) << 40
             | pack_angle(roll, 13) << 27
@@ -348,7 +386,7 @@ fn pack_angle(angle: f32, bits: u32) -> u64 {
 }
 
 /// An angle in `(-π, π]`.
-fn wrap_angle(angle: f32) -> f32 {
+pub fn wrap_angle(angle: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     let wrapped = angle.rem_euclid(TAU);
     if wrapped > PI { wrapped - TAU } else { wrapped }
@@ -356,7 +394,7 @@ fn wrap_angle(angle: f32) -> f32 {
 
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
 
     use super::*;
 
@@ -406,7 +444,7 @@ mod tests {
         assert!(!hull.step(0.1));
     }
 
-    fn chieftain_aiming() -> AimingDef {
+    pub(crate) fn chieftain_aiming() -> AimingDef {
         use crate::wot::item_defs::PitchCurve;
         let curve = |points: &[(f32, f32)]| PitchCurve(points.iter().map(|&(t, a)| (t * std::f32::consts::TAU, a.to_radians())).collect());
         AimingDef {
@@ -481,14 +519,33 @@ mod tests {
     }
 
     #[test]
+    fn engine_shifts_up_with_speed() {
+        let mut hull = chieftain();
+        assert_eq!(hull.engine(), (0, IDLE_RPM));
+        let top = hull.limits.speed_forward;
+        let mut last = (0, 0.0);
+        // Below 2% of the top speed, it counts as still.
+        for step in 2..=100 {
+            hull.speed = top * step as f32 / 100.0;
+            let (gear, rpm) = hull.engine();
+            assert!(gear >= last.0 && (SHIFT_RPM..=1.0).contains(&rpm), "{gear} {rpm} at {}", hull.speed);
+            // The RPM drops only when shifting up.
+            assert!(rpm >= last.1 || gear > last.0);
+            last = (gear, rpm);
+        }
+        assert_eq!(last, (4, 1.0));
+    }
+
+    #[test]
     fn aux_physics_data_packs_as_captured() {
-        // A captured value, standing still after driving: yaw 2.7713, pitch and roll
-        // near 0, both tracks at 1.76 m/s, the ignored last byte 0xaf.
+        // A captured value, slowing down: yaw 2.7713, pitch and roll near 0, both tracks
+        // at 1.76 m/s, the RPM at 0xaf.
         let captured: u64 = 0xaf5f5f813c00f875;
         let mut hull = chieftain();
         hull.direction = Vec3::new(0.0299, 0.0012, 2.7713);
         hull.speed = 1.76;
-        assert_eq!(hull.aux_physics_data(), captured & 0x00ff_ffff_ffff_ffff);
+        // Without the RPM, which depends on the engine model.
+        assert_eq!(hull.aux_physics_data() & 0x00ff_ffff_ffff_ffff, captured & 0x00ff_ffff_ffff_ffff);
     }
 
     #[test]

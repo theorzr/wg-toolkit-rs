@@ -5,6 +5,7 @@ pub mod emulator;
 pub mod account_commands;
 pub mod items;
 pub mod item_defs;
+pub mod collision;
 
 use std::sync::Arc;
 use std::fs::File;

@@ -1,12 +1,16 @@
 //! A vehicle's gun as the server runs it: its ammunition, the shell loaded, the reload,
 //! and each shot's flight until it hits a vehicle, the terrain, or runs out of range.
-//! Vehicles are boxes, without armour; destructibles are not hit yet.
+//! Vehicles are hit on their collision models, without armour yet; destructibles are
+//! not hit yet.
 
-use glam::Vec3;
+use std::sync::Arc;
+
+use glam::{Affine3A, Vec3};
 use rand::Rng;
 
 use wgtk::space::terrain::Terrain;
 
+use crate::wot::collision::{VehicleCollision, VehicleHit};
 use crate::wot::item_defs::ShotDef;
 
 
@@ -46,50 +50,20 @@ pub struct Shot {
 /// What a shell ends its flight on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Landing {
-    /// The vehicle of this entity id.
-    Vehicle(u32),
+    /// The vehicle of this entity id, there.
+    Vehicle(u32, VehicleHit),
     Terrain,
     /// Nothing, at its maximum distance.
     Range,
 }
 
-/// A vehicle shells can hit: a box around its hull, turned with its yaw.
+/// A vehicle shells can hit: its collision models, placed in the world.
 #[derive(Debug, Clone)]
-pub struct VehicleBox {
+pub struct HitTarget {
     pub entity_id: u32,
-    /// The box's centre.
-    pub center: Vec3,
-    pub yaw: f32,
-    /// Half its width, height and length.
-    pub half_extents: Vec3,
-}
-
-impl VehicleBox {
-
-    /// Where a segment from `from` to `to` enters the box, as a fraction of it.
-    fn entry(&self, from: Vec3, to: Vec3) -> Option<f32> {
-        let rotation = glam::Quat::from_rotation_y(self.yaw).inverse();
-        let (from, to) = (rotation * (from - self.center), rotation * (to - self.center));
-        let delta = to - from;
-        let (mut enter, mut exit) = (0.0f32, 1.0f32);
-        for axis in 0..3 {
-            let (start, step, half) = (from[axis], delta[axis], self.half_extents[axis]);
-            if step.abs() < 1e-9 {
-                if start.abs() > half {
-                    return None;
-                }
-                continue;
-            }
-            let (a, b) = ((-half - start) / step, (half - start) / step);
-            enter = enter.max(a.min(b));
-            exit = exit.min(a.max(b));
-            if enter > exit {
-                return None;
-            }
-        }
-        Some(enter)
-    }
-
+    pub collision: Arc<VehicleCollision>,
+    /// Each part's transform, see [`super::physics::Vehicle::part_transforms`].
+    pub transforms: [Affine3A; 4],
 }
 
 impl Gun {
@@ -103,7 +77,7 @@ impl Gun {
     /// Fire the loaded shell at game time `now` from `start` toward `direction`, off by a
     /// random angle within `dispersion` radians, if the gun is loaded and has a shell
     /// left. It then reloads.
-    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[VehicleBox]) -> Option<Shot> {
+    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         if now < self.ready_at {
             return None;
@@ -121,6 +95,13 @@ impl Gun {
         let (end, end_velocity, flight_time, landing) = fly(start, velocity, def.gravity, def.max_distance, terrain, vehicles);
         Some(Shot { id, def, start, velocity, end, end_velocity, flight_time, landing })
 
+    }
+
+    /// The same gun numbering its shots from `first`: the client tells shots apart by
+    /// their id alone, whoever fires them.
+    pub fn with_shot_ids_from(mut self, first: i32) -> Self {
+        self.next_shot_id = first;
+        self
     }
 
     /// Whether the gun got loaded by game time `now` since last asked.
@@ -151,16 +132,17 @@ fn disperse(direction: Vec3, angle: f32, rng: &mut impl Rng) -> Vec3 {
 
 /// Follow a shell from `start`: where it ends, its velocity and the time then, and what
 /// it ends on.
-fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Option<&Terrain>, vehicles: &[VehicleBox]) -> (Vec3, Vec3, f32, Landing) {
+fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> (Vec3, Vec3, f32, Landing) {
     let (mut position, mut velocity, mut time) = (start, velocity, 0.0);
     loop {
         let next = position + velocity * FLIGHT_STEP;
         let next_velocity = velocity - Vec3::Y * gravity * FLIGHT_STEP;
         let hit = vehicles.iter()
-            .filter_map(|vehicle| Some((vehicle.entry(position, next)?, vehicle.entity_id)))
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((t, entity_id)) = hit {
-            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Vehicle(entity_id));
+            .filter_map(|vehicle| Some((vehicle.entity_id, vehicle.collision.first_hit(&vehicle.transforms, position, next)?)))
+            .min_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction));
+        if let Some((entity_id, hit)) = hit {
+            let t = hit.fraction;
+            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Vehicle(entity_id, hit));
         }
         if let Some(ground) = terrain.and_then(|terrain| terrain.height_at(next.x, next.z)) {
             if next.y <= ground {
@@ -183,6 +165,7 @@ fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Op
 mod tests {
 
     use super::*;
+    use crate::wot::collision::{ArmorGroup, CollisionModel, VehiclePart};
     use crate::wot::items::{item_type, IntCompactDescr};
 
     fn shell() -> ShotDef {
@@ -191,6 +174,7 @@ mod tests {
             kind_index: 2,
             caliber: 120.0,
             effects_index: 0,
+            pierced_sticker: None,
             speed: 800.0,
             gravity: 9.81,
             max_distance: 720.0,
@@ -217,10 +201,21 @@ mod tests {
     #[test]
     fn hits_a_vehicle_in_its_way() {
         let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
-        let target = VehicleBox { entity_id: 7, center: Vec3::new(0.0, 0.0, 100.0), yaw: 0.5, half_extents: Vec3::new(1.7, 1.2, 3.5) };
+        // A plate 3 m in front of the hull's origin, the hull 100 m ahead.
+        let plate = |triangles| CollisionModel { groups: vec![ArmorGroup { name: "armor_1".into(), material_kind: 1, triangles }], radius: 5.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
+        let (a, b, c, d) = (Vec3::new(-2.0, -1.0, -3.0), Vec3::new(2.0, -1.0, -3.0), Vec3::new(2.0, 1.0, -3.0), Vec3::new(-2.0, 1.0, -3.0));
+        let collision = VehicleCollision {
+            parts: [plate(vec![]), plate(vec![[a, b, c], [a, c, d]]), plate(vec![]), plate(vec![])],
+            hull_position: Vec3::ZERO,
+        };
+        let hull = Affine3A::from_translation(Vec3::new(0.0, 0.0, 100.0));
+        let target = HitTarget { entity_id: 7, collision: Arc::new(collision), transforms: [hull; 4] };
         let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[target]).unwrap();
-        assert_eq!(shot.landing, Landing::Vehicle(7));
-        assert!(shot.end.z > 95.0 && shot.end.z < 100.0);
+        let Landing::Vehicle(7, hit) = shot.landing else { panic!("missed: {:?}", shot.landing) };
+        assert_eq!(hit.part, VehiclePart::Hull);
+        assert_eq!(hit.material_kind, 1);
+        assert_eq!(hit.normal, -Vec3::Z);
+        assert!((shot.end.z - 97.0).abs() < 0.01 && hit.local_point.z == -3.0);
     }
 
     #[test]

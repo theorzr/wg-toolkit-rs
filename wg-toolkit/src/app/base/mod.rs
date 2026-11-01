@@ -521,8 +521,9 @@ impl App {
     /// With the client's vehicle, the same bundle places it, as the client times the
     /// position updates in a bundle by the tick opening it: a reference point at the
     /// vehicle's position rounded to the metre, the player entity on that point, then
-    /// the vehicle's exact position.
-    pub fn tick(&mut self, addr: SocketAddr, tick: u8, vehicle: Option<&TickVehicle>) -> io::Result<()> {
+    /// the vehicle's exact position. Then the other vehicles, by their alias, with their
+    /// properties; their `player_properties` and `nrl_updates` are not sent.
+    pub fn tick(&mut self, addr: SocketAddr, tick: u8, vehicle: Option<&TickVehicle>, others: &[TickVehicle]) -> io::Result<()> {
         self.bundle.clear();
         let mut writer = self.bundle.element_writer();
         writer.write_simple(client::element::TickSync { tick })?;
@@ -559,6 +560,22 @@ impl App {
                 let dispatch = self.dispatch.entity_from_id(*type_id)
                     .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
                 writer.write_simple(client::element::SelectPlayerEntity {})?;
+                for property in properties {
+                    writer.write(property.clone(), &dispatch.properties[..])?;
+                }
+            }
+        }
+        // Other vehicles: each position update selects its vehicle for its properties.
+        for other in others {
+            writer.write_simple(client::element::AvatarUpdateAliasDetailed {
+                ref_num: 0,
+                id_alias: other.id_alias,
+                position: other.position,
+                direction: other.direction,
+            })?;
+            if let Some((type_id, properties)) = &other.properties {
+                let dispatch = self.dispatch.entity_from_id(*type_id)
+                    .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
                 for property in properties {
                     writer.write(property.clone(), &dispatch.properties[..])?;
                 }

@@ -6,10 +6,12 @@
 
 use glam::Vec3;
 use std::io;
+use std::sync::Arc;
 
 use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
 
+use super::collision::{CollisionModel, VehicleCollision};
 use super::items::{item_type, IntCompactDescr, VehicleDescr};
 
 
@@ -45,6 +47,8 @@ pub struct VehicleDef {
     /// How fast the default chassis turns the vehicle, in rad/s.
     pub rotation_speed: f32,
     pub aiming: AimingDef,
+    /// The default modules' collision models.
+    pub collision: Arc<VehicleCollision>,
 }
 
 /// A shell as the default gun fires it: what the client needs to show its tracer.
@@ -57,6 +61,9 @@ pub struct ShotDef {
     pub caliber: f32,
     /// Its effects' index in `common/shot_effects.xml`.
     pub effects_index: u8,
+    /// The damage sticker a pierce leaves, as its effects give it: its index in
+    /// `common/damage_stickers.xml`.
+    pub pierced_sticker: Option<u8>,
     /// In m/s and m/s², scaled by `projectileSpeedFactor` as the client's item loader
     /// does.
     pub speed: f32,
@@ -229,6 +236,16 @@ impl VehicleDef {
             .map(|(name, _)| name)
             .filter(|name| !name.starts_with("xmlns:"))
             .position(|name| name == effects);
+        // As the server reads stickers, their id is their index, see `_readDamageStickers`.
+        let damage_stickers = read_xml(fs, "scripts/item_defs/vehicles/common/damage_stickers.xml")?;
+        let sticker_index = |sticker: &str| damage_stickers.iter_children_all()
+            .map(|(name, _)| name)
+            .filter(|name| !name.starts_with("xmlns:") && *name != "texture")
+            .position(|name| name == sticker);
+        let pierced_sticker = |effects: &str| child_element(&shot_effects, effects)
+            .and_then(|effects| child_string(child_element(effects, "targetStickers")?, "armorPierced"))
+            .and_then(|sticker| sticker_index(sticker))
+            .map(|index| index as u8);
         let mut shells = Vec::new();
         let mut shots = Vec::new();
         for (shell_name, shot) in child_element(gun_def, "shots").into_iter().flat_map(|shots| shots.iter_children_all()) {
@@ -250,6 +267,7 @@ impl VehicleDef {
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no caliber")))?,
                 effects_index: child_string(shell, "effects").and_then(|effects| effects_index(&effects))
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no known effects")))? as u8,
+                pierced_sticker: child_string(shell, "effects").and_then(|effects| pierced_sticker(effects)),
                 speed: shot_float("speed")? * projectile_speed_factor,
                 gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
                 max_distance: shot_float("maxDistance")?,
@@ -323,6 +341,27 @@ impl VehicleDef {
                 .ok_or_else(|| invalid(format!("{name} has no gun position")))?,
         };
 
+        // The gun's hit tester is the vehicle's own for it, or the shared gun's.
+        let chassis = child_element(&vehicle, "chassis")
+            .and_then(|chassis| chassis.iter_children_all().next())
+            .and_then(|(_, chassis)| chassis.as_element());
+        let gun = [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
+            .find(|gun| child_element(gun, "hitTester").is_some());
+        let parts = [("chassis", chassis), ("hull", child_element(&vehicle, "hull")), ("turret", Some(turret)), ("gun", gun)];
+        let mut models = Vec::new();
+        for (part, module) in parts {
+            let path = module.and_then(|module| child_string(child_element(module, "hitTester")?, "collisionModelClient"))
+                .ok_or_else(|| invalid(format!("{name} has no {part} collision model")))?;
+            // The definitions name a `.model`, the game ships it as a `.havok`.
+            let path = path.strip_suffix(".model").map_or_else(|| path.to_string(), |stem| format!("{stem}.havok"));
+            models.push(CollisionModel::load(fs, &path)?);
+        }
+        let collision = Arc::new(VehicleCollision {
+            parts: models.try_into().unwrap(),
+            hull_position: chassis.and_then(|chassis| child_vec3(chassis, "hullPosition"))
+                .ok_or_else(|| invalid(format!("{name} has no hull position")))?,
+        });
+
         let crew_roles = child_element(&vehicle, "crew")
             .into_iter()
             .flat_map(|crew| crew.iter_children_all())
@@ -343,7 +382,7 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming, collision })
 
     }
 

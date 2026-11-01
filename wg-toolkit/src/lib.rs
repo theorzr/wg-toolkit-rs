@@ -11,6 +11,7 @@ pub mod pxml;
 
 pub mod space;
 pub mod model;
+pub mod havok;
 
 pub mod res;
 pub mod script;
