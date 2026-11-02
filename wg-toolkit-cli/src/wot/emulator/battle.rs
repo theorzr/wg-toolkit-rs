@@ -18,9 +18,9 @@ use wgtk::res::fs::ResFilesystem;
 use wgtk::script::Value;
 
 use crate::wot::schema::{
-    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DogTag, DogTagComponent, Fire, GunMarker,
-    GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, ShotResult, VehicleCell, VehicleInfo,
-    VehicleSyncAttrs,
+    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag, DogTagComponent, Fire,
+    GunMarker, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, ShotResult, VehicleCell,
+    VehicleInfo, VehicleSyncAttrs,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::VehicleDef;
@@ -496,15 +496,18 @@ impl BaseThread {
             }
         }
 
-        // Every client lists it destroyed: its entry's change applies once its generation
-        // changes too.
+        // Every client lists it destroyed, by whom: its entry's changes apply once its
+        // generation changes too.
         if let (true, Some(vehicles_info)) = (killed, battle.vehicles_info) {
-            let index = target.info_index;
+            let death = DeathInfo { victimID: vehicle.id(), killerID: shooter, reasonID: ATTACK_REASON_SHOT, equipmentID: 0, numVehiclesAffected: 0 };
+            target.info.deathInfo = Some(death.clone());
             target.info.isAlive = false;
             target.info.__generation += 1;
+            let at = |field: &str| vec![PathStep::Index(target.info_index), PathStep::Field(field.into())];
             let mut vehicles_info = self.app.component(vehicles_info)?;
-            vehicles_info.set_vehiclesInfo_at(vec![PathStep::Index(index), PathStep::Field("isAlive".into())], false)?;
-            vehicles_info.set_vehiclesInfo_at(vec![PathStep::Index(index), PathStep::Field("__generation".into())], target.info.__generation)?;
+            vehicles_info.set_vehiclesInfo_at(at("deathInfo"), Some(death))?;
+            vehicles_info.set_vehiclesInfo_at(at("isAlive"), false)?;
+            vehicles_info.set_vehiclesInfo_at(at("__generation"), target.info.__generation)?;
         }
 
         let mut flags = HIT_FLAGS_PIERCED;
@@ -783,6 +786,9 @@ const HIT_FLAGS_PIERCED: u32 = 0x100000 | 0x100 | 0x10;
 /// `VEHICLE_HIT_EFFECT.ARMOR_PIERCED`.
 const HIT_EFFECT_ARMOR_PIERCED: u8 = 4;
 
+/// `ATTACK_REASON.SHOT`'s index.
+const ATTACK_REASON_SHOT: i8 = 0;
+
 /// `VEHICLE_HIT_FLAGS.VEHICLE_KILLED`.
 const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
 
@@ -945,8 +951,8 @@ fn show_damage(
     if let Some(stickers) = stickers {
         vehicle.set_damageStickers(stickers)?;
     }
-    // `ATTACK_REASON.SHOT`, no extended reason.
-    vehicle.onHealthChanged(damage.new_health as i16, damage.old_health as i16, damage.shooter, 0, -1)
+    // No extended reason.
+    vehicle.onHealthChanged(damage.new_health as i16, damage.old_health as i16, damage.shooter, ATTACK_REASON_SHOT as u8, -1)
 }
 
 /// A `VEHICLE_HIT_POINT` for a shell piercing at `hit`, its segment encoded over the hit

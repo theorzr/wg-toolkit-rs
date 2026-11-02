@@ -205,6 +205,19 @@ script_dict! {
 }
 
 script_dict! {
+    /// `DEATH_INFO`: who destroyed a vehicle, and how.
+    #[derive(Debug, Clone)]
+    pub struct DeathInfo {
+        pub victimID: EntityId,
+        pub killerID: EntityId,
+        /// The `ATTACK_REASON` index.
+        pub reasonID: i8,
+        pub equipmentID: i16,
+        pub numVehiclesAffected: i16,
+    }
+}
+
+script_dict! {
     /// `FIRE_INFO`: what set a vehicle on fire, and when.
     #[derive(Debug, Clone)]
     pub struct FireInfo {
@@ -280,7 +293,7 @@ script_dict! {
         pub events: Pickle,
         pub badges: Pickle,
         pub ranked: Vec<u16>,
-        pub deathInfo: Option<Value>,
+        pub deathInfo: Option<DeathInfo>,
         pub respawnID: u32,
         pub stFrags: u32,
         pub frags: i16,
