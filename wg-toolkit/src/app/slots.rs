@@ -60,6 +60,12 @@ impl<T> Slots<T> {
     }
 
     /// Every value, with its key.
+    pub fn iter(&self) -> impl Iterator<Item = (SlotKey, &T)> {
+        self.slots.iter().enumerate()
+            .filter_map(|(index, slot)| Some((SlotKey { index: index as u32, generation: slot.generation }, slot.value.as_ref()?)))
+    }
+
+    /// Every value, with its key.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (SlotKey, &mut T)> {
         self.slots.iter_mut().enumerate()
             .filter_map(|(index, slot)| Some((SlotKey { index: index as u32, generation: slot.generation }, slot.value.as_mut()?)))

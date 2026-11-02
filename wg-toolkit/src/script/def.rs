@@ -133,6 +133,9 @@ pub struct Property {
     #[allow(unused)]  // Not used for generation
     pub default: Option<String>,
     pub flags: PropertyFlags,
+    /// Whether the def lists it under `<Volatile>`: a dynamic component's volatile
+    /// property is updated with its whole value alone, see `NrlTree::decode_update`.
+    pub volatile: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

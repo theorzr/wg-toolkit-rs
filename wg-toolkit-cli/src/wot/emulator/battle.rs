@@ -10,7 +10,8 @@ use glam::Vec3;
 use tracing::{debug, info, warn};
 
 use wgtk::app::base::{self, ClientKey, EntityInit, SpaceKey};
-use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode, NrlStream, NrlUpdateNode};
+use wgtk::app::client::element::NrlMessage;
+use wgtk::app::component::{Audience, ComponentKey};
 use wgtk::app::dispatch::MethodCall;
 use wgtk::app::entity::{AnyEntity, Entity, EntityId, EntityKey};
 use wgtk::res::fs::ResFilesystem;
@@ -19,14 +20,17 @@ use wgtk::script::{StringValue, Value};
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::VehicleDef;
 use crate::wot::items::VehicleDescr;
-use crate::wot::schema::{self, Avatar, AvatarCell, HitPoint, ShotResult, VehicleCell};
+use crate::wot::schema::{
+    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle,
+    ShotResult, VehicleCell,
+};
 
 use super::bot::Bot;
 use super::gun::{Gun, HitTarget, Landing, Shot};
 use super::physics::{MotionLimits, Vehicle};
 use super::{
-    ammo_list, arena_vehicles, gun_marker_component, gun_marker_update, gun_reload_time, invalid_data,
-    own_vehicle, property_node, property_update, vehicle_health_info, with_bytes, with_int,
+    ammo_list, arena_vehicles, captured_property, gun_reload_time, invalid_data, targeting_info,
+    vehicle_health_info, vehicle_settings, with_bytes, with_int,
     BaseThread, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
 
@@ -88,19 +92,15 @@ struct Target {
 struct DrivenVehicle {
     entity: EntityKey<schema::Vehicle>,
     vehicle: Vehicle,
-    /// The node of its `GunMarkerComponent`'s `gunMarker` property, once created.
-    gun_marker_node: Option<u16>,
+    /// Its components the client has it with, when the capture has them.
+    own_vehicle: Option<ComponentKey<OwnVehicle>>,
+    gun_marker: Option<ComponentKey<GunMarkerComponent>>,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
     /// The avatar's `ownVehicleGear` last sent, likewise.
     engine_gear: Option<u8>,
     collision: Arc<VehicleCollision>,
     gun: Gun,
-    /// The nodes of its `OwnVehicle`'s `vehicleAmmoList` and `vehicleGunReloadTime`.
-    ammo_node: Option<u16>,
-    reload_node: Option<u16>,
-    /// Updates to its NRL nodes, for the next tick.
-    nrl_updates: Vec<NrlUpdateNode>,
     /// The shells in flight, its and the target's, with the game time they land at and
     /// who fired them.
     shots: Vec<(f64, EntityId, Shot)>,
@@ -108,8 +108,6 @@ struct DrivenVehicle {
     max_health: i64,
     /// Its `damageStickers`: where shells pierced it.
     damage_stickers: Vec<HitPoint>,
-    /// The node of its `OwnVehicle`'s `vehicleHealthInfo`.
-    health_node: Option<u16>,
 }
 
 impl BaseThread {
@@ -150,7 +148,7 @@ impl BaseThread {
         // The arena's info entity, created right away as entities without an alias are,
         // then given its vehicles: only the player's and the target.
         if let (Some(arena), Some(vehicle_id)) = (&captured.arena_info, vehicle_id) {
-            let Some((type_id, properties)) = &arena.created else {
+            let Some((_, properties)) = &arena.created else {
                 warn!(%client, "The capture's arena info entity has no creation");
                 self.set_battle(client, battle);
                 return Ok(());
@@ -162,13 +160,15 @@ impl BaseThread {
                 }
             }
             let target_id = battle.target.as_ref().map(|target| target.entity_id);
-            let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, vehicle_id, target_id, battle.config.as_ref())?;
-            self.app.create_entity_dynamic(space, *type_id, EntityInit {
+            let vehicles = arena_vehicles(&arena.nrl, vehicle_id, target_id, battle.config.as_ref());
+            let info = self.app.create_entity::<AvatarInfo>(space, EntityInit {
                 id: Some(EntityId(arena.entity_id)),
                 properties,
                 ..EntityInit::default()
             })?;
-            self.app.nrl_create_node(client, stream)?;
+            self.app.entity(info)?
+                .add_component::<AvatarVehiclesInfo>(Audience::AllClients)?
+                .set_vehiclesInfo(vehicles)?;
             info!(%client, "Created arena info {}", arena.entity_id);
         }
 
@@ -218,17 +218,14 @@ impl BaseThread {
 
     /// The client has its vehicle: from there on it moves as the client drives it, after
     /// the properties the captured server changed right after creating it. Then its
-    /// `OwnVehicle` component, under an entity node of its own: the client only turns
-    /// its turret once it knows how fast it can. Its `GunMarkerComponent` too, beside
-    /// it, for the client's server reticle: in an element of its own, the client reading
-    /// no further than the first component of one.
+    /// `OwnVehicle` component: the client only turns its turret once it knows how fast it
+    /// can. Its `GunMarkerComponent` too, for the client's server reticle.
     fn vehicle_entered(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let Some(captured) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let (Some(vehicle), Some(position)) = (battle.vehicle, &captured.vehicle_position) else { return Ok(()) };
         let config = battle.config.as_ref();
-        let entity_id = vehicle.id().0;
 
         if let Some(update) = &captured.vehicle_update {
             let mut update = update.clone();
@@ -242,32 +239,38 @@ impl BaseThread {
         let mut driven = DrivenVehicle {
             entity: vehicle,
             vehicle: Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()),
-            gun_marker_node: None,
+            own_vehicle: None,
+            gun_marker: None,
             engine_mode: None,
             engine_gear: None,
             collision: config.collision.clone(),
             gun: Gun::new(config.shots.iter().cloned().zip(config.ammo.iter().map(|&(_, count)| count)).collect(), config.aiming.reload_time),
-            ammo_node: None,
-            reload_node: None,
-            nrl_updates: Vec::new(),
             shots: Vec::new(),
             health: config.max_health.into(),
             max_health: config.max_health.into(),
             damage_stickers: Vec::new(),
-            health_node: None,
         };
 
-        if let Some(component) = &captured.own_vehicle {
-            let dispatch = self.app.dispatch();
-            let stream = own_vehicle(dispatch, component, entity_id, config)?;
-            let entity_node = stream.messages[0].node_id;
-            driven.ammo_node = property_node(dispatch, &stream.messages[1], "vehicleAmmoList");
-            driven.reload_node = property_node(dispatch, &stream.messages[1], "vehicleGunReloadTime");
-            driven.health_node = property_node(dispatch, &stream.messages[1], "vehicleHealthInfo");
-            let (message, property_node) = gun_marker_component(dispatch, entity_node)?;
-            driven.gun_marker_node = Some(property_node);
-            self.app.nrl_create_node(client, stream)?;
-            self.app.nrl_create_node(client, NrlStream { messages: vec![message], rest: Vec::new() })?;
+        if let Some(captured) = &captured.own_vehicle {
+            let entity_id = vehicle.id();
+            let mut entity = self.app.entity(vehicle)?;
+            let mut own = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
+            if let Some(attrs) = captured_property(captured, "syncVehicleAttrs") {
+                own.set_syncVehicleAttrs(attrs.clone())?;
+            }
+            if let Some(targeting) = targeting_info(captured, config) {
+                own.set_targetingInfo(targeting)?;
+            }
+            // What the real server sends right after, as updates: the ammunition, the
+            // shells loaded, the reload and the health.
+            own.set_vehicleAmmoList(ammo_list(config.ammo.iter().copied()))?;
+            own.set_vehicleSettings(vehicle_settings(entity_id, config))?;
+            own.set_vehicleGunReloadTime(gun_reload_time(config.aiming.reload_time, 0.0, 0.0))?;
+            own.set_vehicleHealthInfo(vehicle_health_info(entity_id, config.max_health.into()))?;
+            driven.own_vehicle = Some(own.key());
+            let mut marker = entity.add_component::<GunMarkerComponent>(Audience::OwnClient)?;
+            marker.set_gunMarker(None)?;
+            driven.gun_marker = Some(marker.key());
         }
 
         battle.driven = Some(driven);
@@ -369,13 +372,10 @@ impl BaseThread {
         info!(%client, "Shot {} from {:?} lands at {:?} in {:.2} s", shot.id, shot.start, shot.end, shot.flight_time);
         driven.shots.push((now + f64::from(shot.flight_time), driven.entity.id(), shot.clone()));
 
-        let dispatch = self.app.dispatch();
-        let ammo = ammo_list(driven.gun.ammo.iter().map(|(def, count)| (def.compact_descr.to_int(), *count)));
-        let reload = gun_reload_time(driven.gun.reload_time(), driven.gun.ready_at as f32, driven.gun.reload_time());
-        for (node, name, value) in [(driven.ammo_node, "vehicleAmmoList", ammo), (driven.reload_node, "vehicleGunReloadTime", reload)] {
-            if let Some(node) = node {
-                driven.nrl_updates.push(property_update(dispatch, "OwnVehicle", name, node, &value)?);
-            }
+        if let Some(own) = driven.own_vehicle {
+            let mut own = self.app.component(own)?;
+            own.set_vehicleAmmoList(ammo_list(driven.gun.ammo.iter().map(|(def, count)| (def.compact_descr.to_int(), *count))))?;
+            own.set_vehicleGunReloadTime(gun_reload_time(driven.gun.reload_time(), driven.gun.ready_at as f32, driven.gun.reload_time()))?;
         }
         let vehicle = driven.entity;
 
@@ -432,9 +432,8 @@ impl BaseThread {
         let bounds = driven.collision.parts[hit.part as usize].bounds;
         info!(%client, "Player takes {amount} damage, {old_health} -> {new_health}{}", if new_health == 0 { ", destroyed" } else { "" });
 
-        if let Some(node) = driven.health_node {
-            let info = vehicle_health_info(driven.entity.id().0, new_health);
-            driven.nrl_updates.push(property_update(self.app.dispatch(), "OwnVehicle", "vehicleHealthInfo", node, &info)?);
+        if let Some(own) = driven.own_vehicle {
+            self.app.component(own)?.set_vehicleHealthInfo(vehicle_health_info(driven.entity.id(), new_health))?;
         }
         let stickers = add_sticker(&mut driven.damage_stickers, shot, hit, bounds);
         let damage = Damage { shooter, amount, max_health: driven.max_health, old_health, new_health };
@@ -526,23 +525,16 @@ impl BaseThread {
         let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let avatar_key = battle.avatar;
 
-        let DrivenVehicle { entity, vehicle, gun_marker_node, engine_mode, engine_gear, gun, reload_node, nrl_updates, .. } = driven;
+        let DrivenVehicle { entity, vehicle, own_vehicle, gun_marker, engine_mode, engine_gear, gun, .. } = driven;
         vehicle.step(TICK.as_secs_f32(), terrain.as_ref());
         let Vehicle { hull, turret } = vehicle;
 
-        let gun_marker_ty = app.dispatch().entity_from_name("GunMarkerComponent")
-            .and_then(|(_, component)| component.properties.first())
-            .map(|property| property.ty.clone());
-        let mut updates = std::mem::take(nrl_updates);
-        if let (Some(node), true) = (*reload_node, gun.take_loaded(now)) {
-            let loaded = gun_reload_time(gun.reload_time(), 0.0, 0.0);
-            updates.push(property_update(app.dispatch(), "OwnVehicle", "vehicleGunReloadTime", node, &loaded)?);
+        if let (Some(own), true) = (*own_vehicle, gun.take_loaded(now)) {
+            app.component(own)?.set_vehicleGunReloadTime(gun_reload_time(gun.reload_time(), 0.0, 0.0))?;
         }
-        if let (Some(node), Some(ty)) = (*gun_marker_node, &gun_marker_ty) {
-            updates.push(gun_marker_update(ty, node, turret.gun_marker(hull))?);
-        }
-        for update in &updates {
-            app.nrl_update_node(client, update)?;
+        if let Some(marker) = *gun_marker {
+            let (position, velocity, dispersion) = turret.gun_marker(hull);
+            app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion }))?;
         }
 
         // Every tick, to compare with what the client simulates.
@@ -661,13 +653,9 @@ impl BaseThread {
 /// The first vehicle of the captured arena not in the given vehicle's team, as a
 /// target.
 fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
-    let entries = arena.iter().find_map(|message| match &message.body {
-        NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } => data.children.iter().find_map(|(_, child)| match child {
-            NrlChild::Property { name, value: Value::Seq(entries) } if &**name == "vehiclesInfo" => Some(entries),
-            _ => None,
-        }),
-        _ => None,
-    })?;
+    let Value::Seq(entries) = arena.iter().find_map(|message| captured_property(message, "vehiclesInfo"))? else {
+        return None;
+    };
     let fields = |entry: &Value| match entry {
         Value::Dict(fields) => Some(fields.clone()),
         _ => None,

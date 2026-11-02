@@ -22,6 +22,7 @@ pub mod login_proxy;
 
 pub mod dispatch;
 pub mod entity;
+pub mod component;
 pub mod nrl;
 
 pub mod math;

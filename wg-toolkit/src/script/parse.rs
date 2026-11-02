@@ -42,6 +42,16 @@ pub fn parse_interface(elt: &Element, tys: &mut TySystem, name: String) -> Inter
         parse_properties(&elt, &mut *tys, &mut interface.properties);
     }
 
+    if let Some(Value::Element(elt)) = elt.get_child("Volatile") {
+        if let Some(Value::Element(elt)) = elt.get_child("Properties") {
+            for (name, _) in elt.iter_children_all() {
+                if let Some(property) = interface.properties.iter_mut().find(|p| &*p.name == name) {
+                    property.volatile = true;
+                }
+            }
+        }
+    }
+
     if let Some(Value::Element(elt)) = elt.get_child("ClientMethods") {
         parse_methods(&elt, &mut *tys, &mut interface.client_methods, true);
     }
@@ -141,6 +151,7 @@ pub fn parse_property(elt: &Element, tys: &mut TySystem, name: String) -> Proper
             "ALL_CLIENTS" => PropertyFlags::AllClients,
             raw => panic!("unknown property flags: {raw}"),
         },
+        volatile: false,
     }
 
 }

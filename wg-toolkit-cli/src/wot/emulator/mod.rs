@@ -19,16 +19,15 @@ use std::thread;
 use blowfish::Blowfish;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use glam::Vec3;
 use rsa::rand_core::{OsRng, RngCore};
 use rsa::RsaPrivateKey;
 use tracing::{debug, info, instrument, warn};
 
 use wgtk::app::{login, base};
 use wgtk::app::base::{CellPlayerInit, ClientKey};
-use wgtk::app::client::element::{ChangedProperties, NrlIdList, NrlUpdateNode, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
-use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
-use wgtk::app::entity::{Bytes, EntityKey};
+use wgtk::app::client::element::{ChangedProperties, NrlBody, NrlChild, NrlMessage, NrlNode};
+use wgtk::app::dispatch::MethodCall;
+use wgtk::app::entity::{Bytes, EntityId, EntityKey};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::script::{PythonValue, Script, StringValue, Value};
 use wgtk::space::terrain::Terrain;
@@ -39,7 +38,7 @@ use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_IN
 use crate::wot::collision::VehicleCollision;
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
-use crate::wot::schema::{self, Account, Avatar, AvatarBase};
+use crate::wot::schema::{self, Account, Avatar, AvatarBase, GunReloadTime, VehicleAmmo, VehicleHealthInfo, VehicleSetting};
 
 use account::AccountData;
 use battle::Battle;
@@ -829,196 +828,105 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-/// The arena info entity's NRL tree, its `vehiclesInfo` reduced to the given vehicle's
-/// and the target's, encoded again.
-fn arena_vehicles(dispatch: &ScriptDispatch, captured: &[NrlMessage], vehicle_id: u32, target_id: Option<u32>, config: Option<&VehicleConfig>) -> io::Result<NrlStream> {
-    let mut messages = captured.to_vec();
-    for message in &mut messages {
-        let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, data: Some(data), .. }, .. } = &mut message.body else {
-            continue;
-        };
-        let children = data.children.iter().cloned().map(|(id, child)| match child {
-            NrlChild::Property { name, value: Value::Seq(entries) } if &*name == "vehiclesInfo" => {
-                let entries = entries.into_iter().filter_map(|entry| match entry {
-                    Value::Dict(mut fields) if fields.get("vehicleID").and_then(Value::as_i64) == Some(vehicle_id.into()) => {
-                        if let Some(config) = config {
-                            config.apply_to_arena_entry(&mut fields);
-                        }
-                        Some(Value::Dict(fields))
-                    }
-                    Value::Dict(fields) if target_id.is_some() && fields.get("vehicleID").and_then(Value::as_i64) == target_id.map(i64::from) => {
-                        Some(Value::Dict(fields))
-                    }
-                    _ => None,
-                }).collect();
-                (id, NrlChild::Property { name, value: Value::Seq(entries) })
-            }
-            other => (id, other),
-        }).collect();
-        *data = NrlComponentData::encode(dispatch, *component_type_id, children)?;
-    }
-    Ok(NrlStream { messages, rest: Vec::new() })
+/// A property of the component a captured NRL message creates, if given.
+fn captured_property<'m>(message: &'m NrlMessage, name: &str) -> Option<&'m Value> {
+    let NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } = &message.body else {
+        return None;
+    };
+    data.children.iter().find_map(|(_, child)| match child {
+        NrlChild::Property { name: child_name, value } if &**child_name == name => Some(value),
+        _ => None,
+    })
 }
 
-/// The NRL node every entity node goes under.
-const NRL_ROOT_NODE: u16 = 1;
-
-/// The vehicle's entity node, then its captured `OwnVehicle` component with the
-/// vehicle's own `targetingInfo`: turret and gun at rest, their speeds and dispersion
-/// factors from its definitions, without the crew's and equipment's bonuses.
-fn own_vehicle(dispatch: &ScriptDispatch, captured: &NrlMessage, entity_id: u32, config: &VehicleConfig) -> io::Result<NrlStream> {
-
-    let NrlBody::CreateNode { parent_id, node: NrlNode::DynComponent { component_type_id, data: Some(data), .. } } = &captured.body else {
-        return Err(invalid_data("the captured OwnVehicle message creates no component"));
+/// The captured arena's `vehiclesInfo`, reduced to the given vehicle's entry and the
+/// target's.
+fn arena_vehicles(captured: &[NrlMessage], vehicle_id: u32, target_id: Option<u32>, config: Option<&VehicleConfig>) -> Vec<Value> {
+    let Some(Value::Seq(entries)) = captured.iter().find_map(|message| captured_property(message, "vehiclesInfo")) else {
+        return Vec::new();
     };
-    let entity = NrlMessage {
-        node_id: *parent_id,
-        body: NrlBody::CreateNode { parent_id: NRL_ROOT_NODE, node: NrlNode::Entity { entity_id } },
-    };
-
-    let aiming = &config.aiming;
-    let mut children: Vec<_> = data.children.iter().cloned().map(|(id, child)| match child {
-        NrlChild::Property { name, value: Value::Dict(mut fields) } if &*name == "targetingInfo" => {
-            for (field, value) in fields.iter_mut() {
-                let float = match &**field {
-                    "turretYaw" | "gunPitch" => 0.0,
-                    "maxTurretRotationSpeed" => aiming.turret_rotation_speed,
-                    "maxGunRotationSpeed" => aiming.gun_rotation_speed,
-                    "shotDispMultiplierFactor" => 1.0,
-                    "gunShotDispersionFactorsTurretRotation" => aiming.dispersion_turret_rotation,
-                    "chassisShotDispersionFactorsMovement" => aiming.dispersion_movement,
-                    "chassisShotDispersionFactorsRotation" => aiming.dispersion_rotation,
-                    "gunShotDispersionFactorsAfterShot" => aiming.dispersion_after_shot,
-                    "aimingTime" => aiming.aiming_time,
-                    _ => continue,
-                };
-                *value = Value::Float32(float);
+    let id_of = |fields: &BTreeMap<Arc<str>, Value>| fields.get("vehicleID").and_then(Value::as_i64);
+    entries.iter().filter_map(|entry| match entry {
+        Value::Dict(fields) if id_of(fields) == Some(vehicle_id.into()) => {
+            let mut fields = fields.clone();
+            if let Some(config) = config {
+                config.apply_to_arena_entry(&mut fields);
             }
-            (id, NrlChild::Property { name, value: Value::Dict(fields) })
+            Some(Value::Dict(fields))
         }
-        other => (id, other),
-    }).collect();
-
-    // What the real server sends right after, as updates: the ammunition, the shells
-    // loaded, the reload and the health, given here as the properties' first values.
-    let NrlBody::CreateNode { node: NrlNode::DynComponent { children: ids, .. }, .. } = &captured.body else {
-        unreachable!()
-    };
-    let (_, schema) = dispatch.component_from_nrl_id(*component_type_id)
-        .ok_or_else(|| invalid_data("unknown OwnVehicle component type"))?;
-    let mut present = ids.present.clone().unwrap_or_else(|| vec![0xFF; (ids.ids.len() + 7) / 8]);
-    for (name, value) in own_vehicle_state(entity_id, config) {
-        let Some(index) = schema.properties.iter().position(|property| &*property.name == name) else { continue };
-        let id = ids.ids[index];
-        present[index / 8] |= 1 << (index % 8);
-        children.retain(|&(child_id, _)| child_id != id);
-        children.push((id, NrlChild::Property { name: Arc::from(name), value }));
-    }
-    // In the order of the ids, as the client reads them.
-    children.sort_by_key(|&(id, _)| ids.ids.iter().position(|&i| i == id));
-    let values = children;
-    let ids = NrlIdList::new(captured.node_id.into(), ids.ids.clone(), Some(present));
-
-    let mut component = captured.clone();
-    if let NrlBody::CreateNode { node: NrlNode::DynComponent { children, data, .. }, .. } = &mut component.body {
-        *data = Some(NrlComponentData::encode(dispatch, *component_type_id, values)?);
-        *children = ids;
-    }
-
-    Ok(NrlStream { messages: vec![entity, component], rest: Vec::new() })
-
+        Value::Dict(fields) if target_id.is_some_and(|id| id_of(fields) == Some(id.into())) => Some(entry.clone()),
+        _ => None,
+    }).collect()
 }
 
-/// The `OwnVehicle` properties the real server fills in after creating the component,
-/// for a vehicle just entering the battle: its shells, then the standard consumables of
-/// the captured battle (repair kit, first aid kit, fire extinguisher), the first shell
-/// loaded and next, the gun to reload and full health.
-fn own_vehicle_state(entity_id: u32, config: &VehicleConfig) -> Vec<(&'static str, Value)> {
+/// The captured `OwnVehicle`'s `targetingInfo`, with the vehicle's own: turret and gun
+/// at rest, their speeds and dispersion factors from its definitions, without the
+/// crew's and equipment's bonuses.
+fn targeting_info(captured: &NrlMessage, config: &VehicleConfig) -> Option<Value> {
+    let Value::Dict(mut fields) = captured_property(captured, "targetingInfo")?.clone() else { return None };
+    let aiming = &config.aiming;
+    for (field, value) in fields.iter_mut() {
+        let float = match &**field {
+            "turretYaw" | "gunPitch" => 0.0,
+            "maxTurretRotationSpeed" => aiming.turret_rotation_speed,
+            "maxGunRotationSpeed" => aiming.gun_rotation_speed,
+            "shotDispMultiplierFactor" => 1.0,
+            "gunShotDispersionFactorsTurretRotation" => aiming.dispersion_turret_rotation,
+            "chassisShotDispersionFactorsMovement" => aiming.dispersion_movement,
+            "chassisShotDispersionFactorsRotation" => aiming.dispersion_rotation,
+            "gunShotDispersionFactorsAfterShot" => aiming.dispersion_after_shot,
+            "aimingTime" => aiming.aiming_time,
+            _ => continue,
+        };
+        *value = Value::Float32(float);
+    }
+    Some(Value::Dict(fields))
+}
 
+/// The `vehicleSettings` of a vehicle just entering the battle: its first shell, loaded
+/// and next.
+fn vehicle_settings(entity_id: EntityId, config: &VehicleConfig) -> Vec<VehicleSetting> {
     let shell = config.ammo.first().map_or(0, |&(cd, _)| cd as i32);
-    let setting = |code: u8| Value::Dict(BTreeMap::from([
-        (Arc::from("code"), Value::UInt8(code)),
-        (Arc::from("value"), Value::Int32(shell)),
-        (Arc::from("vehicleID"), Value::Int32(entity_id as i32)),
-    ]));
-
-    vec![
-        ("vehicleAmmoList", ammo_list(config.ammo.iter().copied())),
-        // `VEHICLE_SETTING`: the current shell, then the next one.
-        ("vehicleSettings", Value::Seq(vec![setting(0), setting(1)])),
-        ("vehicleGunReloadTime", gun_reload_time(config.aiming.reload_time, 0.0, 0.0)),
-        ("vehicleHealthInfo", vehicle_health_info(entity_id, config.max_health.into())),
-    ]
-
+    // `VEHICLE_SETTING`: the current shell, then the next one.
+    [0, 1].into_iter()
+        .map(|code| VehicleSetting { code, value: shell, vehicleID: entity_id })
+        .collect()
 }
 
-/// The `OwnVehicle`'s `vehicleHealthInfo` of a vehicle with this health.
-fn vehicle_health_info(entity_id: u32, health: i64) -> Value {
-    Value::Dict(BTreeMap::from([
-        (Arc::from("deathReasonExtID"), Value::Int8(-1)),
-        (Arc::from("deathReasonID"), Value::Int8(-1)),
-        (Arc::from("health"), Value::Int16(health as i16)),
-        (Arc::from("id"), Value::Int32(entity_id as i32)),
-        (Arc::from("isCrewActive"), Value::UInt8(1)),
-        (Arc::from("isRespawnActive"), Value::UInt8(0)),
-    ]))
+/// The `vehicleHealthInfo` of a vehicle with this health.
+fn vehicle_health_info(entity_id: EntityId, health: i64) -> VehicleHealthInfo {
+    VehicleHealthInfo {
+        deathReasonExtID: -1,
+        deathReasonID: -1,
+        health: health as i16,
+        id: entity_id,
+        isCrewActive: true,
+        isRespawnActive: false,
+    }
 }
 
 /// The `vehicleAmmoList` of a vehicle with these shells, by integer descriptor and
 /// count, and the standard consumables.
-fn ammo_list(shells: impl Iterator<Item = (i64, u32)>) -> Value {
-    let ammo = |compact_descr: i64, quantity: u16, in_clip: u16, stage: u16, total_time: i16| Value::Dict(BTreeMap::from([
-        (Arc::from("compactDescr"), Value::Int32(compact_descr as i32)),
-        (Arc::from("endTime"), Value::Float32(0.0)),
-        (Arc::from("index"), Value::UInt8(0)),
-        (Arc::from("previousStage"), Value::UInt16(stage)),
-        (Arc::from("quantity"), Value::UInt16(quantity)),
-        (Arc::from("quantityInClip"), Value::UInt16(in_clip)),
-        (Arc::from("totalTime"), Value::Int16(total_time)),
-    ]));
-    Value::Seq(shells
+fn ammo_list(shells: impl Iterator<Item = (i64, u32)>) -> Vec<VehicleAmmo> {
+    let ammo = |compact_descr: i64, quantity: u16, in_clip: u16, stage: u16, total_time: i16| VehicleAmmo {
+        compactDescr: compact_descr as i32,
+        endTime: 0.0,
+        index: 0,
+        previousStage: stage,
+        quantity,
+        quantityInClip: in_clip,
+        totalTime: total_time,
+    };
+    shells
         .map(|(cd, count)| ammo(cd, count as u16, 0, 0, 0))
         .chain(CONSUMABLES.iter().map(|&cd| ammo(cd, u16::MAX, 3, 3, 60)))
-        .collect())
+        .collect()
 }
 
 /// The `vehicleGunReloadTime` of a gun reloading in `base_time` seconds, done at game
-/// time `end_time` with `time_left` seconds to go: both 0 once loaded, -1 before the
-/// battle.
-fn gun_reload_time(base_time: f32, end_time: f32, time_left: f32) -> Value {
-    Value::Dict(BTreeMap::from([
-        (Arc::from("baseTime"), Value::Float32(base_time)),
-        (Arc::from("clipTime"), Value::Float32(0.0)),
-        (Arc::from("endTime"), Value::Float32(end_time)),
-        (Arc::from("timeLeft"), Value::Float32(time_left)),
-    ]))
-}
-
-/// The node of a property of the component a message creates.
-fn property_node(dispatch: &ScriptDispatch, message: &NrlMessage, name: &str) -> Option<u16> {
-    let NrlBody::CreateNode { node: NrlNode::DynComponent { component_type_id, children, .. }, .. } = &message.body else {
-        return None;
-    };
-    let (_, schema) = dispatch.component_from_nrl_id(*component_type_id)?;
-    let index = schema.properties.iter().position(|property| &*property.name == name)?;
-    children.ids.get(index).map(|&id| id as u16)
-}
-
-/// Set a property of an `OwnVehicle`, as the real server does: `[0][packed length]`
-/// then the value, see `NrlTree::decode_update`.
-fn property_update(dispatch: &ScriptDispatch, component: &str, name: &str, node_id: u16, value: &Value) -> io::Result<NrlUpdateNode> {
-    use wgtk::net::codec::Codec;
-    use wgtk::util::io::WgWriteExt;
-    let (_, schema) = dispatch.entity_from_name(component)
-        .ok_or_else(|| invalid_data(&format!("no {component}")))?;
-    let property = schema.properties.iter().find(|property| &*property.name == name)
-        .ok_or_else(|| invalid_data(&format!("{component} has no {name}")))?;
-    let mut data = Vec::new();
-    value.write(&mut data, &property.ty)?;
-    let mut payload = vec![0];
-    payload.write_packed_u24(data.len() as u32)?;
-    payload.extend_from_slice(&data);
-    Ok(NrlUpdateNode { node_id, payload, python_value: None })
+/// time `end_time` with `time_left` seconds to go.
+fn gun_reload_time(base_time: f32, end_time: f32, time_left: f32) -> GunReloadTime {
+    GunReloadTime { baseTime: base_time, clipTime: 0.0, endTime: end_time, timeLeft: time_left }
 }
 
 /// `INVALID_EFFECT_INDEX`: no prefab effects for a shot, the client then only playing
@@ -1034,60 +942,10 @@ const EXPLOSION_STEP: f32 = 0.05;
 /// order `system/data/material_kinds.xml` first names them.
 const GROUND_EFFECT_MATERIAL: u8 = 0;
 
-/// The consumables of the captured battle, by integer descriptor, which every vehicle
-/// gets until accounts have their own.
+/// The consumables of the captured battle (repair kit, first aid kit, fire
+/// extinguisher), by integer descriptor, which every vehicle gets until accounts have
+/// their own.
 const CONSUMABLES: [i64; 3] = [1531, 1019, 507];
-
-/// The NRL node of the vehicle's `GunMarkerComponent`, its children following: above
-/// the ids the captured trees use, up to about 2200.
-const GUN_MARKER_NODE: u16 = 0x2000;
-
-/// Create the vehicle's `GunMarkerComponent` under its entity node, its `gunMarker`
-/// None: its children are that property then the trailing child, both present, as
-/// the components whose properties the real server updates start. The client has no
-/// node for an absent property, and misreads an update to it. Returns the message and
-/// the property's node, which updates go to.
-fn gun_marker_component(dispatch: &ScriptDispatch, entity_node: u16) -> io::Result<(NrlMessage, u16)> {
-    let (type_id, _) = dispatch.entity_from_name("GunMarkerComponent")
-        .ok_or_else(|| invalid_data("no GunMarkerComponent"))?;
-    let nrl_type_id = dispatch.component_nrl_id(type_id)
-        .ok_or_else(|| invalid_data("GunMarkerComponent is not a network component"))?;
-    let base = u32::from(GUN_MARKER_NODE);
-    let (property, trailing) = (base + 1, base + 2);
-    let message = NrlMessage {
-        node_id: GUN_MARKER_NODE,
-        body: NrlBody::CreateNode {
-            parent_id: entity_node,
-            node: NrlNode::DynComponent {
-                component_type_id: nrl_type_id,
-                name: String::new(),
-                children: NrlIdList::new(base, vec![property, trailing], Some(vec![0b11])),
-                data: Some(NrlComponentData::encode(dispatch, nrl_type_id, vec![
-                    (property, NrlChild::Property { name: Arc::from("gunMarker"), value: Value::None }),
-                    (trailing, NrlChild::Trailing),
-                ])?),
-            },
-        },
-    };
-    Ok((message, property as u16))
-}
-
-/// Set the `gunMarker` property at the given node: where the gun fires from, the
-/// shell's velocity and the dispersion angle. Unlike the properties the captured server
-/// updates, `[kind][packed length][value]` (see `NrlTree::decode_update`), this one is
-/// the value alone: its `ClientCompositePropertyNode::update` has the node's flag at
-/// `+0x5c` set and streams the whole value instead.
-fn gun_marker_update(ty: &wgtk::script::Ty, node_id: u16, (position, velocity, dispersion): (Vec3, Vec3, f32)) -> io::Result<NrlUpdateNode> {
-    use wgtk::net::codec::Codec;
-    let value = Value::Dict(BTreeMap::from([
-        (Arc::from("gunPosition"), Value::Vector3(position)),
-        (Arc::from("shotVector"), Value::Vector3(velocity)),
-        (Arc::from("dispersion"), Value::Float32(dispersion)),
-    ]));
-    let mut payload = Vec::new();
-    value.write(&mut payload, ty)?;
-    Ok(NrlUpdateNode { node_id, payload, python_value: None })
-}
 
 /// The same integer value type as `value`, holding `n`: a request id or an entity id
 /// must keep the type its method or property declares.

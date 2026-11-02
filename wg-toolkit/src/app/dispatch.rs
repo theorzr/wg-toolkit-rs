@@ -185,6 +185,8 @@ pub struct PropertyDef {
     pub length: ElementLength,
     /// Which side hosts it and which clients see it.
     pub flags: PropertyFlags,
+    /// See [`crate::script::Property::volatile`].
+    pub volatile: bool,
 }
 
 /// The dynamically-decoded result of a method call (base- or cell-directed), produced by
@@ -552,7 +554,7 @@ fn build_property_table(
     }
 
     collected.into_iter()
-        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags })
+        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags, volatile: property.volatile })
         .collect()
 
 }
@@ -656,6 +658,7 @@ mod tests {
             persistent: false, identifier: false, indexed: false,
             database_len: None, default: None,
             flags: PropertyFlags::AllClients,
+            volatile: false,
         }
     }
 

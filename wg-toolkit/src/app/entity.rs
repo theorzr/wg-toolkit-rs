@@ -25,6 +25,7 @@ use crate::script::{PropertyFlags, PythonValue, StringValue, Ty, TyKind, Value};
 use crate::util::io::{serde_pickle_de_options, serde_pickle_ser_options};
 
 use super::client::element::{ChangedProperties, EntityMethod, IndexedEntityProperty, UpdateEntity};
+use super::component::{Audience, Component, ComponentSchema, EntityComponents};
 use super::dispatch::{EntityDispatch, MethodCall, MethodDef};
 use super::outbox::ClientOutbox;
 use super::slots::SlotKey;
@@ -500,7 +501,7 @@ pub fn bind<S: Schema>(dispatch: &EntityDispatch) -> Result<Bound, BindError> {
 }
 
 /// A type, briefly: its name, or its kind when it has none.
-fn describe(ty: &Ty) -> String {
+pub(crate) fn describe(ty: &Ty) -> String {
     match (ty.name(), ty.kind()) {
         ("", TyKind::Alias(inner)) => describe(inner),
         ("", TyKind::Dict(_)) => "FIXED_DICT".to_string(),
@@ -652,6 +653,17 @@ impl<'a, T: EntitySchema> Entity<'a, T> {
         self.view.raw_mut().set_dynamic(properties)
     }
 
+    /// Add a dynamic component of the given schema to the entity, which must be in a
+    /// space: the clients of the given audience knowing the entity get it at the end of
+    /// the tick, with the properties set by then, see [`super::component`].
+    pub fn add_component<C: ComponentSchema>(&mut self, audience: Audience) -> io::Result<Component<'_, C>> {
+        let raw = self.view.raw_mut();
+        let entity = EntityKey::new(raw.slot, raw.id);
+        raw.components.as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("entity {entity} is in no space")))?
+            .add(entity, audience)
+    }
+
 }
 
 impl<'a, T: EntitySchema> Deref for Entity<'a, T> {
@@ -677,6 +689,8 @@ pub struct RawEntity<'a> {
     pub(crate) dispatch: &'a EntityDispatch,
     pub(crate) bound: &'a Bound,
     pub(crate) sink: EntitySink<'a>,
+    /// Its dynamic components, when in a space.
+    pub(crate) components: Option<EntityComponents<'a>>,
 }
 
 /// Where what an entity's clients get goes.
@@ -1124,7 +1138,7 @@ mod tests {
     }
 
     fn property(name: &str, ty: Ty, flags: PropertyFlags) -> PropertyDef {
-        PropertyDef { name: name.into(), ty, length: ElementLength::Variable8, flags }
+        PropertyDef { name: name.into(), ty, length: ElementLength::Variable8, flags, volatile: false }
     }
 
     fn dispatch() -> EntityDispatch {

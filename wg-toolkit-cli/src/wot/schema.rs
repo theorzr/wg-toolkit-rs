@@ -6,7 +6,7 @@ use glam::Vec3;
 use wgtk::app::base;
 use wgtk::app::entity::{BindError, Bytes, EntityId};
 use wgtk::script::Value;
-use wgtk::{entity_schema, script_dict};
+use wgtk::{component_schema, entity_schema, script_dict};
 
 
 /// Register every schema of this module with the given app.
@@ -14,6 +14,10 @@ pub fn register(app: &mut base::App) -> Result<(), BindError> {
     app.register::<Account>()?;
     app.register::<Avatar>()?;
     app.register::<Vehicle>()?;
+    app.register::<AvatarInfo>()?;
+    app.register_component::<AvatarVehiclesInfo>()?;
+    app.register_component::<OwnVehicle>()?;
+    app.register_component::<GunMarkerComponent>()?;
     Ok(())
 }
 
@@ -105,6 +109,45 @@ entity_schema! {
     }
 }
 
+entity_schema! {
+    /// The arena's info entity, which the arena's vehicles are told of with.
+    pub AvatarInfo {}
+}
+
+component_schema! {
+    /// The arena's vehicles, on its info entity.
+    pub AvatarVehiclesInfo {
+        cell {
+            vehiclesInfo: Vec<Value>,
+        }
+    }
+}
+
+component_schema! {
+    /// What the client knows of its own vehicle, on that vehicle.
+    pub OwnVehicle {
+        cell {
+            syncVehicleAttrs: Value,
+            /// How its turret and gun aim.
+            targetingInfo: Value,
+            vehicleAmmoList: Vec<VehicleAmmo>,
+            /// The shell loaded, then the next one.
+            vehicleSettings: Vec<VehicleSetting>,
+            vehicleGunReloadTime: GunReloadTime,
+            vehicleHealthInfo: VehicleHealthInfo,
+        }
+    }
+}
+
+component_schema! {
+    /// The server's reticle of the client's own vehicle, on that vehicle.
+    pub GunMarkerComponent {
+        cell {
+            gunMarker: Option<GunMarker>,
+        }
+    }
+}
+
 script_dict! {
     /// `VEHICLE_HIT_POINT`: where a shell hit a vehicle.
     #[derive(Debug, Clone)]
@@ -123,5 +166,63 @@ script_dict! {
         pub gunInstallationIndex: u8,
         pub hitFlags: u32,
         pub vehicleID: EntityId,
+    }
+}
+
+script_dict! {
+    /// A shell or a consumable of a vehicle.
+    #[derive(Debug, Clone)]
+    pub struct VehicleAmmo {
+        pub compactDescr: i32,
+        pub endTime: f32,
+        pub index: u8,
+        pub previousStage: u16,
+        pub quantity: u16,
+        pub quantityInClip: u16,
+        pub totalTime: i16,
+    }
+}
+
+script_dict! {
+    /// `VEHICLE_SETTING`: one of a vehicle's settings, by code, the shell loaded say.
+    #[derive(Debug, Clone)]
+    pub struct VehicleSetting {
+        pub code: u8,
+        pub value: i32,
+        pub vehicleID: EntityId,
+    }
+}
+
+script_dict! {
+    /// How long a gun takes to reload, and when it is loaded: both 0 once it is, -1
+    /// before the battle.
+    #[derive(Debug, Clone)]
+    pub struct GunReloadTime {
+        pub baseTime: f32,
+        pub clipTime: f32,
+        pub endTime: f32,
+        pub timeLeft: f32,
+    }
+}
+
+script_dict! {
+    #[derive(Debug, Clone)]
+    pub struct VehicleHealthInfo {
+        pub deathReasonExtID: i8,
+        pub deathReasonID: i8,
+        pub health: i16,
+        pub id: EntityId,
+        pub isCrewActive: bool,
+        pub isRespawnActive: bool,
+    }
+}
+
+script_dict! {
+    /// Where the gun fires from, the shell's velocity and the dispersion angle.
+    #[derive(Debug, Clone)]
+    pub struct GunMarker {
+        pub gunPosition: Vec3,
+        pub shotVector: Vec3,
+        pub dispersion: f32,
     }
 }

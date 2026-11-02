@@ -210,6 +210,15 @@ impl NrlTree {
                 let property = component.properties.get(index)
                     .ok_or_else(|| invalid(format!("component {type_id} has no property {index}")))?;
 
+                // A volatile property's update is its whole value alone.
+                if property.volatile {
+                    let new = Value::read(read, &property.ty)?;
+                    if let Some(NodeKind::Property { value, .. }) = self.nodes.get_mut(&key).map(|node| &mut node.kind) {
+                        *value = Some(new.clone());
+                    }
+                    return Ok(NrlUpdate { node_id, entity_id, type_id, change: NrlChange::Set { property: Arc::clone(&property.name), value: new } });
+                }
+
                 let kind = read.read_u8()?;
                 let len = read.read_packed_u24()? as usize;
                 if read.len() < len {

@@ -32,7 +32,8 @@ use crate::net::socket::PacketSocket;
 use crate::script::{PropertyFlags, Script, Ty, Value};
 use crate::net::proto::Protocol;
 
-use super::client::element::{ChangedProperties, NrlStream, NrlUpdateNode};
+use super::client::element::ChangedProperties;
+use super::component::{self, Component, ComponentEntry, ComponentKey, ComponentRegistry, ComponentSchema, EntityComponents, NodeIds, RawComponent};
 use super::dispatch::{EntityDispatch, ScriptDispatch, MethodCall, MethodDef};
 use super::math::PackedYawPitchRoll;
 use super::outbox::{ClientOutbox, Outbox};
@@ -63,6 +64,8 @@ pub struct App {
     bindings: Vec<Option<Bound>>,
     /// The entity type of each registered schema.
     schema_types: HashMap<TypeId, u16>,
+    /// The registered component schemas, see [`Self::register_component`].
+    components: ComponentRegistry,
     /// Internal socket for this application.
     socket: PacketSocket,
     /// The channel tracker.
@@ -97,6 +100,7 @@ impl App {
         Ok(Self {
             bindings: (0..=dispatch.entities.len()).map(|_| None).collect(),
             schema_types: HashMap::new(),
+            components: ComponentRegistry::default(),
             dispatch,
             socket: PacketSocket::bind(addr)?,
             protocol: Protocol::new(),
@@ -136,38 +140,68 @@ impl App {
         Ok(())
     }
 
+    /// Bind a component schema to its dynamic component type of the loaded script,
+    /// checking every member it declares, see [`component`]. Its components can then be
+    /// added to entities, see [`Entity::add_component`], and viewed with
+    /// [`Self::component`].
+    pub fn register_component<C: ComponentSchema>(&mut self) -> Result<(), BindError> {
+        self.components.register::<C>(&self.dispatch)
+    }
+
     /// View an entity through its schema. What its client methods and properties give
     /// goes to its client right away, or once in a space, to the clients knowing it at
     /// the end of the tick, see [`Self::end_tick`].
     pub fn entity<T: EntitySchema>(&mut self, key: EntityKey<T>) -> io::Result<Entity<'_, T>> {
         let entry = self.entities.get_mut(key.slot)
             .ok_or_else(|| io_invalid_data(format_args!("no such entity: {key}")))?;
-        let bound = self.bindings.get(usize::from(entry.type_id)).and_then(Option::as_ref)
+        let EntityEntry { client, type_id, properties, cell } = entry;
+        let bound = self.bindings.get(usize::from(*type_id)).and_then(Option::as_ref)
             .filter(|bound| bound.is::<T>())
             .ok_or_else(|| io_invalid_data(format_args!("entity {key} is not a registered {}", T::NAME)))?;
-        let dispatch = self.dispatch.entity_from_id(entry.type_id)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {}", entry.type_id)))?;
-        let sink = match (&entry.cell, entry.client) {
+        let dispatch = self.dispatch.entity_from_id(*type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+        let (sink, components) = match (cell, *client) {
             (Some(cell), _) => {
                 let space = self.spaces.get_mut(cell.space.slot)
                     .ok_or_else(|| io_invalid_data(format_args!("entity {key} is in no space")))?;
-                EntitySink::Space(&mut space.events)
+                let components = EntityComponents {
+                    components: &mut cell.components,
+                    node: &mut cell.nrl_node,
+                    node_ids: &mut space.node_ids,
+                    registry: &self.components,
+                    script: &self.dispatch,
+                };
+                (EntitySink::Space(&mut space.events), Some(components))
             }
             (None, Some(client)) => {
                 let is_player = self.clients.get(client.slot).and_then(|c| c.player) == Some(key.any());
                 let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
-                EntitySink::Client { out, is_player }
+                (EntitySink::Client { out, is_player }, None)
             }
             (None, None) => return Err(io_invalid_data(format_args!("entity {key} has no client and is in no space"))),
         };
         Ok(Entity::new(RawEntity {
             slot: key.slot,
             id: key.id,
-            properties: &mut entry.properties,
+            properties,
             dispatch,
             bound,
             sink,
+            components,
         }))
+    }
+
+    /// View a component of an entity through its schema, see [`Entity::add_component`].
+    pub fn component<C: ComponentSchema>(&mut self, key: ComponentKey<C>) -> io::Result<Component<'_, C>> {
+        let entry = self.entities.get_mut(key.entity.slot)
+            .and_then(|entry| entry.cell.as_mut())
+            .and_then(|cell| cell.components.get_mut(key.slot))
+            .ok_or_else(|| io_invalid_data(format_args!("no such component: {key:?}")))?;
+        let bound = self.components.bound::<C>(entry.type_id())
+            .ok_or_else(|| io_invalid_data(format_args!("component {key:?} is not a registered {}", C::NAME)))?;
+        let dispatch = self.dispatch.entity_from_id(entry.type_id())
+            .ok_or_else(|| io_invalid_data(format_args!("unknown component type: {}", entry.type_id())))?;
+        Ok(Component::new(RawComponent { entity: key.entity, slot: key.slot, entry, dispatch, bound }))
     }
 
     /// The key of an entity of any type as one of the given schema, if it is one.
@@ -481,12 +515,6 @@ impl App {
             .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))
     }
 
-    /// A logged in client, if not gone.
-    fn client_mut(&mut self, key: ClientKey) -> io::Result<&mut Client> {
-        self.clients.get_mut(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))
-    }
-
     /// A new unique entity id.
     fn new_entity_id(&mut self) -> u32 {
         loop {
@@ -759,7 +787,7 @@ impl App {
         if self.space_keys.contains_key(&id) {
             return Err(io_invalid_data(format_args!("space {id} already exists")));
         }
-        let slot = self.spaces.insert(Space { entities: Vec::new(), data: Vec::new(), events: Vec::new() });
+        let slot = self.spaces.insert(Space { entities: Vec::new(), data: Vec::new(), events: Vec::new(), node_ids: NodeIds::default() });
         let key = SpaceKey { slot, id };
         self.space_keys.insert(id, key);
         Ok(key)
@@ -921,33 +949,6 @@ impl App {
         Ok(())
     }
 
-    /// Create NRL nodes on a client: an entity's node and its dynamic components, say.
-    /// The stream's first message must create a node. In a space, sent with the tick,
-    /// after what it says of the entities.
-    pub fn nrl_create_node(&mut self, client: ClientKey, stream: NrlStream) -> io::Result<()> {
-        self.write_queued(client, Queued::NrlCreateNode(stream))
-    }
-
-    /// Update an NRL node on a client, as the real server sends updates: the record goes
-    /// to the client's NRL buffer, then a flag applies it. In a space, sent with the
-    /// tick, after what it says of the entities.
-    pub fn nrl_update_node(&mut self, client: ClientKey, update: &NrlUpdateNode) -> io::Result<()> {
-        let mut fragment = update.node_id.to_be_bytes().to_vec();
-        fragment.extend_from_slice(&update.payload);
-        self.write_queued(client, Queued::NrlUpdate(fragment))
-    }
-
-    /// Write to a client, with its next tick if in a space.
-    fn write_queued(&mut self, client: ClientKey, queued: Queued) -> io::Result<()> {
-        match self.client_mut(client)?.witness.as_mut() {
-            Some(witness) => {
-                witness.queued.push(queued);
-                Ok(())
-            }
-            None => queued.write(self.out(client)?),
-        }
-    }
-
     /// How many ticks a client got in its space: its game time, in ticks.
     pub fn ticks(&self, client: ClientKey) -> Option<u32> {
         Some(self.client(client).ok()?.witness.as_ref()?.ticks)
@@ -979,6 +980,9 @@ impl App {
         for (_, entry) in self.entities.iter_mut() {
             if let Some(cell) = &mut entry.cell {
                 cell.moved = false;
+                for (_, component) in cell.components.iter_mut() {
+                    component.end_tick();
+                }
             }
         }
         for (_, space) in self.spaces.iter_mut() {
@@ -1024,6 +1028,9 @@ impl App {
                 if let Some(alias) = entry.alias {
                     witness.aliases[usize::from(alias)] = false;
                 }
+                // NOTE: Whether the client drops its NRL nodes with it is not known, they
+                // are created again with the same ids if it comes back.
+                witness.nrl.remove(&entry.entity);
             }
         }
         witness.known = known;
@@ -1120,8 +1127,31 @@ impl App {
             event.kind.write(out, dispatch)?;
         }
 
-        for queued in witness.queued.drain(..) {
-            queued.write(out)?;
+        // Their dynamic components it gets: each new one created, in an element of its own
+        // since the client reads no further than the first component of one, under its
+        // entity's node the first time, then what changed of the others.
+        let created = witness.known.iter().filter(|known| known.created).map(|known| known.entity);
+        for entity in std::iter::once(witness.entity).chain(created) {
+            let Some((_, other)) = cell(entity) else { continue };
+            let Some(entity_node) = other.nrl_node else { continue };
+            let own = entity == witness.entity || other.controlled_by.is_some_and(|controller| controller.id == own_id);
+            for (slot, component) in other.components.iter() {
+                if !component.is_for(own) {
+                    continue;
+                }
+                let known = witness.nrl.get(&entity);
+                let created = !known.is_some_and(|slots| slots.contains(&slot));
+                if created {
+                    let mut messages = Vec::with_capacity(2);
+                    if known.is_none() {
+                        messages.push(component::create_entity_node(entity.id, entity_node));
+                    }
+                    messages.push(component.create(entity_node, &self.dispatch)?);
+                    out.write_simple(client::element::NrlCreateNode(client::element::NrlStream { messages, rest: Vec::new() }))?;
+                    witness.nrl.entry(entity).or_default().push(slot);
+                }
+                component.write_events(out, &self.dispatch, created)?;
+            }
         }
 
         Ok(())
@@ -1300,6 +1330,8 @@ struct Space {
     data: Vec<SpaceData>,
     /// What its entities gave their clients during the tick.
     events: Vec<EntityEvent>,
+    /// The NRL node ids of its entities and their components.
+    node_ids: NodeIds,
 }
 
 /// Something of a space its clients get once in it.
@@ -1379,12 +1411,15 @@ struct CellPart {
     /// See [`EntityInit::alias`] and [`EntityInit::controlled_by`].
     alias: bool,
     controlled_by: Option<EntityKey<AnyEntity>>,
+    /// Its dynamic components, and its NRL node once it has any.
+    components: Slots<ComponentEntry>,
+    nrl_node: Option<u16>,
 }
 
 impl CellPart {
 
     fn new(space: SpaceKey, position: Vec3, direction: Vec3, alias: bool, controlled_by: Option<EntityKey<AnyEntity>>) -> Self {
-        Self { space, position, direction, moved: false, alias, controlled_by }
+        Self { space, position, direction, moved: false, alias, controlled_by, components: Slots::default(), nrl_node: None }
     }
 
 }
@@ -1393,8 +1428,7 @@ impl CellPart {
 ///
 /// Each tick sends it, in a bundle the tick opens: the entities entering and leaving its
 /// area of interest, those it asked for, where it and those it knows are, what their
-/// properties and client methods gave, then what was queued for it, see
-/// [`App::nrl_create_node`].
+/// properties and client methods gave, then their dynamic components.
 #[derive(Debug)]
 struct Witness {
     /// Its player entity.
@@ -1405,14 +1439,14 @@ struct Witness {
     aliases: Vec<bool>,
     /// The ticks sent to it, the first being tick 0.
     ticks: u32,
-    /// What goes with its next tick.
-    queued: Vec<Queued>,
+    /// The entities whose NRL node it has, with their components it has.
+    nrl: HashMap<EntityKey<AnyEntity>, Vec<SlotKey>>,
 }
 
 impl Witness {
 
     fn new(entity: EntityKey<AnyEntity>) -> Self {
-        Self { entity, known: Vec::new(), aliases: vec![false; usize::from(NO_ALIAS)], ticks: 0, queued: Vec::new() }
+        Self { entity, known: Vec::new(), aliases: vec![false; usize::from(NO_ALIAS)], ticks: 0, nrl: HashMap::new() }
     }
 
     /// Take the first free id alias.
@@ -1432,28 +1466,6 @@ struct Known {
     /// Whether its client asked for it, and whether it was created on it since.
     requested: bool,
     created: bool,
-}
-
-/// What goes to a client with its next tick, see [`App::nrl_create_node`].
-#[derive(Debug)]
-enum Queued {
-    NrlCreateNode(NrlStream),
-    /// An NRL record, applied by the flag following it.
-    NrlUpdate(Vec<u8>),
-}
-
-impl Queued {
-
-    fn write(self, out: &mut ClientOutbox) -> io::Result<()> {
-        match self {
-            Self::NrlCreateNode(stream) => out.write_simple(client::element::NrlCreateNode(stream)),
-            Self::NrlUpdate(fragment) => {
-                out.write_simple(client::element::NrlData { fragment })?;
-                out.write_simple(client::element::NrlUpdateNodeFlag)
-            }
-        }
-    }
-
 }
 
 // ============ //
