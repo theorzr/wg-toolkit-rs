@@ -2,37 +2,36 @@
 //! which the client drives, and an enemy vehicle in front of it to shoot at.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Instant;
+use std::sync::Arc;
 use std::io;
 
-use glam::Vec3;
 use tracing::{debug, info, warn};
+use glam::Vec3;
 
+use wgtk::app::entity::{AnyEntity, Audience, ComponentKey, Entity, EntityId, EntityKey};
 use wgtk::app::base::{self, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::client::element::NrlMessage;
-use wgtk::app::component::{Audience, ComponentKey};
-use wgtk::app::dispatch::MethodCall;
-use wgtk::app::entity::{AnyEntity, Entity, EntityId, EntityKey};
-use wgtk::res::fs::ResFilesystem;
 use wgtk::script::{StringValue, Value};
+use wgtk::app::dispatch::MethodCall;
+use wgtk::res::fs::ResFilesystem;
 
-use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
-use crate::wot::item_defs::VehicleDef;
-use crate::wot::items::VehicleDescr;
 use crate::wot::schema::{
     self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle,
     ShotResult, VehicleCell,
 };
+use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
+use crate::wot::item_defs::VehicleDef;
+use crate::wot::items::VehicleDescr;
 
-use super::bot::Bot;
-use super::gun::{Gun, HitTarget, Landing, Shot};
-use super::physics::{MotionLimits, Vehicle};
 use super::{
     ammo_list, arena_vehicles, captured_property, gun_reload_time, invalid_data, targeting_info,
     vehicle_health_info, vehicle_settings, with_bytes, with_int,
     BaseThread, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
+use super::gun::{Gun, HitTarget, Landing, Shot};
+use super::physics::{MotionLimits, Vehicle};
+use super::bot::Bot;
 
 
 /// The battle of a client, in a space of its own, see [`BaseThread::enter_space`].

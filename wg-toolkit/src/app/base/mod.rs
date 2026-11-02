@@ -10,40 +10,45 @@
 
 pub mod element;
 
-use std::any::TypeId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, SocketAddrV4};
+use std::time::{Duration, Instant};
 use std::io::{self, Read, Write};
 use std::num::Wrapping;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::fmt;
 
+use tracing::{debug, warn};
 use blowfish::Blowfish;
-use glam::Vec3;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use tracing::{debug, warn};
+use glam::Vec3;
 
 use crate::net::bundle::{Bundle, NextElementReader, ElementReader};
 use crate::net::element::{Element, ElementLength, SimpleElement};
-use crate::net::socket::PacketSocket;
 use crate::script::{PropertyFlags, Script, Ty, Value};
+use crate::net::socket::PacketSocket;
 use crate::net::proto::Protocol;
 
-use super::client::element::ChangedProperties;
-use super::component::{self, Component, ComponentEntry, ComponentKey, ComponentRegistry, ComponentSchema, EntityComponents, NodeIds, RawComponent};
+use super::entity::{
+    self, AnyEntity, BindError, Component, ComponentKey, ComponentSchema, ComponentState, Entity, EntityComponents,
+    EntityEvent, EntityId, EntityKey, EntitySchema, EntitySink, Methods, NrlNodeIds, RawComponent, RawEntity, Registry, ScriptType,
+};
 use super::dispatch::{EntityDispatch, ScriptDispatch, MethodCall, MethodDef};
-use super::math::PackedYawPitchRoll;
+use super::client::element::ChangedProperties;
 use super::outbox::{ClientOutbox, Outbox};
+use super::math::PackedYawPitchRoll;
 use super::slots::{SlotKey, Slots};
-use super::entity::{self, AnyEntity, BindError, Bound, Calls, Entity, EntityEvent, EntityId, EntityKey, EntitySchema, EntitySink, RawEntity, ScriptType};
 use super::io_invalid_data;
 use super::client;
 
 use element::{LoginKey, SessionKey};
 
+
+// ========= //
+//    APP    //
+// ========= //
 
 /// The base application.
 ///
@@ -51,7 +56,8 @@ use element::{LoginKey, SessionKey};
 /// `AnyEntity` sum type -- entities, methods and properties are all resolved by name (or
 /// exposed id) against that script model at runtime (see [`ScriptDispatch`]), so this
 /// type itself never needs to know about any concrete game's entity types. Schemas
-/// registered with [`Self::register`] give typed access on top, see [`entity`].
+/// registered with [`Self::register`] give typed access on top, see
+/// [`super::entity`].
 ///
 /// Clients, entities and spaces are given as keys, [`ClientKey`], [`EntityKey`] and
 /// [`SpaceKey`], which go stale once what they name is gone.
@@ -60,12 +66,10 @@ pub struct App {
     /// The scripting model for this app, and its per entity-type dispatch tables
     /// computed from it at construction time.
     dispatch: ScriptDispatch,
-    /// The schema registered for each entity type, by type id, see [`Self::register`].
-    bindings: Vec<Option<Bound>>,
-    /// The entity type of each registered schema.
-    schema_types: HashMap<TypeId, u16>,
-    /// The registered component schemas, see [`Self::register_component`].
-    components: ComponentRegistry,
+    /// The registered entity and component schemas, see [`Self::register`] and
+    /// [`Self::register_component`].
+    entity_schemas: Registry,
+    component_schemas: Registry,
     /// Internal socket for this application.
     socket: PacketSocket,
     /// The channel tracker.
@@ -80,28 +84,26 @@ pub struct App {
     /// Clients that have made an initial client connection, associated to the request id.
     pending_clients: HashMap<SocketAddr, u32>,
     /// The logged in clients, and the key of each by its address.
-    clients: Slots<Client>,
+    clients: Slots<ClientState>,
     client_keys: HashMap<SocketAddr, ClientKey>,
     /// Every entity this app has created, and the key of each by its id.
-    entities: Slots<EntityEntry>,
+    entities: Slots<EntityState>,
     entity_keys: HashMap<u32, EntityKey<AnyEntity>>,
     /// The next id for entities, this is wrapping around and we ensure that the same id
     /// isn't used twice!
     entities_next_id: Wrapping<u32>,
     /// The spaces, and the key of each by its id.
-    spaces: Slots<Space>,
+    spaces: Slots<SpaceState>,
     space_keys: HashMap<u32, SpaceKey>,
 }
 
 impl App {
 
     pub fn new(addr: SocketAddr, script: Script) -> io::Result<Self> {
-        let dispatch = ScriptDispatch::new(script);
         Ok(Self {
-            bindings: (0..=dispatch.entities.len()).map(|_| None).collect(),
-            schema_types: HashMap::new(),
-            components: ComponentRegistry::default(),
-            dispatch,
+            dispatch: ScriptDispatch::new(script),
+            entity_schemas: Registry::default(),
+            component_schemas: Registry::default(),
             socket: PacketSocket::bind(addr)?,
             protocol: Protocol::new(),
             events: VecDeque::new(),
@@ -129,95 +131,26 @@ impl App {
     }
 
     /// Bind a schema to its entity type of the loaded script, checking every member it
-    /// declares, see [`entity`]. Its entities can then be created, viewed through it
-    /// with [`Self::entity`], and their calls decoded with [`Self::decode`].
+    /// declares, see [`super::entity`]. Its entities can then be created, viewed
+    /// through it with [`Self::entity`], and their calls decoded with [`Self::decode`].
     pub fn register<T: EntitySchema>(&mut self) -> Result<(), BindError> {
-        let Some((type_id, dispatch)) = self.dispatch.entity_from_name(T::NAME) else {
-            return Err(BindError { schema: T::NAME, errors: vec![format!("no entity type {}", T::NAME)] });
-        };
-        self.bindings[usize::from(type_id)] = Some(entity::bind::<T>(dispatch)?);
-        self.schema_types.insert(TypeId::of::<T>(), type_id);
-        Ok(())
+        self.entity_schemas.register::<T>(&self.dispatch)
     }
 
     /// Bind a component schema to its dynamic component type of the loaded script,
-    /// checking every member it declares, see [`component`]. Its components can then be
-    /// added to entities, see [`Entity::add_component`], and viewed with
-    /// [`Self::component`].
+    /// checking every member it declares, see [`super::entity`]. Its components can
+    /// then be added to entities, see [`Entity::add_component`], and viewed with
+    /// [`Self::component`]. The client must have a class for it, for NRL to number it.
     pub fn register_component<C: ComponentSchema>(&mut self) -> Result<(), BindError> {
-        self.components.register::<C>(&self.dispatch)
-    }
 
-    /// View an entity through its schema. What its client methods and properties give
-    /// goes to its client right away, or once in a space, to the clients knowing it at
-    /// the end of the tick, see [`Self::end_tick`].
-    pub fn entity<T: EntitySchema>(&mut self, key: EntityKey<T>) -> io::Result<Entity<'_, T>> {
-        let entry = self.entities.get_mut(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {key}")))?;
-        let EntityEntry { client, type_id, properties, cell } = entry;
-        let bound = self.bindings.get(usize::from(*type_id)).and_then(Option::as_ref)
-            .filter(|bound| bound.is::<T>())
-            .ok_or_else(|| io_invalid_data(format_args!("entity {key} is not a registered {}", T::NAME)))?;
-        let dispatch = self.dispatch.entity_from_id(*type_id)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
-        let (sink, components) = match (cell, *client) {
-            (Some(cell), _) => {
-                let space = self.spaces.get_mut(cell.space.slot)
-                    .ok_or_else(|| io_invalid_data(format_args!("entity {key} is in no space")))?;
-                let components = EntityComponents {
-                    components: &mut cell.components,
-                    node: &mut cell.nrl_node,
-                    node_ids: &mut space.node_ids,
-                    registry: &self.components,
-                    script: &self.dispatch,
-                };
-                (EntitySink::Space(&mut space.events), Some(components))
-            }
-            (None, Some(client)) => {
-                let is_player = self.clients.get(client.slot).and_then(|c| c.player) == Some(key.any());
-                let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
-                (EntitySink::Client { out, is_player }, None)
-            }
-            (None, None) => return Err(io_invalid_data(format_args!("entity {key} has no client and is in no space"))),
-        };
-        Ok(Entity::new(RawEntity {
-            slot: key.slot,
-            id: key.id,
-            properties,
-            dispatch,
-            bound,
-            sink,
-            components,
-        }))
-    }
+        let nrl_type_id = self.dispatch.entity_from_name(C::NAME)
+            .and_then(|(type_id, _)| self.dispatch.component_nrl_id(type_id));
+        if nrl_type_id.is_none() {
+            return Err(BindError { schema: C::NAME, errors: vec!["no component type the client has a class for".to_string()] });
+        }
 
-    /// View a component of an entity through its schema, see [`Entity::add_component`].
-    pub fn component<C: ComponentSchema>(&mut self, key: ComponentKey<C>) -> io::Result<Component<'_, C>> {
-        let entry = self.entities.get_mut(key.entity.slot)
-            .and_then(|entry| entry.cell.as_mut())
-            .and_then(|cell| cell.components.get_mut(key.slot))
-            .ok_or_else(|| io_invalid_data(format_args!("no such component: {key:?}")))?;
-        let bound = self.components.bound::<C>(entry.type_id())
-            .ok_or_else(|| io_invalid_data(format_args!("component {key:?} is not a registered {}", C::NAME)))?;
-        let dispatch = self.dispatch.entity_from_id(entry.type_id())
-            .ok_or_else(|| io_invalid_data(format_args!("unknown component type: {}", entry.type_id())))?;
-        Ok(Component::new(RawComponent { entity: key.entity, slot: key.slot, entry, dispatch, bound }))
-    }
+        self.component_schemas.register::<C>(&self.dispatch)
 
-    /// The key of an entity of any type as one of the given schema, if it is one.
-    pub fn cast<T: EntitySchema>(&self, key: EntityKey<AnyEntity>) -> Option<EntityKey<T>> {
-        let entry = self.entities.get(key.slot)?;
-        self.bindings.get(usize::from(entry.type_id))?.as_ref()?
-            .is::<T>()
-            .then(|| key.cast())
-    }
-
-    /// Decode a call a client made to one of an entity's base or cell methods, if the
-    /// entity is of the given calls' schema and the method one they declare.
-    pub fn decode<C: Calls>(&self, entity: EntityKey<AnyEntity>, call: &MethodCall) -> Option<(EntityKey<C::Schema>, C)> {
-        let entry = self.entities.get(entity.slot)?;
-        let call = self.bindings.get(usize::from(entry.type_id))?.as_ref()?.decode(call)?;
-        Some((entity.cast(), call))
     }
 
     /// Poll for the next event of this app, blocking until one comes.
@@ -301,11 +234,14 @@ impl App {
             }
 
         }
+
     }
 
     /// Handle an element read from the given address.
     fn handle_element(&mut self, addr: SocketAddr, reader: ElementReader<'_, '_>) -> io::Result<()> {
+
         let client = self.client_keys.get(&addr).copied();
+
         match reader.id() {
             LoginKey::ID => self.handle_client_auth(addr, reader),
             SessionKey::ID => self.handle_client_session_key(client, reader),
@@ -357,6 +293,7 @@ impl App {
             id if element::id::CELL_ENTITY_METHOD.contains(id) => self.handle_cell_entity_method(client, reader),
             id => Err(io_invalid_data(format_args!("unexpected element #{id}"))),
         }
+
     }
 
     fn handle_client_auth(&mut self, addr: SocketAddr, reader: ElementReader<'_, '_>) -> io::Result<()> {
@@ -409,15 +346,15 @@ impl App {
 
         let Some((client, entity)) = client
             .and_then(|key| Some((key, self.clients.get(key.slot)?.player?))) else {
-            return self.skip::<RawEntityMethod>(reader);
+            return self.skip::<SkippedEntityMethod>(reader);
         };
 
-        let Some(entry) = self.entities.get(entity.slot) else {
-            return self.skip::<RawEntityMethod>(reader);
+        let Some(state) = self.entities.get(entity.slot) else {
+            return self.skip::<SkippedEntityMethod>(reader);
         };
 
-        let Some(dispatch) = self.dispatch.entity_from_id(entry.type_id) else {
-            return self.skip::<RawEntityMethod>(reader);
+        let Some(dispatch) = self.dispatch.entity_from_id(state.type_id) else {
+            return self.skip::<SkippedEntityMethod>(reader);
         };
 
         let call = reader.read::<element::BaseEntityMethod, _>(&dispatch.base_methods)?.element.call;
@@ -435,7 +372,7 @@ impl App {
 
         let Some((client, cell_entity)) = client
             .and_then(|key| Some((key, self.clients.get(key.slot)?.witness.as_ref()?.entity))) else {
-            return self.skip::<RawEntityMethod>(reader);
+            return self.skip::<SkippedEntityMethod>(reader);
         };
 
         let tables = CellTables { entities: &self.entities, entity_keys: &self.entity_keys, dispatch: &self.dispatch, cell_entity };
@@ -444,6 +381,7 @@ impl App {
             0 => Some(cell_entity),
             id => self.entity_keys.get(&id).copied(),
         };
+
         match entity {
             Some(entity) => self.events.push_back(Event::CellMethod(CellMethodEvent { client, entity, call: method.call })),
             None => debug!(addr = %client.addr, "Cell method call on unknown entity {}", method.entity_id),
@@ -452,6 +390,75 @@ impl App {
         Ok(())
 
     }
+
+    /// Read (and discard) a single already-typed element, without aborting the rest of
+    /// the bundle -- used for ids whose framing is known but that this app doesn't act
+    /// on yet.
+    fn skip<T: Element<()>>(&mut self, reader: ElementReader<'_, '_>) -> io::Result<()> {
+        reader.read_simple::<T>()?;
+        Ok(())
+    }
+
+}
+
+/// How long a reliable packet waits for its acknowledgment before being sent again, and
+/// for how long it is sent again before its client is assumed gone. A poll timeout (see
+/// [`App::poll_until`]) lets resends go out while no packet comes in.
+const RESEND_TIMEOUT: Duration = Duration::from_millis(400);
+const RESEND_GIVE_UP: Duration = Duration::from_secs(20);
+
+/// Resolves a client-to-cell call's method table from the entity it names, for
+/// [`element::CellEntityMethod`].
+struct CellTables<'a> {
+    entities: &'a Slots<EntityState>,
+    entity_keys: &'a HashMap<u32, EntityKey<AnyEntity>>,
+    dispatch: &'a ScriptDispatch,
+    /// Substituted for a wire entity id of 0, exactly as the real base app does.
+    cell_entity: EntityKey<AnyEntity>,
+}
+
+impl element::CellMethodTables for CellTables<'_> {
+    fn cell_methods(&self, entity_id: u32) -> Option<&[MethodDef]> {
+        let key = match entity_id {
+            0 => self.cell_entity,
+            id => *self.entity_keys.get(&id)?,
+        };
+        let state = self.entities.get(key.slot)?;
+        Some(&self.dispatch.entity_from_id(state.type_id)?.cell_methods)
+    }
+}
+
+/// A `BASE_ENTITY_METHOD` or `CELL_ENTITY_METHOD`-range element skipped without knowing
+/// its method table: its framing is always `Variable16`, whatever the entity.
+struct SkippedEntityMethod;
+
+impl Element<()> for SkippedEntityMethod {
+
+    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
+        unreachable!("SkippedEntityMethod is read-only")
+    }
+
+    fn write(&self, _write: &mut dyn Write, _config: &()) -> io::Result<u8> {
+        unreachable!("SkippedEntityMethod is read-only")
+    }
+
+    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
+        Ok(ElementLength::Variable16)
+    }
+
+    fn read(read: &mut dyn Read, _config: &(), _len: usize, _id: u8) -> io::Result<Self> {
+        io::copy(read, &mut io::sink())?;
+        Ok(Self)
+    }
+
+}
+
+
+// ============= //
+//    CLIENTS    //
+// ============= //
+
+impl App {
 
     /// Accept the login of the given user, in response to [`Event::Login`], registering
     /// the client (blowfish key included -- everything sent to this client from this
@@ -470,7 +477,7 @@ impl App {
 
         let session_key = OsRng.next_u32();
 
-        let slot = self.clients.insert(Client {
+        let slot = self.clients.insert(ClientState {
             session_key,
             blowfish: Arc::clone(&blowfish),
             player: None,
@@ -490,213 +497,11 @@ impl App {
 
     }
 
-    /// Forget a client and its entities.
-    fn remove_client(&mut self, key: ClientKey) {
-        self.clients.remove(key.slot);
-        self.outbox.remove(key.addr);
-        self.remove_entities(|_, entry| entry.client == Some(key));
-    }
-
-    /// Forget the entities the given predicate selects.
-    fn remove_entities(&mut self, mut predicate: impl FnMut(EntityKey<AnyEntity>, &EntityEntry) -> bool) {
-        let entities = &self.entities;
-        let removed: Vec<_> = self.entity_keys.values()
-            .copied()
-            .filter(|&key| entities.get(key.slot).is_some_and(|entry| predicate(key, entry)))
-            .collect();
-        for key in removed {
-            self.remove_entity(key);
-        }
-    }
-
-    /// A logged in client, if not gone.
-    fn client(&self, key: ClientKey) -> io::Result<&Client> {
-        self.clients.get(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))
-    }
-
-    /// A new unique entity id.
-    fn new_entity_id(&mut self) -> u32 {
-        loop {
-            let id = self.entities_next_id.0;
-            self.entities_next_id += 1;
-            if !self.entity_keys.contains_key(&id) {
-                break id;
-            }
-        }
-    }
-
-    /// The outbox of a logged in client.
-    fn out(&mut self, key: ClientKey) -> io::Result<&mut ClientOutbox> {
-        self.client(key)?;
-        self.outbox.client(key.addr, &mut self.protocol, &self.socket)
-    }
-
-    /// Write a simple element to a client's outbox.
-    fn send_simple<E: SimpleElement>(&mut self, client: ClientKey, element: E) -> io::Result<()> {
-        self.out(client)?.write_simple(element)
-    }
-
-    /// The entity type of a registered schema.
-    fn schema_type<T: EntitySchema>(&self) -> io::Result<u16> {
-        self.schema_types.get(&TypeId::of::<T>()).copied()
-            .ok_or_else(|| io_invalid_data(format_args!("schema {} is not registered", T::NAME)))
-    }
-
-    /// Track a new entity, of a client or in a space, replacing any of the same id.
-    fn insert_entity(&mut self, id: u32, client: Option<ClientKey>, type_id: u16, cell: Option<CellPart>) -> EntityKey<AnyEntity> {
-        if let Some(&previous) = self.entity_keys.get(&id) {
-            self.remove_entity(previous);
-        }
-        let space = cell.as_ref().map(|cell| cell.space);
-        let properties = self.dispatch.entity_from_id(type_id).map_or(0, |dispatch| dispatch.properties.len());
-        let slot = self.entities.insert(EntityEntry { client, type_id, properties: vec![None; properties], cell });
-        let key = EntityKey::new(slot, id);
-        self.entity_keys.insert(id, key);
-        if let Some(space) = space.and_then(|space| self.spaces.get_mut(space.slot)) {
-            space.entities.push(key);
-        }
-        key
-    }
-
-    /// Forget an entity, and its cell part.
-    fn remove_entity(&mut self, key: EntityKey<AnyEntity>) {
-        self.leave_space(key);
-        if self.entities.remove(key.slot).is_some() {
-            self.entity_keys.remove(&key.id);
-        }
-    }
-
-    /// Keep the given property values of an entity, by exposed id.
-    fn store_properties<T>(&mut self, key: EntityKey<T>, values: impl IntoIterator<Item = (usize, Value)>) {
-        if let Some(entry) = self.entities.get_mut(key.slot) {
-            for (exposed_id, value) in values {
-                if let Some(slot) = entry.properties.get_mut(exposed_id) {
-                    *slot = Some(value);
-                }
-            }
-        }
-    }
-
     /// Tell a client the server's update frequency and game time, which the real server
     /// does right after the login reply. `unknown` is a field of unknown meaning, see
     /// [`client::element::UpdateFrequencyNotification`].
     pub fn update_frequency(&mut self, client: ClientKey, frequency: u8, unknown: u16, game_time: u32) -> io::Result<()> {
         self.send_simple(client, client::element::UpdateFrequencyNotification { frequency, unknown, game_time })
-    }
-
-    /// Create a new base-player entity of the given schema for a client. This becomes
-    /// that client's current base-player entity, replacing any previous one (real
-    /// BigWorld only ever has one at a time).
-    ///
-    /// `entity_data` is of the entity's client-visible data type (see
-    /// [`crate::app::dispatch::EntityDispatch::data_ty`]), checked before anything is
-    /// sent: a dict of its first property values. A [`Value`] passes unchecked.
-    pub fn create_base_player<T: EntitySchema>(
-        &mut self,
-        client: ClientKey,
-        entity_data: impl ScriptType,
-        entity_components_count: u8,
-    ) -> io::Result<EntityKey<T>> {
-
-        self.client(client)?;
-        let entity_type_id = self.schema_type::<T>()?;
-        let entity_id = self.new_entity_id();
-        let dispatch = self.dispatch.entity_from_id(entity_type_id)
-            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {entity_type_id}")))?;
-        if !check_data(&entity_data, &dispatch.data_ty) {
-            return Err(io_invalid_data(format_args!("{} is not the data of a {}", std::any::type_name_of_val(&entity_data), T::NAME)));
-        }
-        let entity_data = entity_data.into_value(&dispatch.data_ty);
-
-        self.outbox.client(client.addr, &mut self.protocol, &self.socket)?.write(
-            client::element::CreateBasePlayer {
-                entity_id,
-                entity_type_id,
-                entity_data: Cow::Borrowed(&entity_data),
-                entity_components_count,
-            },
-            dispatch,
-        )?;
-
-        let properties = match entity_data {
-            Value::Dict(fields) => fields.into_iter()
-                .filter_map(|(name, value)| Some((dispatch.properties.iter().position(|def| def.name == name)?, value)))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let key = self.insert_entity(entity_id, Some(client), entity_type_id, None);
-        self.store_properties(key, properties);
-
-        if let Some(client) = self.clients.get_mut(client.slot) {
-            client.player = Some(key);
-        }
-
-        Ok(key.cast())
-
-    }
-
-    /// An entity, if not gone.
-    fn entry<T>(&self, key: EntityKey<T>) -> io::Result<&EntityEntry> {
-        self.entities.get(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {key}")))
-    }
-
-    /// Call a method, resolved by name against the target entity's client-method table,
-    /// on the client owning the given entity, selecting it first if needed: for calls a
-    /// schema doesn't declare, those replayed from a capture say.
-    pub fn call_method<T>(&mut self, entity: EntityKey<T>, method_name: &str, args: Vec<Value>) -> io::Result<()> {
-
-        let entry = self.entry(entity)?;
-        let client = entry.client.ok_or_else(|| io_invalid_data(format_args!("entity {entity} has no client")))?;
-
-        let dispatch = self.dispatch.entity_from_id(entry.type_id)
-            .ok_or_else(|| io_invalid_data(format_args!("no dispatch table for entity: {entity}")))?;
-
-        let (exposed_id, name) = dispatch.client_methods.iter().enumerate()
-            .find(|(_, m)| &*m.name == method_name)
-            .map(|(exposed_id, m)| (exposed_id as u16, m.name.clone()))
-            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?;
-
-        let is_player = self.client(client)?.player == Some(entity.any());
-        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
-        if is_player {
-            out.select_player()?;
-        } else {
-            out.select_entity(entity.id)?;
-        }
-        out.write_selected(
-            client::element::EntityMethod { call: MethodCall::Known { exposed_id, name, args } },
-            &dispatch.client_methods,
-        )
-
-    }
-
-    /// Reset all entities known to the given client, optionally keeping its current
-    /// base-player entity alive (`keep_player_on_base`). This is the only entity
-    /// *removal* mechanism the wire protocol has -- there's no way to remove a single
-    /// arbitrary entity, only "reset everything" (see `re-work/doc/ENTITY.md`).
-    pub fn reset_entities(&mut self, client: ClientKey, keep_player_on_base: bool) -> io::Result<()> {
-
-        self.send_simple(client, client::element::ResetEntities { keep_player_on_base })?;
-
-        let keep = keep_player_on_base
-            .then(|| self.clients.get(client.slot).and_then(|c| c.player))
-            .flatten();
-
-        self.remove_entities(|entity, entry| entry.client == Some(client) && Some(entity) != keep);
-
-        if let Some(keep) = keep {
-            self.leave_space(keep);
-        }
-        if let Some(client) = self.clients.get_mut(client.slot) {
-            if !keep_player_on_base {
-                client.player = None;
-            }
-        }
-
-        Ok(())
-
     }
 
     /// Tell a client where its cell app is, before creating its cell player.
@@ -733,10 +538,10 @@ impl App {
     /// in.
     pub fn push_resource(&mut self, client: ClientKey, res_id: u16, description: Vec<u8>, data: &[u8]) -> io::Result<()> {
 
+        const CHUNK_SIZE: usize = 8192;
+
         self.client(client)?;
         let addr = client.addr;
-
-        const CHUNK_SIZE: usize = 8192;
 
         if data.len() > CHUNK_SIZE * 256 {
             return Err(io_invalid_data(format_args!("resource of {} bytes, more than 256 fragments", data.len())));
@@ -773,417 +578,26 @@ impl App {
 
     }
 
-    /// Read (and discard) a single already-typed element, without aborting the rest of
-    /// the bundle -- used for ids whose framing is known but that this app doesn't act
-    /// on yet.
-    fn skip<T: Element<()>>(&mut self, reader: ElementReader<'_, '_>) -> io::Result<()> {
-        reader.read_simple::<T>()?;
-        Ok(())
-    }
+    /// Reset all entities known to the given client, optionally keeping its current
+    /// base-player entity alive (`keep_player_on_base`). This is the only entity
+    /// *removal* mechanism the wire protocol has -- there's no way to remove a single
+    /// arbitrary entity, only "reset everything" (see `re-work/doc/ENTITY.md`).
+    pub fn reset_entities(&mut self, client: ClientKey, keep_player_on_base: bool) -> io::Result<()> {
 
-    /// Create a space of the given id, which the protocol carries: one from a capture,
-    /// whose space properties name it, say.
-    pub fn create_space(&mut self, id: u32) -> io::Result<SpaceKey> {
-        if self.space_keys.contains_key(&id) {
-            return Err(io_invalid_data(format_args!("space {id} already exists")));
-        }
-        let slot = self.spaces.insert(Space { entities: Vec::new(), data: Vec::new(), events: Vec::new(), node_ids: NodeIds::default() });
-        let key = SpaceKey { slot, id };
-        self.space_keys.insert(id, key);
-        Ok(key)
-    }
+        self.send_simple(client, client::element::ResetEntities { keep_player_on_base })?;
 
-    /// Destroy a space: the entities in it without a client are gone, the others only
-    /// leave it.
-    pub fn destroy_space(&mut self, key: SpaceKey) {
-        let Some(space) = self.spaces.get(key.slot) else { return };
-        for entity in space.entities.clone() {
-            match self.entities.get(entity.slot).and_then(|entry| entry.client) {
-                Some(_) => self.leave_space(entity),
-                None => self.remove_entity(entity),
-            }
-        }
-        self.spaces.remove(key.slot);
-        self.space_keys.remove(&key.id);
-    }
+        let keep = keep_player_on_base
+            .then(|| self.clients.get(client.slot).and_then(|c| c.player))
+            .flatten();
 
-    /// Give a space one of its properties, still raw, see [`client::element::SpaceProperty`]:
-    /// clients get it once in the space, in the order given.
-    pub fn set_space_property(&mut self, space: SpaceKey, data: Vec<u8>) -> io::Result<()> {
-        self.add_space_data(space, SpaceData::Property(data))
-    }
+        self.remove_entities(|entity, state| state.client == Some(client) && Some(entity) != keep);
 
-    /// Map a geometry (a map, `spaces/08_ruinberg` say) into a space, at the identity
-    /// transform: clients get it once in the space, after what was given before.
-    pub fn add_space_geometry_mapping(&mut self, space: SpaceKey, entry_id: SocketAddrV4, path: &str) -> io::Result<()> {
-        self.add_space_data(space, SpaceData::GeometryMapping { entry_id, path: path.to_string() })
-    }
-
-    /// Keep some data of a space for every client getting into it, and give it to those
-    /// already in it.
-    fn add_space_data(&mut self, key: SpaceKey, data: SpaceData) -> io::Result<()> {
-        let space = self.spaces.get_mut(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such space: {key}")))?;
-        let clients: Vec<_> = space.entities.iter()
-            .filter_map(|entity| self.entities.get(entity.slot)?.client)
-            .filter(|client| self.clients.get(client.slot).is_some_and(|c| c.witness.is_some()))
-            .collect();
-        for client in clients {
-            data.write(self.outbox.client(client.addr, &mut self.protocol, &self.socket)?, key)?;
-        }
-        space.data.push(data);
-        Ok(())
-    }
-
-    /// Get a client's base-player entity into a space, with a cell part: the client gets
-    /// its cell player and the space's data right away, then what is in the space from
-    /// the end of the tick on. Its cell method calls go to it.
-    pub fn create_cell_player<T>(&mut self, player: EntityKey<T>, space: SpaceKey, init: CellPlayerInit) -> io::Result<()> {
-
-        let entry = self.entry(player)?;
-        let client = entry.client.ok_or_else(|| io_invalid_data(format_args!("entity {player} has no client")))?;
-        let data = &self.spaces.get(space.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such space: {space}")))?
-            .data;
-
-        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
-        out.write_simple(client::element::CreateCellPlayer {
-            unk_flag: 0,
-            space_id: space.id,
-            unk_short: 0,
-            vehicle_id: init.vehicle_id,
-            position: init.position,
-            packed_xz_scale: init.packed_xz_scale,
-            direction: init.direction,
-            cell_data: init.cell_data,
-        })?;
-        for data in data {
-            data.write(out, space)?;
-        }
-
-        self.leave_space(player.any());
-        if let Some(entry) = self.entities.get_mut(player.slot) {
-            entry.cell = Some(CellPart::new(space, init.position, init.direction, true, None, Visibility::Interest));
-        }
-        if let Some(space) = self.spaces.get_mut(space.slot) {
-            space.entities.push(player.any());
+        if let Some(keep) = keep {
+            self.leave_space(keep);
         }
         if let Some(client) = self.clients.get_mut(client.slot) {
-            client.witness = Some(Witness::new(player.any()));
-        }
-
-        Ok(())
-
-    }
-
-    /// Take an entity out of its space, if in one: it leaves the area of interest of the
-    /// clients knowing it, and its own client no longer knows that space.
-    pub fn leave_space<T>(&mut self, entity: EntityKey<T>) {
-        let Some(entry) = self.entities.get_mut(entity.slot) else { return };
-        let Some(cell) = entry.cell.take() else { return };
-        if let Some(space) = self.spaces.get_mut(cell.space.slot) {
-            space.entities.retain(|&other| other != entity.any());
-        }
-        if let Some(client) = entry.client.and_then(|client| self.clients.get_mut(client.slot)) {
-            if client.witness.as_ref().is_some_and(|witness| witness.entity == entity.any()) {
-                client.witness = None;
-            }
-        }
-    }
-
-    /// The space of an entity, if in one.
-    pub fn space_of<T>(&self, entity: EntityKey<T>) -> Option<SpaceKey> {
-        Some(self.entities.get(entity.slot)?.cell.as_ref()?.space)
-    }
-
-    /// Create an entity of the given schema in a space, see [`Self::create_entity_dynamic`].
-    pub fn create_entity<T: EntitySchema>(&mut self, space: SpaceKey, init: EntityInit) -> io::Result<EntityKey<T>> {
-        let type_id = self.schema_type::<T>()?;
-        self.create_entity_dynamic(space, type_id, init).map(EntityKey::cast)
-    }
-
-    /// Create an entity of the given type in a space, which needs no schema. Its
-    /// properties are its first property values: clients get those visible to them as
-    /// it enters their area of interest, see [`EntityInit::alias`].
-    pub fn create_entity_dynamic(&mut self, space: SpaceKey, type_id: u16, init: EntityInit) -> io::Result<EntityKey<AnyEntity>> {
-
-        if self.dispatch.entity_from_id(type_id).is_none() {
-            return Err(io_invalid_data(format_args!("unknown entity type: {type_id}")));
-        }
-        if self.spaces.get(space.slot).is_none() {
-            return Err(io_invalid_data(format_args!("no such space: {space}")));
-        }
-
-        let id = match init.id {
-            Some(EntityId(id)) => id,
-            None => self.new_entity_id(),
-        };
-
-        let cell = CellPart::new(space, init.position, init.direction, init.alias, init.controlled_by, init.visibility);
-        let key = self.insert_entity(id, None, type_id, Some(cell));
-        self.store_properties(key, init.properties.values.into_iter().map(|(exposed_id, _, value)| (exposed_id.into(), value)));
-        Ok(key)
-
-    }
-
-    /// Destroy an entity: it leaves the area of interest of the clients knowing it.
-    pub fn destroy_entity<T>(&mut self, key: EntityKey<T>) {
-        self.remove_entity(key.any());
-    }
-
-    /// Where an entity in a space is, and its direction (roll, pitch and yaw).
-    pub fn position<T>(&self, entity: EntityKey<T>) -> Option<(Vec3, Vec3)> {
-        let cell = self.entities.get(entity.slot)?.cell.as_ref()?;
-        Some((cell.position, cell.direction))
-    }
-
-    /// Move an entity in a space, with its direction (roll, pitch and yaw): the clients
-    /// knowing it get where it is at the end of the tick.
-    pub fn set_position<T>(&mut self, entity: EntityKey<T>, position: Vec3, direction: Vec3) -> io::Result<()> {
-        let cell = self.entities.get_mut(entity.slot)
-            .and_then(|entry| entry.cell.as_mut())
-            .ok_or_else(|| io_invalid_data(format_args!("entity {entity} is in no space")))?;
-        cell.position = position;
-        cell.direction = direction;
-        cell.moved = true;
-        Ok(())
-    }
-
-    /// Set what of its space a client knows, from the next tick on: [`Interest::WholeSpace`]
-    /// until then. It must have a cell player, see [`Self::create_cell_player`].
-    pub fn set_interest(&mut self, client: ClientKey, interest: Interest) -> io::Result<()> {
-        self.witness_mut(client)?.interest = interest;
-        Ok(())
-    }
-
-    /// Show an entity of its space to a client whose interest is [`Interest::Manual`]: it
-    /// enters its area of interest with the next tick, until hidden.
-    pub fn show<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
-        self.witness_mut(client)?.shown.insert(entity.any());
-        Ok(())
-    }
-
-    /// Hide an entity shown to a client, see [`Self::show`]: it leaves its area of
-    /// interest with the next tick.
-    pub fn hide<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
-        self.witness_mut(client)?.shown.remove(&entity.any());
-        Ok(())
-    }
-
-    /// What a client knows of its space, if it has a cell player.
-    fn witness_mut(&mut self, key: ClientKey) -> io::Result<&mut Witness> {
-        self.clients.get_mut(key.slot)
-            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))?
-            .witness.as_mut()
-            .ok_or_else(|| io_invalid_data(format_args!("client {} has no cell player", key.addr)))
-    }
-
-    /// How many ticks a client got in its space: its game time, in ticks.
-    pub fn ticks(&self, client: ClientKey) -> Option<u32> {
-        Some(self.client(client).ok()?.witness.as_ref()?.ticks)
-    }
-
-    /// A client asks for an entity that entered its area of interest: it gets created
-    /// with the next tick.
-    pub(super) fn request_entity(&mut self, client: ClientKey, entity_id: u32) {
-        let known = self.clients.get_mut(client.slot)
-            .and_then(|client| client.witness.as_mut())
-            .and_then(|witness| witness.known.iter_mut().find(|known| known.entity.id == entity_id));
-        match known {
-            Some(known) => known.requested = true,
-            None => debug!(addr = %client.addr, "Asked for entity {entity_id}, which it doesn't know"),
-        }
-    }
-
-    /// End a tick: tell each client in a space what changed in its area of interest since
-    /// the last one, in a bundle the tick opens, see [`Witness`].
-    pub fn end_tick(&mut self) {
-
-        let clients: Vec<_> = self.client_keys.values().copied().collect();
-        for client in clients {
-            if let Err(error) = self.tick_client(client) {
-                self.events.push_back(Event::IoError(IoErrorEvent { error, addr: Some(client.addr) }));
-            }
-        }
-
-        for (_, entry) in self.entities.iter_mut() {
-            if let Some(cell) = &mut entry.cell {
-                cell.moved = false;
-                for (_, component) in cell.components.iter_mut() {
-                    component.end_tick();
-                }
-            }
-        }
-        for (_, space) in self.spaces.iter_mut() {
-            space.events.clear();
-        }
-
-    }
-
-    fn tick_client(&mut self, client: ClientKey) -> io::Result<()> {
-        let Some(mut witness) = self.clients.get_mut(client.slot).and_then(|c| c.witness.take()) else {
-            return Ok(());
-        };
-        let result = self.write_tick(client, &mut witness);
-        if let Some(state) = self.clients.get_mut(client.slot) {
-            state.witness = Some(witness);
-        }
-        result
-    }
-
-    /// Tell a client what changed in its area of interest, see [`Self::end_tick`] and
-    /// [`Interest`].
-    fn write_tick(&mut self, client: ClientKey, witness: &mut Witness) -> io::Result<()> {
-
-        let entities = &self.entities;
-        let Some(own) = entities.get(witness.entity.slot).and_then(|entry| entry.cell.as_ref()) else { return Ok(()) };
-        let Some(space) = self.spaces.get(own.space.slot) else { return Ok(()) };
-        let own_id = witness.entity.id;
-        let cell = |key: EntityKey<AnyEntity>| entities.get(key.slot).and_then(|entry| Some((entry, entry.cell.as_ref()?)));
-
-        // What was written to it before goes first, the tick opens a bundle.
-        self.outbox.flush(client.addr, &mut self.protocol, &self.socket)?;
-        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
-        out.write_simple(client::element::TickSync { tick: witness.ticks as u8 })?;
-        witness.ticks = witness.ticks.wrapping_add(1);
-
-        // Those gone, no longer in its space, or out of its interest.
-        witness.shown.retain(|key| space.entities.contains(key));
-        let interest = witness.interest;
-        let shown = &witness.shown;
-        let has = |key, known| cell(key).is_some_and(|(_, other)| interest.has(own.position, shown, own_id, key, other, known));
-        let mut known = Vec::with_capacity(witness.known.len());
-        for entry in std::mem::take(&mut witness.known) {
-            if space.entities.contains(&entry.entity) && has(entry.entity, true) {
-                known.push(entry);
-            } else {
-                out.write_simple(client::element::LeaveAoi { entity_id: entry.entity.id, last_event_numbers: Vec::new() })?;
-                if let Some(alias) = entry.alias {
-                    witness.aliases[usize::from(alias)] = false;
-                }
-                // NOTE: Whether the client drops its NRL nodes with it is not known, they
-                // are created again with the same ids if it comes back.
-                witness.nrl.remove(&entry.entity);
-            }
-        }
-        witness.known = known;
-
-        // Those new to it, in the order they got in the space.
-        for &key in &space.entities {
-            if key.id == own_id || witness.known.iter().any(|known| known.entity == key) || !has(key, false) {
-                continue;
-            }
-            let Some((_, other)) = cell(key) else { continue };
-            let alias = match other.alias {
-                true => Some(take_alias(&mut witness.aliases).ok_or_else(|| io_invalid_data(format_args!("no alias left for {key}")))?),
-                false => None,
-            };
-            out.write_simple(client::element::EnterAoi { entity_id: key.id, id_alias: alias.unwrap_or(NO_ALIAS) })?;
-            // Without an alias, it is created right away rather than once asked for.
-            witness.known.push(Known { entity: key, alias, requested: alias.is_none(), created: false });
-        }
-
-        // Those asked for: created with what of them is visible to it.
-        for known in &mut witness.known {
-            if !known.requested || known.created {
-                continue;
-            }
-            let Some((entry, other)) = cell(known.entity) else { continue };
-            let dispatch = self.dispatch.entity_from_id(entry.type_id)
-                .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {}", entry.type_id)))?;
-            let own = other.controlled_by.is_some_and(|controller| controller.id == own_id);
-            let client_data = visible_properties(entry, dispatch, own).encode(&dispatch.properties)?;
-            let (roll, pitch, yaw) = (other.direction.x, other.direction.y, other.direction.z);
-            match known.alias {
-                Some(_) => out.write_simple(client::element::CreateEntity {
-                    entity_id: known.entity.id,
-                    entity_type_id: entry.type_id,
-                    unk_u16: 0,
-                    resource_name: RESOURCE_NAME.to_string(),
-                    position: other.position,
-                    direction: PackedYawPitchRoll::pack(yaw, pitch, roll, false),
-                    direction_unk: CREATE_ENTITY_UNK,
-                    client_data,
-                })?,
-                None => out.write_simple(client::element::CreateEntityDetailed {
-                    entity_id: known.entity.id,
-                    entity_type_id: entry.type_id,
-                    unk_u16: 0,
-                    resource_name: RESOURCE_NAME.to_string(),
-                    position: other.position,
-                    direction: other.direction,
-                    client_data,
-                })?,
-            }
-            known.created = true;
-            self.events.push_back(Event::Entered(EnteredEvent { client, entity: known.entity }));
-        }
-
-        // Where it is, as the captured server places the player: a reference point at
-        // its position rounded to the metre, then itself on that point.
-        if own.moved {
-            out.write_simple(client::element::RelativePosition { position: own.position.round() })?;
-            out.write_simple(client::element::AvatarUpdatePlayerDetailed { ref_num: 0, position: Vec3::ZERO, direction: Vec3::ZERO })?;
-        }
-
-        // Where those it knows moved, each position update selecting its entity.
-        for known in &witness.known {
-            let (Some(id_alias), true) = (known.alias, known.created) else { continue };
-            let Some((_, other)) = cell(known.entity).filter(|(_, other)| other.moved) else { continue };
-            out.write_simple(client::element::AvatarUpdateAliasDetailed {
-                ref_num: 0,
-                id_alias,
-                position: other.position,
-                direction: other.direction,
-            })?;
-        }
-
-        // What their properties and client methods gave, in the order given.
-        for event in &space.events {
-            let entity = if event.entity_id == own_id {
-                out.select_player()?;
-                witness.entity
-            } else {
-                let Some(known) = witness.known.iter().find(|known| known.entity.id == event.entity_id && known.created) else { continue };
-                let own = cell(known.entity)
-                    .and_then(|(_, other)| other.controlled_by)
-                    .is_some_and(|controller| controller.id == own_id);
-                if event.own_client && !own {
-                    continue;
-                }
-                out.select_entity(event.entity_id)?;
-                known.entity
-            };
-            let Some((entry, _)) = cell(entity) else { continue };
-            let dispatch = self.dispatch.entity_from_id(entry.type_id)
-                .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {}", entry.type_id)))?;
-            event.kind.write(out, dispatch)?;
-        }
-
-        // Their dynamic components it gets: each new one created, in an element of its own
-        // since the client reads no further than the first component of one, under its
-        // entity's node the first time, then what changed of the others.
-        let created = witness.known.iter().filter(|known| known.created).map(|known| known.entity);
-        for entity in std::iter::once(witness.entity).chain(created) {
-            let Some((_, other)) = cell(entity) else { continue };
-            let Some(entity_node) = other.nrl_node else { continue };
-            let own = entity == witness.entity || other.controlled_by.is_some_and(|controller| controller.id == own_id);
-            for (slot, component) in other.components.iter() {
-                if !component.is_for(own) {
-                    continue;
-                }
-                let known = witness.nrl.get(&entity);
-                let created = !known.is_some_and(|slots| slots.contains(&slot));
-                if created {
-                    let mut messages = Vec::with_capacity(2);
-                    if known.is_none() {
-                        messages.push(component::create_entity_node(entity.id, entity_node));
-                    }
-                    messages.push(component.create(entity_node, &self.dispatch)?);
-                    out.write_simple(client::element::NrlCreateNode(client::element::NrlStream { messages, rest: Vec::new() }))?;
-                    witness.nrl.entry(entity).or_default().push(slot);
-                }
-                component.write_events(out, &self.dispatch, created)?;
+            if !keep_player_on_base {
+                client.player = None;
             }
         }
 
@@ -1191,70 +605,31 @@ impl App {
 
     }
 
-}
-
-/// Whether the given data is of the given type, see [`App::create_base_player`].
-fn check_data<D: ScriptType>(_data: &D, ty: &Ty) -> bool {
-    D::check(ty)
-}
-
-/// Resolves a client-to-cell call's method table from the entity it names, for
-/// [`element::CellEntityMethod`].
-struct CellTables<'a> {
-    entities: &'a Slots<EntityEntry>,
-    entity_keys: &'a HashMap<u32, EntityKey<AnyEntity>>,
-    dispatch: &'a ScriptDispatch,
-    /// Substituted for a wire entity id of 0, exactly as the real base app does.
-    cell_entity: EntityKey<AnyEntity>,
-}
-
-impl element::CellMethodTables for CellTables<'_> {
-    fn cell_methods(&self, entity_id: u32) -> Option<&[MethodDef]> {
-        let key = match entity_id {
-            0 => self.cell_entity,
-            id => *self.entity_keys.get(&id)?,
-        };
-        let entry = self.entities.get(key.slot)?;
-        Some(&self.dispatch.entity_from_id(entry.type_id)?.cell_methods)
-    }
-}
-
-/// Read the raw wire payload of a `CELL_ENTITY_METHOD`/`BASE_ENTITY_METHOD`-range
-/// element without needing to know its method table ahead of time -- its framing is
-/// always `Variable16` regardless of the target entity, so this can be read generically
-/// and decoded later once the target entity's dispatch table is known.
-struct RawEntityMethod {
-    element_id: u8,
-    data: Vec<u8>,
-}
-
-impl Element<()> for RawEntityMethod {
-
-    fn write_length(&self, _config: &()) -> io::Result<ElementLength> {
-        unreachable!("RawEntityMethod is read-only")
+    /// Forget a client and its entities.
+    fn remove_client(&mut self, key: ClientKey) {
+        self.clients.remove(key.slot);
+        self.outbox.remove(key.addr);
+        self.remove_entities(|_, state| state.client == Some(key));
     }
 
-    fn write(&self, _write: &mut dyn Write, _config: &()) -> io::Result<u8> {
-        unreachable!("RawEntityMethod is read-only")
+    /// A logged in client, if not gone.
+    fn client(&self, key: ClientKey) -> io::Result<&ClientState> {
+        self.clients.get(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))
     }
 
-    fn read_length(_config: &(), _id: u8) -> io::Result<ElementLength> {
-        Ok(ElementLength::Variable16)
+    /// The outbox of a logged in client.
+    fn out(&mut self, key: ClientKey) -> io::Result<&mut ClientOutbox> {
+        self.client(key)?;
+        self.outbox.client(key.addr, &mut self.protocol, &self.socket)
     }
 
-    fn read(read: &mut dyn Read, _config: &(), _len: usize, id: u8) -> io::Result<Self> {
-        let mut data = Vec::new();
-        read.read_to_end(&mut data)?;
-        Ok(Self { element_id: id, data })
+    /// Write a simple element to a client's outbox.
+    fn send_simple<E: SimpleElement>(&mut self, client: ClientKey, element: E) -> io::Result<()> {
+        self.out(client)?.write_simple(element)
     }
 
 }
-
-/// How long a reliable packet waits for its acknowledgment before being sent again, and
-/// for how long it is sent again before its client is assumed gone. A poll timeout (see
-/// [`App::poll_until`]) lets resends go out while no packet comes in.
-const RESEND_TIMEOUT: Duration = Duration::from_millis(400);
-const RESEND_GIVE_UP: Duration = Duration::from_secs(20);
 
 /// A logged in client of the base app: its address and its place among the app's
 /// clients, which no later client at the same address takes.
@@ -1279,9 +654,9 @@ impl fmt::Display for ClientKey {
     }
 }
 
-/// An active logged in client in the base application.
+/// A logged in client of the base app.
 #[derive(Debug)]
-struct Client {
+struct ClientState {
     /// The session key for this client.
     session_key: u32,
     /// The blowfish key for encryption of this client's packets.
@@ -1295,21 +670,317 @@ struct Client {
     witness: Option<Witness>,
 }
 
+
+// ============== //
+//    ENTITIES    //
+// ============== //
+
+impl App {
+
+    /// View an entity through its schema. What its client methods and properties give
+    /// goes to its client right away, or once in a space, to the clients knowing it at
+    /// the end of the tick, see [`Self::end_tick`].
+    pub fn entity<T: EntitySchema>(&mut self, key: EntityKey<T>) -> io::Result<Entity<'_, T>> {
+
+        let state = self.entities.get_mut(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {key}")))?;
+        let EntityState { client, type_id, properties, cell } = state;
+
+        let bound = self.entity_schemas.bound(*type_id)
+            .filter(|bound| bound.is::<T>())
+            .ok_or_else(|| io_invalid_data(format_args!("entity {key} is not a registered {}", T::NAME)))?;
+        let dispatch = self.dispatch.entity_from_id(*type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {type_id}")))?;
+
+        // In a space, what it gives goes to the clients knowing it, and it may have
+        // components. Otherwise, it goes to its own client.
+        let (sink, components) = match (cell, *client) {
+            (Some(cell), _) => {
+                let space = self.spaces.get_mut(cell.space.slot)
+                    .ok_or_else(|| io_invalid_data(format_args!("entity {key} is in no space")))?;
+                let components = EntityComponents {
+                    components: &mut cell.components,
+                    nrl_node: &mut cell.nrl_node,
+                    nrl_nodes: &mut space.nrl_nodes,
+                    registry: &self.component_schemas,
+                    script: &self.dispatch,
+                };
+                (EntitySink::Space(&mut space.events), Some(components))
+            }
+            (None, Some(client)) => {
+                let is_player = self.clients.get(client.slot).and_then(|c| c.player) == Some(key.any());
+                let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
+                (EntitySink::Client { out, is_player }, None)
+            }
+            (None, None) => return Err(io_invalid_data(format_args!("entity {key} has no client and is in no space"))),
+        };
+
+        Ok(Entity::new(RawEntity {
+            slot: key.slot,
+            id: key.id,
+            properties,
+            dispatch,
+            bound,
+            sink,
+            components,
+        }))
+
+    }
+
+    /// View a component of an entity through its schema, see [`Entity::add_component`].
+    pub fn component<C: ComponentSchema>(&mut self, key: ComponentKey<C>) -> io::Result<Component<'_, C>> {
+
+        let state = self.entities.get_mut(key.entity.slot)
+            .and_then(|state| state.cell.as_mut())
+            .and_then(|cell| cell.components.get_mut(key.slot))
+            .ok_or_else(|| io_invalid_data(format_args!("no such component: {key:?}")))?;
+
+        let type_id = state.type_id();
+        let bound = self.component_schemas.bound(type_id)
+            .filter(|bound| bound.is::<C>())
+            .ok_or_else(|| io_invalid_data(format_args!("component {key:?} is not a registered {}", C::NAME)))?;
+        let dispatch = self.dispatch.entity_from_id(type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown component type: {type_id}")))?;
+
+        Ok(Component::new(RawComponent { entity: key.entity, slot: key.slot, state, dispatch, bound }))
+
+    }
+
+    /// The key of an entity of any type as one of the given schema, if it is one.
+    pub fn cast<T: EntitySchema>(&self, key: EntityKey<AnyEntity>) -> Option<EntityKey<T>> {
+        let state = self.entities.get(key.slot)?;
+        self.entity_schemas.bound(state.type_id)?
+            .is::<T>()
+            .then(|| key.cast())
+    }
+
+    /// Decode a call a client made to one of an entity's base or cell methods, if the
+    /// entity is of the given calls' schema and the method one they declare.
+    pub fn decode<M: Methods>(&self, entity: EntityKey<AnyEntity>, call: &MethodCall) -> Option<(EntityKey<M::Schema>, M)> {
+        let state = self.entities.get(entity.slot)?;
+        let call = self.entity_schemas.bound(state.type_id)?.decode(call)?;
+        Some((entity.cast(), call))
+    }
+
+    /// Create a new base-player entity of the given schema for a client. This becomes
+    /// that client's current base-player entity, replacing any previous one (real
+    /// BigWorld only ever has one at a time).
+    ///
+    /// `entity_data` is of the entity's client-visible data type (see
+    /// [`crate::app::dispatch::EntityDispatch::data_ty`]), checked before anything is
+    /// sent: a dict of its first property values. A [`Value`] passes unchecked.
+    pub fn create_base_player<T: EntitySchema>(
+        &mut self,
+        client: ClientKey,
+        entity_data: impl ScriptType,
+        entity_components_count: u8,
+    ) -> io::Result<EntityKey<T>> {
+
+        self.client(client)?;
+        let entity_type_id = self.entity_schemas.type_of::<T>()?;
+        let entity_id = self.new_entity_id();
+
+        let dispatch = self.dispatch.entity_from_id(entity_type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {entity_type_id}")))?;
+        if !check_data(&entity_data, &dispatch.data_ty) {
+            return Err(io_invalid_data(format_args!("{} is not the data of a {}", std::any::type_name_of_val(&entity_data), T::NAME)));
+        }
+        let entity_data = entity_data.into_value(&dispatch.data_ty);
+
+        self.outbox.client(client.addr, &mut self.protocol, &self.socket)?.write(
+            client::element::CreateBasePlayer {
+                entity_id,
+                entity_type_id,
+                entity_data: Cow::Borrowed(&entity_data),
+                entity_components_count,
+            },
+            dispatch,
+        )?;
+
+        let properties = match entity_data {
+            Value::Dict(fields) => fields.into_iter()
+                .filter_map(|(name, value)| Some((dispatch.properties.iter().position(|def| def.name == name)?, value)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let key = self.insert_entity(entity_id, Some(client), entity_type_id, None);
+        self.store_properties(key, properties);
+
+        if let Some(client) = self.clients.get_mut(client.slot) {
+            client.player = Some(key);
+        }
+
+        Ok(key.cast())
+
+    }
+
+    /// Call a method, resolved by name against the target entity's client-method table,
+    /// on the client owning the given entity, selecting it first if needed: for calls a
+    /// schema doesn't declare, those replayed from a capture say.
+    pub fn call_method<T>(&mut self, entity: EntityKey<T>, method_name: &str, args: Vec<Value>) -> io::Result<()> {
+
+        let state = self.entity_state(entity)?;
+        let client = state.client.ok_or_else(|| io_invalid_data(format_args!("entity {entity} has no client")))?;
+
+        let dispatch = self.dispatch.entity_from_id(state.type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("no dispatch table for entity: {entity}")))?;
+
+        let (exposed_id, name) = dispatch.client_methods.iter().enumerate()
+            .find(|(_, m)| &*m.name == method_name)
+            .map(|(exposed_id, m)| (exposed_id as u16, m.name.clone()))
+            .ok_or_else(|| io_invalid_data(format_args!("unknown client method: {method_name}")))?;
+
+        let is_player = self.client(client)?.player == Some(entity.any());
+        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
+        if is_player {
+            out.select_player()?;
+        } else {
+            out.select_entity(entity.id)?;
+        }
+
+        out.write_selected(
+            client::element::EntityMethod { call: MethodCall::Known { exposed_id, name, args } },
+            &dispatch.client_methods,
+        )
+
+    }
+
+    /// An entity, if not gone.
+    fn entity_state<T>(&self, key: EntityKey<T>) -> io::Result<&EntityState> {
+        self.entities.get(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {key}")))
+    }
+
+    /// A new unique entity id.
+    fn new_entity_id(&mut self) -> u32 {
+        loop {
+            let id = self.entities_next_id.0;
+            self.entities_next_id += 1;
+            if !self.entity_keys.contains_key(&id) {
+                break id;
+            }
+        }
+    }
+
+    /// Track a new entity, of a client or in a space, replacing any of the same id.
+    fn insert_entity(&mut self, id: u32, client: Option<ClientKey>, type_id: u16, cell: Option<EntityCell>) -> EntityKey<AnyEntity> {
+
+        if let Some(&previous) = self.entity_keys.get(&id) {
+            self.remove_entity(previous);
+        }
+
+        let space = cell.as_ref().map(|cell| cell.space);
+        let properties = self.dispatch.entity_from_id(type_id).map_or(0, |dispatch| dispatch.properties.len());
+        let slot = self.entities.insert(EntityState { client, type_id, properties: vec![None; properties], cell });
+        let key = EntityKey::new(slot, id);
+        self.entity_keys.insert(id, key);
+
+        if let Some(space) = space.and_then(|space| self.spaces.get_mut(space.slot)) {
+            space.entities.push(key);
+        }
+
+        key
+
+    }
+
+    /// Forget an entity, and its cell part.
+    fn remove_entity(&mut self, key: EntityKey<AnyEntity>) {
+        self.leave_space(key);
+        if self.entities.remove(key.slot).is_some() {
+            self.entity_keys.remove(&key.id);
+        }
+    }
+
+    /// Forget the entities the given predicate selects.
+    fn remove_entities(&mut self, mut predicate: impl FnMut(EntityKey<AnyEntity>, &EntityState) -> bool) {
+
+        let entities = &self.entities;
+        let removed: Vec<_> = self.entity_keys.values()
+            .copied()
+            .filter(|&key| entities.get(key.slot).is_some_and(|state| predicate(key, state)))
+            .collect();
+
+        for key in removed {
+            self.remove_entity(key);
+        }
+
+    }
+
+    /// Keep the given property values of an entity, by exposed id.
+    fn store_properties<T>(&mut self, key: EntityKey<T>, values: impl IntoIterator<Item = (usize, Value)>) {
+        let Some(state) = self.entities.get_mut(key.slot) else { return };
+        for (exposed_id, value) in values {
+            if let Some(slot) = state.properties.get_mut(exposed_id) {
+                *slot = Some(value);
+            }
+        }
+    }
+
+}
+
 /// One entity this app has created: the client that owns it, if a base entity, its wire
 /// type id, its client-visible property values, by exposed id, when known, and its cell
 /// part, once in a space.
 #[derive(Debug)]
-struct EntityEntry {
+struct EntityState {
     client: Option<ClientKey>,
     type_id: u16,
     properties: Vec<Option<Value>>,
-    cell: Option<CellPart>,
+    cell: Option<EntityCell>,
+}
+
+/// The cell part of an entity, in a space.
+#[derive(Debug)]
+struct EntityCell {
+    space: SpaceKey,
+    position: Vec3,
+    /// Roll, pitch and yaw.
+    direction: Vec3,
+    /// Whether it moved during the tick.
+    moved: bool,
+    /// See [`EntityInit::alias`], [`EntityInit::controlled_by`] and
+    /// [`EntityInit::visibility`].
+    alias: bool,
+    controlled_by: Option<EntityKey<AnyEntity>>,
+    visibility: Visibility,
+    /// Its dynamic components, and its NRL node once it has any.
+    components: Slots<ComponentState>,
+    nrl_node: Option<u16>,
+}
+
+impl EntityCell {
+
+    fn new(space: SpaceKey, position: Vec3, direction: Vec3, alias: bool, controlled_by: Option<EntityKey<AnyEntity>>, visibility: Visibility) -> Self {
+        Self { 
+            space, 
+            position, 
+            direction, 
+            moved: false, 
+            alias, 
+            controlled_by, 
+            visibility, 
+            components: Slots::default(), 
+            nrl_node: None,
+        }
+    }
+
+    /// Whether the given entity controls it, whose client is then its own.
+    fn is_controlled_by(&self, entity: EntityKey<AnyEntity>) -> bool {
+        self.controlled_by == Some(entity)
+    }
+
+}
+
+/// Whether the given data is of the given type, see [`App::create_base_player`].
+fn check_data<D: ScriptType>(_data: &D, ty: &Ty) -> bool {
+    D::check(ty)
 }
 
 /// What of an entity's properties a client gets as it enters its area of interest: those
 /// with a known value, but those for its own client only when it is.
-fn visible_properties(entry: &EntityEntry, dispatch: &EntityDispatch, own: bool) -> ChangedProperties {
-    let values = entry.properties.iter().enumerate()
+fn visible_properties(state: &EntityState, dispatch: &EntityDispatch, own: bool) -> ChangedProperties {
+
+    let values = state.properties.iter().enumerate()
         .filter_map(|(exposed_id, value)| {
             let def = &dispatch.properties[exposed_id];
             let own_client = matches!(def.flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
@@ -1317,20 +988,205 @@ fn visible_properties(entry: &EntityEntry, dispatch: &EntityDispatch, own: bool)
             Some((exposed_id as u8, Arc::clone(&def.name), value.clone()))
         })
         .collect();
+
     ChangedProperties { values, stopped: None }
+
 }
 
-/// The id alias of an entity entering an area of interest without one.
-const NO_ALIAS: u8 = 255;
 
-/// What entity creations carry before their position, always this in captures, see
-/// [`client::element::CreateEntity::resource_name`].
-const RESOURCE_NAME: &str = "bw.default";
+// ============ //
+//    SPACES    //
+// ============ //
 
-/// The byte `CreateEntity` carries after the direction, of unknown meaning, see
-/// [`client::element::CreateEntity::direction_unk`]: as captured for a vehicle, the
-/// client crashing on a vehicle created with 0.
-const CREATE_ENTITY_UNK: u8 = 5;
+impl App {
+
+    /// Create a space of the given id, which the protocol carries: one from a capture,
+    /// whose space properties name it, say.
+    pub fn create_space(&mut self, id: u32) -> io::Result<SpaceKey> {
+
+        if self.space_keys.contains_key(&id) {
+            return Err(io_invalid_data(format_args!("space {id} already exists")));
+        }
+
+        let slot = self.spaces.insert(SpaceState::default());
+        let key = SpaceKey { slot, id };
+        self.space_keys.insert(id, key);
+        Ok(key)
+
+    }
+
+    /// Destroy a space: the entities in it without a client are gone, the others only
+    /// leave it.
+    pub fn destroy_space(&mut self, key: SpaceKey) {
+
+        let Some(space) = self.spaces.get(key.slot) else { return };
+
+        for entity in space.entities.clone() {
+            match self.entities.get(entity.slot).and_then(|state| state.client) {
+                Some(_) => self.leave_space(entity),
+                None => self.remove_entity(entity),
+            }
+        }
+
+        self.spaces.remove(key.slot);
+        self.space_keys.remove(&key.id);
+
+    }
+
+    /// Give a space one of its properties, still raw, see [`client::element::SpaceProperty`]:
+    /// clients get it once in the space, in the order given.
+    pub fn set_space_property(&mut self, space: SpaceKey, data: Vec<u8>) -> io::Result<()> {
+        self.add_space_data(space, SpaceData::Property(data))
+    }
+
+    /// Map a geometry (a map, `spaces/08_ruinberg` say) into a space, at the identity
+    /// transform: clients get it once in the space, after what was given before.
+    pub fn add_space_geometry_mapping(&mut self, space: SpaceKey, entry_id: SocketAddrV4, path: &str) -> io::Result<()> {
+        self.add_space_data(space, SpaceData::GeometryMapping { entry_id, path: path.to_string() })
+    }
+
+    /// Get a client's base-player entity into a space, with a cell part: the client gets
+    /// its cell player and the space's data right away, then what is in the space from
+    /// the end of the tick on. Its cell method calls go to it.
+    pub fn create_cell_player<T>(&mut self, player: EntityKey<T>, space: SpaceKey, init: CellPlayerInit) -> io::Result<()> {
+
+        let state = self.entity_state(player)?;
+        let client = state.client.ok_or_else(|| io_invalid_data(format_args!("entity {player} has no client")))?;
+        let data = &self.spaces.get(space.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such space: {space}")))?
+            .data;
+
+        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
+        out.write_simple(client::element::CreateCellPlayer {
+            unk_flag: 0,
+            space_id: space.id,
+            unk_short: 0,
+            vehicle_id: init.vehicle_id,
+            position: init.position,
+            packed_xz_scale: init.packed_xz_scale,
+            direction: init.direction,
+            cell_data: init.cell_data,
+        })?;
+        for data in data {
+            data.write(out, space)?;
+        }
+
+        self.leave_space(player.any());
+        if let Some(state) = self.entities.get_mut(player.slot) {
+            state.cell = Some(EntityCell::new(space, init.position, init.direction, true, None, Visibility::Interest));
+        }
+        if let Some(space) = self.spaces.get_mut(space.slot) {
+            space.entities.push(player.any());
+        }
+        if let Some(client) = self.clients.get_mut(client.slot) {
+            client.witness = Some(Witness::new(player.any()));
+        }
+
+        Ok(())
+
+    }
+
+    /// Create an entity of the given schema in a space, see [`Self::create_entity_dynamic`].
+    pub fn create_entity<T: EntitySchema>(&mut self, space: SpaceKey, init: EntityInit) -> io::Result<EntityKey<T>> {
+        let type_id = self.entity_schemas.type_of::<T>()?;
+        self.create_entity_dynamic(space, type_id, init).map(EntityKey::cast)
+    }
+
+    /// Create an entity of the given type in a space, which needs no schema. Its
+    /// properties are its first property values: clients get those visible to them as
+    /// it enters their area of interest, see [`EntityInit::alias`].
+    pub fn create_entity_dynamic(&mut self, space: SpaceKey, type_id: u16, init: EntityInit) -> io::Result<EntityKey<AnyEntity>> {
+
+        if self.dispatch.entity_from_id(type_id).is_none() {
+            return Err(io_invalid_data(format_args!("unknown entity type: {type_id}")));
+        }
+        if self.spaces.get(space.slot).is_none() {
+            return Err(io_invalid_data(format_args!("no such space: {space}")));
+        }
+
+        let id = match init.id {
+            Some(EntityId(id)) => id,
+            None => self.new_entity_id(),
+        };
+
+        let cell = EntityCell::new(space, init.position, init.direction, init.alias, init.controlled_by, init.visibility);
+        let key = self.insert_entity(id, None, type_id, Some(cell));
+        self.store_properties(key, init.properties.values.into_iter().map(|(exposed_id, _, value)| (exposed_id.into(), value)));
+        Ok(key)
+
+    }
+
+    /// Destroy an entity: it leaves the area of interest of the clients knowing it.
+    pub fn destroy_entity<T>(&mut self, key: EntityKey<T>) {
+        self.remove_entity(key.any());
+    }
+
+    /// Take an entity out of its space, if in one: it leaves the area of interest of the
+    /// clients knowing it, and its own client no longer knows that space.
+    pub fn leave_space<T>(&mut self, entity: EntityKey<T>) {
+
+        let Some(state) = self.entities.get_mut(entity.slot) else { return };
+        let Some(cell) = state.cell.take() else { return };
+
+        if let Some(space) = self.spaces.get_mut(cell.space.slot) {
+            space.entities.retain(|&other| other != entity.any());
+        }
+
+        if let Some(client) = state.client.and_then(|client| self.clients.get_mut(client.slot)) {
+            if client.witness.as_ref().is_some_and(|witness| witness.entity == entity.any()) {
+                client.witness = None;
+            }
+        }
+
+    }
+
+    /// The space of an entity, if in one.
+    pub fn space_of<T>(&self, entity: EntityKey<T>) -> Option<SpaceKey> {
+        Some(self.entities.get(entity.slot)?.cell.as_ref()?.space)
+    }
+
+    /// Where an entity in a space is, and its direction (roll, pitch and yaw).
+    pub fn position<T>(&self, entity: EntityKey<T>) -> Option<(Vec3, Vec3)> {
+        let cell = self.entities.get(entity.slot)?.cell.as_ref()?;
+        Some((cell.position, cell.direction))
+    }
+
+    /// Move an entity in a space, with its direction (roll, pitch and yaw): the clients
+    /// knowing it get where it is at the end of the tick.
+    pub fn set_position<T>(&mut self, entity: EntityKey<T>, position: Vec3, direction: Vec3) -> io::Result<()> {
+
+        let cell = self.entities.get_mut(entity.slot)
+            .and_then(|state| state.cell.as_mut())
+            .ok_or_else(|| io_invalid_data(format_args!("entity {entity} is in no space")))?;
+
+        cell.position = position;
+        cell.direction = direction;
+        cell.moved = true;
+        Ok(())
+
+    }
+
+    /// Keep some data of a space for every client getting into it, and give it to those
+    /// already in it.
+    fn add_space_data(&mut self, key: SpaceKey, data: SpaceData) -> io::Result<()> {
+
+        let space = self.spaces.get_mut(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such space: {key}")))?;
+
+        let clients: Vec<_> = space.entities.iter()
+            .filter_map(|entity| self.entities.get(entity.slot)?.client)
+            .filter(|client| self.clients.get(client.slot).is_some_and(|c| c.witness.is_some()))
+            .collect();
+        for client in clients {
+            data.write(self.outbox.client(client.addr, &mut self.protocol, &self.socket)?, key)?;
+        }
+
+        space.data.push(data);
+        Ok(())
+
+    }
+
+}
 
 /// A space of the app: its id and its place among the app's spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1355,8 +1211,8 @@ impl fmt::Display for SpaceKey {
 }
 
 /// A space: its entities, and what its clients get of it.
-#[derive(Debug)]
-struct Space {
+#[derive(Debug, Default)]
+struct SpaceState {
     /// Its entities, in the order they got in it, which they enter areas of interest in.
     entities: Vec<EntityKey<AnyEntity>>,
     /// Its properties and geometry mappings, which clients get once in it.
@@ -1364,7 +1220,7 @@ struct Space {
     /// What its entities gave their clients during the tick.
     events: Vec<EntityEvent>,
     /// The NRL node ids of its entities and their components.
-    node_ids: NodeIds,
+    nrl_nodes: NrlNodeIds,
 }
 
 /// Something of a space its clients get once in it.
@@ -1382,10 +1238,12 @@ impl SpaceData {
         match self {
             Self::Property(data) => out.write_simple(client::element::SpaceProperty { data: data.clone() }),
             Self::GeometryMapping { entry_id, path } => {
+
                 let mut transform = [0.0; 16];
                 for i in 0..4 {
                     transform[i * 5] = 1.0;
                 }
+
                 out.write_simple(client::element::AddSpaceGeometryMapping {
                     space_id: space.id,
                     entry_id: (*entry_id).into(),
@@ -1394,6 +1252,7 @@ impl SpaceData {
                     unk: 1,
                     rest: Vec::new(),
                 })
+
             }
         }
     }
@@ -1420,8 +1279,146 @@ pub struct EntityInit {
     pub properties: ChangedProperties,
 }
 
+/// The cell part of a client's player entity, see [`App::create_cell_player`].
+#[derive(Debug, Clone)]
+pub struct CellPlayerInit {
+    /// The entity the player is on, see [`client::element::CreateCellPlayer`].
+    pub vehicle_id: u32,
+    pub position: Vec3,
+    /// Roll, pitch and yaw.
+    pub direction: Vec3,
+    pub packed_xz_scale: f32,
+    /// The client's cell data, still encoded, given to its client as is.
+    pub cell_data: Vec<u8>,
+}
+
+
+// =============== //
+//    WITNESSES    //
+// =============== //
+
+impl App {
+
+    /// Set what of its space a client knows, from the next tick on: [`Interest::WholeSpace`]
+    /// until then. It must have a cell player, see [`Self::create_cell_player`].
+    pub fn set_interest(&mut self, client: ClientKey, interest: Interest) -> io::Result<()> {
+        self.witness_mut(client)?.interest = interest;
+        Ok(())
+    }
+
+    /// Show an entity of its space to a client whose interest is [`Interest::Manual`]: it
+    /// enters its area of interest with the next tick, until hidden.
+    pub fn show<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
+        self.witness_mut(client)?.shown.insert(entity.any());
+        Ok(())
+    }
+
+    /// Hide an entity shown to a client, see [`Self::show`]: it leaves its area of
+    /// interest with the next tick.
+    pub fn hide<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
+        self.witness_mut(client)?.shown.remove(&entity.any());
+        Ok(())
+    }
+
+    /// How many ticks a client got in its space: its game time, in ticks.
+    pub fn ticks(&self, client: ClientKey) -> Option<u32> {
+        Some(self.client(client).ok()?.witness.as_ref()?.ticks)
+    }
+
+    /// End a tick: tell each client in a space what changed in its area of interest since
+    /// the last one, in a bundle the tick opens, see [`Witness`].
+    pub fn end_tick(&mut self) {
+
+        let clients: Vec<_> = self.client_keys.values().copied().collect();
+        for client in clients {
+            if let Err(error) = self.tick_client(client) {
+                self.events.push_back(Event::IoError(IoErrorEvent { error, addr: Some(client.addr) }));
+            }
+        }
+
+        for (_, state) in self.entities.iter_mut() {
+            if let Some(cell) = &mut state.cell {
+                cell.moved = false;
+                for (_, component) in cell.components.iter_mut() {
+                    component.end_tick();
+                }
+            }
+        }
+
+        for (_, space) in self.spaces.iter_mut() {
+            space.events.clear();
+        }
+
+    }
+
+    /// A client asks for an entity that entered its area of interest: it gets created
+    /// with the next tick.
+    fn request_entity(&mut self, client: ClientKey, entity_id: u32) {
+
+        let known = self.clients.get_mut(client.slot)
+            .and_then(|client| client.witness.as_mut())
+            .and_then(|witness| witness.known.iter_mut().find(|known| known.entity.id == entity_id));
+
+        match known {
+            Some(known) => known.requested = true,
+            None => debug!(addr = %client.addr, "Asked for entity {entity_id}, which it doesn't know"),
+        }
+
+    }
+
+    /// Tell a client in a space what changed in its area of interest, see
+    /// [`Witness::write_tick`].
+    fn tick_client(&mut self, client: ClientKey) -> io::Result<()> {
+
+        // Taken out of its client for the tick, which reads the rest of the app.
+        let Some(mut witness) = self.clients.get_mut(client.slot).and_then(|c| c.witness.take()) else {
+            return Ok(());
+        };
+
+        let result = self.write_tick(client, &mut witness);
+
+        if let Some(state) = self.clients.get_mut(client.slot) {
+            state.witness = Some(witness);
+        }
+
+        result
+
+    }
+
+    fn write_tick(&mut self, client: ClientKey, witness: &mut Witness) -> io::Result<()> {
+
+        let Some(player) = self.entities.get(witness.entity.slot).and_then(|state| state.cell.as_ref()) else { return Ok(()) };
+        let Some(space) = self.spaces.get(player.space.slot) else { return Ok(()) };
+        let view = TickView { entities: &self.entities, space, dispatch: &self.dispatch, player };
+
+        // What was written to it before goes first, the tick opens a bundle.
+        self.outbox.flush(client.addr, &mut self.protocol, &self.socket)?;
+        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
+
+        let mut created = Vec::new();
+        let result = witness.write_tick(out, &view, &mut created);
+
+        for entity in created {
+            self.events.push_back(Event::Entered(EnteredEvent { client, entity }));
+        }
+
+        result
+
+    }
+
+    /// What a client knows of its space, if it has a cell player.
+    fn witness_mut(&mut self, key: ClientKey) -> io::Result<&mut Witness> {
+        self.clients.get_mut(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))?
+            .witness.as_mut()
+            .ok_or_else(|| io_invalid_data(format_args!("client {} has no cell player", key.addr)))
+    }
+
+}
+
 /// What of its space a client knows, see [`App::set_interest`]: which entities are in its
-/// area of interest, besides its own and those always visible (see [`Visibility`]).
+/// area of interest, besides those it controls and those always visible (see
+/// [`Visibility`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Interest {
     /// Every entity of its space.
@@ -1444,67 +1441,6 @@ pub enum Visibility {
     Always,
 }
 
-impl Interest {
-
-    /// Whether a client whose player entity is at `from`, interested in this, has an
-    /// entity of its space in its area of interest, knowing it already or not.
-    fn has(&self, from: Vec3, shown: &HashSet<EntityKey<AnyEntity>>, own_id: u32, key: EntityKey<AnyEntity>, other: &CellPart, known: bool) -> bool {
-        if other.visibility == Visibility::Always || other.controlled_by.is_some_and(|controller| controller.id == own_id) {
-            return true;
-        }
-        match *self {
-            Self::WholeSpace => true,
-            Self::Radius { enter, leave } => {
-                let offset = other.position - from;
-                let distance = (offset.x * offset.x + offset.z * offset.z).sqrt();
-                distance <= if known { leave.max(enter) } else { enter }
-            }
-            Self::Manual => shown.contains(&key),
-        }
-    }
-
-}
-
-/// The cell part of a client's player entity, see [`App::create_cell_player`].
-#[derive(Debug, Clone)]
-pub struct CellPlayerInit {
-    /// The entity the player is on, see [`client::element::CreateCellPlayer`].
-    pub vehicle_id: u32,
-    pub position: Vec3,
-    /// Roll, pitch and yaw.
-    pub direction: Vec3,
-    pub packed_xz_scale: f32,
-    /// The client's cell data, still encoded, given to its client as is.
-    pub cell_data: Vec<u8>,
-}
-
-/// The cell part of an entity, in a space.
-#[derive(Debug)]
-struct CellPart {
-    space: SpaceKey,
-    position: Vec3,
-    /// Roll, pitch and yaw.
-    direction: Vec3,
-    /// Whether it moved during the tick.
-    moved: bool,
-    /// See [`EntityInit::alias`], [`EntityInit::controlled_by`] and
-    /// [`EntityInit::visibility`].
-    alias: bool,
-    controlled_by: Option<EntityKey<AnyEntity>>,
-    visibility: Visibility,
-    /// Its dynamic components, and its NRL node once it has any.
-    components: Slots<ComponentEntry>,
-    nrl_node: Option<u16>,
-}
-
-impl CellPart {
-
-    fn new(space: SpaceKey, position: Vec3, direction: Vec3, alias: bool, controlled_by: Option<EntityKey<AnyEntity>>, visibility: Visibility) -> Self {
-        Self { space, position, direction, moved: false, alias, controlled_by, visibility, components: Slots::default(), nrl_node: None }
-    }
-
-}
-
 /// What a client knows of the space its player entity is in.
 ///
 /// Each tick sends it, in a bundle the tick opens: the entities entering and leaving its
@@ -1515,7 +1451,7 @@ struct Witness {
     /// Its player entity.
     entity: EntityKey<AnyEntity>,
     /// The entities in its area of interest, in the order they entered it.
-    known: Vec<Known>,
+    known: Vec<WitnessEntity>,
     /// Which id aliases are taken.
     aliases: Vec<bool>,
     /// The ticks sent to it, the first being tick 0.
@@ -1527,30 +1463,322 @@ struct Witness {
     nrl: HashMap<EntityKey<AnyEntity>, Vec<SlotKey>>,
 }
 
-impl Witness {
-
-    fn new(entity: EntityKey<AnyEntity>) -> Self {
-        Self { entity, known: Vec::new(), aliases: vec![false; usize::from(NO_ALIAS)], ticks: 0, interest: Interest::WholeSpace, shown: HashSet::new(), nrl: HashMap::new() }
-    }
-
-}
-
-/// Take the first free id alias of a witness.
-fn take_alias(aliases: &mut [bool]) -> Option<u8> {
-    let alias = aliases.iter().position(|&taken| !taken)?;
-    aliases[alias] = true;
-    Some(alias as u8)
-}
-
 /// An entity in the area of interest of a witness.
 #[derive(Debug)]
-struct Known {
+struct WitnessEntity {
     entity: EntityKey<AnyEntity>,
     alias: Option<u8>,
     /// Whether its client asked for it, and whether it was created on it since.
     requested: bool,
     created: bool,
 }
+
+/// What a witness's tick reads: the space its player entity is in, with the entities
+/// and the tables.
+struct TickView<'a> {
+    entities: &'a Slots<EntityState>,
+    space: &'a SpaceState,
+    dispatch: &'a ScriptDispatch,
+    /// The cell of its player entity.
+    player: &'a EntityCell,
+}
+
+impl<'a> TickView<'a> {
+
+    /// An entity in a space, with its cell.
+    fn get(&self, key: EntityKey<AnyEntity>) -> Option<(&'a EntityState, &'a EntityCell)> {
+        let state = self.entities.get(key.slot)?;
+        Some((state, state.cell.as_ref()?))
+    }
+
+    /// The tables of an entity's type.
+    fn dispatch(&self, state: &EntityState) -> io::Result<&'a EntityDispatch> {
+        self.dispatch.entity_from_id(state.type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {}", state.type_id)))
+    }
+
+}
+
+impl Witness {
+
+    fn new(entity: EntityKey<AnyEntity>) -> Self {
+        Self {
+            entity,
+            known: Vec::new(),
+            aliases: vec![false; usize::from(NO_ALIAS)],
+            ticks: 0,
+            interest: Interest::WholeSpace,
+            shown: HashSet::new(),
+            nrl: HashMap::new(),
+        }
+    }
+
+    /// Whether an entity of its space is in its area of interest, knowing it already or
+    /// not, with its player entity at `from`.
+    fn sees(&self, from: Vec3, key: EntityKey<AnyEntity>, cell: &EntityCell, known: bool) -> bool {
+
+        if cell.visibility == Visibility::Always || cell.is_controlled_by(self.entity) {
+            return true;
+        }
+
+        match self.interest {
+            Interest::WholeSpace => true,
+            Interest::Radius { enter, leave } => {
+                let offset = cell.position - from;
+                let distance = (offset.x * offset.x + offset.z * offset.z).sqrt();
+                distance <= if known { leave.max(enter) } else { enter }
+            }
+            Interest::Manual => self.shown.contains(&key),
+        }
+
+    }
+
+    /// Take the first free id alias.
+    fn take_alias(&mut self) -> Option<u8> {
+        let alias = self.aliases.iter().position(|&taken| !taken)?;
+        self.aliases[alias] = true;
+        Some(alias as u8)
+    }
+
+    /// Write what changed in its area of interest since the last tick, adding the
+    /// entities created on its client to `created`.
+    fn write_tick(&mut self, out: &mut ClientOutbox, view: &TickView, created: &mut Vec<EntityKey<AnyEntity>>) -> io::Result<()> {
+
+        out.write_simple(client::element::TickSync { tick: self.ticks as u8 })?;
+        self.ticks = self.ticks.wrapping_add(1);
+
+        self.write_leaving(out, view)?;
+        self.write_entering(out, view)?;
+        self.write_created(out, view, created)?;
+        self.write_positions(out, view)?;
+        self.write_events(out, view)?;
+        self.write_components(out, view)
+
+    }
+
+    /// The entities gone, no longer in its space, or out of its interest.
+    fn write_leaving(&mut self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+
+        self.shown.retain(|key| view.space.entities.contains(key));
+
+        let (known, left): (Vec<_>, Vec<_>) = std::mem::take(&mut self.known).into_iter()
+            .partition(|known| view.space.entities.contains(&known.entity)
+                && view.get(known.entity).is_some_and(|(_, cell)| self.sees(view.player.position, known.entity, cell, true)));
+        self.known = known;
+
+        for left in left {
+
+            out.write_simple(client::element::LeaveAoi { entity_id: left.entity.id, last_event_numbers: Vec::new() })?;
+
+            if let Some(alias) = left.alias {
+                self.aliases[usize::from(alias)] = false;
+            }
+
+            // NOTE: Whether the client drops its NRL nodes with it is not known, they are
+            // created again with the same ids if it comes back.
+            self.nrl.remove(&left.entity);
+
+        }
+
+        Ok(())
+
+    }
+
+    /// The entities new to its area of interest, in the order they got in the space.
+    fn write_entering(&mut self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+
+        let entering: Vec<_> = view.space.entities.iter()
+            .filter(|&&key| key != self.entity && !self.known.iter().any(|known| known.entity == key))
+            .filter_map(|&key| Some((key, view.get(key)?.1)))
+            .filter(|&(key, cell)| self.sees(view.player.position, key, cell, false))
+            .collect();
+
+        for (key, cell) in entering {
+
+            let alias = match cell.alias {
+                true => Some(self.take_alias().ok_or_else(|| io_invalid_data(format_args!("no alias left for {key}")))?),
+                false => None,
+            };
+
+            out.write_simple(client::element::EnterAoi { entity_id: key.id, id_alias: alias.unwrap_or(NO_ALIAS) })?;
+
+            // Without an alias, it is created right away rather than once asked for.
+            self.known.push(WitnessEntity { entity: key, alias, requested: alias.is_none(), created: false });
+
+        }
+
+        Ok(())
+
+    }
+
+    /// The entities its client asked for, created with what of them is visible to it.
+    fn write_created(&mut self, out: &mut ClientOutbox, view: &TickView, created: &mut Vec<EntityKey<AnyEntity>>) -> io::Result<()> {
+
+        for known in &mut self.known {
+
+            if !known.requested || known.created {
+                continue;
+            }
+
+            let Some((state, cell)) = view.get(known.entity) else { continue };
+            let dispatch = view.dispatch(state)?;
+            let client_data = visible_properties(state, dispatch, cell.is_controlled_by(self.entity)).encode(&dispatch.properties)?;
+
+            let (roll, pitch, yaw) = (cell.direction.x, cell.direction.y, cell.direction.z);
+            match known.alias {
+                Some(_) => out.write_simple(client::element::CreateEntity {
+                    entity_id: known.entity.id,
+                    entity_type_id: state.type_id,
+                    unk_u16: 0,
+                    resource_name: RESOURCE_NAME.to_string(),
+                    position: cell.position,
+                    direction: PackedYawPitchRoll::pack(yaw, pitch, roll, false),
+                    direction_unk: CREATE_ENTITY_UNK,
+                    client_data,
+                })?,
+                None => out.write_simple(client::element::CreateEntityDetailed {
+                    entity_id: known.entity.id,
+                    entity_type_id: state.type_id,
+                    unk_u16: 0,
+                    resource_name: RESOURCE_NAME.to_string(),
+                    position: cell.position,
+                    direction: cell.direction,
+                    client_data,
+                })?,
+            }
+
+            known.created = true;
+            created.push(known.entity);
+
+        }
+
+        Ok(())
+
+    }
+
+    /// Where its player entity and the entities it knows moved.
+    fn write_positions(&self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+
+        // Where it is, as the captured server places the player: a reference point at
+        // its position rounded to the metre, then itself on that point.
+        if view.player.moved {
+            out.write_simple(client::element::RelativePosition { position: view.player.position.round() })?;
+            out.write_simple(client::element::AvatarUpdatePlayerDetailed { ref_num: 0, position: Vec3::ZERO, direction: Vec3::ZERO })?;
+        }
+
+        // Each position update of the others selects its entity by alias.
+        for known in &self.known {
+
+            let (Some(id_alias), true) = (known.alias, known.created) else { continue };
+            let Some((_, cell)) = view.get(known.entity).filter(|(_, cell)| cell.moved) else { continue };
+
+            out.write_simple(client::element::AvatarUpdateAliasDetailed {
+                ref_num: 0,
+                id_alias,
+                position: cell.position,
+                direction: cell.direction,
+            })?;
+
+        }
+
+        Ok(())
+
+    }
+
+    /// What the properties and client methods of its player entity and the entities it
+    /// has gave, in the order given.
+    fn write_events(&self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+
+        for event in &view.space.events {
+
+            let entity = if event.entity_id == self.entity.id {
+                out.select_player()?;
+                self.entity
+            } else {
+
+                let Some(known) = self.known.iter().find(|known| known.entity.id == event.entity_id && known.created) else { continue };
+
+                // Some go to its own client only.
+                let own = view.get(known.entity).is_some_and(|(_, cell)| cell.is_controlled_by(self.entity));
+                if event.own_client && !own {
+                    continue;
+                }
+
+                out.select_entity(event.entity_id)?;
+                known.entity
+
+            };
+
+            let Some((state, _)) = view.get(entity) else { continue };
+            event.kind.write(out, view.dispatch(state)?)?;
+
+        }
+
+        Ok(())
+
+    }
+
+    /// The dynamic components of its player entity and the entities it has, those it
+    /// gets: each new one created, in an element of its own since the client reads no
+    /// further than the first component of one, under its entity's node the first time,
+    /// then what changed of the others.
+    fn write_components(&mut self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+
+        let created = self.known.iter().filter(|known| known.created).map(|known| known.entity);
+        let entities: Vec<_> = std::iter::once(self.entity).chain(created).collect();
+
+        for entity in entities {
+
+            let Some((_, cell)) = view.get(entity) else { continue };
+            let Some(entity_node) = cell.nrl_node else { continue };
+            let own = entity == self.entity || cell.is_controlled_by(self.entity);
+
+            for (slot, component) in cell.components.iter() {
+
+                if !component.is_for(own) {
+                    continue;
+                }
+
+                let known = self.nrl.get(&entity);
+                let new = !known.is_some_and(|slots| slots.contains(&slot));
+
+                if new {
+
+                    let mut messages = Vec::with_capacity(2);
+                    if known.is_none() {
+                        messages.push(entity::create_entity_node(entity.id, entity_node));
+                    }
+                    messages.push(component.create(entity_node, view.dispatch)?);
+
+                    out.write_simple(client::element::NrlCreateNode(client::element::NrlStream { messages, rest: Vec::new() }))?;
+                    self.nrl.entry(entity).or_default().push(slot);
+
+                }
+
+                component.write_events(out, view.dispatch, new)?;
+
+            }
+
+        }
+
+        Ok(())
+
+    }
+
+}
+
+/// The id alias of an entity entering an area of interest without one.
+const NO_ALIAS: u8 = 255;
+
+/// What entity creations carry before their position, always this in captures, see
+/// [`client::element::CreateEntity::resource_name`].
+const RESOURCE_NAME: &str = "bw.default";
+
+/// The byte `CreateEntity` carries after the direction, of unknown meaning, see
+/// [`client::element::CreateEntity::direction_unk`]: as captured for a vehicle, the
+/// client crashing on a vehicle created with 0.
+const CREATE_ENTITY_UNK: u8 = 5;
+
 
 // ============ //
 //    EVENTS    //
@@ -1653,25 +1881,27 @@ mod tests {
         let space = SpaceKey { slot: slots.insert(()), id: 1 };
         let key = EntityKey::new(slots.insert(()), 2);
         let player = EntityKey::new(slots.insert(()), 3);
-        let at = |x| CellPart::new(space, Vec3::new(x, 5.0, 0.0), Vec3::ZERO, true, None, Visibility::Interest);
-        let none = HashSet::new();
-        let has = |interest: Interest, shown: &HashSet<_>, other: &CellPart, known| interest.has(Vec3::ZERO, shown, player.id, key, other, known);
+        let at = |x| EntityCell::new(space, Vec3::new(x, 5.0, 0.0), Vec3::ZERO, true, None, Visibility::Interest);
 
-        let radius = Interest::Radius { enter: 10.0, leave: 15.0 };
-        assert!(has(radius, &none, &at(9.0), false));
-        assert!(!has(radius, &none, &at(12.0), false));
-        assert!(has(radius, &none, &at(12.0), true));
-        assert!(!has(radius, &none, &at(16.0), true));
+        let mut witness = Witness::new(player);
+        witness.interest = Interest::Radius { enter: 10.0, leave: 15.0 };
+        assert!(witness.sees(Vec3::ZERO, key, &at(9.0), false));
+        assert!(!witness.sees(Vec3::ZERO, key, &at(12.0), false));
+        assert!(witness.sees(Vec3::ZERO, key, &at(12.0), true));
+        assert!(!witness.sees(Vec3::ZERO, key, &at(16.0), true));
 
-        assert!(!has(Interest::Manual, &none, &at(0.0), false));
-        assert!(has(Interest::Manual, &HashSet::from([key]), &at(0.0), false));
+        let mut controlled = at(1000.0);
+        controlled.controlled_by = Some(player);
+        assert!(witness.sees(Vec3::ZERO, key, &controlled, false));
+
+        witness.interest = Interest::Manual;
+        assert!(!witness.sees(Vec3::ZERO, key, &at(0.0), false));
+        witness.shown.insert(key);
+        assert!(witness.sees(Vec3::ZERO, key, &at(0.0), false));
 
         let mut always = at(1000.0);
         always.visibility = Visibility::Always;
-        assert!(has(Interest::Manual, &none, &always, false));
-        let mut controlled = at(1000.0);
-        controlled.controlled_by = Some(player);
-        assert!(has(radius, &none, &controlled, false));
+        assert!(witness.sees(Vec3::ZERO, player, &always, false));
 
     }
 

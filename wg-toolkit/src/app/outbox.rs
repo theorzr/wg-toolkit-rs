@@ -12,10 +12,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::io;
 
-use crate::net::bundle::Bundle;
+use crate::net::socket::PacketSocket;
 use crate::net::element::Element;
 use crate::net::proto::Protocol;
-use crate::net::socket::PacketSocket;
+use crate::net::bundle::Bundle;
 
 use super::client::element::{SelectEntity, SelectPlayerEntity};
 

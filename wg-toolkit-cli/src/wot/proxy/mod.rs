@@ -2,32 +2,33 @@
 
 mod python;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::cell::RefCell;
 use std::{io, thread};
 use std::path::Path;
+use std::rc::Rc;
 
-use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, DebugElementVariable32, SimpleElement, REPLY_ID};
-use wgtk::app::dispatch::{ScriptDispatch, MethodCall, MethodDef, PropertyDef};
-use wgtk::app::math::{PackedXyz, PackedXz, calculate_reference_position};
 use tracing::{debug, error, info, warn, info_span, trace, trace_span};
-use wgtk::app::base::element::{CellMethodTables, BaseAppLoginReply};
-use wgtk::net::bundle::{self, Bundle, NextElementReader, ElementReader, RoundTrip};
-use wgtk::app::proxy::capture::{CaptureReader, CaptureWriter};
-use wgtk::app::{proxy, login_proxy, base, client};
-use wgtk::app::nrl::NrlTree;
-use wgtk::util::io::serde_pickle_de_options;
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use wgtk::net::codec::WgSocketAddrV4;
-use wgtk::script::{Script, Value};
 use flate2::read::ZlibDecoder;
-use wgtk::net::packet::Packet;
 use blowfish::Blowfish;
 use glam::Vec3;
+
+use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, DebugElementVariable32, SimpleElement, REPLY_ID};
+use wgtk::net::bundle::{self, Bundle, NextElementReader, ElementReader, RoundTrip};
+use wgtk::app::dispatch::{ScriptDispatch, MethodCall, MethodDef, PropertyDef};
+use wgtk::app::math::{PackedXyz, PackedXz, calculate_reference_position};
+use wgtk::app::base::element::{CellMethodTables, BaseAppLoginReply};
+use wgtk::app::proxy::capture::{CaptureReader, CaptureWriter};
+use wgtk::app::{proxy, login_proxy, base, client};
+use wgtk::util::io::serde_pickle_de_options;
+use wgtk::net::codec::WgSocketAddrV4;
+use wgtk::script::{Script, Value};
+use wgtk::net::packet::Packet;
+use wgtk::app::nrl::NrlTree;
 
 use crate::CliResult;
 

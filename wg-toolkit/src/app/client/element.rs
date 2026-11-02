@@ -11,8 +11,8 @@ use tracing::warn;
 use glam::Vec3;
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::app::dispatch::{ScriptDispatch, EntityDispatch, MethodDef, PropertyDef, MethodCall};
 use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options, serde_pickle_ser_options};
+use crate::app::dispatch::{ScriptDispatch, EntityDispatch, MethodDef, PropertyDef, MethodCall};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::script::{Ty, TyKind, TyDict, Value, PythonValue};
 use crate::app::bit::{BitReader, BitWriter};

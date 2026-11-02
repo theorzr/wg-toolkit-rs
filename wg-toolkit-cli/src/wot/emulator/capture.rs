@@ -3,9 +3,9 @@
 //! server sent back for it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::io::{self, Read, Write};
 
 use wgtk::app::client::element::{
     self as client_el, AddSpaceGeometryMapping, AvatarUpdateAliasDetailed, ChangedProperties, CreateBasePlayer,
@@ -16,9 +16,9 @@ use wgtk::app::client::element::{
 };
 use wgtk::app::base::element::{self as base_el, BaseEntityMethod, EnableEntities, SessionKey};
 use wgtk::app::proxy::{self, capture::CaptureReader, PacketChannel, PacketDirection, Peer};
-use wgtk::net::bundle::{Bundle, NextElementReader};
 use wgtk::net::element::{DebugElementVariable32, Element, ElementLength, SimpleElement};
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
+use wgtk::net::bundle::{Bundle, NextElementReader};
 use wgtk::script::Value;
 
 

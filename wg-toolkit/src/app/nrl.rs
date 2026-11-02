@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 
+use crate::script::{Ty, TyKind, Value};
 use crate::util::io::WgReadExt;
 use crate::net::codec::Codec;
-use crate::script::{Ty, TyKind, Value};
 
 use super::client::element::{
     decode_compressed_path, EntityPropertyPathStep, NrlBody, NrlChild, NrlNode, NrlStream, PathOutcome,

@@ -3,10 +3,10 @@
 
 use glam::Vec3;
 
-use wgtk::app::base;
+use wgtk::{component_schema, entity_schema, script_dict};
 use wgtk::app::entity::{BindError, Bytes, EntityId};
 use wgtk::script::Value;
-use wgtk::{component_schema, entity_schema, script_dict};
+use wgtk::app::base;
 
 
 /// Register every schema of this module with the given app.

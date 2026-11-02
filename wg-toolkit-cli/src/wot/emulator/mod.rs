@@ -10,40 +10,40 @@ mod physics;
 
 use std::collections::{hash_map, BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
+use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use std::thread;
 
-use blowfish::Blowfish;
+use tracing::{debug, info, instrument, warn};
+use rsa::rand_core::{OsRng, RngCore};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use rsa::rand_core::{OsRng, RngCore};
+use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
-use tracing::{debug, info, instrument, warn};
 
-use wgtk::app::{login, base};
-use wgtk::app::base::{CellPlayerInit, ClientKey};
 use wgtk::app::client::element::{ChangedProperties, NrlBody, NrlChild, NrlMessage, NrlNode};
-use wgtk::app::dispatch::MethodCall;
-use wgtk::app::entity::{Bytes, EntityId, EntityKey};
-use wgtk::res::fs::ResFilesystem;
 use wgtk::script::{PythonValue, Script, StringValue, Value};
-use wgtk::space::terrain::Terrain;
+use wgtk::app::entity::{Bytes, EntityId, EntityKey};
+use wgtk::app::base::{CellPlayerInit, ClientKey};
 use wgtk::util::io::serde_pickle_ser_options;
+use wgtk::app::dispatch::MethodCall;
+use wgtk::space::terrain::Terrain;
+use wgtk::res::fs::ResFilesystem;
+use wgtk::app::{login, base};
 
-use crate::CliResult;
-use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
-use crate::wot::collision::VehicleCollision;
-use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
-use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::schema::{self, Account, Avatar, AvatarBase, GunReloadTime, VehicleAmmo, VehicleHealthInfo, VehicleSetting};
+use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
+use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
+use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
+use crate::wot::collision::VehicleCollision;
+use crate::CliResult;
 
-use account::AccountData;
-use battle::Battle;
 use capture::{Answer, CapturedSession};
 use physics::MotionLimits;
+use account::AccountData;
+use battle::Battle;
 
 
 pub fn run(
