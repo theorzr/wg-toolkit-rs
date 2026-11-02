@@ -34,8 +34,8 @@ use crate::script::{PropertyFlags, PythonValue, StringValue, Ty, TyKind, Value};
 use crate::net::codec::Codec;
 
 use super::client::element::{
-    ChangedProperties, EntityMethod, IndexedEntityProperty, NrlBody, NrlChild, NrlComponentData, NrlData, NrlIdList,
-    NrlMessage, NrlNode, NrlUnlinkTreeFlag, NrlUpdateNodeFlag, UpdateEntity,
+    encode_nested_path, ChangedProperties, EntityMethod, IndexedEntityProperty, NrlBody, NrlChild, NrlComponentData,
+    NrlData, NrlIdList, NrlMessage, NrlNode, NrlUnlinkTreeFlag, NrlUpdateNodeFlag, UpdateEntity,
 };
 use super::dispatch::{EntityDispatch, MethodCall, MethodDef, ScriptDispatch};
 use super::slots::{SlotKey, Slots};
@@ -44,6 +44,8 @@ use super::io_invalid_data;
 
 #[doc(hidden)]
 pub use paste::paste as __paste;
+/// A step of a path into a property's value, see `set_<property>_at`.
+pub use super::client::element::EntityPropertyPathStep as PathStep;
 
 
 // ============ //
@@ -986,12 +988,49 @@ impl RawComponent<'_> {
 
     }
 
+    /// Set a value inside the declared property at the given index, at the given path
+    /// from it: its clients only get that value. The property must have a value, with
+    /// the path in it.
+    pub fn set_property_at<V: ScriptType>(&mut self, index: usize, path: Vec<PathStep>, value: V) -> io::Result<()> {
+
+        let property = self.bound.properties[index];
+        let invalid = || io_invalid_data(format_args!("no value at {path:?}"));
+        let ty = path.iter().try_fold(&self.dispatch.properties[usize::from(property)].ty, |ty, step| match (kind(ty), step) {
+            (TyKind::Dict(dict), PathStep::Field(name)) => dict.properties.iter().find(|prop| prop.name == *name).map(|prop| &prop.ty),
+            (TyKind::Array(seq) | TyKind::Tuple(seq), PathStep::Index(_)) => Some(&seq.ty),
+            _ => None,
+        }).ok_or_else(invalid)?;
+        let value = value.into_value(ty);
+
+        let root = self.state.values[usize::from(property)].as_mut().ok_or_else(invalid)?;
+        let slot = path.iter().try_fold(root, |value, step| match (value, step) {
+            (Value::Dict(dict), PathStep::Field(name)) => dict.get_mut(name),
+            (Value::Seq(items), PathStep::Index(index)) => items.get_mut(*index as usize),
+            _ => None,
+        }).ok_or_else(invalid)?;
+        *slot = value.clone();
+
+        self.state.events.push(ComponentEvent::SetAt { property, path, value });
+        Ok(())
+
+    }
+
     /// The declared property at the given index, if given a value.
     pub fn get_property<V: ScriptType>(&self, index: usize) -> Option<V> {
         let property = self.bound.properties[index];
         V::from_value(self.state.values[usize::from(property)].clone()?)
     }
 
+}
+
+/// Insert at `start` the packed length of what follows it in an update record.
+fn insert_length(fragment: &mut Vec<u8>, start: usize) -> io::Result<()> {
+    let mut prefix = [0; 4];
+    let mut write = &mut prefix[..];
+    write.write_packed_u24((fragment.len() - start) as u32)?;
+    let len = 4 - write.len();
+    fragment.splice(start..start, prefix[..len].iter().copied());
+    Ok(())
 }
 
 /// The components of an entity in a space, for [`Entity::add_component`]: its
@@ -1076,6 +1115,8 @@ pub(crate) struct ComponentState {
 enum ComponentEvent {
     /// A property was set, its value being the current one.
     Set { property: u16 },
+    /// A value inside a property was set, at the given path from it.
+    SetAt { property: u16, path: Vec<PathStep>, value: Value },
     Call { method: u16, args: Vec<Value> },
 }
 
@@ -1164,18 +1205,34 @@ impl ComponentState {
                     if def.volatile {
                         value.write(&mut fragment, &def.ty)?;
                     } else {
-                        // `[kind 0: the whole value][packed length][value]`, the length
-                        // put in once the value is written.
+                        // `[kind 0: the whole value][packed length][value]`.
                         fragment.push(0);
                         let start = fragment.len();
                         value.write(&mut fragment, &def.ty)?;
-                        let mut prefix = [0; 4];
-                        let mut write = &mut prefix[..];
-                        write.write_packed_u24((fragment.len() - start) as u32)?;
-                        let len = 4 - write.len();
-                        fragment.splice(start..start, prefix[..len].iter().copied());
+                        insert_length(&mut fragment, start)?;
                     }
 
+                    fragment
+
+                }
+                ComponentEvent::SetAt { .. } if created => continue,
+                ComponentEvent::SetAt { property, ref path, ref value } => {
+
+                    // `[kind 2: a value inside][packed length][path][value]`, the path
+                    // starting at the component's property table. Its `Array` lengths
+                    // come from the property's value.
+                    let name = &dispatch.properties[usize::from(property)].name;
+                    let current = self.values[usize::from(property)].clone().expect("set");
+                    let values = HashMap::from([(Arc::clone(name), current)]);
+                    let full_path: Vec<PathStep> = std::iter::once(PathStep::Field(Arc::clone(name)))
+                        .chain(path.iter().cloned())
+                        .collect();
+
+                    let mut fragment = self.record(property);
+                    fragment.push(2);
+                    let start = fragment.len();
+                    encode_nested_path(&dispatch.properties, &values, &full_path, value, &mut fragment)?;
+                    insert_length(&mut fragment, start)?;
                     fragment
 
                 }
@@ -1636,6 +1693,14 @@ macro_rules! component_schema {
                 $(#[$prop_meta])*
                 pub fn [<set_ $prop>](&mut self, value: $prop_ty) -> ::std::io::Result<()> {
                     self.0.set_property([<__ $name:snake _component>]::Props::$prop as usize, value)
+                }
+                $(#[$prop_meta])*
+                pub fn [<set_ $prop _at>]<V: $crate::app::entity::ScriptType>(
+                    &mut self,
+                    path: ::std::vec::Vec<$crate::app::entity::PathStep>,
+                    value: V,
+                ) -> ::std::io::Result<()> {
+                    self.0.set_property_at([<__ $name:snake _component>]::Props::$prop as usize, path, value)
                 }
             )* )?
         }

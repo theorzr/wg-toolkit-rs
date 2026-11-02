@@ -2799,6 +2799,18 @@ fn encode_compressed_path(
 
 }
 
+/// Write a single value at `path` as a compressed path from the `top` property table,
+/// given the tracked values the path's `Array` lengths come from.
+pub(crate) fn encode_nested_path(
+    top: &[PropertyDef],
+    values: &HashMap<Arc<str>, Value>,
+    path: &[EntityPropertyPathStep],
+    value: &Value,
+    write: &mut dyn Write,
+) -> io::Result<()> {
+    encode_compressed_path(top, Some(values), path, PathLeaf::Single(value), write)
+}
+
 /// What a run of client-visible property values decoded to, whole or not.
 ///
 /// Decoding stops at the first exposed id the property table doesn't cover, or the first

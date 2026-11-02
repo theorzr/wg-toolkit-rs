@@ -8,7 +8,9 @@ use std::io;
 use tracing::{debug, info, warn};
 use glam::Vec3;
 
-use wgtk::app::entity::{AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, Pickle, ScriptType};
+use wgtk::app::entity::{
+    AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle, ScriptType,
+};
 use wgtk::app::base::{self, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::client::element::{ChangedProperties, NrlMessage};
 use wgtk::app::dispatch::MethodCall;
@@ -48,6 +50,8 @@ pub struct Battle {
     driven: Option<DrivenVehicle>,
     /// The enemy vehicle standing in front of it, to shoot at.
     target: Option<Target>,
+    /// The arena's vehicles, on its info entity.
+    vehicles_info: Option<ComponentKey<AvatarVehiclesInfo>>,
 }
 
 impl Battle {
@@ -71,8 +75,10 @@ struct Target {
     entity_id: u32,
     /// Its entity, once created.
     entity: Option<EntityKey<schema::Vehicle>>,
-    /// Its captured `vehiclesInfo` entry, which its vehicle is made from.
+    /// Its `vehiclesInfo` entry: the captured one its vehicle is made from, then its own
+    /// once created, at `info_index`.
     info: VehicleInfo,
+    info_index: u32,
     /// Its driver and its collision models, once created, and whether the client has it.
     bot: Option<Bot>,
     collision: Option<Arc<VehicleCollision>>,
@@ -121,6 +127,7 @@ impl Target {
             entity: None,
             health: info.maxHealth.into(),
             info,
+            info_index: 0,
             bot: None,
             collision: None,
             entered: false,
@@ -144,7 +151,7 @@ impl BaseThread {
         self.app.set_interest(client, Interest::Manual)?;
 
         let config = self.battle_clients.get(&client).and_then(|c| c.config.clone());
-        let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: None, driven: None, target: None };
+        let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: None, driven: None, target: None, vehicles_info: None };
 
         let session = self.session.clone();
         let Some(captured) = session.as_ref().and_then(|s| s.battle.as_ref()) else {
@@ -179,7 +186,9 @@ impl BaseThread {
         if let Some(target) = &mut battle.target {
             info!(%client, "Target {} ({})", target.entity_id, target.info.name);
             let public = self.create_target(space, target)?;
-            vehicles.push(vehicle_info(EntityId(target.entity_id), &public, 0));
+            target.info = vehicle_info(EntityId(target.entity_id), &public, 0);
+            target.info_index = vehicles.len() as u32;
+            vehicles.push(target.info.clone());
         }
 
         // The arena's info entity, created right away as entities without an alias are,
@@ -190,8 +199,9 @@ impl BaseThread {
         })?;
         let mut entity = self.app.entity(info)?;
         entity.set_avatarID(avatar.id())?;
-        entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?
-            .set_vehiclesInfo(vehicles)?;
+        let mut vehicles_info = entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?;
+        vehicles_info.set_vehiclesInfo(vehicles)?;
+        battle.vehicles_info = Some(vehicles_info.key());
         info!(%client, "Created arena info {}", info.id());
 
         self.set_battle(client, battle);
@@ -480,10 +490,21 @@ impl BaseThread {
             (None, false) => {
                 let mut entity = self.app.entity(vehicle)?;
                 let mut fire = entity.add_component::<Fire>(Audience::AllClients)?;
-                fire.set_fireInfo(Value::None)?;
+                fire.set_fireInfo(None)?;
                 target.fire = Some((fire.key(), now + TARGET_FIRE_DURATION));
                 info!(%client, "Target {entity_id} on fire");
             }
+        }
+
+        // Every client lists it destroyed: its entry's change applies once its generation
+        // changes too.
+        if let (true, Some(vehicles_info)) = (killed, battle.vehicles_info) {
+            let index = target.info_index;
+            target.info.isAlive = false;
+            target.info.__generation += 1;
+            let mut vehicles_info = self.app.component(vehicles_info)?;
+            vehicles_info.set_vehiclesInfo_at(vec![PathStep::Index(index), PathStep::Field("isAlive".into())], false)?;
+            vehicles_info.set_vehiclesInfo_at(vec![PathStep::Index(index), PathStep::Field("__generation".into())], target.info.__generation)?;
         }
 
         let mut flags = HIT_FLAGS_PIERCED;

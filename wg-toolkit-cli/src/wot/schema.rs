@@ -179,7 +179,7 @@ component_schema! {
     pub Fire {
         cell {
             /// A `FIRE_INFO` dict, or none as captured.
-            fireInfo: Value,
+            fireInfo: Option<FireInfo>,
         }
     }
 }
@@ -201,6 +201,19 @@ script_dict! {
         pub maxHealth: u16,
         pub respawnID: u32,
         pub stFrags: u32,
+    }
+}
+
+script_dict! {
+    /// `FIRE_INFO`: what set a vehicle on fire, and when.
+    #[derive(Debug, Clone)]
+    pub struct FireInfo {
+        /// The vehicle's fire, among its extras.
+        pub deviceExtraIndex: u8,
+        pub notificationIndex: u8,
+        pub attackerID: EntityId,
+        pub equipmentID: u16,
+        pub startTime: f64,
     }
 }
 
