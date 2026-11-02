@@ -153,9 +153,9 @@ component_schema! {
     /// What the client knows of its own vehicle, on that vehicle.
     pub OwnVehicle {
         cell {
-            syncVehicleAttrs: Value,
+            syncVehicleAttrs: VehicleSyncAttrs,
             /// How its turret and gun aim.
-            targetingInfo: Value,
+            targetingInfo: Option<TargetingInfo>,
             vehicleAmmoList: Vec<VehicleAmmo>,
             /// The shell loaded, then the next one.
             vehicleSettings: Vec<VehicleSetting>,
@@ -201,6 +201,35 @@ script_dict! {
         pub maxHealth: u16,
         pub respawnID: u32,
         pub stFrags: u32,
+    }
+}
+
+script_dict! {
+    /// `VEHICLE_SYNC_ATTRS`: the vehicle's view range, and its shells' piercing and
+    /// speed factors.
+    #[derive(Debug, Clone)]
+    pub struct VehicleSyncAttrs {
+        pub circularVisionRadius: u16,
+        pub gunPiercing: f32,
+        pub gunShotsSpeed: f32,
+    }
+}
+
+script_dict! {
+    /// `TARGETING_INFO`: where the turret and gun point, how fast they turn, and how
+    /// the gun's dispersion grows and shrinks.
+    #[derive(Debug, Clone)]
+    pub struct TargetingInfo {
+        pub turretYaw: f32,
+        pub gunPitch: f32,
+        pub maxTurretRotationSpeed: f32,
+        pub maxGunRotationSpeed: f32,
+        pub shotDispMultiplierFactor: f32,
+        pub gunShotDispersionFactorsTurretRotation: f32,
+        pub chassisShotDispersionFactorsMovement: f32,
+        pub chassisShotDispersionFactorsRotation: f32,
+        pub aimingTime: f32,
+        pub gunShotDispersionFactorsAfterShot: f32,
     }
 }
 

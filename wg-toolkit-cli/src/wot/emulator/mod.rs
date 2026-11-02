@@ -33,7 +33,9 @@ use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::{login, base};
 
-use crate::wot::schema::{self, Account, Avatar, AvatarBase, GunReloadTime, VehicleAmmo, VehicleHealthInfo, VehicleSetting};
+use crate::wot::schema::{
+    self, Account, Avatar, AvatarBase, GunReloadTime, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
+};
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
@@ -73,12 +75,11 @@ pub fn run(
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             let battle = match &session.battle {
-                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}, own vehicle {}",
+                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
                     battle.calls.len(), battle.cell_player.is_some(), battle.space_properties.len(),
                     battle.geometry.as_ref().map(|g| &g.path), battle.vehicle_alias,
                     battle.vehicle_position.is_some(), battle.vehicle_entity.is_some(),
-                    battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len())))),
-                    battle.own_vehicle.is_some()),
+                    battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len()))))),
                 None => "none".to_string(),
             };
             info!("Serving from capture {}: account {}, {} requests, battle: {battle}",
@@ -772,28 +773,22 @@ fn captured_property<'m>(message: &'m NrlMessage, name: &str) -> Option<&'m Valu
     })
 }
 
-/// The captured `OwnVehicle`'s `targetingInfo`, with the vehicle's own: turret and gun
-/// at rest, their speeds and dispersion factors from its definitions, without the
-/// crew's and equipment's bonuses.
-fn targeting_info(captured: &NrlMessage, config: &VehicleConfig) -> Option<Value> {
-    let Value::Dict(mut fields) = captured_property(captured, "targetingInfo")?.clone() else { return None };
+/// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and
+/// dispersion factors from its definitions, without the crew's and equipment's bonuses.
+fn targeting_info(config: &VehicleConfig) -> TargetingInfo {
     let aiming = &config.aiming;
-    for (field, value) in fields.iter_mut() {
-        let float = match &**field {
-            "turretYaw" | "gunPitch" => 0.0,
-            "maxTurretRotationSpeed" => aiming.turret_rotation_speed,
-            "maxGunRotationSpeed" => aiming.gun_rotation_speed,
-            "shotDispMultiplierFactor" => 1.0,
-            "gunShotDispersionFactorsTurretRotation" => aiming.dispersion_turret_rotation,
-            "chassisShotDispersionFactorsMovement" => aiming.dispersion_movement,
-            "chassisShotDispersionFactorsRotation" => aiming.dispersion_rotation,
-            "gunShotDispersionFactorsAfterShot" => aiming.dispersion_after_shot,
-            "aimingTime" => aiming.aiming_time,
-            _ => continue,
-        };
-        *value = Value::Float32(float);
+    TargetingInfo {
+        turretYaw: 0.0,
+        gunPitch: 0.0,
+        maxTurretRotationSpeed: aiming.turret_rotation_speed,
+        maxGunRotationSpeed: aiming.gun_rotation_speed,
+        shotDispMultiplierFactor: 1.0,
+        gunShotDispersionFactorsTurretRotation: aiming.dispersion_turret_rotation,
+        chassisShotDispersionFactorsMovement: aiming.dispersion_movement,
+        chassisShotDispersionFactorsRotation: aiming.dispersion_rotation,
+        aimingTime: aiming.aiming_time,
+        gunShotDispersionFactorsAfterShot: aiming.dispersion_after_shot,
     }
-    Some(Value::Dict(fields))
 }
 
 /// The `vehicleSettings` of a vehicle just entering the battle: its first shell, loaded

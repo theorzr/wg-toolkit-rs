@@ -66,10 +66,6 @@ pub struct CapturedBattle {
     /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
     /// the arena's vehicles.
     pub arena_info: Option<CapturedArenaInfo>,
-    /// The NRL message creating the player vehicle's `OwnVehicle` component, which
-    /// tells the client how its turret and gun aim (`targetingInfo`), decoded. It goes
-    /// under the vehicle's entity node, created in a message of its own.
-    pub own_vehicle: Option<NrlMessage>,
 }
 
 /// The arena's info entity: its type and properties, from its creation, then the NRL
@@ -329,12 +325,6 @@ impl Extractor<'_> {
                 NrlCreateNode::ID => {
                     let mut stream = elt.read_simple::<NrlCreateNode>()?.element.0;
                     let decoded = self.in_avatar && stream.decode_components(self.dispatch).is_ok();
-                    if let Some(battle) = self.session.battle.as_mut().filter(|_| decoded) {
-                        let own_vehicle = stream.messages.iter().find(|message| creates_component_with(message, "targetingInfo"));
-                        if battle.own_vehicle.is_none() {
-                            battle.own_vehicle = own_vehicle.cloned();
-                        }
-                    }
                     if decoded && carries_vehicles_info(&stream.messages) {
                         let entity_id = stream.messages.iter().find_map(|message| match &message.body {
                             NrlBody::CreateNode { node: NrlNode::Entity { entity_id }, .. } => Some(*entity_id),

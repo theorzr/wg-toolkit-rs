@@ -18,6 +18,7 @@ use wgtk::script::Value;
 use crate::wot::schema::{
     self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DogTag, DogTagComponent, Fire, GunMarker,
     GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, ShotResult, VehicleCell, VehicleInfo,
+    VehicleSyncAttrs,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::VehicleDef;
@@ -268,9 +269,7 @@ impl BaseThread {
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let Some(captured) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let (Some(vehicle), Some(position)) = (battle.vehicle, &captured.vehicle_position) else { return Ok(()) };
-        let config = battle.config.as_ref();
-
-        let Some(config) = config else { return Ok(()) };
+        let Some(config) = battle.config.as_ref() else { return Ok(()) };
         let mut driven = DrivenVehicle {
             entity: vehicle,
             vehicle: Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()),
@@ -286,27 +285,22 @@ impl BaseThread {
             damage_stickers: Vec::new(),
         };
 
-        if let Some(captured) = &captured.own_vehicle {
-            let entity_id = vehicle.id();
-            let mut entity = self.app.entity(vehicle)?;
-            let mut own = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
-            if let Some(attrs) = captured_property(captured, "syncVehicleAttrs") {
-                own.set_syncVehicleAttrs(attrs.clone())?;
-            }
-            if let Some(targeting) = targeting_info(captured, config) {
-                own.set_targetingInfo(targeting)?;
-            }
-            // What the real server sends right after, as updates: the ammunition, the
-            // shells loaded, the reload and the health.
-            own.set_vehicleAmmoList(ammo_list(config.ammo.iter().copied()))?;
-            own.set_vehicleSettings(vehicle_settings(entity_id, config))?;
-            own.set_vehicleGunReloadTime(gun_reload_time(config.aiming.reload_time, 0.0, 0.0))?;
-            own.set_vehicleHealthInfo(vehicle_health_info(entity_id, config.max_health.into()))?;
-            driven.own_vehicle = Some(own.key());
-            let mut marker = entity.add_component::<GunMarkerComponent>(Audience::OwnClient)?;
-            marker.set_gunMarker(None)?;
-            driven.gun_marker = Some(marker.key());
-        }
+        let entity_id = vehicle.id();
+        let mut entity = self.app.entity(vehicle)?;
+        let mut own = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
+        // No crew or equipment bonus: the view range all vehicles have here.
+        own.set_syncVehicleAttrs(VehicleSyncAttrs { circularVisionRadius: VIEW_RANGE as u16, gunPiercing: 1.0, gunShotsSpeed: 1.0 })?;
+        own.set_targetingInfo(Some(targeting_info(config)))?;
+        // What the real server sends right after, as updates: the ammunition, the
+        // shells loaded, the reload and the health.
+        own.set_vehicleAmmoList(ammo_list(config.ammo.iter().copied()))?;
+        own.set_vehicleSettings(vehicle_settings(entity_id, config))?;
+        own.set_vehicleGunReloadTime(gun_reload_time(config.aiming.reload_time, 0.0, 0.0))?;
+        own.set_vehicleHealthInfo(vehicle_health_info(entity_id, config.max_health.into()))?;
+        driven.own_vehicle = Some(own.key());
+        let mut marker = entity.add_component::<GunMarkerComponent>(Audience::OwnClient)?;
+        marker.set_gunMarker(None)?;
+        driven.gun_marker = Some(marker.key());
 
         battle.driven = Some(driven);
         Ok(())
