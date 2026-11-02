@@ -24,9 +24,10 @@ use glam::{Vec2, Vec3, Vec4};
 use crate::script::{PropertyFlags, PythonValue, StringValue, Ty, TyKind, Value};
 use crate::util::io::{serde_pickle_de_options, serde_pickle_ser_options};
 
-use super::client::element::{EntityMethod, IndexedEntityProperty};
+use super::client::element::{ChangedProperties, EntityMethod, IndexedEntityProperty, UpdateEntity};
 use super::dispatch::{EntityDispatch, MethodCall, MethodDef};
 use super::outbox::ClientOutbox;
+use super::slots::SlotKey;
 
 #[doc(hidden)]
 pub use paste::paste as __paste;
@@ -519,8 +520,7 @@ fn describe(ty: &Ty) -> String {
 /// decoded a call to it with. Stale once the entity is gone, even if another one takes
 /// its place.
 pub struct EntityKey<T> {
-    pub(crate) slot: u32,
-    pub(crate) generation: u32,
+    pub(crate) slot: SlotKey,
     pub(crate) id: u32,
     _schema: PhantomData<fn() -> T>,
 }
@@ -530,8 +530,8 @@ pub enum AnyEntity {}
 
 impl<T> EntityKey<T> {
 
-    pub(crate) fn new(slot: u32, generation: u32, id: u32) -> Self {
-        Self { slot, generation, id, _schema: PhantomData }
+    pub(crate) fn new(slot: SlotKey, id: u32) -> Self {
+        Self { slot, id, _schema: PhantomData }
     }
 
     /// The entity's id, as the protocol carries it.
@@ -541,12 +541,12 @@ impl<T> EntityKey<T> {
 
     /// The same key, to an entity of any type.
     pub fn any(self) -> EntityKey<AnyEntity> {
-        EntityKey::new(self.slot, self.generation, self.id)
+        EntityKey::new(self.slot, self.id)
     }
 
     /// The same key, to an entity of the given type, which the caller checked it is.
     pub(crate) fn cast<U>(self) -> EntityKey<U> {
-        EntityKey::new(self.slot, self.generation, self.id)
+        EntityKey::new(self.slot, self.id)
     }
 
 }
@@ -561,7 +561,7 @@ impl<T> Copy for EntityKey<T> {}
 
 impl<T> PartialEq for EntityKey<T> {
     fn eq(&self, other: &Self) -> bool {
-        (self.slot, self.generation) == (other.slot, other.generation)
+        self.slot == other.slot
     }
 }
 
@@ -569,7 +569,7 @@ impl<T> Eq for EntityKey<T> {}
 
 impl<T> std::hash::Hash for EntityKey<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (self.slot, self.generation).hash(state);
+        self.slot.hash(state);
     }
 }
 
@@ -636,13 +636,20 @@ impl<'a, T: EntitySchema> Entity<'a, T> {
     /// The entity's key.
     pub fn key(&self) -> EntityKey<T> {
         let raw = self.view.raw();
-        EntityKey::new(raw.slot, raw.generation, raw.id)
+        EntityKey::new(raw.slot, raw.id)
     }
 
     /// Call a client method the schema doesn't declare, by name, with values left
     /// unchecked: for calls replayed from a capture.
     pub fn call_dynamic(&mut self, name: &str, args: Vec<Value>) -> io::Result<()> {
         self.view.raw_mut().call_dynamic(name, args)
+    }
+
+    /// Set properties the schema doesn't declare, given in the entity type's property
+    /// table, with values left unchecked, in one element: for changes replayed from a
+    /// capture.
+    pub fn set_dynamic(&mut self, properties: ChangedProperties) -> io::Result<()> {
+        self.view.raw_mut().set_dynamic(properties)
     }
 
 }
@@ -661,28 +668,89 @@ impl<'a, T: EntitySchema> DerefMut for Entity<'a, T> {
 }
 
 /// What a view goes through: the entity, its property values, its tables, its binding
-/// and the outbox of the client it is on.
+/// and where what its clients get goes.
 pub struct RawEntity<'a> {
-    pub(crate) slot: u32,
-    pub(crate) generation: u32,
+    pub(crate) slot: SlotKey,
     pub(crate) id: u32,
     /// Its client-visible property values, by exposed id, when known.
     pub(crate) properties: &'a mut [Option<Value>],
-    pub(crate) out: &'a mut ClientOutbox,
     pub(crate) dispatch: &'a EntityDispatch,
     pub(crate) bound: &'a Bound,
-    /// Whether it is its client's player entity, selected as such.
-    pub(crate) is_player: bool,
+    pub(crate) sink: EntitySink<'a>,
+}
+
+/// Where what an entity's clients get goes.
+pub(crate) enum EntitySink<'a> {
+    /// The outbox of the one client of a base entity, selecting it as its player or by
+    /// its id.
+    Client { out: &'a mut ClientOutbox, is_player: bool },
+    /// The events of the space of an entity in one, which go to the clients knowing it.
+    Space(&'a mut Vec<EntityEvent>),
+}
+
+/// What an entity in a space gave its clients, for each of them to get at the end of
+/// the tick.
+#[derive(Debug)]
+pub(crate) struct EntityEvent {
+    pub entity_id: u32,
+    /// Whether it goes to its own client only, rather than to every client knowing it.
+    pub own_client: bool,
+    pub kind: EntityEventKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum EntityEventKind {
+    Call { exposed_id: u16, args: Vec<Value> },
+    Property { exposed_id: u16, value: Value },
+    /// Several properties in one element.
+    Update(ChangedProperties),
+}
+
+impl EntityEventKind {
+
+    /// Write it to an outbox, its entity already selected, against its entity type's
+    /// tables.
+    pub fn write(&self, out: &mut ClientOutbox, dispatch: &EntityDispatch) -> io::Result<()> {
+        match self {
+            &Self::Call { exposed_id, ref args } => {
+                let name = Arc::clone(&dispatch.client_methods[exposed_id as usize].name);
+                let call = EntityMethod { call: MethodCall::Known { exposed_id, name, args: args.clone() } };
+                out.write_selected(call, &dispatch.client_methods)
+            }
+            &Self::Property { exposed_id, ref value } => {
+                out.write_selected(IndexedEntityProperty { exposed_id, value: value.clone() }, &dispatch.properties[..])
+            }
+            Self::Update(properties) => out.write_selected(UpdateEntity(properties.clone()), &dispatch.properties[..]),
+        }
+    }
+
 }
 
 impl RawEntity<'_> {
 
-    fn select(&mut self) -> io::Result<()> {
-        if self.is_player {
-            self.out.select_player()
-        } else {
-            self.out.select_entity(self.id)
+    /// Give what an entity gave to its clients.
+    fn emit(&mut self, kind: EntityEventKind, own_client: bool) -> io::Result<()> {
+        match &mut self.sink {
+            EntitySink::Client { out, is_player } => {
+                if *is_player {
+                    out.select_player()?;
+                } else {
+                    out.select_entity(self.id)?;
+                }
+                kind.write(out, self.dispatch)
+            }
+            EntitySink::Space(events) => {
+                events.push(EntityEvent { entity_id: self.id, own_client, kind });
+                Ok(())
+            }
         }
+    }
+
+    /// Set a property by exposed id, and give it to the clients it is for.
+    fn write_property(&mut self, exposed_id: u16, value: Value) -> io::Result<()> {
+        self.properties[exposed_id as usize] = Some(value.clone());
+        let own_client = matches!(self.dispatch.properties[exposed_id as usize].flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
+        self.emit(EntityEventKind::Property { exposed_id, value }, own_client)
     }
 
     /// Call the declared client method at the given index.
@@ -697,9 +765,7 @@ impl RawEntity<'_> {
     pub fn set_property<V: ScriptType>(&mut self, index: usize, value: V) -> io::Result<()> {
         let exposed_id = self.bound.properties[index];
         let value = value.into_value(&self.dispatch.properties[exposed_id as usize].ty);
-        self.properties[exposed_id as usize] = Some(value.clone());
-        self.select()?;
-        self.out.write_selected(IndexedEntityProperty { exposed_id, value }, &self.dispatch.properties[..])
+        self.write_property(exposed_id, value)
     }
 
     /// The declared property at the given index, if its value is known: given at
@@ -715,10 +781,19 @@ impl RawEntity<'_> {
         self.write_call(exposed_id as u16, args)
     }
 
+    fn set_dynamic(&mut self, properties: ChangedProperties) -> io::Result<()> {
+        let mut own_client = false;
+        for (exposed_id, _, value) in &properties.values {
+            let def = self.dispatch.properties.get(usize::from(*exposed_id))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown property: {exposed_id}")))?;
+            own_client |= matches!(def.flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
+            self.properties[usize::from(*exposed_id)] = Some(value.clone());
+        }
+        self.emit(EntityEventKind::Update(properties), own_client)
+    }
+
     fn write_call(&mut self, exposed_id: u16, args: Vec<Value>) -> io::Result<()> {
-        let name = Arc::clone(&self.dispatch.client_methods[exposed_id as usize].name);
-        self.select()?;
-        self.out.write_selected(EntityMethod { call: MethodCall::Known { exposed_id, name, args } }, &self.dispatch.client_methods)
+        self.emit(EntityEventKind::Call { exposed_id, args }, false)
     }
 
 }

@@ -21,7 +21,7 @@ pub mod id {
     // `BaseAppExtInterface`.
 
     // --- Cell session handshake ---
-    pub const CELL_APP_LOGIN: u8           = 0x00;  // VAR 2
+    pub const CELL_APP_LOGIN: u8            = 0x00;  // VAR 2
     pub const AUTHENTICATE: u8              = 0x01;  // FIXED 8
 
     // --- Avatar updates, physics corrections, NRL & method dispatch (raw placeholders) ---

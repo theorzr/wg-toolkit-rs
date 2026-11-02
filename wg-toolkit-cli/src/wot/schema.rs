@@ -68,6 +68,10 @@ entity_schema! {
             fn vehicle_shoot();
             fn vehicle_moveWith(flags: u8);
             fn vehicle_stopTrackingWithGun(yaw: f32, pitch: f32);
+            // What the client aims from, so it must turn with the hull, and the engine's
+            // RPM.
+            ownVehicleAuxPhysicsData: u64,
+            ownVehicleGear: u8,
         }
     }
 }
@@ -95,6 +99,8 @@ entity_schema! {
             fn stopTrackingWithGun(yaw: f32, pitch: f32);
             health: i16,
             damageStickers: Vec<HitPoint>,
+            gunAnglesPacked: u16,
+            engineMode: [u8; 2],
         }
     }
 }

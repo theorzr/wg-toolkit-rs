@@ -3,21 +3,22 @@
 //! `re-work/bigworld-src-14.4.1/`) -- used by [`super::math`] to implement the packed
 //! position/direction formulas from `network/msgtypes.hpp`/`.ipp`.
 
+
 /// Each [`Self::add`] call appends `num_bits` bits taken from the low bits of `value`,
 /// written starting from the most-significant unused bit of the current byte and
 /// spilling into subsequent bytes as needed.
-pub(crate) struct BitWriter<'a> {
+pub struct BitWriter<'a> {
     buf: &'a mut [u8],
     pos: u32,
 }
 
 impl<'a> BitWriter<'a> {
 
-    pub(crate) fn new(buf: &'a mut [u8]) -> Self {
+    pub fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
-    pub(crate) fn add(&mut self, num_bits: u32, value: u32) {
+    pub fn add(&mut self, num_bits: u32, value: u32) {
         for i in (0..num_bits).rev() {
             let bit = (value >> i) & 1;
             let byte = (self.pos / 8) as usize;
@@ -31,19 +32,19 @@ impl<'a> BitWriter<'a> {
 
 /// Counterpart to [`BitWriter`].
 #[derive(Clone, Copy)]
-pub(crate) struct BitReader<'a> {
+pub struct BitReader<'a> {
     buf: &'a [u8],
     pos: u32,
 }
 
 impl<'a> BitReader<'a> {
 
-    pub(crate) fn new(buf: &'a [u8]) -> Self {
+    pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
     /// Total number of bits available.
-    pub(crate) fn total_bits(&self) -> u32 {
+    pub fn total_bits(&self) -> u32 {
         self.buf.len() as u32 * 8
     }
 
@@ -51,7 +52,7 @@ impl<'a> BitReader<'a> {
     /// available, leaving the position unchanged on failure. Meant for speculative
     /// decoding where running out of bits is an expected "this guess doesn't work"
     /// outcome, not a programming error.
-    pub(crate) fn try_get(&mut self, num_bits: u32) -> Option<u32> {
+    pub fn try_get(&mut self, num_bits: u32) -> Option<u32> {
         if self.pos.checked_add(num_bits)? > self.total_bits() {
             return None;
         }
@@ -59,16 +60,16 @@ impl<'a> BitReader<'a> {
     }
 
     /// Skip to the start of the next byte, discarding any partial-byte padding bits.
-    pub(crate) fn align_to_byte(&mut self) {
+    pub fn align_to_byte(&mut self) {
         self.pos = self.pos.div_ceil(8) * 8;
     }
 
     /// The bytes remaining after the current position, or `None` if not byte-aligned.
-    pub(crate) fn remaining_bytes(&self) -> Option<&'a [u8]> {
+    pub fn remaining_bytes(&self) -> Option<&'a [u8]> {
         (self.pos % 8 == 0).then(|| &self.buf[(self.pos / 8) as usize..])
     }
 
-    pub(crate) fn get(&mut self, num_bits: u32) -> u32 {
+    pub fn get(&mut self, num_bits: u32) -> u32 {
         let mut value = 0;
         for _ in 0..num_bits {
             let byte = (self.pos / 8) as usize;
