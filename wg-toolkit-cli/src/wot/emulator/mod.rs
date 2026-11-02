@@ -771,11 +771,10 @@ impl VehicleConfig {
         }
     }
 
-    /// Its vehicle entity's creation properties.
+    /// Its vehicle entity's captured creation properties, see `BaseThread::create_vehicle`.
     fn apply_to_entity(&self, properties: &mut ChangedProperties) {
         for (_, name, value) in &mut properties.values {
             match (&**name, &mut *value) {
-                ("health", value) => *value = with_int(value, self.max_health.into()),
                 ("publicInfo", Value::Dict(info)) => {
                     for (name, value) in info.iter_mut() {
                         match &**name {
@@ -785,13 +784,6 @@ impl VehicleConfig {
                         }
                     }
                 }
-                ("vehPostProgression", value) => *value = Value::Seq(Vec::new()),
-                ("crewCompactDescrs", Value::Seq(crew)) => {
-                    let like = crew.first().cloned().unwrap_or(Value::String(StringValue::Raw(Vec::new())));
-                    *crew = self.crew.iter().map(|cd| with_bytes(&like, cd.clone())).collect();
-                }
-                ("setups", value) => *value = with_python(value, self.setups.clone()),
-                ("setupsIndexes", value) => *value = with_python(value, self.setup_indexes.clone()),
                 _ => {}
             }
         }
@@ -804,14 +796,6 @@ fn with_bytes(value: &Value, bytes: Vec<u8>) -> Value {
     match value {
         Value::Python(_) => Value::Python(PythonValue::Raw(bytes)),
         _ => Value::String(StringValue::Raw(bytes)),
-    }
-}
-
-/// The same kind of Python value as `value`, holding `python`.
-fn with_python(value: &Value, python: serde_pickle::Value) -> Value {
-    match value {
-        Value::String(_) => Value::String(StringValue::Python(python)),
-        _ => Value::Python(PythonValue::Decoded(python)),
     }
 }
 

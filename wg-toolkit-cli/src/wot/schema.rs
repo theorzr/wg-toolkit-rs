@@ -4,7 +4,7 @@
 use glam::Vec3;
 
 use wgtk::{component_schema, entity_schema, script_dict};
-use wgtk::app::entity::{BindError, Bytes, EntityId};
+use wgtk::app::entity::{BindError, Bytes, EntityId, Pickle};
 use wgtk::script::Value;
 use wgtk::app::base;
 
@@ -106,6 +106,22 @@ entity_schema! {
             damageStickers: Vec<HitPoint>,
             gunAnglesPacked: u16,
             engineMode: [u8; 2],
+            avatarID: EntityId,
+            vehPostProgression: Vec<i32>,
+            // Its `MY_VEHICLE` level of detail, which only its own client gets.
+            isMyVehicle: bool,
+            quickShellChangerFactor: f32,
+            onRespawnReloadTimeFactor: f32,
+            perkEffects: PerkEffects,
+            perks: Vec<Value>,
+            perksRibbonNotify: Vec<Value>,
+            crewCompactDescrs: Vec<Bytes>,
+            enhancements: Pickle,
+            setups: Pickle,
+            setupsIndexes: Pickle,
+            vehPerks: Pickle,
+            disabledSwitches: Vec<i32>,
+            ownVehiclePosition: Option<OwnVehiclePosition>,
         }
     }
 }
@@ -156,6 +172,25 @@ component_schema! {
             /// A `FIRE_INFO` dict, or none as captured.
             fireInfo: Value,
         }
+    }
+}
+
+script_dict! {
+    /// `PERK_EFFECTS`: the equipment the vehicle's perks affect.
+    #[derive(Debug, Clone, Default)]
+    pub struct PerkEffects {
+        pub equipment: Vec<Bytes>,
+    }
+}
+
+script_dict! {
+    /// `OWN_VEHICLE_POSITION`: where the server last placed the vehicle, for its client.
+    #[derive(Debug, Clone)]
+    pub struct OwnVehiclePosition {
+        pub position: Vec3,
+        pub direction: Vec3,
+        pub speed: f32,
+        pub rotationSpeed: f32,
     }
 }
 

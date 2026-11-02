@@ -61,8 +61,7 @@ pub struct CapturedBattle {
     pub vehicle_alias: Option<u8>,
     pub vehicle_position: Option<AvatarUpdateAliasDetailed>,
     pub vehicle_entity: Option<CreateEntity>,
-    /// [`Self::vehicle_entity`]'s properties, decoded, with those of its inner level of
-    /// detail its client got right after.
+    /// [`Self::vehicle_entity`]'s properties, decoded.
     pub vehicle_properties: Option<ChangedProperties>,
     /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
     /// the arena's vehicles.
@@ -363,19 +362,8 @@ impl Extractor<'_> {
                     }
                 }
                 UpdateEntity::ID => {
-                    // Its inner level of detail, sent to the vehicle right after its creation,
-                    // as its own client is: its type is assumed.
-                    let vehicle = self.selected.filter(|&id| self.battle_vehicle(id).is_some());
-                    let properties = vehicle.and_then(|_| self.dispatch.entity_from_name("Vehicle")).map(|(_, d)| &d.properties);
-                    match properties {
-                        Some(properties) => {
-                            let UpdateEntity(e) = elt.read::<UpdateEntity, _>(&properties[..])?.element;
-                            if let Some(created) = self.session.battle.as_mut().and_then(|b| b.vehicle_properties.as_mut()) {
-                                created.values.extend(e.values);
-                            }
-                        }
-                        None => { elt.read::<Skipped, _>(&())?; }
-                    }
+                    // The vehicle's inner level of detail, which the emulator builds.
+                    elt.read::<Skipped, _>(&())?;
                 }
                 TickSync::ID => { elt.read_simple::<TickSync>()?; }
                 SwitchBaseApp::ID => { elt.read_simple::<SwitchBaseApp>()?; }

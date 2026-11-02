@@ -1571,7 +1571,7 @@ impl Witness {
         self.write_entering(out, view)?;
         self.write_created(out, view, created)?;
         self.write_positions(out, view)?;
-        self.write_events(out, view)?;
+        self.write_events(out, view, created)?;
         self.write_components(out, view)
 
     }
@@ -1718,8 +1718,9 @@ impl Witness {
     }
 
     /// What the properties and client methods of its player entity and the entities it
-    /// has gave, in the order given.
-    fn write_events(&self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
+    /// has gave, in the order given. Those of an entity created on it this tick are left
+    /// out: its creation has its current properties.
+    fn write_events(&self, out: &mut ClientOutbox, view: &TickView, created: &[EntityKey<AnyEntity>]) -> io::Result<()> {
 
         for event in &view.space.events {
 
@@ -1728,7 +1729,8 @@ impl Witness {
                 self.entity
             } else {
 
-                let Some(known) = self.known.iter().find(|known| known.entity.id == event.entity_id && known.created) else { continue };
+                let Some(known) = self.known.iter()
+                    .find(|known| known.entity.id == event.entity_id && known.created && !created.contains(&known.entity)) else { continue };
 
                 // Some go to its own client only.
                 let own = view.get(known.entity).is_some_and(|(_, cell)| cell.is_controlled_by(self.entity));

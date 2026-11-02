@@ -9,7 +9,7 @@ use std::io;
 use tracing::{debug, info, warn};
 use glam::Vec3;
 
-use wgtk::app::entity::{AnyEntity, Audience, ComponentKey, Entity, EntityId, EntityKey};
+use wgtk::app::entity::{AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, Pickle};
 use wgtk::app::base::{self, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::client::element::NrlMessage;
 use wgtk::script::{StringValue, Value};
@@ -17,7 +17,7 @@ use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
-    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle,
+    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects,
     ShotResult, VehicleCell,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
@@ -201,11 +201,6 @@ impl BaseThread {
         };
 
         let mut properties = properties.clone();
-        for (_, name, value) in &mut properties.values {
-            if &**name == "avatarID" {
-                *value = with_int(value, battle.avatar.id().0.into());
-            }
-        }
         if let Some(config) = &battle.config {
             config.apply_to_entity(&mut properties);
         }
@@ -220,6 +215,30 @@ impl BaseThread {
             visibility: Visibility::Interest,
             properties,
         })?;
+
+        // Set before its creation on the client, which carries them.
+        let mut entity = self.app.entity(vehicle)?;
+        entity.set_avatarID(battle.avatar.id())?;
+        entity.set_vehPostProgression(Vec::new())?;
+
+        if let Some(config) = &battle.config {
+            let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
+            entity.set_health(config.max_health as i16)?;
+            entity.set_isMyVehicle(true)?;
+            entity.set_quickShellChangerFactor(QUICK_SHELL_CHANGER_FACTOR)?;
+            entity.set_onRespawnReloadTimeFactor(1.0)?;
+            entity.set_perkEffects(PerkEffects::default())?;
+            entity.set_perks(Vec::new())?;
+            entity.set_perksRibbonNotify(Vec::new())?;
+            entity.set_crewCompactDescrs(config.crew.iter().cloned().map(Bytes).collect())?;
+            entity.set_enhancements(empty())?;
+            entity.set_setups(Pickle(config.setups.clone()))?;
+            entity.set_setupsIndexes(Pickle(config.setup_indexes.clone()))?;
+            entity.set_vehPerks(empty())?;
+            entity.set_disabledSwitches(Vec::new())?;
+            entity.set_ownVehiclePosition(None)?;
+        }
+
         Ok(Some(vehicle))
 
     }
@@ -741,6 +760,10 @@ const TARGET_DISTANCE: f32 = 40.0;
 /// How far the player's vehicle spots others, in metres on the ground plane: the most
 /// any vehicle can see, until vehicles have their own.
 const VIEW_RANGE: f32 = 445.0;
+
+/// The `quickShellChangerFactor` of a vehicle, as captured: how much faster it changes
+/// shells, from its crew and equipment.
+const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
 
 /// How long the target burns after its last hit, in seconds.
 const TARGET_FIRE_DURATION: f64 = 5.0;
