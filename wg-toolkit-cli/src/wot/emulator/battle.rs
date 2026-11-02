@@ -17,8 +17,8 @@ use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
-    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects,
-    PublicVehicleInfo, ShotResult, VehicleCell,
+    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DogTag, DogTagComponent, Fire, GunMarker,
+    GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, ShotResult, VehicleCell,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::VehicleDef;
@@ -214,11 +214,15 @@ impl BaseThread {
             alias: true,
             controlled_by: Some(battle.avatar.any()),
             visibility: Visibility::Interest,
-            properties: properties.clone(),
+            ..EntityInit::default()
         })?;
 
+        // Its turret at rest, as it is once driven.
+        let gun_angles = battle.config.as_ref()
+            .map(|config| Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()))
+            .map_or(REST_GUN_ANGLES, |vehicle| vehicle.turret.gun_angles_packed());
         let mut entity = self.app.entity(vehicle)?;
-        init_vehicle(&mut entity, battle.avatar.id(), public)?;
+        init_vehicle(&mut entity, battle.avatar.id(), public, gun_angles)?;
 
         if let Some(config) = &battle.config {
             let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
@@ -335,6 +339,8 @@ impl BaseThread {
         let limits = MotionLimits { speed_forward: def.speed_forward, speed_backward: def.speed_backward, rotation_speed: def.rotation_speed };
         let ammo = def.shots.iter().cloned().zip(def.default_ammo().into_iter().map(|(_, count)| count)).collect();
         let gun = Gun::new(ammo, def.aiming.reload_time).with_shot_ids_from(TARGET_FIRST_SHOT_ID);
+        let driven = Vehicle::new(position, direction, limits, def.aiming.clone());
+        let gun_angles = driven.turret.gun_angles_packed();
 
         info!("Creating target {} ({}) at {position:?}", target.entity_id, def.name);
         let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
@@ -344,10 +350,10 @@ impl BaseThread {
             alias: true,
             controlled_by: None,
             visibility: Visibility::Interest,
-            properties: properties.clone(),
+            ..EntityInit::default()
         })?;
-        init_vehicle(&mut self.app.entity(vehicle)?, EntityId(0), public)?;
-        target.bot = Some(Bot::new(Vehicle::new(position, direction, limits, def.aiming.clone()), gun, position));
+        init_vehicle(&mut self.app.entity(vehicle)?, EntityId(0), public, gun_angles)?;
+        target.bot = Some(Bot::new(driven, gun, position));
         target.collision = Some(def.collision.clone());
         target.entity = Some(vehicle);
         Ok(())
@@ -748,6 +754,12 @@ const VIEW_RANGE: f32 = 445.0;
 /// shells, from its crew and equipment.
 const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
 
+/// The gun's angles of a vehicle without configuration: turret straight ahead.
+const REST_GUN_ANGLES: u16 = 512 << 6;
+
+/// The default dog tag's components, as captured: their ids and grades.
+const DEFAULT_DOG_TAG: [(i32, i8); 2] = [(300, 9), (66, 0)];
+
 /// How long the target burns after its last hit, in seconds.
 const TARGET_FIRE_DURATION: f64 = 5.0;
 
@@ -765,9 +777,17 @@ fn captured_public_info(properties: &ChangedProperties) -> io::Result<PublicVehi
 }
 
 /// Set what every client gets of a fresh vehicle, before its creation on any: its
-/// public info, its full health, and its avatar if driven by a client's.
-fn init_vehicle(entity: &mut Entity<'_, schema::Vehicle>, avatar: EntityId, public: PublicVehicleInfo) -> io::Result<()> {
+/// public info, its full health, its gun's angles, and its avatar if driven by a
+/// client's. Its dog tag is the default one.
+fn init_vehicle(entity: &mut Entity<'_, schema::Vehicle>, avatar: EntityId, public: PublicVehicleInfo, gun_angles: u16) -> io::Result<()> {
+    let dog_tag = || DogTag {
+        components: DEFAULT_DOG_TAG.iter()
+            .map(|&(id, grade)| DogTagComponent { id, progress: 0.0, grade })
+            .collect(),
+    };
     entity.set_avatarID(avatar)?;
+    entity.set_gunAnglesPacked(gun_angles)?;
+    entity.set_dogTag(BattleDogTag { dogTag: dog_tag(), defaultDogTag: dog_tag(), showDogTagToKiller: false })?;
     entity.set_health(public.maxHealth as i16)?;
     entity.set_publicInfo(public)?;
     entity.set_isStrafing(false)?;

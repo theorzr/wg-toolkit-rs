@@ -112,6 +112,7 @@ entity_schema! {
             isStrafing: bool,
             isCrewActive: bool,
             publicStateModifiers: Vec<u8>,
+            dogTag: BattleDogTag,
             // Its `MY_VEHICLE` level of detail, which only its own client gets.
             isMyVehicle: bool,
             quickShellChangerFactor: f32,
@@ -196,6 +197,34 @@ script_dict! {
         pub maxHealth: u16,
         pub respawnID: u32,
         pub stFrags: u32,
+    }
+}
+
+script_dict! {
+    /// `BATTLE_DOG_TAG`: the dog tag a vehicle's player shows, and its default one.
+    #[derive(Debug, Clone)]
+    pub struct BattleDogTag {
+        pub dogTag: DogTag,
+        pub defaultDogTag: DogTag,
+        pub showDogTagToKiller: bool,
+    }
+}
+
+script_dict! {
+    /// `DOG_TAG`: a dog tag, as its components.
+    #[derive(Debug, Clone)]
+    pub struct DogTag {
+        pub components: Vec<DogTagComponent>,
+    }
+}
+
+script_dict! {
+    /// `DOG_TAG_COMPONENT`: a dog tag's background, engraving or badge.
+    #[derive(Debug, Clone)]
+    pub struct DogTagComponent {
+        pub id: i32,
+        pub progress: f32,
+        pub grade: i8,
     }
 }
 
