@@ -35,7 +35,7 @@ use crate::net::codec::Codec;
 
 use super::client::element::{
     ChangedProperties, EntityMethod, IndexedEntityProperty, NrlBody, NrlChild, NrlComponentData, NrlData, NrlIdList,
-    NrlMessage, NrlNode, NrlUpdateNodeFlag, UpdateEntity,
+    NrlMessage, NrlNode, NrlUnlinkTreeFlag, NrlUpdateNodeFlag, UpdateEntity,
 };
 use super::dispatch::{EntityDispatch, MethodCall, MethodDef, ScriptDispatch};
 use super::slots::{SlotKey, Slots};
@@ -1096,6 +1096,11 @@ impl ComponentState {
         self.events.clear();
     }
 
+    /// What its clients need to remove it once removed from the given slot.
+    pub fn removed(&self, slot: SlotKey) -> RemovedComponent {
+        RemovedComponent { slot, node: self.node }
+    }
+
     /// The NRL message creating it under its entity's node, with every property given a
     /// value. Its method children all carry their method, in table order.
     pub fn create(&self, entity_node: u16, script: &ScriptDispatch) -> io::Result<NrlMessage> {
@@ -1199,6 +1204,24 @@ impl ComponentState {
     fn dispatch<'s>(&self, script: &'s ScriptDispatch) -> io::Result<&'s EntityDispatch> {
         script.entity_from_id(self.type_id)
             .ok_or_else(|| io_invalid_data(format_args!("unknown component type: {}", self.type_id)))
+    }
+
+}
+
+/// A component removed during the tick, which its clients still have.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RemovedComponent {
+    pub slot: SlotKey,
+    node: u16,
+}
+
+impl RemovedComponent {
+
+    /// Write its removal to a client: its node's id goes to the client's NRL buffer, then
+    /// a flag unlinks that node and its children, as captured for a fire put out.
+    pub fn write(&self, out: &mut ClientOutbox) -> io::Result<()> {
+        out.write_simple(NrlData { fragment: self.node.to_be_bytes().to_vec() })?;
+        out.write_simple(NrlUnlinkTreeFlag)
     }
 
 }

@@ -33,7 +33,7 @@ use crate::net::proto::Protocol;
 
 use super::entity::{
     self, AnyEntity, BindError, Component, ComponentKey, ComponentSchema, ComponentState, Entity, EntityComponents,
-    EntityEvent, EntityId, EntityKey, EntitySchema, EntitySink, Methods, NrlNodeIds, RawComponent, RawEntity, Registry, ScriptType,
+    EntityEvent, EntityId, EntityKey, EntitySchema, EntitySink, Methods, NrlNodeIds, RawComponent, RawEntity, Registry, RemovedComponent, ScriptType,
 };
 use super::dispatch::{EntityDispatch, ScriptDispatch, MethodCall, MethodDef};
 use super::client::element::ChangedProperties;
@@ -746,6 +746,22 @@ impl App {
 
     }
 
+    /// Remove a component of an entity, see [`Entity::add_component`]: the clients that
+    /// have it remove it at the end of the tick.
+    pub fn remove_component<C: ComponentSchema>(&mut self, key: ComponentKey<C>) -> io::Result<()> {
+
+        let cell = self.entities.get_mut(key.entity.slot)
+            .and_then(|state| state.cell.as_mut())
+            .ok_or_else(|| io_invalid_data(format_args!("no such component: {key:?}")))?;
+
+        let state = cell.components.remove(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such component: {key:?}")))?;
+        cell.removed_components.push(state.removed(key.slot));
+
+        Ok(())
+
+    }
+
     /// The key of an entity of any type as one of the given schema, if it is one.
     pub fn cast<T: EntitySchema>(&self, key: EntityKey<AnyEntity>) -> Option<EntityKey<T>> {
         let state = self.entities.get(key.slot)?;
@@ -943,8 +959,10 @@ struct EntityCell {
     alias: bool,
     controlled_by: Option<EntityKey<AnyEntity>>,
     visibility: Visibility,
-    /// Its dynamic components, and its NRL node once it has any.
+    /// Its dynamic components, those removed during the tick, and its NRL node once it
+    /// has any.
     components: Slots<ComponentState>,
+    removed_components: Vec<RemovedComponent>,
     nrl_node: Option<u16>,
 }
 
@@ -960,6 +978,7 @@ impl EntityCell {
             controlled_by, 
             visibility, 
             components: Slots::default(), 
+            removed_components: Vec::new(),
             nrl_node: None,
         }
     }
@@ -1339,6 +1358,7 @@ impl App {
         for (_, state) in self.entities.iter_mut() {
             if let Some(cell) = &mut state.cell {
                 cell.moved = false;
+                cell.removed_components.clear();
                 for (_, component) in cell.components.iter_mut() {
                     component.end_tick();
                 }
@@ -1574,8 +1594,8 @@ impl Witness {
                 self.aliases[usize::from(alias)] = false;
             }
 
-            // NOTE: Whether the client drops its NRL nodes with it is not known, they are
-            // created again with the same ids if it comes back.
+            // The client drops its NRL nodes with it: the captured server creates them
+            // again, with the same ids, when it comes back.
             self.nrl.remove(&left.entity);
 
         }
@@ -1719,7 +1739,7 @@ impl Witness {
     }
 
     /// The dynamic components of its player entity and the entities it has, those it
-    /// gets: each new one created, in an element of its own since the client reads no
+    /// gets: each removed one it has unlinked, each new one created, in an element of its own since the client reads no
     /// further than the first component of one, under its entity's node the first time,
     /// then what changed of the others.
     fn write_components(&mut self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
@@ -1732,6 +1752,15 @@ impl Witness {
             let Some((_, cell)) = view.get(entity) else { continue };
             let Some(entity_node) = cell.nrl_node else { continue };
             let own = entity == self.entity || cell.is_controlled_by(self.entity);
+
+            if let Some(slots) = self.nrl.get_mut(&entity) {
+                for removed in &cell.removed_components {
+                    if let Some(index) = slots.iter().position(|&slot| slot == removed.slot) {
+                        slots.swap_remove(index);
+                        removed.write(out)?;
+                    }
+                }
+            }
 
             for (slot, component) in cell.components.iter() {
 

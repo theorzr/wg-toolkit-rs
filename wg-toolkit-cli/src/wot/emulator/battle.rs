@@ -17,7 +17,7 @@ use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
-    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle,
+    self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle,
     ShotResult, VehicleCell,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
@@ -85,6 +85,8 @@ struct Target {
     engine_mode: Option<[u8; 2]>,
     /// Its `damageStickers`: where shells pierced it.
     damage_stickers: Vec<HitPoint>,
+    /// Its fire, with the game time it goes out at, see [`TARGET_FIRE_DURATION`].
+    fire: Option<(ComponentKey<Fire>, f64)>,
 }
 
 /// A battle client's vehicle: the vehicle the server simulates, and how the client
@@ -453,6 +455,7 @@ impl BaseThread {
     fn damage_target(&mut self, client: ClientKey, entity_id: u32, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
+        let now = battle.game_time();
         let Some(driven) = battle.driven.as_ref() else { return Ok(()) };
         let shooter = driven.entity.id();
         let Some(target) = battle.target.as_mut().filter(|target| target.entity_id == entity_id && target.health > 0) else {
@@ -471,6 +474,20 @@ impl BaseThread {
         let stickers = add_sticker(&mut target.damage_stickers, shot, hit, bounds);
         let damage = Damage { shooter, amount, max_health, old_health, new_health };
         show_damage(&mut self.app.entity(vehicle)?, shot, hit, bounds, &damage, stickers)?;
+
+        // A hit sets it on fire, which a kill puts out.
+        match (target.fire.take(), killed) {
+            (Some((fire, _)), true) => self.app.remove_component(fire)?,
+            (Some((fire, _)), false) => target.fire = Some((fire, now + TARGET_FIRE_DURATION)),
+            (None, true) => {}
+            (None, false) => {
+                let mut entity = self.app.entity(vehicle)?;
+                let mut fire = entity.add_component::<Fire>(Audience::AllClients)?;
+                fire.set_fireInfo(Value::None)?;
+                target.fire = Some((fire.key(), now + TARGET_FIRE_DURATION));
+                info!(%client, "Target {entity_id} on fire");
+            }
+        }
 
         let mut flags = HIT_FLAGS_PIERCED;
         if killed {
@@ -588,6 +605,12 @@ impl BaseThread {
 
         // The target drives, aims at the player and fires once on them.
         let Some(target) = battle.target.as_mut().filter(|target| target.entered && target.health > 0) else { return Ok(()) };
+
+        if let Some((fire, _)) = target.fire.take_if(|&mut (_, until)| until <= now) {
+            app.remove_component(fire)?;
+            info!(%client, "Target {} fire out", target.entity_id);
+        }
+
         let (Some(bot), Some(target_entity)) = (target.bot.as_mut(), target.entity) else { return Ok(()) };
         let enemy = hit_target(driven.entity.id().0, &driven.vehicle, &driven.collision);
         let enemy_hull = enemy.transforms[VehiclePart::Hull as usize].translation.into();
@@ -702,6 +725,7 @@ fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
             spotted: false,
             engine_mode: None,
             damage_stickers: Vec::new(),
+            fire: None,
         }))
 }
 
@@ -726,6 +750,9 @@ const TARGET_DISTANCE: f32 = 40.0;
 /// How far the player's vehicle spots others, in metres on the ground plane: the most
 /// any vehicle can see, until vehicles have their own.
 const VIEW_RANGE: f32 = 445.0;
+
+/// How long the target burns after its last hit, in seconds.
+const TARGET_FIRE_DURATION: f64 = 5.0;
 
 /// Whether the target fires back at the player.
 const TARGET_FIRES: bool = false;

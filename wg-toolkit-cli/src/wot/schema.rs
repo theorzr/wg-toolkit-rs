@@ -18,6 +18,7 @@ pub fn register(app: &mut base::App) -> Result<(), BindError> {
     app.register_component::<AvatarVehiclesInfo>()?;
     app.register_component::<OwnVehicle>()?;
     app.register_component::<GunMarkerComponent>()?;
+    app.register_component::<Fire>()?;
     Ok(())
 }
 
@@ -144,6 +145,16 @@ component_schema! {
     pub GunMarkerComponent {
         cell {
             gunMarker: Option<GunMarker>,
+        }
+    }
+}
+
+component_schema! {
+    /// A fire on a vehicle, burning while the vehicle has it.
+    pub Fire {
+        cell {
+            /// A `FIRE_INFO` dict, or none as captured.
+            fireInfo: Value,
         }
     }
 }
