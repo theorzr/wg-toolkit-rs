@@ -200,10 +200,11 @@ impl BaseThread {
             return Ok(None);
         };
 
+        // The player's name is the only thing left from the capture, until accounts have
+        // their own.
         let mut public = captured_public_info(properties)?;
         if let Some(config) = &battle.config {
-            public.compDescr = Bytes(config.descr.clone());
-            public.maxHealth = config.max_health as u16;
+            public = public_info(public.name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
         }
 
         info!(avatar = %battle.avatar, "Creating vehicle {}", entity.entity_id);
@@ -298,27 +299,16 @@ impl BaseThread {
 
     }
 
-    /// Create the target in its battle's space, from the player's captured vehicle: its
-    /// own id, descriptor, name, team and health, no avatar, [`TARGET_DISTANCE`] in front
-    /// of the player's start, facing it.
+    /// Create the target in its battle's space, from its arena entry: its own id,
+    /// descriptor, name and team, no avatar, [`TARGET_DISTANCE`] in front of the
+    /// player's start, facing it.
     fn create_target(&mut self, space: SpaceKey, target: &mut Target) -> io::Result<()> {
 
         let Some(captured) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
-        let (Some(properties), Some(start)) = (&captured.vehicle_properties, &captured.vehicle_position) else {
-            warn!("The capture has no vehicle to make the target from");
+        let Some(start) = &captured.vehicle_position else {
+            warn!("The capture has no start to place the target from");
             return Ok(());
         };
-
-        // The player's vehicle's, with the target's own name, vehicle, team and health,
-        // and neither the player's camouflage nor marks.
-        let field = |name: &str| target.info.get(name).cloned();
-        let mut public = captured_public_info(properties)?;
-        public.name = field("name").and_then(String::from_value).unwrap_or(public.name);
-        public.compDescr = field("compDescr").and_then(Bytes::from_value).unwrap_or(public.compDescr);
-        public.team = field("team").as_ref().and_then(Value::as_i64).map_or(public.team, |team| team as u8);
-        public.maxHealth = field("maxHealth").as_ref().and_then(Value::as_i64).map_or(public.maxHealth, |health| health as u16);
-        public.outfit = Bytes::default();
-        public.marksOnGun = 0;
 
         let yaw = start.direction.z;
         let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
@@ -341,6 +331,11 @@ impl BaseThread {
         let gun = Gun::new(ammo, def.aiming.reload_time).with_shot_ids_from(TARGET_FIRST_SHOT_ID);
         let driven = Vehicle::new(position, direction, limits, def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
+
+        let field = |name: &str| target.info.get(name).cloned();
+        let name = field("name").and_then(String::from_value).unwrap_or_default();
+        let team = field("team").as_ref().and_then(Value::as_i64).map_or(PLAYER_TEAM % 2 + 1, |team| team as u8);
+        let public = public_info(name, &compact_descr, team, def.max_health as u16, def.crew_roles.len());
 
         info!("Creating target {} ({}) at {position:?}", target.entity_id, def.name);
         let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
@@ -743,6 +738,9 @@ const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
 /// The target's first shot id, apart from the player's.
 const TARGET_FIRST_SHOT_ID: i32 = 1_000_000;
 
+/// The player's team, the target being in the other.
+const PLAYER_TEAM: u8 = 1;
+
 /// How far in front of the player's start the target stands, in metres.
 const TARGET_DISTANCE: f32 = 40.0;
 
@@ -774,6 +772,26 @@ fn captured_public_info(properties: &ChangedProperties) -> io::Result<PublicVehi
         .find(|(_, name, _)| &**name == "publicInfo")
         .and_then(|(_, _, value)| PublicVehicleInfo::from_value(value.clone()))
         .ok_or_else(|| invalid_data("the captured vehicle has no public info"))
+}
+
+/// The `publicInfo` of a vehicle of the given name, descriptor, team, health and crew
+/// size: no camouflage, marks, crew skins nor frags.
+fn public_info(name: String, descr: &[u8], team: u8, max_health: u16, crew: usize) -> PublicVehicleInfo {
+    PublicVehicleInfo {
+        name,
+        compDescr: Bytes(descr.to_vec()),
+        outfit: Bytes::default(),
+        outfitLevel: 0,
+        index: 0,
+        team,
+        prebattleID: EntityId(0),
+        marksOnGun: 0,
+        crewGroups: vec![0; crew],
+        commanderSkinID: 0,
+        maxHealth: max_health,
+        respawnID: 0,
+        stFrags: 0,
+    }
 }
 
 /// Set what every client gets of a fresh vehicle, before its creation on any: its
