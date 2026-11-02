@@ -13,6 +13,7 @@
 //! convert, never to encode.
 
 use std::any::TypeId;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::fmt;
@@ -510,12 +511,118 @@ fn describe(ty: &Ty) -> String {
 }
 
 
+// ========== //
+//    KEYS    //
+// ========== //
+
+/// An entity of an app, of the given schema: what the app gave when it created it, or
+/// decoded a call to it with. Stale once the entity is gone, even if another one takes
+/// its place.
+pub struct EntityKey<T> {
+    pub(crate) slot: u32,
+    pub(crate) generation: u32,
+    pub(crate) id: u32,
+    _schema: PhantomData<fn() -> T>,
+}
+
+/// The schema of an [`EntityKey`] to an entity of any type.
+pub enum AnyEntity {}
+
+impl<T> EntityKey<T> {
+
+    pub(crate) fn new(slot: u32, generation: u32, id: u32) -> Self {
+        Self { slot, generation, id, _schema: PhantomData }
+    }
+
+    /// The entity's id, as the protocol carries it.
+    pub fn id(&self) -> EntityId {
+        EntityId(self.id)
+    }
+
+    /// The same key, to an entity of any type.
+    pub fn any(self) -> EntityKey<AnyEntity> {
+        EntityKey::new(self.slot, self.generation, self.id)
+    }
+
+    /// The same key, to an entity of the given type, which the caller checked it is.
+    pub(crate) fn cast<U>(self) -> EntityKey<U> {
+        EntityKey::new(self.slot, self.generation, self.id)
+    }
+
+}
+
+impl<T> Clone for EntityKey<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for EntityKey<T> {}
+
+impl<T> PartialEq for EntityKey<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.slot, self.generation) == (other.slot, other.generation)
+    }
+}
+
+impl<T> Eq for EntityKey<T> {}
+
+impl<T> std::hash::Hash for EntityKey<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.slot, self.generation).hash(state);
+    }
+}
+
+impl<T> fmt::Debug for EntityKey<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EntityKey({})", self.id)
+    }
+}
+
+impl<T> fmt::Display for EntityKey<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.id, f)
+    }
+}
+
+/// An entity's id as the protocol carries it, an `OBJECT_ID` say: in method arguments
+/// and properties, where a key cannot go since one cannot be read back from a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityId(pub u32);
+
+impl fmt::Display for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// An `INT32` or a `UINT32`.
+impl ScriptType for EntityId {
+    fn check(ty: &Ty) -> bool {
+        matches!(kind(ty), TyKind::Int32 | TyKind::UInt32)
+    }
+    fn into_value(self, ty: &Ty) -> Value {
+        match kind(ty) {
+            TyKind::Int32 => Value::Int32(self.0 as i32),
+            _ => Value::UInt32(self.0),
+        }
+    }
+    fn from_value(value: Value) -> Option<Self> {
+        match value {
+            Value::Int32(id) => Some(Self(id as u32)),
+            Value::UInt32(id) => Some(Self(id)),
+            _ => None,
+        }
+    }
+}
+
+
 // =========== //
 //    VIEWS    //
 // =========== //
 
 /// An entity of a client, as a schema sees it: derefs to its schema's view, whose
-/// methods call and set its members.
+/// methods call its client methods and set and get its properties.
 pub struct Entity<'a, T: EntitySchema> {
     view: T::View<'a>,
 }
@@ -526,9 +633,10 @@ impl<'a, T: EntitySchema> Entity<'a, T> {
         Self { view: T::View::new(raw) }
     }
 
-    /// The entity's id.
-    pub fn entity_id(&self) -> u32 {
-        self.view.raw().entity_id
+    /// The entity's key.
+    pub fn key(&self) -> EntityKey<T> {
+        let raw = self.view.raw();
+        EntityKey::new(raw.slot, raw.generation, raw.id)
     }
 
     /// Call a client method the schema doesn't declare, by name, with values left
@@ -552,13 +660,17 @@ impl<'a, T: EntitySchema> DerefMut for Entity<'a, T> {
     }
 }
 
-/// What a view writes through: the entity, its tables, its binding and the outbox of
-/// the client it is on.
+/// What a view goes through: the entity, its property values, its tables, its binding
+/// and the outbox of the client it is on.
 pub struct RawEntity<'a> {
+    pub(crate) slot: u32,
+    pub(crate) generation: u32,
+    pub(crate) id: u32,
+    /// Its client-visible property values, by exposed id, when known.
+    pub(crate) properties: &'a mut [Option<Value>],
     pub(crate) out: &'a mut ClientOutbox,
     pub(crate) dispatch: &'a EntityDispatch,
     pub(crate) bound: &'a Bound,
-    pub(crate) entity_id: u32,
     /// Whether it is its client's player entity, selected as such.
     pub(crate) is_player: bool,
 }
@@ -569,7 +681,7 @@ impl RawEntity<'_> {
         if self.is_player {
             self.out.select_player()
         } else {
-            self.out.select_entity(self.entity_id)
+            self.out.select_entity(self.id)
         }
     }
 
@@ -585,8 +697,16 @@ impl RawEntity<'_> {
     pub fn set_property<V: ScriptType>(&mut self, index: usize, value: V) -> io::Result<()> {
         let exposed_id = self.bound.properties[index];
         let value = value.into_value(&self.dispatch.properties[exposed_id as usize].ty);
+        self.properties[exposed_id as usize] = Some(value.clone());
         self.select()?;
         self.out.write_selected(IndexedEntityProperty { exposed_id, value }, &self.dispatch.properties[..])
+    }
+
+    /// The declared property at the given index, if its value is known: given at
+    /// creation, or set since.
+    pub fn get_property<V: ScriptType>(&self, index: usize) -> Option<V> {
+        let exposed_id = self.bound.properties[index];
+        V::from_value(self.properties[exposed_id as usize].clone()?)
     }
 
     fn call_dynamic(&mut self, name: &str, args: Vec<Value>) -> io::Result<()> {
@@ -637,19 +757,19 @@ macro_rules! script_dict {
             $( $(#[$field_meta])* $field_vis $field: $ty ),*
         }
 
-        impl $crate::app::schema::ScriptType for $name {
+        impl $crate::app::entity::ScriptType for $name {
 
             fn check(ty: &$crate::script::Ty) -> bool {
-                $crate::app::schema::dict_check(ty, &[
-                    $( (stringify!($field), <$ty as $crate::app::schema::ScriptType>::check) ),*
+                $crate::app::entity::dict_check(ty, &[
+                    $( (stringify!($field), <$ty as $crate::app::entity::ScriptType>::check) ),*
                 ])
             }
 
             fn into_value(self, ty: &$crate::script::Ty) -> $crate::script::Value {
                 let mut dict = ::std::collections::BTreeMap::new();
                 $(
-                    let field_ty = $crate::app::schema::dict_field_ty(ty, stringify!($field)).expect("checked");
-                    dict.insert(::std::sync::Arc::from(stringify!($field)), $crate::app::schema::ScriptType::into_value(self.$field, field_ty));
+                    let field_ty = $crate::app::entity::dict_field_ty(ty, stringify!($field)).expect("checked");
+                    dict.insert(::std::sync::Arc::from(stringify!($field)), $crate::app::entity::ScriptType::into_value(self.$field, field_ty));
                 )*
                 $crate::script::Value::Dict(dict)
             }
@@ -657,7 +777,7 @@ macro_rules! script_dict {
             fn from_value(value: $crate::script::Value) -> ::std::option::Option<Self> {
                 let $crate::script::Value::Dict(mut dict) = value else { return None };
                 Some(Self {
-                    $( $field: $crate::app::schema::ScriptType::from_value(dict.remove(stringify!($field))?)? ),*
+                    $( $field: $crate::app::entity::ScriptType::from_value(dict.remove(stringify!($field))?)? ),*
                 })
             }
 
@@ -668,7 +788,8 @@ macro_rules! script_dict {
 
 /// Declare the members of an entity type that a server uses, each with Rust types:
 /// generates the schema, the view its [`Entity`] derefs to, with a method per client
-/// method and a setter per property, and an enum per side of the calls it receives.
+/// method and a getter and a setter per property, and an enum per side of the calls it
+/// receives.
 ///
 /// ```ignore
 /// entity_schema! {
@@ -748,7 +869,7 @@ macro_rules! entity_schema {
         [ $( { $(#[$base_prop_meta:meta])* $base_prop:ident : $base_prop_ty:ty } )* ]
         [ $( { $(#[$cell_meta:meta])* $cell:ident ( $( $cell_arg:ident : $cell_ty:ty ),* $(,)? ) } )* ]
         [ $( { $(#[$cell_prop_meta:meta])* $cell_prop:ident : $cell_prop_ty:ty } )* ]
-    ) => { $crate::app::schema::__paste! {
+    ) => { $crate::app::entity::__paste! {
 
         $(#[$meta])*
         $vis enum $name {}
@@ -762,51 +883,51 @@ macro_rules! entity_schema {
             pub enum Props { $( $base_prop, )* $( $cell_prop, )* }
         }
 
-        impl $crate::app::schema::Schema for $name {
+        impl $crate::app::entity::Schema for $name {
             const NAME: &'static str = stringify!($name);
-            const CLIENT_METHODS: &'static [$crate::app::schema::MethodDecl] = &[ $(
-                $crate::app::schema::MethodDecl {
+            const CLIENT_METHODS: &'static [$crate::app::entity::MethodDecl] = &[ $(
+                $crate::app::entity::MethodDecl {
                     name: stringify!($client),
-                    args: <( $( $client_ty, )* ) as $crate::app::schema::ScriptArgs>::TYPES,
+                    args: <( $( $client_ty, )* ) as $crate::app::entity::ScriptArgs>::TYPES,
                 },
             )* ];
-            const BASE_METHODS: &'static [$crate::app::schema::MethodDecl] = &[ $(
-                $crate::app::schema::MethodDecl {
+            const BASE_METHODS: &'static [$crate::app::entity::MethodDecl] = &[ $(
+                $crate::app::entity::MethodDecl {
                     name: stringify!($base),
-                    args: <( $( $base_ty, )* ) as $crate::app::schema::ScriptArgs>::TYPES,
+                    args: <( $( $base_ty, )* ) as $crate::app::entity::ScriptArgs>::TYPES,
                 },
             )* ];
-            const CELL_METHODS: &'static [$crate::app::schema::MethodDecl] = &[ $(
-                $crate::app::schema::MethodDecl {
+            const CELL_METHODS: &'static [$crate::app::entity::MethodDecl] = &[ $(
+                $crate::app::entity::MethodDecl {
                     name: stringify!($cell),
-                    args: <( $( $cell_ty, )* ) as $crate::app::schema::ScriptArgs>::TYPES,
+                    args: <( $( $cell_ty, )* ) as $crate::app::entity::ScriptArgs>::TYPES,
                 },
             )* ];
-            const PROPERTIES: &'static [$crate::app::schema::PropertyDecl] = &[
-                $( $crate::app::schema::PropertyDecl {
+            const PROPERTIES: &'static [$crate::app::entity::PropertyDecl] = &[
+                $( $crate::app::entity::PropertyDecl {
                     name: stringify!($base_prop),
-                    side: $crate::app::schema::Side::Base,
-                    ty: $crate::app::schema::TypeDecl::of::<$base_prop_ty>(),
+                    side: $crate::app::entity::Side::Base,
+                    ty: $crate::app::entity::TypeDecl::of::<$base_prop_ty>(),
                 }, )*
-                $( $crate::app::schema::PropertyDecl {
+                $( $crate::app::entity::PropertyDecl {
                     name: stringify!($cell_prop),
-                    side: $crate::app::schema::Side::Cell,
-                    ty: $crate::app::schema::TypeDecl::of::<$cell_prop_ty>(),
+                    side: $crate::app::entity::Side::Cell,
+                    ty: $crate::app::entity::TypeDecl::of::<$cell_prop_ty>(),
                 }, )*
             ];
         }
 
-        impl $crate::app::schema::EntitySchema for $name {
+        impl $crate::app::entity::EntitySchema for $name {
             type View<'a> = [<$name View>]<'a>;
         }
 
         /// The view of an entity, see its schema.
-        $vis struct [<$name View>]<'a>($crate::app::schema::RawEntity<'a>);
+        $vis struct [<$name View>]<'a>($crate::app::entity::RawEntity<'a>);
 
-        impl<'a> $crate::app::schema::View<'a> for [<$name View>]<'a> {
-            fn new(raw: $crate::app::schema::RawEntity<'a>) -> Self { Self(raw) }
-            fn raw(&self) -> &$crate::app::schema::RawEntity<'a> { &self.0 }
-            fn raw_mut(&mut self) -> &mut $crate::app::schema::RawEntity<'a> { &mut self.0 }
+        impl<'a> $crate::app::entity::View<'a> for [<$name View>]<'a> {
+            fn new(raw: $crate::app::entity::RawEntity<'a>) -> Self { Self(raw) }
+            fn raw(&self) -> &$crate::app::entity::RawEntity<'a> { &self.0 }
+            fn raw_mut(&mut self) -> &mut $crate::app::entity::RawEntity<'a> { &mut self.0 }
         }
 
         #[allow(non_snake_case, dead_code)]
@@ -819,11 +940,19 @@ macro_rules! entity_schema {
             )*
             $(
                 $(#[$base_prop_meta])*
+                pub fn $base_prop(&self) -> ::std::option::Option<$base_prop_ty> {
+                    self.0.get_property([<__ $name:snake _schema>]::Props::$base_prop as usize)
+                }
+                $(#[$base_prop_meta])*
                 pub fn [<set_ $base_prop>](&mut self, value: $base_prop_ty) -> ::std::io::Result<()> {
                     self.0.set_property([<__ $name:snake _schema>]::Props::$base_prop as usize, value)
                 }
             )*
             $(
+                $(#[$cell_prop_meta])*
+                pub fn $cell_prop(&self) -> ::std::option::Option<$cell_prop_ty> {
+                    self.0.get_property([<__ $name:snake _schema>]::Props::$cell_prop as usize)
+                }
                 $(#[$cell_prop_meta])*
                 pub fn [<set_ $cell_prop>](&mut self, value: $cell_prop_ty) -> ::std::io::Result<()> {
                     self.0.set_property([<__ $name:snake _schema>]::Props::$cell_prop as usize, value)
@@ -840,7 +969,7 @@ macro_rules! entity_schema {
     (@calls $vis:vis $name:ident $side:ident []) => {};
     (@calls $vis:vis $name:ident $side:ident
         [ $( { $(#[$fn_meta:meta])* $fn_name:ident ( $( $arg:ident : $ty:ty ),* ) } )+ ]
-    ) => { $crate::app::schema::__paste! {
+    ) => { $crate::app::entity::__paste! {
 
         #[doc = concat!("The ", stringify!($side), " methods of [`", stringify!($name), "`] received.")]
         #[derive(Debug)]
@@ -848,14 +977,14 @@ macro_rules! entity_schema {
             $( $(#[$fn_meta])* [<$fn_name:camel>] { $( $arg: $ty ),* }, )*
         }
 
-        impl $crate::app::schema::Calls for [<$name $side>] {
+        impl $crate::app::entity::Calls for [<$name $side>] {
             type Schema = $name;
-            const SIDE: $crate::app::schema::Side = $crate::app::schema::Side::$side;
+            const SIDE: $crate::app::entity::Side = $crate::app::entity::Side::$side;
             #[allow(unused)]
             fn decode(index: usize, args: ::std::vec::Vec<$crate::script::Value>) -> ::std::option::Option<Self> {
                 $(
                     if index == [<__ $name:snake _schema>]::$side::$fn_name as usize {
-                        let ( $( $arg, )* ) = <( $( $ty, )* ) as $crate::app::schema::ScriptArgs>::from_values(args)?;
+                        let ( $( $arg, )* ) = <( $( $ty, )* ) as $crate::app::entity::ScriptArgs>::from_values(args)?;
                         return Some(Self::[<$fn_name:camel>] { $( $arg ),* });
                     }
                 )*

@@ -28,7 +28,7 @@ const FLUSH_PACKETS: usize = 8;
 
 /// The outboxes of every client an app sends to.
 #[derive(Debug, Default)]
-pub(crate) struct Outbox {
+pub struct Outbox {
     clients: HashMap<SocketAddr, ClientOutbox>,
 }
 
@@ -42,6 +42,11 @@ impl Outbox {
             client.flush(addr, protocol, socket)?;
         }
         Ok(client)
+    }
+
+    /// Forget what waits for the given client, gone.
+    pub fn remove(&mut self, addr: SocketAddr) {
+        self.clients.remove(&addr);
     }
 
     /// Send what waits for the given client, as one reliable bundle.
@@ -67,7 +72,7 @@ impl Outbox {
 
 /// The bundle waiting to be sent to one client, and what it selects, see [`Outbox`].
 #[derive(Debug)]
-pub(crate) struct ClientOutbox {
+pub struct ClientOutbox {
     bundle: Bundle,
     /// The entity the client will have selected once it has read the bundle so far, when
     /// known: any element written with [`Self::write`] may select another.

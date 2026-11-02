@@ -3436,7 +3436,7 @@ impl Element<[PropertyDef]> for EntityProperty {
 }
 
 /// An [`EntityProperty`] given by its exposed id rather than its name, as bound schemas
-/// write them (see [`crate::app::schema`]). Write-only: what is read is an
+/// write them (see [`crate::app::entity`]). Write-only: what is read is an
 /// [`EntityProperty`].
 #[derive(Debug, Clone)]
 pub struct IndexedEntityProperty {

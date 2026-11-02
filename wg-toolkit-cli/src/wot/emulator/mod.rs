@@ -1,52 +1,50 @@
 //! The emulator implementation of the login + base applications, we are trying to
 //! reproduce the official server implementation.
 
-use std::collections::{hash_map, BTreeMap, HashMap};
-use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use tracing::{debug, info, instrument, warn};
-use rsa::rand_core::{OsRng, RngCore};
-use wgtk::app::{login, base};
-use wgtk::script::Script;
-use rsa::RsaPrivateKey;
-use blowfish::Blowfish;
-
 mod account;
 mod capture;
 mod bot;
 mod gun;
 mod physics;
 
+use std::collections::{hash_map, BTreeMap, HashMap};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::io::{self, Write};
+use std::thread;
 
-use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
-use wgtk::app::client::element::{ChangedProperties, EntityProperty, NrlIdList, NrlUpdateNode, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
-use wgtk::script::{PythonValue, StringValue};
-use wgtk::util::io::serde_pickle_ser_options;
+use blowfish::Blowfish;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use std::io::Write;
 use glam::Vec3;
-use wgtk::script::Value;
+use rsa::rand_core::{OsRng, RngCore};
+use rsa::RsaPrivateKey;
+use tracing::{debug, info, instrument, warn};
 
-use account::AccountData;
-use capture::{Answer, CapturedSession};
-use bot::Bot;
-use gun::{Gun, HitTarget, Landing, Shot};
-use physics::{MotionLimits, Vehicle};
+use wgtk::app::{login, base};
+use wgtk::app::base::ClientKey;
+use wgtk::app::client::element::{ChangedProperties, EntityProperty, NrlIdList, NrlUpdateNode, NrlBody, NrlChild, NrlComponentData, NrlMessage, NrlNode, NrlStream};
+use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
+use wgtk::app::entity::{Bytes, Entity, EntityId, EntityKey};
+use wgtk::res::fs::ResFilesystem;
+use wgtk::script::{PythonValue, Script, StringValue, Value};
+use wgtk::space::terrain::Terrain;
+use wgtk::util::io::serde_pickle_ser_options;
+
+use crate::CliResult;
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
-use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
+use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::schema::{self, Account, Avatar, AvatarBase, AvatarCell, HitPoint, ShotResult, VehicleCell};
-use wgtk::app::schema::{Bytes, Entity};
-use wgtk::res::fs::ResFilesystem;
-use wgtk::space::terrain::Terrain;
-use crate::CliResult;
+
+use account::AccountData;
+use bot::Bot;
+use capture::{Answer, CapturedSession};
+use gun::{Gun, HitTarget, Landing, Shot};
+use physics::{MotionLimits, Vehicle};
 
 
 pub fn run(
@@ -145,7 +143,7 @@ pub fn run(
         account,
         game_dir: game_dir.to_path_buf(),
         terrain,
-        players: HashMap::new(),
+        accounts: HashMap::new(),
         enqueued: HashMap::new(),
         pending_switches: HashMap::new(),
         pending_returns: HashMap::new(),
@@ -181,10 +179,10 @@ struct BaseThread {
     game_dir: PathBuf,
     /// The battle map's terrain.
     terrain: Option<Terrain>,
-    /// Each client's player entity.
-    players: HashMap<SocketAddr, base::Handle>,
+    /// Each client's account, outside of battles.
+    accounts: HashMap<ClientKey, EntityKey<Account>>,
     /// Clients waiting in the battle queue, with the inventory id of their vehicle.
-    enqueued: HashMap<SocketAddr, i64>,
+    enqueued: HashMap<ClientKey, i64>,
     /// Clients told to switch base app for their battle, by the session key they will
     /// log in again with, with the IP they will come from, their blowfish key and
     /// their vehicle.
@@ -193,7 +191,7 @@ struct BaseThread {
     /// the session key they will log in with.
     pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
-    battle_clients: HashMap<SocketAddr, BattleClient>,
+    battle_clients: HashMap<ClientKey, BattleClient>,
 }
 
 /// A client connected for a battle.
@@ -201,6 +199,8 @@ struct BaseThread {
 struct BattleClient {
     /// Its vehicle's configuration, the captured vehicle's when `None`.
     config: Option<VehicleConfig>,
+    /// Its avatar, once created.
+    avatar: Option<EntityKey<Avatar>>,
     /// When its game time started, at 0: the battle's clock, which arena periods end on.
     joined: Instant,
     /// The ticks sent to it, the first being tick 0.
@@ -218,7 +218,8 @@ struct BattleClient {
 #[derive(Debug, Clone)]
 struct Target {
     entity_id: u32,
-    entity_type_id: u16,
+    /// Its entity, once created.
+    entity: Option<EntityKey<schema::Vehicle>>,
     /// Its `vehiclesInfo` entry's fields, which its `publicInfo` repeats.
     info: BTreeMap<Arc<str>, Value>,
     /// Its driver and its collision models, once created.
@@ -235,8 +236,8 @@ struct Target {
 /// knows it.
 #[derive(Debug)]
 struct DrivenVehicle {
+    entity: EntityKey<schema::Vehicle>,
     id_alias: u8,
-    entity_type_id: u16,
     vehicle: Vehicle,
     /// The node of its `GunMarkerComponent`'s `gunMarker` property, once created.
     gun_marker_node: Option<u16>,
@@ -244,7 +245,6 @@ struct DrivenVehicle {
     engine_mode: Option<[u8; 2]>,
     /// The avatar's `ownVehicleGear` last sent, likewise.
     engine_gear: Option<u8>,
-    entity_id: u32,
     collision: Arc<VehicleCollision>,
     gun: Gun,
     /// The nodes of its `OwnVehicle`'s `vehicleAmmoList` and `vehicleGunReloadTime`.
@@ -254,7 +254,7 @@ struct DrivenVehicle {
     nrl_updates: Vec<NrlUpdateNode>,
     /// The shells in flight, its and the target's, with the game time they land at and
     /// who fired them.
-    shots: Vec<(f64, u32, Shot)>,
+    shots: Vec<(f64, EntityId, Shot)>,
     health: i64,
     max_health: i64,
     /// Its `damageStickers`: where shells pierced it.
@@ -364,17 +364,17 @@ impl BaseThread {
 
     /// Bring a client that enabled entities to its account, as the captured server did:
     /// the `Account` entity, then `showGUI`.
-    fn enter_account(&mut self, addr: SocketAddr) -> io::Result<()> {
+    fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(session) = &self.session else { return Ok(()) };
 
         let Some((data, components_count)) = &session.account else { return Ok(()) };
-        let handle = self.app.create_base_player(addr, "Account", data.clone(), *components_count)?;
-        self.players.insert(addr, handle);
-        info!(%addr, "Created account {}", handle.entity_id());
+        let account = self.app.create_base_player::<Account>(client, data.clone(), *components_count)?;
+        self.accounts.insert(client, account);
+        info!(%client, "Created account {account}");
 
         if let Some(args) = &session.show_gui {
-            self.app.call_method(handle, "showGUI", args.clone())?;
+            self.app.call_method(account, "showGUI", args.clone())?;
         }
 
         Ok(())
@@ -383,29 +383,29 @@ impl BaseThread {
 
     /// The client's arena is ready: tell its account, then switch it to the base app
     /// holding its avatar, this one, as the captured server did.
-    fn start_battle(&mut self, addr: SocketAddr, vehicle_id: i64) -> io::Result<()> {
+    fn start_battle(&mut self, client: ClientKey, vehicle_id: i64) -> io::Result<()> {
 
         if self.session.as_ref().and_then(|s| s.battle.as_ref()).is_none() {
-            warn!(%addr, "The capture has no battle to enter");
+            warn!(%client, "The capture has no battle to enter");
             return Ok(());
         }
 
-        let (Some(&handle), Some((session_key, blowfish))) = (self.players.get(&addr), self.app.client_keys(addr)) else {
+        let (Some(&account), Some((session_key, blowfish))) = (self.accounts.get(&client), self.app.client_keys(client)) else {
             return Ok(());
         };
 
-        self.app.entity::<Account>(handle.entity_id())?.onArenaCreated()?;
+        self.app.entity(account)?.onArenaCreated()?;
 
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
         let config = self.vehicle_config(vehicle_id)
-            .inspect_err(|e| warn!(%addr, "Failed to read vehicle {vehicle_id}, the captured one is used: {e}"))
+            .inspect_err(|e| warn!(%client, "Failed to read vehicle {vehicle_id}, the captured one is used: {e}"))
             .ok();
-        self.pending_switches.insert(session_key, (addr.ip(), blowfish, config));
-        self.app.switch_base_app(addr, base_addr, true)?;
-        self.players.remove(&addr);
-        info!(%addr, "Arena created, switching to {base_addr}");
+        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, config));
+        self.app.switch_base_app(client, base_addr, true)?;
+        self.accounts.remove(&client);
+        info!(%client, "Arena created, switching to {base_addr}");
 
         Ok(())
 
@@ -413,15 +413,16 @@ impl BaseThread {
 
     /// Switch a battle client's arena to a period: the countdown, then the battle. The
     /// update is `(period, end time, length, extra)`, pickled then compressed.
-    fn arena_period(&mut self, addr: SocketAddr, period: u8) -> io::Result<()> {
+    fn arena_period(&mut self, client: ClientKey, period: u8) -> io::Result<()> {
 
-        let (Some(client), Some(&handle)) = (self.battle_clients.get_mut(&addr), self.players.get(&addr)) else { return Ok(()) };
+        let Some(battle) = self.battle_clients.get_mut(&client) else { return Ok(()) };
+        let Some(avatar) = battle.avatar else { return Ok(()) };
         let length = match period {
             ARENA_PERIOD_PREBATTLE => PREBATTLE_LENGTH,
             _ => BATTLE_LENGTH,
         };
-        client.next_period = (period == ARENA_PERIOD_PREBATTLE).then(|| (Instant::now() + length, ARENA_PERIOD_BATTLE));
-        let end = client.game_time() + length.as_secs_f64();
+        battle.next_period = (period == ARENA_PERIOD_PREBATTLE).then(|| (Instant::now() + length, ARENA_PERIOD_BATTLE));
+        let end = battle.game_time() + length.as_secs_f64();
 
         let info = serde_pickle::Value::Tuple(vec![
             serde_pickle::Value::I64(period.into()),
@@ -435,8 +436,8 @@ impl BaseThread {
         encoder.write_all(&pickled)?;
         let data = encoder.finish()?;
 
-        self.app.entity::<Avatar>(handle.entity_id())?.updateArena(ARENA_UPDATE_PERIOD, Bytes(data))?;
-        info!(%addr, "Arena period {period} until {end:.1}");
+        self.app.entity(avatar)?.updateArena(ARENA_UPDATE_PERIOD, Bytes(data))?;
+        info!(%client, "Arena period {period} until {end:.1}");
 
         Ok(())
 
@@ -471,39 +472,40 @@ impl BaseThread {
 
     /// Leave the client's battle, as the captured server does: switch it to the base
     /// app again, where it logs in back to its account.
-    fn leave_battle(&mut self, addr: SocketAddr) -> io::Result<()> {
-        let Some((session_key, blowfish)) = self.app.client_keys(addr) else { return Ok(()) };
+    fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
+        let Some((session_key, blowfish)) = self.app.client_keys(client) else { return Ok(()) };
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        self.pending_returns.insert(session_key, (addr.ip(), blowfish));
-        self.app.switch_base_app(addr, base_addr, true)?;
-        self.battle_clients.remove(&addr);
-        self.players.remove(&addr);
-        info!(%addr, "Leaving the battle, switching to {base_addr}");
+        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish));
+        self.app.switch_base_app(client, base_addr, true)?;
+        self.battle_clients.remove(&client);
+        info!(%client, "Leaving the battle, switching to {base_addr}");
         Ok(())
     }
 
     /// Bring a client that reconnected for its battle to its avatar.
-    fn enter_battle(&mut self, addr: SocketAddr) -> io::Result<()> {
+    fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some((data, components_count)) = self.session.as_ref()
             .and_then(|s| s.battle.as_ref())
             .and_then(|b| b.avatar.as_ref()) else {
-            warn!(%addr, "The capture has no avatar to create");
+            warn!(%client, "The capture has no avatar to create");
             return Ok(());
         };
 
-        let handle = self.app.create_base_player(addr, "Avatar", data.clone(), *components_count)?;
-        self.players.insert(addr, handle);
-        info!(%addr, "Created avatar {}", handle.entity_id());
+        let avatar = self.app.create_base_player::<Avatar>(client, data.clone(), *components_count)?;
+        if let Some(battle) = self.battle_clients.get_mut(&client) {
+            battle.avatar = Some(avatar);
+        }
+        info!(%client, "Created avatar {avatar}");
 
         // The battle's setup, as the captured server sent it: the arena, the avatar's
         // cell side in the space, the space and its map, then the player's vehicle
         // entering the area of interest.
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         for (method, args) in &battle.calls {
-            self.app.call_method(handle, method, args.clone())?;
+            self.app.call_method(avatar, method, args.clone())?;
         }
 
         // No `SetCellAppExtAddress`, which the captured server sends: given one, the
@@ -512,56 +514,56 @@ impl BaseThread {
         // comes through this base app.
 
         let Some(cell) = &battle.cell_player else {
-            warn!(%addr, "The capture has no cell player");
+            warn!(%client, "The capture has no cell player");
             return Ok(());
         };
-        self.app.create_cell_player(handle, cell.space_id, cell.vehicle_id, cell.position, cell.direction,
+        self.app.create_cell_player(avatar, cell.space_id, cell.vehicle_id, cell.position, cell.direction,
             cell.packed_xz_scale, cell.cell_data.clone())?;
 
         for data in &battle.space_properties {
-            self.app.space_property(addr, data.clone())?;
+            self.app.space_property(client, data.clone())?;
         }
         if let Some(geometry) = &battle.geometry {
-            self.app.add_space_geometry_mapping(addr, geometry.space_id, geometry.entry_id.addr, &geometry.path)?;
-            info!(%addr, "Entering space {} with {}", geometry.space_id, geometry.path);
+            self.app.add_space_geometry_mapping(client, geometry.space_id, geometry.entry_id.addr, &geometry.path)?;
+            info!(%client, "Entering space {} with {}", geometry.space_id, geometry.path);
         }
 
         // Its position and properties follow its creation, see `create_vehicle`.
         if let Some(alias) = battle.vehicle_alias {
-            self.app.enter_aoi(addr, cell.vehicle_id, alias)?;
+            self.app.enter_aoi(client, cell.vehicle_id, alias)?;
         }
 
         // An enemy to shoot at, created likewise once the client asks, see
         // `create_target`.
         let target = battle.arena_info.as_ref().and_then(|arena| enemy_of(&arena.nrl, cell.vehicle_id));
         if let Some(target) = &target {
-            self.app.enter_aoi(addr, target.entity_id, TARGET_ALIAS)?;
-            info!(%addr, "Target {} ({:?})", target.entity_id, target.info.get("name"));
+            self.app.enter_aoi(client, target.entity_id, TARGET_ALIAS)?;
+            info!(%client, "Target {} ({:?})", target.entity_id, target.info.get("name"));
         }
-        if let Some(client) = self.battle_clients.get_mut(&addr) {
-            client.target = target.clone();
+        if let Some(battle) = self.battle_clients.get_mut(&client) {
+            battle.target = target.clone();
         }
 
         // The arena's info entity, created right away as entities without an alias are,
         // then given its vehicles: only the player's, the arena having no one else yet.
         if let Some(arena) = &battle.arena_info {
             let Some((type_id, properties)) = &arena.created else {
-                warn!(%addr, "The capture's arena info entity has no creation");
+                warn!(%client, "The capture's arena info entity has no creation");
                 return Ok(());
             };
             let mut properties = properties.clone();
             for (_, name, value) in &mut properties.values {
                 if &**name == "avatarID" {
-                    *value = with_int(value, handle.entity_id().into());
+                    *value = with_int(value, avatar.id().0.into());
                 }
             }
-            let config = self.battle_clients.get(&addr).and_then(|client| client.config.as_ref());
+            let config = self.battle_clients.get(&client).and_then(|battle| battle.config.as_ref());
             let target_id = target.as_ref().map(|target| target.entity_id);
             let stream = arena_vehicles(self.app.dispatch(), &arena.nrl, cell.vehicle_id, target_id, config)?;
-            self.app.enter_aoi(addr, arena.entity_id, NO_ID_ALIAS)?;
-            self.app.create_entity_detailed(addr, arena.entity_id, *type_id, Vec3::ZERO, Vec3::ZERO, &properties)?;
-            self.app.nrl_create_node(addr, stream)?;
-            info!(%addr, "Created arena info {}", arena.entity_id);
+            self.app.enter_aoi(client, arena.entity_id, NO_ID_ALIAS)?;
+            self.app.create_entity_detailed(client, arena.entity_id, *type_id, Vec3::ZERO, Vec3::ZERO, &properties)?;
+            self.app.nrl_create_node(client, stream)?;
+            info!(%client, "Created arena info {}", arena.entity_id);
         }
 
         Ok(())
@@ -570,15 +572,15 @@ impl BaseThread {
 
     /// Create the player's vehicle once the client asks for it, then place it and give
     /// it its properties: the client drops both for an entity it doesn't have yet.
-    fn create_vehicle(&mut self, addr: SocketAddr, entity_id: u32) -> io::Result<()> {
+    fn create_vehicle(&mut self, client: ClientKey, entity_id: u32) -> io::Result<()> {
 
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let Some(entity) = battle.vehicle_entity.as_ref().filter(|e| e.entity_id == entity_id) else { return Ok(()) };
 
         // The vehicle belongs to our avatar, and is the one the client went to battle with.
-        let config = self.battle_clients.get(&addr).and_then(|client| client.config.clone());
+        let config = self.battle_clients.get(&client).and_then(|battle| battle.config.clone());
         let config = config.as_ref();
-        let avatar_id = self.players.get(&addr).map(|handle| handle.entity_id());
+        let avatar_id = self.battle_clients.get(&client).and_then(|battle| battle.avatar).map(|avatar| avatar.id().0);
         let mut entity = entity.clone();
         if let Some(properties) = &battle.vehicle_properties {
             let mut properties = properties.clone();
@@ -596,20 +598,19 @@ impl BaseThread {
             entity.client_data = properties.encode(&dispatch.properties)?;
         }
 
-        info!(%addr, "Creating vehicle {entity_id}");
-        self.app.create_entity(addr, entity.clone())?;
+        info!(%client, "Creating vehicle {entity_id}");
+        let vehicle = self.app.create_entity::<schema::Vehicle>(client, entity)?;
         if let (Some(alias), Some(position)) = (battle.vehicle_alias, &battle.vehicle_position) {
-            self.app.update_position_detailed(addr, alias, position.position, position.direction)?;
+            self.app.update_position_detailed(client, alias, position.position, position.direction)?;
             // From there on it moves as the client drives it.
-            if let (Some(client), Some(config)) = (self.battle_clients.get_mut(&addr), config) {
-                client.driven = Some(DrivenVehicle {
+            if let (Some(battle), Some(config)) = (self.battle_clients.get_mut(&client), config) {
+                battle.driven = Some(DrivenVehicle {
+                    entity: vehicle,
                     id_alias: alias,
-                    entity_type_id: entity.entity_type_id,
                     vehicle: Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()),
                     gun_marker_node: None,
                     engine_mode: None,
                     engine_gear: None,
-                    entity_id,
                     collision: config.collision.clone(),
                     gun: Gun::new(config.shots.iter().cloned().zip(config.ammo.iter().map(|&(_, count)| count)).collect(), config.aiming.reload_time),
                     ammo_node: None,
@@ -628,7 +629,7 @@ impl BaseThread {
             if let Some(config) = config {
                 config.apply_to_update(&mut update);
             }
-            self.app.update_entity(addr, entity_id, entity.entity_type_id, update)?;
+            self.app.update_entity(vehicle, update)?;
         }
 
         // Its `OwnVehicle` component, under an entity node of its own: the client only
@@ -642,13 +643,13 @@ impl BaseThread {
             let ammo_node = property_node(self.app.dispatch(), &stream.messages[1], "vehicleAmmoList");
             let reload_node = property_node(self.app.dispatch(), &stream.messages[1], "vehicleGunReloadTime");
             let health_node = property_node(self.app.dispatch(), &stream.messages[1], "vehicleHealthInfo");
-            if let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|client| client.driven.as_mut()) {
+            if let Some(driven) = self.battle_clients.get_mut(&client).and_then(|battle| battle.driven.as_mut()) {
                 (driven.ammo_node, driven.reload_node, driven.health_node) = (ammo_node, reload_node, health_node);
             }
-            self.app.nrl_create_node(addr, stream)?;
+            self.app.nrl_create_node(client, stream)?;
             let (message, property_node) = gun_marker_component(self.app.dispatch(), entity_node)?;
-            self.app.nrl_create_node(addr, NrlStream { messages: vec![message], rest: Vec::new() })?;
-            if let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|client| client.driven.as_mut()) {
+            self.app.nrl_create_node(client, NrlStream { messages: vec![message], rest: Vec::new() })?;
+            if let Some(driven) = self.battle_clients.get_mut(&client).and_then(|battle| battle.driven.as_mut()) {
                 driven.gun_marker_node = Some(property_node);
             }
         }
@@ -660,12 +661,12 @@ impl BaseThread {
     /// Create the target once the client asks for it, from the player's captured
     /// vehicle: its own id, descriptor, name, team and health, no avatar, then place it
     /// [`TARGET_DISTANCE`] in front of the player's start, facing it.
-    fn create_target(&mut self, addr: SocketAddr) -> io::Result<()> {
+    fn create_target(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(target) = self.battle_clients.get(&addr).and_then(|client| client.target.clone()) else { return Ok(()) };
+        let Some(target) = self.battle_clients.get(&client).and_then(|battle| battle.target.clone()) else { return Ok(()) };
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let (Some(entity), Some(properties), Some(start)) = (&battle.vehicle_entity, &battle.vehicle_properties, &battle.vehicle_position) else {
-            warn!(%addr, "The capture has no vehicle to make the target from");
+            warn!(%client, "The capture has no vehicle to make the target from");
             return Ok(());
         };
 
@@ -727,14 +728,14 @@ impl BaseThread {
         let gun = Gun::new(ammo, def.aiming.reload_time).with_shot_ids_from(TARGET_FIRST_SHOT_ID);
         let bot = Bot::new(Vehicle::new(position, direction, limits, def.aiming.clone()), gun, position);
 
-        info!(%addr, "Creating target {} ({}) at {position:?}", target.entity_id, def.name);
-        if let Some(target) = self.battle_clients.get_mut(&addr).and_then(|client| client.target.as_mut()) {
+        info!(%client, "Creating target {} ({}) at {position:?}", target.entity_id, def.name);
+        let vehicle = self.app.create_entity::<schema::Vehicle>(client, entity)?;
+        if let Some(target) = self.battle_clients.get_mut(&client).and_then(|battle| battle.target.as_mut()) {
             target.bot = Some(bot);
             target.collision = Some(def.collision.clone());
-            target.entity_type_id = entity.entity_type_id;
+            target.entity = Some(vehicle);
         }
-        self.app.create_entity(addr, entity)?;
-        self.app.update_position_detailed(addr, TARGET_ALIAS, position, direction)?;
+        self.app.update_position_detailed(client, TARGET_ALIAS, position, direction)?;
         Ok(())
 
     }
@@ -742,23 +743,23 @@ impl BaseThread {
     /// Fire the client's gun, if loaded: the shell's tracer and the gun's effects, then
     /// one shell fewer and the reload. Where the shell lands follows with
     /// [`Self::land_shot`].
-    fn shoot(&mut self, addr: SocketAddr) -> io::Result<()> {
+    fn shoot(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
-        let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
-        let now = client.game_time();
-        let vehicles: Vec<_> = client.target.iter()
+        let Some(battle) = self.battle_clients.get_mut(&client) else { return Ok(()) };
+        let Some(avatar) = battle.avatar else { return Ok(()) };
+        let now = battle.game_time();
+        let vehicles: Vec<_> = battle.target.iter()
             .filter(|target| target.health > 0)
             .filter_map(|target| Some(hit_target(target.entity_id, &target.bot.as_ref()?.vehicle, target.collision.as_ref()?)))
             .collect();
-        let Some(driven) = client.driven.as_mut() else { return Ok(()) };
+        let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
         let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref(), &vehicles) else {
-            debug!(%addr, "Not loaded, not shooting");
+            debug!(%client, "Not loaded, not shooting");
             return Ok(());
         };
-        info!(%addr, "Shot {} from {:?} lands at {:?} in {:.2} s", shot.id, shot.start, shot.end, shot.flight_time);
-        driven.shots.push((now + f64::from(shot.flight_time), driven.entity_id, shot.clone()));
+        info!(%client, "Shot {} from {:?} lands at {:?} in {:.2} s", shot.id, shot.start, shot.end, shot.flight_time);
+        driven.shots.push((now + f64::from(shot.flight_time), driven.entity.id(), shot.clone()));
 
         let dispatch = self.app.dispatch();
         let ammo = ammo_list(driven.gun.ammo.iter().map(|(def, count)| (def.compact_descr.to_int(), *count)));
@@ -768,31 +769,31 @@ impl BaseThread {
                 driven.nrl_updates.push(property_update(dispatch, "OwnVehicle", name, node, &value)?);
             }
         }
-        let vehicle_id = driven.entity_id;
+        let vehicle = driven.entity;
 
-        show_shot(&mut self.app, avatar, vehicle_id, &shot)
+        show_shot(&mut self.app, avatar, vehicle, &shot)
 
     }
 
     /// A shell gets to its end: it damages the vehicle it hits, explodes on the
     /// terrain, or its tracer stops at its maximum distance.
-    fn land_shot(&mut self, addr: SocketAddr, shooter_id: u32, shot: &Shot) -> io::Result<()> {
-        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
+    fn land_shot(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+        let Some(avatar) = self.battle_clients.get(&client).and_then(|battle| battle.avatar) else { return Ok(()) };
         let def = &shot.def;
-        self.app.entity::<Avatar>(avatar.entity_id())?.stopTracer(shot.id, shot.end)?;
+        self.app.entity(avatar)?.stopTracer(shot.id, shot.end)?;
         match shot.landing {
             Landing::Vehicle(entity_id, hit) => {
-                info!(%addr, "Shot {} hits {entity_id}'s {:?}, material {}, at {:?}", shot.id, hit.part, hit.material_kind, hit.local_point);
-                let player_vehicle = self.battle_clients.get(&addr).and_then(|client| client.driven.as_ref()).map(|driven| driven.entity_id);
-                if Some(entity_id) == player_vehicle {
-                    self.damage_player(addr, shooter_id, shot, &hit)
+                info!(%client, "Shot {} hits {entity_id}'s {:?}, material {}, at {:?}", shot.id, hit.part, hit.material_kind, hit.local_point);
+                let player_vehicle = self.battle_clients.get(&client).and_then(|battle| battle.driven.as_ref()).map(|driven| driven.entity.id());
+                if Some(EntityId(entity_id)) == player_vehicle {
+                    self.damage_player(client, shooter, shot, &hit)
                 } else {
-                    self.damage_target(addr, entity_id, shot, &hit)
+                    self.damage_target(client, entity_id, shot, &hit)
                 }
             }
             // EXPERIMENT: the explosion comes for a shot the client does not know, so that
             // it shows it from these arguments alone.
-            Landing::Terrain => self.app.entity::<Avatar>(avatar.entity_id())?.explodeProjectile(
+            Landing::Terrain => self.app.entity(avatar)?.explodeProjectile(
                 shot.id | 0x4000_0000,
                 def.effects_index,
                 def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
@@ -811,37 +812,38 @@ impl BaseThread {
 
     /// The player's vehicle takes a shell's damage, as the target does: its health
     /// drops, in its `OwnVehicle` too.
-    fn damage_player(&mut self, addr: SocketAddr, shooter_id: u32, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
+    fn damage_player(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
 
-        let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
-        let Some(driven) = client.driven.as_mut().filter(|driven| driven.health > 0) else { return Ok(()) };
+        let Some(battle) = self.battle_clients.get_mut(&client) else { return Ok(()) };
+        let Some(driven) = battle.driven.as_mut().filter(|driven| driven.health > 0) else { return Ok(()) };
         let amount = spread_damage(shot.def.damage);
         let old_health = driven.health;
         driven.health = (old_health - amount).max(0);
         let new_health = driven.health;
         let bounds = driven.collision.parts[hit.part as usize].bounds;
-        info!(%addr, "Player takes {amount} damage, {old_health} -> {new_health}{}", if new_health == 0 { ", destroyed" } else { "" });
+        info!(%client, "Player takes {amount} damage, {old_health} -> {new_health}{}", if new_health == 0 { ", destroyed" } else { "" });
 
         if let Some(node) = driven.health_node {
-            let info = vehicle_health_info(driven.entity_id, new_health);
+            let info = vehicle_health_info(driven.entity.id().0, new_health);
             driven.nrl_updates.push(property_update(self.app.dispatch(), "OwnVehicle", "vehicleHealthInfo", node, &info)?);
         }
         let stickers = add_sticker(&mut driven.damage_stickers, shot, hit, bounds);
-        let damage = Damage { shooter_id, amount, max_health: driven.max_health, old_health, new_health };
-        show_damage(&mut self.app.entity(driven.entity_id)?, shot, hit, bounds, &damage, stickers)
+        let damage = Damage { shooter, amount, max_health: driven.max_health, old_health, new_health };
+        show_damage(&mut self.app.entity(driven.entity)?, shot, hit, bounds, &damage, stickers)
 
     }
 
     /// The target takes a shell's damage, varied by up to [`DAMAGE_SPREAD`] either way:
     /// its health drops, and the player sees the hit, as the captured server shows one.
-    fn damage_target(&mut self, addr: SocketAddr, entity_id: u32, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
+    fn damage_target(&mut self, client: ClientKey, entity_id: u32, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
 
-        let Some(&avatar) = self.players.get(&addr) else { return Ok(()) };
-        let Some(client) = self.battle_clients.get_mut(&addr) else { return Ok(()) };
-        let shooter_id = client.driven.as_ref().map_or(0, |driven| driven.entity_id);
-        let Some(target) = client.target.as_mut().filter(|target| target.entity_id == entity_id && target.health > 0) else {
+        let Some(battle) = self.battle_clients.get_mut(&client) else { return Ok(()) };
+        let (Some(avatar), Some(driven)) = (battle.avatar, battle.driven.as_ref()) else { return Ok(()) };
+        let shooter = driven.entity.id();
+        let Some(target) = battle.target.as_mut().filter(|target| target.entity_id == entity_id && target.health > 0) else {
             return Ok(());
         };
+        let Some(vehicle) = target.entity else { return Ok(()) };
         let amount = spread_damage(shot.def.damage);
         let old_health = target.health;
         target.health = (old_health - amount).max(0);
@@ -849,33 +851,35 @@ impl BaseThread {
         let killed = new_health == 0;
         let bounds = target.collision.as_ref().map_or([Vec3::ZERO; 2], |collision| collision.parts[hit.part as usize].bounds);
         let max_health = target.info.get("maxHealth").and_then(Value::as_i64).unwrap_or(old_health);
-        info!(%addr, "Target {entity_id} takes {amount} damage, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
+        info!(%client, "Target {entity_id} takes {amount} damage, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
 
         let stickers = add_sticker(&mut target.damage_stickers, shot, hit, bounds);
-        let damage = Damage { shooter_id, amount, max_health, old_health, new_health };
-        show_damage(&mut self.app.entity(entity_id)?, shot, hit, bounds, &damage, stickers)?;
+        let damage = Damage { shooter, amount, max_health, old_health, new_health };
+        show_damage(&mut self.app.entity(vehicle)?, shot, hit, bounds, &damage, stickers)?;
 
         let mut flags = HIT_FLAGS_PIERCED;
         if killed {
             flags |= HIT_FLAG_VEHICLE_KILLED;
         }
-        self.app.entity::<Avatar>(avatar.entity_id())?.showShotResults(vec![ShotResult {
+        self.app.entity(avatar)?.showShotResults(vec![ShotResult {
             gunInstallationIndex: 0,
             hitFlags: flags,
-            vehicleID: entity_id,
+            vehicleID: vehicle.id(),
         }])
 
     }
 
     /// Answer a client request with what the captured server answered to the closest
     /// captured request, with the new request's id in place of the captured one.
-    fn answer(&mut self, addr: SocketAddr, method: &str, args: &[Value]) -> io::Result<()> {
+    fn answer(&mut self, client: ClientKey, method: &str, args: &[Value]) -> io::Result<()> {
 
-        let (Some(session), Some(&handle)) = (&self.session, self.players.get(&addr)) else { return Ok(()) };
+        let player = self.accounts.get(&client).map(|account| account.any())
+            .or_else(|| self.battle_clients.get(&client)?.avatar.map(|avatar| avatar.any()));
+        let (Some(session), Some(player)) = (&self.session, player) else { return Ok(()) };
         let Some(request_id) = args.first().and_then(Value::as_i64) else { return Ok(()) };
 
         let Some(captured) = session.find_request(method, args) else {
-            warn!(%addr, "No captured answer to {method} {args:?}");
+            warn!(%client, "No captured answer to {method} {args:?}");
             return Ok(());
         };
 
@@ -889,12 +893,12 @@ impl BaseThread {
                     if let Some(first) = args.first_mut().filter(|first| Some(&**first) == captured.args.first()) {
                         *first = with_int(first, request_id);
                     }
-                    info!(%addr, "Answering with {method} {}", format!("{args:?}").chars().take(200).collect::<String>());
-                    self.app.call_method(handle, method, args)?;
+                    info!(%client, "Answering with {method} {}", format!("{args:?}").chars().take(200).collect::<String>());
+                    self.app.call_method(player, method, args)?;
                 }
                 Answer::Resource { description, data } => {
-                    info!(%addr, "Answering with resource {request_id}, {} bytes", data.len());
-                    self.app.push_resource(addr, request_id as u16, description.clone(), data)?;
+                    info!(%client, "Answering with resource {request_id}, {} bytes", data.len());
+                    self.app.push_resource(client, request_id as u16, description.clone(), data)?;
                 }
             }
         }
@@ -903,11 +907,21 @@ impl BaseThread {
 
     }
 
+    /// Tell a client just logged in the update frequency, right after the login reply, as
+    /// the captured server did.
+    fn send_update_frequency(&mut self, client: ClientKey) {
+        if let Some((frequency, unknown)) = self.session.as_ref().and_then(|s| s.update_frequency) {
+            if let Err(e) = self.app.update_frequency(client, frequency, unknown, 0) {
+                warn!(%client, "Failed to send the update frequency: {e}");
+            }
+        }
+    }
+
     /// A request of the client's account, answered as captured. The arena is ready as
     /// soon as the client first asks how the queue is going.
-    fn request(&mut self, addr: SocketAddr, name: &str, args: &[Value]) {
-        if let Err(e) = self.answer(addr, name, args) {
-            warn!(%addr, "Failed to answer {name}: {e}");
+    fn request(&mut self, client: ClientKey, name: &str, args: &[Value]) {
+        if let Err(e) = self.answer(client, name, args) {
+            warn!(%client, "Failed to answer {name}: {e}");
         }
         let command = args.get(1).and_then(Value::as_i64);
         if command == Some(CMD_ENQUEUE_IN_BATTLE_QUEUE.into()) {
@@ -916,50 +930,50 @@ impl BaseThread {
                 Some(Value::Seq(values)) => values.get(1).and_then(Value::as_i64),
                 _ => None,
             };
-            self.enqueued.insert(addr, vehicle_id.unwrap_or(0));
+            self.enqueued.insert(client, vehicle_id.unwrap_or(0));
         } else if let Some(vehicle_id) = (command == Some(CMD_REQ_QUEUE_INFO.into()))
-            .then(|| self.enqueued.remove(&addr)).flatten() {
-            if let Err(e) = self.start_battle(addr, vehicle_id) {
-                warn!(%addr, "Failed to start the battle: {e}");
+            .then(|| self.enqueued.remove(&client)).flatten() {
+            if let Err(e) = self.start_battle(client, vehicle_id) {
+                warn!(%client, "Failed to start the battle: {e}");
             }
         }
     }
 
     /// A cell method of its avatar the client called.
-    fn avatar_cell_call(&mut self, addr: SocketAddr, call: AvatarCell) {
+    fn avatar_cell_call(&mut self, client: ClientKey, call: AvatarCell) {
         if let AvatarCell::VehicleShoot {} = call {
-            if let Err(e) = self.shoot(addr) {
-                warn!(%addr, "Failed to shoot: {e}");
+            if let Err(e) = self.shoot(client) {
+                warn!(%client, "Failed to shoot: {e}");
             }
             return;
         }
-        let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|c| c.driven.as_mut()) else {
-            warn!(%addr, "{call:?}, but the client has no vehicle");
+        let Some(driven) = self.battle_clients.get_mut(&client).and_then(|c| c.driven.as_mut()) else {
+            warn!(%client, "{call:?}, but the client has no vehicle");
             return;
         };
         match call {
             AvatarCell::VehicleShoot {} => unreachable!(),
             AvatarCell::VehicleMoveWith { flags } => {
-                info!(%addr, "Moving with flags {flags:#04x}");
+                info!(%client, "Moving with flags {flags:#04x}");
                 driven.vehicle.hull.flags = flags;
             }
-            AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(addr, driven, yaw, pitch),
+            AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
     }
 
     /// A cell method of its vehicle the client called.
-    fn vehicle_cell_call(&mut self, addr: SocketAddr, call: VehicleCell) {
-        let Some(driven) = self.battle_clients.get_mut(&addr).and_then(|c| c.driven.as_mut()) else {
-            warn!(%addr, "{call:?}, but the client has no vehicle");
+    fn vehicle_cell_call(&mut self, client: ClientKey, call: VehicleCell) {
+        let Some(driven) = self.battle_clients.get_mut(&client).and_then(|c| c.driven.as_mut()) else {
+            warn!(%client, "{call:?}, but the client has no vehicle");
             return;
         };
         match call {
             VehicleCell::TrackRelativePointWithGun { point } => {
                 let Vehicle { hull, turret } = &mut driven.vehicle;
-                debug!(%addr, "Tracking {point:?} from {:?}", hull.position);
+                debug!(%client, "Tracking {point:?} from {:?}", hull.position);
                 turret.track(hull.position + point);
             }
-            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(addr, driven, yaw, pitch),
+            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
     }
 
@@ -978,16 +992,15 @@ impl BaseThread {
             // Every tick due, late ones included, so that no tick number is skipped.
             while Instant::now() >= next_tick {
                 next_tick += TICK;
-                let avatar_type_id = self.app.dispatch().entity_from_name("Avatar").map(|(type_id, _)| type_id);
                 let gun_marker_ty = self.app.dispatch().entity_from_name("GunMarkerComponent")
                     .and_then(|(_, component)| component.properties.first())
                     .map(|property| property.ty.clone());
-                for (&addr, client) in &mut self.battle_clients {
-                    let tick = client.ticks as u8;
-                    client.ticks = client.ticks.wrapping_add(1);
-                    let now = client.game_time();
-                    let vehicle = client.driven.as_mut().map(|driven| {
-                        let DrivenVehicle { id_alias, entity_type_id, vehicle, gun_marker_node, engine_mode, engine_gear, gun, reload_node, nrl_updates: pending, .. } = driven;
+                for (&client, battle) in &mut self.battle_clients {
+                    let tick = battle.ticks as u8;
+                    battle.ticks = battle.ticks.wrapping_add(1);
+                    let now = battle.game_time();
+                    let vehicle = battle.driven.as_mut().map(|driven| {
+                        let DrivenVehicle { entity, id_alias, vehicle, gun_marker_node, engine_mode, engine_gear, gun, reload_node, nrl_updates: pending, .. } = driven;
                         vehicle.step(TICK.as_secs_f32(), self.terrain.as_ref());
                         let Vehicle { hull, turret } = vehicle;
                         let gun_marker = gun_marker_node.zip(gun_marker_ty.as_ref())
@@ -997,16 +1010,16 @@ impl BaseThread {
                             let loaded = gun_reload_time(gun.reload_time(), 0.0, 0.0);
                             match property_update(self.app.dispatch(), "OwnVehicle", "vehicleGunReloadTime", node, &loaded) {
                                 Ok(update) => nrl_updates.push(update),
-                                Err(e) => warn!(%addr, "Failed to encode the reload: {e}"),
+                                Err(e) => warn!(%client, "Failed to encode the reload: {e}"),
                             }
                         }
                         match gun_marker {
                             Some(Ok(update)) => nrl_updates.push(update),
-                            Some(Err(e)) => warn!(%addr, "Failed to encode the gun marker: {e}"),
+                            Some(Err(e)) => warn!(%client, "Failed to encode the gun marker: {e}"),
                             None => {}
                         }
                         // Every tick, to compare with what the client simulates.
-                        debug!(%addr, "Vehicle at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
+                        debug!(%client, "Vehicle at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
                             hull.position, hull.direction, hull.speed, turret.yaw, turret.pitch);
                         let mut properties = vec![EntityProperty { name: "gunAnglesPacked".into(), value: Value::UInt16(turret.gun_angles_packed()) }];
                         let mode = hull.engine_mode();
@@ -1029,29 +1042,29 @@ impl BaseThread {
                             player_properties.push(EntityProperty { name: "ownVehicleGear".into(), value: Value::UInt8(gear) });
                         }
                         base::TickVehicle {
+                            entity: entity.any(),
                             id_alias: *id_alias,
                             position: hull.position,
                             direction: hull.direction,
-                            properties: Some((*entity_type_id, properties)),
-                            // What the client aims from, so it must turn with the hull.
-                            player_properties: avatar_type_id.map(|type_id| (type_id, player_properties)),
+                            properties,
+                            player_properties,
                             nrl_updates,
                         }
                     });
                     // The target drives, aims at the player and fires once on them.
                     let mut others = Vec::new();
                     let mut bot_shot = None;
-                    if let (Some(target), Some(driven)) = (client.target.as_mut(), client.driven.as_mut()) {
-                        if let Some(bot) = target.bot.as_mut().filter(|_| target.health > 0) {
-                            let enemy = hit_target(driven.entity_id, &driven.vehicle, &driven.collision);
+                    if let (Some(target), Some(driven)) = (battle.target.as_mut(), battle.driven.as_mut()) {
+                        if let (Some(bot), Some(target_entity)) = (target.bot.as_mut().filter(|_| target.health > 0), target.entity) {
+                            let enemy = hit_target(driven.entity.id().0, &driven.vehicle, &driven.collision);
                             let enemy_hull = enemy.transforms[VehiclePart::Hull as usize].translation.into();
                             let on_target = bot.step(TICK.as_secs_f32(), self.terrain.as_ref(), enemy_hull, TARGET_DRIVES);
                             if TARGET_FIRES && on_target && driven.health > 0 {
                                 let (position, velocity, dispersion) = bot.vehicle.turret.gun_marker(&bot.vehicle.hull);
                                 if let Some(shot) = bot.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref(), &[enemy]) {
-                                    info!(%addr, "Target shot {} lands at {:?} in {:.2} s", shot.id, shot.end, shot.flight_time);
-                                    driven.shots.push((now + f64::from(shot.flight_time), target.entity_id, shot.clone()));
-                                    bot_shot = Some((target.entity_id, shot));
+                                    info!(%client, "Target shot {} lands at {:?} in {:.2} s", shot.id, shot.end, shot.flight_time);
+                                    driven.shots.push((now + f64::from(shot.flight_time), target_entity.id(), shot.clone()));
+                                    bot_shot = Some((target_entity, shot));
                                 }
                             }
                             let Vehicle { hull, turret } = &bot.vehicle;
@@ -1065,48 +1078,49 @@ impl BaseThread {
                                 });
                             }
                             others.push(base::TickVehicle {
+                                entity: target_entity.any(),
                                 id_alias: TARGET_ALIAS,
                                 position: hull.position,
                                 direction: hull.direction,
-                                properties: Some((target.entity_type_id, properties)),
-                                player_properties: None,
+                                properties,
+                                player_properties: Vec::new(),
                                 nrl_updates: Vec::new(),
                             });
                         }
                     }
 
-                    if let Err(e) = self.app.tick(addr, tick, vehicle.as_ref(), &others) {
-                        warn!(%addr, "Failed to tick: {e}");
+                    if let Err(e) = self.app.tick(client, tick, vehicle.as_ref(), &others) {
+                        warn!(%client, "Failed to tick: {e}");
                     }
-                    if let (Some((shooter_id, shot)), Some(&avatar)) = (bot_shot, self.players.get(&addr)) {
-                        let result = show_shot(&mut self.app, avatar, shooter_id, &shot);
+                    if let (Some((shooter, shot)), Some(avatar)) = (bot_shot, battle.avatar) {
+                        let result = show_shot(&mut self.app, avatar, shooter, &shot);
                         if let Err(e) = result {
-                            warn!(%addr, "Failed to show the target's shot: {e}");
+                            warn!(%client, "Failed to show the target's shot: {e}");
                         }
                     }
                 }
                 let landed: Vec<_> = self.battle_clients.iter_mut()
-                    .filter_map(|(&addr, client)| {
-                        let now = client.game_time();
-                        let shots = &mut client.driven.as_mut()?.shots;
+                    .filter_map(|(&client, battle)| {
+                        let now = battle.game_time();
+                        let shots = &mut battle.driven.as_mut()?.shots;
                         let (landed, flying) = std::mem::take(shots).into_iter().partition(|&(at, _, _)| at <= now);
                         *shots = flying;
-                        Some((addr, landed))
+                        Some((client, landed))
                     })
                     .collect();
-                for (addr, landed) in landed {
-                    for (_, shooter_id, shot) in landed {
-                        if let Err(e) = self.land_shot(addr, shooter_id, &shot) {
-                            warn!(%addr, "Failed to land shot {}: {e}", shot.id);
+                for (client, landed) in landed {
+                    for (_, shooter, shot) in landed {
+                        if let Err(e) = self.land_shot(client, shooter, &shot) {
+                            warn!(%client, "Failed to land shot {}: {e}", shot.id);
                         }
                     }
                 }
                 let due: Vec<_> = self.battle_clients.iter()
-                    .filter_map(|(&addr, client)| client.next_period.filter(|&(at, _)| at <= Instant::now()).map(|(_, period)| (addr, period)))
+                    .filter_map(|(&client, battle)| battle.next_period.filter(|&(at, _)| at <= Instant::now()).map(|(_, period)| (client, period)))
                     .collect();
-                for (addr, period) in due {
-                    if let Err(e) = self.arena_period(addr, period) {
-                        warn!(%addr, "Failed to change the arena period: {e}");
+                for (client, period) in due {
+                    if let Err(e) = self.arena_period(client, period) {
+                        warn!(%client, "Failed to change the arena period: {e}");
                     }
                 }
             }
@@ -1130,11 +1144,8 @@ impl BaseThread {
                             continue;
                         }
                         info!(addr = %login.addr, "Login #{}... Success, back from the battle", login.attempt_num);
-                        self.app.answer_login_success(login.addr, blowfish);
-                        if let Some((frequency, unknown)) = self.session.as_ref().and_then(|s| s.update_frequency) {
-                            if let Err(e) = self.app.update_frequency(login.addr, frequency, unknown, 0) {
-                                warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
-                            }
+                        if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
+                            self.send_update_frequency(client);
                         }
                         continue;
                     }
@@ -1146,13 +1157,12 @@ impl BaseThread {
                             continue;
                         }
                         info!(addr = %login.addr, "Login #{}... Success, for the battle", login.attempt_num);
-                        self.app.answer_login_success(login.addr, blowfish);
-                        if let Some((frequency, unknown)) = self.session.as_ref().and_then(|s| s.update_frequency) {
-                            if let Err(e) = self.app.update_frequency(login.addr, frequency, unknown, 0) {
-                                warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
-                            }
+                        if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
+                            self.send_update_frequency(client);
+                            self.battle_clients.insert(client, BattleClient {
+                                config, avatar: None, joined: Instant::now(), ticks: 0, next_period: None, driven: None, target: None,
+                            });
                         }
-                        self.battle_clients.insert(login.addr, BattleClient { config, joined: Instant::now(), ticks: 0, next_period: None, driven: None, target: None });
                         continue;
                     }
 
@@ -1171,84 +1181,73 @@ impl BaseThread {
                     }
                     
                     info!(addr = %login.addr, "Login #{}... Success", login.attempt_num);
-                    self.app.answer_login_success(login.addr, client.blowfish);
-
-                    // Right after the login reply, as the captured server did.
-                    if let Some((frequency, unknown)) = self.session.as_ref().and_then(|s| s.update_frequency) {
-                        if let Err(e) = self.app.update_frequency(login.addr, frequency, unknown, 0) {
-                            warn!(addr = %login.addr, "Failed to send the update frequency: {e}");
-                        }
+                    let blowfish = client.blowfish;
+                    drop(clients);
+                    if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
+                        self.send_update_frequency(client);
                     }
 
                 }
                 base::Event::EnableEntities(event) => {
-                    info!(addr = %event.addr, "Entities enabled");
-                    if self.battle_clients.contains_key(&event.addr) {
-                        if let Err(e) = self.enter_battle(event.addr) {
-                            warn!(addr = %event.addr, "Failed to create the avatar: {e}");
+                    info!(client = %event.client, "Entities enabled");
+                    if self.battle_clients.contains_key(&event.client) {
+                        if let Err(e) = self.enter_battle(event.client) {
+                            warn!(client = %event.client, "Failed to create the avatar: {e}");
                         }
-                    } else if let Err(e) = self.enter_account(event.addr) {
-                        warn!(addr = %event.addr, "Failed to create the account: {e}");
+                    } else if let Err(e) = self.enter_account(event.client) {
+                        warn!(client = %event.client, "Failed to create the account: {e}");
                     }
                 }
                 base::Event::BaseMethod(event) => {
                     let MethodCall::Known { name, args, .. } = &event.call else {
-                        warn!(addr = %event.addr, "Base method call on entity {}: {:?}", event.entity_id, event.call);
+                        warn!(client = %event.client, "Base method call on entity {}: {:?}", event.entity, event.call);
                         continue;
                     };
-                    info!(addr = %event.addr, "Base method call on entity {}: {name} {args:?}", event.entity_id);
-                    match self.app.decode::<AvatarBase>(event.entity_id, &event.call) {
-                        Some(AvatarBase::SetClientReady {}) => {
-                            if let Err(e) = self.arena_period(event.addr, ARENA_PERIOD_PREBATTLE) {
-                                warn!(addr = %event.addr, "Failed to start the countdown: {e}");
+                    info!(client = %event.client, "Base method call on entity {}: {name} {args:?}", event.entity);
+                    match self.app.decode::<AvatarBase>(event.entity, &event.call) {
+                        Some((_, AvatarBase::SetClientReady {})) => {
+                            if let Err(e) = self.arena_period(event.client, ARENA_PERIOD_PREBATTLE) {
+                                warn!(client = %event.client, "Failed to start the countdown: {e}");
                             }
                         }
-                        Some(AvatarBase::LeaveArena {}) => {
-                            if let Err(e) = self.leave_battle(event.addr) {
-                                warn!(addr = %event.addr, "Failed to leave the battle: {e}");
+                        Some((_, AvatarBase::LeaveArena {})) => {
+                            if let Err(e) = self.leave_battle(event.client) {
+                                warn!(client = %event.client, "Failed to leave the battle: {e}");
                             }
                         }
-                        None => self.request(event.addr, name, args),
+                        None => self.request(event.client, name, args),
                     }
                 }
                 base::Event::CellMethod(event) => {
-                    if let Some(call) = self.app.decode::<AvatarCell>(event.entity_id, &event.call) {
-                        self.avatar_cell_call(event.addr, call);
-                    } else if let Some(call) = self.app.decode::<VehicleCell>(event.entity_id, &event.call) {
-                        self.vehicle_cell_call(event.addr, call);
+                    if let Some((_, call)) = self.app.decode::<AvatarCell>(event.entity, &event.call) {
+                        self.avatar_cell_call(event.client, call);
+                    } else if let Some((_, call)) = self.app.decode::<VehicleCell>(event.entity, &event.call) {
+                        self.vehicle_cell_call(event.client, call);
                     } else {
                         match &event.call {
-                            MethodCall::Known { name, .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {name}", event.entity_id),
-                            MethodCall::Unknown { .. } => debug!(addr = %event.addr, "Cell method call on entity {}: {:?}", event.entity_id, event.call),
+                            MethodCall::Known { name, .. } => debug!(client = %event.client, "Cell method call on entity {}: {name}", event.entity),
+                            MethodCall::Unknown { .. } => debug!(client = %event.client, "Cell method call on entity {}: {:?}", event.entity, event.call),
                         }
                     }
                 }
                 base::Event::AvatarUpdate(event) => {
-                    debug!(addr = %event.addr, "Avatar update on {:?}: {:?}, direction {:?}", event.vehicle_id, event.position, event.direction);
+                    debug!(client = %event.client, "Avatar update on {:?}: {:?}, direction {:?}", event.vehicle_id, event.position, event.direction);
                 }
                 base::Event::RequestEntityUpdate(event) => {
-                    let is_target = self.battle_clients.get(&event.addr)
-                        .and_then(|client| client.target.as_ref())
+                    let is_target = self.battle_clients.get(&event.client)
+                        .and_then(|battle| battle.target.as_ref())
                         .is_some_and(|target| target.entity_id == event.entity_id);
                     if is_target {
-                        if let Err(e) = self.create_target(event.addr) {
-                            warn!(addr = %event.addr, "Failed to create the target: {e}");
+                        if let Err(e) = self.create_target(event.client) {
+                            warn!(client = %event.client, "Failed to create the target: {e}");
                         }
-                    } else if let Err(e) = self.create_vehicle(event.addr, event.entity_id) {
-                        warn!(addr = %event.addr, "Failed to create vehicle {}: {e}", event.entity_id);
+                    } else if let Err(e) = self.create_vehicle(event.client, event.entity_id) {
+                        warn!(client = %event.client, "Failed to create vehicle {}: {e}", event.entity_id);
                     }
                 }
                 base::Event::Timeout => {}
 
             }
-
-            // let entity: Handle<entity::Login> = self.app.create_base_player(addr, entity::Login {
-            //     accountDBID_s: "09518858105".to_string(),
-            //     loginPriority: 0,
-            // });
-
-            // self.app.call_method(entity, entity::Login_Client::setPeripheryRoutingGroup());
-            // self.app.reset_entities(addr);
 
         }
 
@@ -1465,7 +1464,7 @@ fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
         .find(|fields| team(fields).is_some_and(|team| team != own_team))
         .and_then(|info| Some(Target {
             entity_id: info.get("vehicleID")?.as_i64()? as u32,
-            entity_type_id: 0,
+            entity: None,
             health: info.get("maxHealth")?.as_i64()?,
             info,
             bot: None,
@@ -1596,10 +1595,10 @@ fn own_vehicle_state(entity_id: u32, config: &VehicleConfig) -> Vec<(&'static st
 }
 
 /// Show a shot to the player: its tracer, and the gun firing on the shooter.
-fn show_shot(app: &mut base::App, avatar: base::Handle, shooter_id: u32, shot: &Shot) -> io::Result<()> {
+fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<schema::Vehicle>, shot: &Shot) -> io::Result<()> {
     let def = &shot.def;
-    app.entity::<Avatar>(avatar.entity_id())?.showTracer(
-        shooter_id as i32,
+    app.entity(avatar)?.showTracer(
+        shooter.id(),
         shot.id,
         0,
         def.effects_index,
@@ -1614,14 +1613,14 @@ fn show_shot(app: &mut base::App, avatar: base::Handle, shooter_id: u32, shot: &
         0,
     )?;
     // One shell from the only gun.
-    app.entity::<schema::Vehicle>(shooter_id)?.showShooting(1, 0, def.kind_index)
+    app.entity(shooter)?.showShooting(1, 0, def.kind_index)
 }
 
 /// Stop the gun where our turret is rather than at the client's angles, which its own
 /// rotator computes slightly apart: the gun would move as it locks.
-fn hold_gun(addr: SocketAddr, driven: &mut DrivenVehicle, yaw: f32, pitch: f32) {
+fn hold_gun(client: ClientKey, driven: &mut DrivenVehicle, yaw: f32, pitch: f32) {
     let turret = &mut driven.vehicle.turret;
-    debug!(%addr, "Holding the gun at yaw {:.4}, pitch {:.4} (client: {yaw:.4}, {pitch:.4})", turret.yaw, turret.pitch);
+    debug!(%client, "Holding the gun at yaw {:.4}, pitch {:.4} (client: {yaw:.4}, {pitch:.4})", turret.yaw, turret.pitch);
     turret.hold(turret.yaw, turret.pitch);
 }
 
@@ -1638,7 +1637,7 @@ fn spread_damage(damage: f32) -> i64 {
 
 /// A shell's damage to a vehicle.
 struct Damage {
-    shooter_id: u32,
+    shooter: EntityId,
     amount: i64,
     max_health: i64,
     old_health: i64,
@@ -1660,7 +1659,7 @@ fn show_damage(
     let def = &shot.def;
     let damage_factor = (damage.amount * 255 / damage.max_health.max(1)).clamp(0, 255) as u8;
     vehicle.showDamageFromShot(
-        damage.shooter_id as i32,
+        damage.shooter,
         vec![hit_point(shot, hit, bounds, HIT_EFFECT_ARMOR_PIERCED)],
         def.effects_index,
         def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
@@ -1675,7 +1674,7 @@ fn show_damage(
         vehicle.set_damageStickers(stickers)?;
     }
     // `ATTACK_REASON.SHOT`, no extended reason.
-    vehicle.onHealthChanged(damage.new_health as i16, damage.old_health as i16, damage.shooter_id as i32, 0, -1)
+    vehicle.onHealthChanged(damage.new_health as i16, damage.old_health as i16, damage.shooter, 0, -1)
 }
 
 /// A `VEHICLE_HIT_POINT` for a shell piercing at `hit`, its segment encoded over the hit

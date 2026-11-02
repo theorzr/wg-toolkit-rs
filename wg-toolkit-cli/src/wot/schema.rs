@@ -1,10 +1,10 @@
 //! The members of WoT's entities that the emulator uses, bound against the loaded
-//! script when it starts, see [`wgtk::app::schema`].
+//! script when it starts, see [`wgtk::app::entity`].
 
 use glam::Vec3;
 
 use wgtk::app::base;
-use wgtk::app::schema::{BindError, Bytes};
+use wgtk::app::entity::{BindError, Bytes, EntityId};
 use wgtk::script::Value;
 use wgtk::{entity_schema, script_dict};
 
@@ -30,7 +30,7 @@ entity_schema! {
         client {
             fn updateArena(update_type: u8, data: Bytes);
             fn showTracer(
-                shooter_id: i32,
+                shooter: EntityId,
                 shot_id: i32,
                 is_ricochet: u8,
                 effects_index: u8,
@@ -77,7 +77,7 @@ entity_schema! {
         client {
             fn showShooting(burst_count: u8, gun_index: i8, shell_kind: u8);
             fn showDamageFromShot(
-                attacker_id: i32,
+                attacker: EntityId,
                 points: Vec<HitPoint>,
                 effects_index: u8,
                 prefab_effects_index: u8,
@@ -88,7 +88,7 @@ entity_schema! {
                 speed: f32,
                 unknown: u8,
             );
-            fn onHealthChanged(new_health: i16, old_health: i16, attacker_id: i32, attack_reason: u8, extended_reason: i8);
+            fn onHealthChanged(new_health: i16, old_health: i16, attacker: EntityId, attack_reason: u8, extended_reason: i8);
         }
         cell {
             fn trackRelativePointWithGun(point: Vec3);
@@ -116,6 +116,6 @@ script_dict! {
     pub struct ShotResult {
         pub gunInstallationIndex: u8,
         pub hitFlags: u32,
-        pub vehicleID: u32,
+        pub vehicleID: EntityId,
     }
 }
