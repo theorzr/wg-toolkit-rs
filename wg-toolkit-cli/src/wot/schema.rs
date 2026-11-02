@@ -108,6 +108,10 @@ entity_schema! {
             engineMode: [u8; 2],
             avatarID: EntityId,
             vehPostProgression: Vec<i32>,
+            publicInfo: PublicVehicleInfo,
+            isStrafing: bool,
+            isCrewActive: bool,
+            publicStateModifiers: Vec<u8>,
             // Its `MY_VEHICLE` level of detail, which only its own client gets.
             isMyVehicle: bool,
             quickShellChangerFactor: f32,
@@ -172,6 +176,26 @@ component_schema! {
             /// A `FIRE_INFO` dict, or none as captured.
             fireInfo: Value,
         }
+    }
+}
+
+script_dict! {
+    /// `PUBLIC_VEHICLE_INFO`: what every client knows of a vehicle.
+    #[derive(Debug, Clone)]
+    pub struct PublicVehicleInfo {
+        pub name: String,
+        pub compDescr: Bytes,
+        pub outfit: Bytes,
+        pub outfitLevel: u8,
+        pub index: u16,
+        pub team: u8,
+        pub prebattleID: EntityId,
+        pub marksOnGun: u8,
+        pub crewGroups: Vec<u16>,
+        pub commanderSkinID: u16,
+        pub maxHealth: u16,
+        pub respawnID: u32,
+        pub stFrags: u32,
     }
 }
 

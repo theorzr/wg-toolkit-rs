@@ -23,7 +23,7 @@ use flate2::Compression;
 use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
-use wgtk::app::client::element::{ChangedProperties, NrlBody, NrlChild, NrlMessage, NrlNode};
+use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode};
 use wgtk::script::{PythonValue, Script, StringValue, Value};
 use wgtk::app::entity::{Bytes, EntityId, EntityKey};
 use wgtk::app::base::{CellPlayerInit, ClientKey};
@@ -766,24 +766,6 @@ impl VehicleConfig {
                 "compDescr" => *value = with_bytes(value, self.descr.clone()),
                 "maxHealth" => *value = with_int(value, self.max_health.into()),
                 "vehPostProgression" => *value = Value::Seq(Vec::new()),
-                _ => {}
-            }
-        }
-    }
-
-    /// Its vehicle entity's captured creation properties, see `BaseThread::create_vehicle`.
-    fn apply_to_entity(&self, properties: &mut ChangedProperties) {
-        for (_, name, value) in &mut properties.values {
-            match (&**name, &mut *value) {
-                ("publicInfo", Value::Dict(info)) => {
-                    for (name, value) in info.iter_mut() {
-                        match &**name {
-                            "compDescr" => *value = with_bytes(value, self.descr.clone()),
-                            "maxHealth" => *value = with_int(value, self.max_health.into()),
-                            _ => {}
-                        }
-                    }
-                }
                 _ => {}
             }
         }

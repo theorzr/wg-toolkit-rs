@@ -9,16 +9,16 @@ use std::io;
 use tracing::{debug, info, warn};
 use glam::Vec3;
 
-use wgtk::app::entity::{AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, Pickle};
+use wgtk::app::entity::{AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, Pickle, ScriptType};
 use wgtk::app::base::{self, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
-use wgtk::app::client::element::NrlMessage;
+use wgtk::app::client::element::{ChangedProperties, NrlMessage};
 use wgtk::script::{StringValue, Value};
 use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
     self, Avatar, AvatarCell, AvatarInfo, AvatarVehiclesInfo, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects,
-    ShotResult, VehicleCell,
+    PublicVehicleInfo, ShotResult, VehicleCell,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::item_defs::VehicleDef;
@@ -26,7 +26,7 @@ use crate::wot::items::VehicleDescr;
 
 use super::{
     ammo_list, arena_vehicles, captured_property, gun_reload_time, invalid_data, targeting_info,
-    vehicle_health_info, vehicle_settings, with_bytes, with_int,
+    vehicle_health_info, vehicle_settings, with_int,
     BaseThread, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
 use super::gun::{Gun, HitTarget, Landing, Shot};
@@ -200,9 +200,10 @@ impl BaseThread {
             return Ok(None);
         };
 
-        let mut properties = properties.clone();
+        let mut public = captured_public_info(properties)?;
         if let Some(config) = &battle.config {
-            config.apply_to_entity(&mut properties);
+            public.compDescr = Bytes(config.descr.clone());
+            public.maxHealth = config.max_health as u16;
         }
 
         info!(avatar = %battle.avatar, "Creating vehicle {}", entity.entity_id);
@@ -213,17 +214,14 @@ impl BaseThread {
             alias: true,
             controlled_by: Some(battle.avatar.any()),
             visibility: Visibility::Interest,
-            properties,
+            properties: properties.clone(),
         })?;
 
-        // Set before its creation on the client, which carries them.
         let mut entity = self.app.entity(vehicle)?;
-        entity.set_avatarID(battle.avatar.id())?;
-        entity.set_vehPostProgression(Vec::new())?;
+        init_vehicle(&mut entity, battle.avatar.id(), public)?;
 
         if let Some(config) = &battle.config {
             let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
-            entity.set_health(config.max_health as i16)?;
             entity.set_isMyVehicle(true)?;
             entity.set_quickShellChangerFactor(QUICK_SHELL_CHANGER_FACTOR)?;
             entity.set_onRespawnReloadTimeFactor(1.0)?;
@@ -307,33 +305,17 @@ impl BaseThread {
             return Ok(());
         };
 
-        let max_health = target.info.get("maxHealth").and_then(Value::as_i64).unwrap_or(1000);
-        let mut properties = properties.clone();
-        for (_, name, value) in &mut properties.values {
-            match (&**name, &mut *value) {
-                ("health", value) => *value = with_int(value, max_health),
-                ("avatarID", value) => *value = with_int(value, 0),
-                ("vehPostProgression", value) => *value = Value::Seq(Vec::new()),
-                ("publicInfo", Value::Dict(public)) => {
-                    for (field, value) in public.iter_mut() {
-                        match &**field {
-                            "maxHealth" => *value = with_int(value, max_health),
-                            // The player's camouflage and marks are not the target's.
-                            "outfit" => *value = with_bytes(value, Vec::new()),
-                            "marksOnGun" => *value = with_int(value, 0),
-                            "compDescr" | "name" | "team" => if let Some(own) = target.info.get(field) {
-                                *value = match (own, &*value) {
-                                    (Value::Int8(n), _) => with_int(value, (*n).into()),
-                                    _ => own.clone(),
-                                };
-                            },
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        // The player's vehicle's, with the target's own name, vehicle, team and health,
+        // and neither the player's camouflage nor marks.
+        let field = |name: &str| target.info.get(name).cloned();
+        let mut public = captured_public_info(properties)?;
+        public.name = field("name").and_then(String::from_value).unwrap_or(public.name);
+        public.compDescr = field("compDescr").and_then(Bytes::from_value).unwrap_or(public.compDescr);
+        public.team = field("team").as_ref().and_then(Value::as_i64).map_or(public.team, |team| team as u8);
+        public.maxHealth = field("maxHealth").as_ref().and_then(Value::as_i64).map_or(public.maxHealth, |health| health as u16);
+        public.outfit = Bytes::default();
+        public.marksOnGun = 0;
+
         let yaw = start.direction.z;
         let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
         if let Some(height) = self.terrain.as_ref().and_then(|terrain| terrain.height_at(position.x, position.z)) {
@@ -362,8 +344,9 @@ impl BaseThread {
             alias: true,
             controlled_by: None,
             visibility: Visibility::Interest,
-            properties,
+            properties: properties.clone(),
         })?;
+        init_vehicle(&mut self.app.entity(vehicle)?, EntityId(0), public)?;
         target.bot = Some(Bot::new(Vehicle::new(position, direction, limits, def.aiming.clone()), gun, position));
         target.collision = Some(def.collision.clone());
         target.entity = Some(vehicle);
@@ -772,6 +755,27 @@ const TARGET_FIRE_DURATION: f64 = 5.0;
 const TARGET_FIRES: bool = false;
 /// Whether the target drives around, else it stays where it is created.
 const TARGET_DRIVES: bool = false;
+
+/// The `publicInfo` of the captured player's vehicle, which vehicles are made from.
+fn captured_public_info(properties: &ChangedProperties) -> io::Result<PublicVehicleInfo> {
+    properties.values.iter()
+        .find(|(_, name, _)| &**name == "publicInfo")
+        .and_then(|(_, _, value)| PublicVehicleInfo::from_value(value.clone()))
+        .ok_or_else(|| invalid_data("the captured vehicle has no public info"))
+}
+
+/// Set what every client gets of a fresh vehicle, before its creation on any: its
+/// public info, its full health, and its avatar if driven by a client's.
+fn init_vehicle(entity: &mut Entity<'_, schema::Vehicle>, avatar: EntityId, public: PublicVehicleInfo) -> io::Result<()> {
+    entity.set_avatarID(avatar)?;
+    entity.set_health(public.maxHealth as i16)?;
+    entity.set_publicInfo(public)?;
+    entity.set_isStrafing(false)?;
+    entity.set_isCrewActive(true)?;
+    entity.set_damageStickers(Vec::new())?;
+    entity.set_publicStateModifiers(Vec::new())?;
+    entity.set_vehPostProgression(Vec::new())
+}
 
 /// Show a shot to the player: its tracer, and the gun firing on the shooter.
 fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<schema::Vehicle>, shot: &Shot) -> io::Result<()> {
