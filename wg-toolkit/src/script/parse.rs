@@ -1,5 +1,7 @@
 //! Parsing logic for the script definitions.
 
+use std::sync::Arc;
+
 use crate::pxml::{Element, Value};
 
 use super::def::{Arg, Entity, Interface, Method, Property, PropertyFlags, VariableHeaderSize};
@@ -152,6 +154,9 @@ pub fn parse_property(elt: &Element, tys: &mut TySystem, name: String) -> Proper
             raw => panic!("unknown property flags: {raw}"),
         },
         volatile: false,
+        detail_level: elt.get_child("DetailLevel")
+            .and_then(Value::as_string)
+            .map(Arc::from),
     }
 
 }

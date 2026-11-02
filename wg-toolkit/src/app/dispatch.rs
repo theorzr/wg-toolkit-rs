@@ -185,8 +185,20 @@ pub struct PropertyDef {
     pub length: ElementLength,
     /// Which side hosts it and which clients see it.
     pub flags: PropertyFlags,
-    /// See [`crate::script::Property::volatile`].
+    /// See [`crate::script::Property::volatile`] and
+    /// [`crate::script::Property::detail_level`].
     pub volatile: bool,
+    pub detail_level: Option<Arc<str>>,
+}
+
+impl PropertyDef {
+
+    /// Whether only its entity's own client gets it: for its own client by its flags, or
+    /// in an inner level of detail, which only that client gets, see `base::App`.
+    pub fn is_own_client(&self) -> bool {
+        matches!(self.flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient) || self.detail_level.is_some()
+    }
+
 }
 
 /// The dynamically-decoded result of a method call (base- or cell-directed), produced by
@@ -554,7 +566,7 @@ fn build_property_table(
     }
 
     collected.into_iter()
-        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags, volatile: property.volatile })
+        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags, volatile: property.volatile, detail_level: property.detail_level.clone() })
         .collect()
 
 }
@@ -659,6 +671,7 @@ mod tests {
             database_len: None, default: None,
             flags: PropertyFlags::AllClients,
             volatile: false,
+            detail_level: None,
         }
     }
 

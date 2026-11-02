@@ -224,9 +224,8 @@ impl BaseThread {
 
     }
 
-    /// The client has its vehicle: from there on it moves as the client drives it, after
-    /// the properties the captured server changed right after creating it. Then its
-    /// `OwnVehicle` component: the client only turns its turret once it knows how fast it
+    /// The client has its vehicle: from there on it moves as the client drives it. Then
+    /// its `OwnVehicle` component: the client only turns its turret once it knows how fast it
     /// can. Its `GunMarkerComponent` too, for the client's server reticle.
     fn vehicle_entered(&mut self, client: ClientKey) -> io::Result<()> {
 
@@ -234,14 +233,6 @@ impl BaseThread {
         let Some(captured) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
         let (Some(vehicle), Some(position)) = (battle.vehicle, &captured.vehicle_position) else { return Ok(()) };
         let config = battle.config.as_ref();
-
-        if let Some(update) = &captured.vehicle_update {
-            let mut update = update.clone();
-            if let Some(config) = config {
-                config.apply_to_update(&mut update);
-            }
-            self.app.entity(vehicle)?.set_dynamic(update)?;
-        }
 
         let Some(config) = config else { return Ok(()) };
         let mut driven = DrivenVehicle {

@@ -866,7 +866,7 @@ impl RawEntity<'_> {
     /// Set a property by exposed id, and give it to the clients it is for.
     fn write_property(&mut self, exposed_id: u16, value: Value) -> io::Result<()> {
         self.properties[exposed_id as usize] = Some(value.clone());
-        let own_client = matches!(self.dispatch.properties[exposed_id as usize].flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
+        let own_client = self.dispatch.properties[exposed_id as usize].is_own_client();
         self.emit(EntityEventKind::Property { exposed_id, value }, own_client)
     }
 
@@ -903,7 +903,7 @@ impl RawEntity<'_> {
         for (exposed_id, _, value) in &properties.values {
             let def = self.dispatch.properties.get(usize::from(*exposed_id))
                 .ok_or_else(|| io_invalid_data(format_args!("unknown property: {exposed_id}")))?;
-            own_client |= matches!(def.flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
+            own_client |= def.is_own_client();
             self.properties[usize::from(*exposed_id)] = Some(value.clone());
         }
         self.emit(EntityEventKind::Update(properties), own_client)
@@ -1696,7 +1696,7 @@ mod tests {
     }
 
     fn property(name: &str, ty: Ty, flags: PropertyFlags) -> PropertyDef {
-        PropertyDef { name: name.into(), ty, length: ElementLength::Variable8, flags, volatile: false }
+        PropertyDef { name: name.into(), ty, length: ElementLength::Variable8, flags, volatile: false, detail_level: None }
     }
 
     fn dispatch() -> EntityDispatch {

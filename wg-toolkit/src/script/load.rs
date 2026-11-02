@@ -463,6 +463,7 @@ mod tests {
                 database_len: None, default: None,
                 flags: PropertyFlags::AllClients,
                 volatile: false,
+                detail_level: None,
             }],
             temp_properties: vec![format!("temp_{name}")],
             client_methods: vec![Method {

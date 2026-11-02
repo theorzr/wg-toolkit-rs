@@ -136,6 +136,10 @@ pub struct Property {
     /// Whether the def lists it under `<Volatile>`: a dynamic component's volatile
     /// property is updated with its whole value alone, see `NrlTree::decode_update`.
     pub volatile: bool,
+    /// The label of the level of detail it belongs to, if not the outer one: an entity's
+    /// clients only get it once that close to it, in WoT the `MY_VEHICLE` level of a
+    /// vehicle's own client.
+    pub detail_level: Option<Arc<str>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

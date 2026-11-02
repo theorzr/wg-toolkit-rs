@@ -3613,8 +3613,8 @@ mod tests {
         }));
         let bar_ty = sys.register(None, TyKind::Array(TySeq { ty: string_ty.clone(), size: None }));
         let properties = vec![
-            PropertyDef { name: Arc::from("foo"), ty: foo_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false },
-            PropertyDef { name: Arc::from("bar"), ty: bar_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false },
+            PropertyDef { name: Arc::from("foo"), ty: foo_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef { name: Arc::from("bar"), ty: bar_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
         ];
         (properties, u16_ty, string_ty, u8_ty)
     }
@@ -3635,10 +3635,10 @@ mod tests {
         // AreaOfEffect's client-visible properties, in the order `build_property_table`
         // produces (two 4-byte, then two 8-byte).
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
-            PropertyDef { name: Arc::from("equipmentID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
-            PropertyDef { name: Arc::from("launchTime"), ty: f64_ty.clone(), length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false },
-            PropertyDef { name: Arc::from("strikeTime"), ty: f64_ty, length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef { name: Arc::from("equipmentID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef { name: Arc::from("launchTime"), ty: f64_ty.clone(), length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef { name: Arc::from("strikeTime"), ty: f64_ty, length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
         ];
 
         let data = const_hex("0400e729890001e53600000266666666b66601410366666666e6660141");
@@ -3681,7 +3681,7 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
         ];
 
         // Three properties promised; the second id (0x62 = 98, as seen live) is past the
@@ -3709,8 +3709,8 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("a"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
-            PropertyDef { name: Arc::from("b"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
+            PropertyDef { name: Arc::from("a"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef { name: Arc::from("b"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
         ];
 
         // Two properties, but the second id repeats the first. `addChangedProperties`
@@ -3731,7 +3731,7 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false },
+            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
         ];
 
         let data = const_hex("0100e7298900ff");

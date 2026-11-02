@@ -73,10 +73,10 @@ pub fn run(
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             let battle = match &session.battle {
-                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, update {}, entity {}, arena info {:?}, own vehicle {}",
+                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}, own vehicle {}",
                     battle.calls.len(), battle.cell_player.is_some(), battle.space_properties.len(),
                     battle.geometry.as_ref().map(|g| &g.path), battle.vehicle_alias,
-                    battle.vehicle_position.is_some(), battle.vehicle_update.is_some(), battle.vehicle_entity.is_some(),
+                    battle.vehicle_position.is_some(), battle.vehicle_entity.is_some(),
                     battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len())))),
                     battle.own_vehicle.is_some()),
                 None => "none".to_string(),
@@ -786,15 +786,6 @@ impl VehicleConfig {
                     }
                 }
                 ("vehPostProgression", value) => *value = Value::Seq(Vec::new()),
-                _ => {}
-            }
-        }
-    }
-
-    /// The properties its vehicle entity gets once created.
-    fn apply_to_update(&self, update: &mut ChangedProperties) {
-        for (_, name, value) in &mut update.values {
-            match (&**name, &mut *value) {
                 ("crewCompactDescrs", Value::Seq(crew)) => {
                     let like = crew.first().cloned().unwrap_or(Value::String(StringValue::Raw(Vec::new())));
                     *crew = self.crew.iter().map(|cd| with_bytes(&like, cd.clone())).collect();

@@ -56,13 +56,13 @@ pub struct CapturedBattle {
     pub space_properties: Vec<Vec<u8>>,
     /// The map, mapped into the space.
     pub geometry: Option<AddSpaceGeometryMapping>,
-    /// The player's vehicle: its id alias when entering the area of interest, the
-    /// properties sent to it right after, and its creation, answering the client.
+    /// The player's vehicle: its id alias when entering the area of interest, its
+    /// position, and its creation, answering the client.
     pub vehicle_alias: Option<u8>,
     pub vehicle_position: Option<AvatarUpdateAliasDetailed>,
-    pub vehicle_update: Option<ChangedProperties>,
     pub vehicle_entity: Option<CreateEntity>,
-    /// [`Self::vehicle_entity`]'s properties, decoded.
+    /// [`Self::vehicle_entity`]'s properties, decoded, with those of its inner level of
+    /// detail its client got right after.
     pub vehicle_properties: Option<ChangedProperties>,
     /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
     /// the arena's vehicles.
@@ -363,14 +363,15 @@ impl Extractor<'_> {
                     }
                 }
                 UpdateEntity::ID => {
-                    // Sent to the vehicle before its creation, so its type is assumed.
+                    // Its inner level of detail, sent to the vehicle right after its creation,
+                    // as its own client is: its type is assumed.
                     let vehicle = self.selected.filter(|&id| self.battle_vehicle(id).is_some());
                     let properties = vehicle.and_then(|_| self.dispatch.entity_from_name("Vehicle")).map(|(_, d)| &d.properties);
                     match properties {
                         Some(properties) => {
                             let UpdateEntity(e) = elt.read::<UpdateEntity, _>(&properties[..])?.element;
-                            if let Some(battle) = self.session.battle.as_mut() {
-                                battle.vehicle_update.get_or_insert(e);
+                            if let Some(created) = self.session.battle.as_mut().and_then(|b| b.vehicle_properties.as_mut()) {
+                                created.values.extend(e.values);
                             }
                         }
                         None => { elt.read::<Skipped, _>(&())?; }

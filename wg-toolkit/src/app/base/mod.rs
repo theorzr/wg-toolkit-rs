@@ -27,7 +27,7 @@ use glam::Vec3;
 
 use crate::net::bundle::{Bundle, NextElementReader, ElementReader};
 use crate::net::element::{Element, ElementLength, SimpleElement};
-use crate::script::{PropertyFlags, Script, Ty, Value};
+use crate::script::{Script, Ty, Value};
 use crate::net::socket::PacketSocket;
 use crate::net::proto::Protocol;
 
@@ -995,15 +995,15 @@ fn check_data<D: ScriptType>(_data: &D, ty: &Ty) -> bool {
     D::check(ty)
 }
 
-/// What of an entity's properties a client gets as it enters its area of interest: those
-/// with a known value, but those for its own client only when it is.
-fn visible_properties(state: &EntityState, dispatch: &EntityDispatch, own: bool) -> ChangedProperties {
+/// What of an entity's properties a client gets as it enters its area of interest, in its
+/// outer level of detail or in the inner ones: those with a known value, but those for its
+/// own client only when it is.
+fn visible_properties(state: &EntityState, dispatch: &EntityDispatch, own: bool, inner: bool) -> ChangedProperties {
 
     let values = state.properties.iter().enumerate()
         .filter_map(|(exposed_id, value)| {
             let def = &dispatch.properties[exposed_id];
-            let own_client = matches!(def.flags, PropertyFlags::OwnClient | PropertyFlags::BaseAndClient);
-            let value = value.as_ref().filter(|_| own || !own_client)?;
+            let value = value.as_ref().filter(|_| (own || !def.is_own_client()) && def.detail_level.is_some() == inner)?;
             Some((exposed_id as u8, Arc::clone(&def.name), value.clone()))
         })
         .collect();
@@ -1642,7 +1642,8 @@ impl Witness {
 
             let Some((state, cell)) = view.get(known.entity) else { continue };
             let dispatch = view.dispatch(state)?;
-            let client_data = visible_properties(state, dispatch, cell.is_controlled_by(self.entity)).encode(&dispatch.properties)?;
+            let own = cell.is_controlled_by(self.entity);
+            let client_data = visible_properties(state, dispatch, own, false).encode(&dispatch.properties)?;
 
             let (roll, pitch, yaw) = (cell.direction.x, cell.direction.y, cell.direction.z);
             match known.alias {
@@ -1665,6 +1666,17 @@ impl Witness {
                     direction: cell.direction,
                     client_data,
                 })?,
+            }
+
+            // Its inner levels of detail follow at once, as captured for a vehicle and its
+            // `MY_VEHICLE` level. NOTE: Distance levels are not modelled: its own client
+            // gets every inner level, and the others none.
+            if own {
+                let inner = visible_properties(state, dispatch, own, true);
+                if !inner.values.is_empty() {
+                    out.select_entity(known.entity.id)?;
+                    out.write_selected(client::element::UpdateEntity(inner), &dispatch.properties[..])?;
+                }
             }
 
             known.created = true;
