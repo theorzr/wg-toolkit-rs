@@ -8,7 +8,7 @@ mod bot;
 mod gun;
 mod physics;
 
-use std::collections::{hash_map, BTreeMap, HashMap};
+use std::collections::{hash_map, HashMap};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
@@ -24,11 +24,11 @@ use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
 use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode};
-use wgtk::script::{PythonValue, Script, StringValue, Value};
 use wgtk::app::entity::{Bytes, EntityId, EntityKey};
 use wgtk::app::base::{CellPlayerInit, ClientKey};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
+use wgtk::script::{Script, Value};
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::{login, base};
@@ -757,30 +757,6 @@ struct VehicleConfig {
     collision: Arc<VehicleCollision>,
 }
 
-impl VehicleConfig {
-
-    /// Its entry in the arena's `vehiclesInfo`.
-    fn apply_to_arena_entry(&self, fields: &mut BTreeMap<Arc<str>, Value>) {
-        for (name, value) in fields.iter_mut() {
-            match &**name {
-                "compDescr" => *value = with_bytes(value, self.descr.clone()),
-                "maxHealth" => *value = with_int(value, self.max_health.into()),
-                "vehPostProgression" => *value = Value::Seq(Vec::new()),
-                _ => {}
-            }
-        }
-    }
-
-}
-
-/// The same kind of byte string as `value`, holding `bytes`.
-fn with_bytes(value: &Value, bytes: Vec<u8>) -> Value {
-    match value {
-        Value::Python(_) => Value::Python(PythonValue::Raw(bytes)),
-        _ => Value::String(StringValue::Raw(bytes)),
-    }
-}
-
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
@@ -794,26 +770,6 @@ fn captured_property<'m>(message: &'m NrlMessage, name: &str) -> Option<&'m Valu
         NrlChild::Property { name: child_name, value } if &**child_name == name => Some(value),
         _ => None,
     })
-}
-
-/// The captured arena's `vehiclesInfo`, reduced to the given vehicle's entry and the
-/// target's.
-fn arena_vehicles(captured: &[NrlMessage], vehicle_id: u32, target_id: Option<u32>, config: Option<&VehicleConfig>) -> Vec<Value> {
-    let Some(Value::Seq(entries)) = captured.iter().find_map(|message| captured_property(message, "vehiclesInfo")) else {
-        return Vec::new();
-    };
-    let id_of = |fields: &BTreeMap<Arc<str>, Value>| fields.get("vehicleID").and_then(Value::as_i64);
-    entries.iter().filter_map(|entry| match entry {
-        Value::Dict(fields) if id_of(fields) == Some(vehicle_id.into()) => {
-            let mut fields = fields.clone();
-            if let Some(config) = config {
-                config.apply_to_arena_entry(&mut fields);
-            }
-            Some(Value::Dict(fields))
-        }
-        Value::Dict(fields) if target_id.is_some_and(|id| id_of(fields) == Some(id.into())) => Some(entry.clone()),
-        _ => None,
-    }).collect()
 }
 
 /// The captured `OwnVehicle`'s `targetingInfo`, with the vehicle's own: turret and gun

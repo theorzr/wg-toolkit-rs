@@ -133,14 +133,18 @@ entity_schema! {
 
 entity_schema! {
     /// The arena's info entity, which the arena's vehicles are told of with.
-    pub AvatarInfo {}
+    pub AvatarInfo {
+        cell {
+            avatarID: EntityId,
+        }
+    }
 }
 
 component_schema! {
     /// The arena's vehicles, on its info entity.
     pub AvatarVehiclesInfo {
         cell {
-            vehiclesInfo: Vec<Value>,
+            vehiclesInfo: Vec<VehicleInfo>,
         }
     }
 }
@@ -197,6 +201,52 @@ script_dict! {
         pub maxHealth: u16,
         pub respawnID: u32,
         pub stFrags: u32,
+    }
+}
+
+script_dict! {
+    /// `VEHICLES_INFO`: a vehicle of the arena, as every client lists it.
+    #[derive(Debug, Clone)]
+    pub struct VehicleInfo {
+        pub vehicleID: EntityId,
+        pub isAlive: bool,
+        pub outfitCD: Bytes,
+        pub compDescr: Bytes,
+        pub fakeName: String,
+        pub name: String,
+        pub team: i8,
+        pub isAvatarReady: bool,
+        pub isTeamKiller: bool,
+        pub accountDBID: u64,
+        pub clanAbbrev: String,
+        pub clanDBID: i64,
+        pub prebattleID: EntityId,
+        pub isPrebattleCreator: bool,
+        pub forbidInBattleInvitations: bool,
+        pub igrType: i8,
+        pub avatarSessionID: String,
+        pub overriddenBadge: i8,
+        pub customRoleSlotTypeId: i8,
+        pub botDisplayStatus: i8,
+        pub teamPanelMode: u8,
+        pub maxHealth: i16,
+        pub prestigeLevel: i32,
+        pub prestigeGradeMarkID: i32,
+        pub vehPostProgression: Vec<i32>,
+        pub personalMissionIDs: Vec<i32>,
+        pub personalMissionInfo: Pickle,
+        pub events: Pickle,
+        pub badges: Pickle,
+        pub ranked: Vec<u16>,
+        pub deathInfo: Option<Value>,
+        pub respawnID: u32,
+        pub stFrags: u32,
+        pub frags: i16,
+        pub activePetID: i32,
+        pub tkills: i16,
+        pub fogOfWar: u8,
+        pub position: [i16; 2],
+        pub __generation: u32,
     }
 }
 
