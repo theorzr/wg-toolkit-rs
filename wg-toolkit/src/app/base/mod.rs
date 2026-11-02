@@ -11,7 +11,7 @@
 pub mod element;
 
 use std::any::TypeId;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, SocketAddrV4};
 use std::io::{self, Read, Write};
 use std::num::Wrapping;
@@ -863,7 +863,7 @@ impl App {
 
         self.leave_space(player.any());
         if let Some(entry) = self.entities.get_mut(player.slot) {
-            entry.cell = Some(CellPart::new(space, init.position, init.direction, true, None));
+            entry.cell = Some(CellPart::new(space, init.position, init.direction, true, None, Visibility::Interest));
         }
         if let Some(space) = self.spaces.get_mut(space.slot) {
             space.entities.push(player.any());
@@ -919,7 +919,7 @@ impl App {
             None => self.new_entity_id(),
         };
 
-        let cell = CellPart::new(space, init.position, init.direction, init.alias, init.controlled_by);
+        let cell = CellPart::new(space, init.position, init.direction, init.alias, init.controlled_by, init.visibility);
         let key = self.insert_entity(id, None, type_id, Some(cell));
         self.store_properties(key, init.properties.values.into_iter().map(|(exposed_id, _, value)| (exposed_id.into(), value)));
         Ok(key)
@@ -947,6 +947,35 @@ impl App {
         cell.direction = direction;
         cell.moved = true;
         Ok(())
+    }
+
+    /// Set what of its space a client knows, from the next tick on: [`Interest::WholeSpace`]
+    /// until then. It must have a cell player, see [`Self::create_cell_player`].
+    pub fn set_interest(&mut self, client: ClientKey, interest: Interest) -> io::Result<()> {
+        self.witness_mut(client)?.interest = interest;
+        Ok(())
+    }
+
+    /// Show an entity of its space to a client whose interest is [`Interest::Manual`]: it
+    /// enters its area of interest with the next tick, until hidden.
+    pub fn show<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
+        self.witness_mut(client)?.shown.insert(entity.any());
+        Ok(())
+    }
+
+    /// Hide an entity shown to a client, see [`Self::show`]: it leaves its area of
+    /// interest with the next tick.
+    pub fn hide<T>(&mut self, client: ClientKey, entity: EntityKey<T>) -> io::Result<()> {
+        self.witness_mut(client)?.shown.remove(&entity.any());
+        Ok(())
+    }
+
+    /// What a client knows of its space, if it has a cell player.
+    fn witness_mut(&mut self, key: ClientKey) -> io::Result<&mut Witness> {
+        self.clients.get_mut(key.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such client: {}", key.addr)))?
+            .witness.as_mut()
+            .ok_or_else(|| io_invalid_data(format_args!("client {} has no cell player", key.addr)))
     }
 
     /// How many ticks a client got in its space: its game time, in ticks.
@@ -1002,8 +1031,8 @@ impl App {
         result
     }
 
-    /// Tell a client what changed in its area of interest, see [`Self::end_tick`]. Every
-    /// entity of its space is of interest to it.
+    /// Tell a client what changed in its area of interest, see [`Self::end_tick`] and
+    /// [`Interest`].
     fn write_tick(&mut self, client: ClientKey, witness: &mut Witness) -> io::Result<()> {
 
         let entities = &self.entities;
@@ -1018,10 +1047,14 @@ impl App {
         out.write_simple(client::element::TickSync { tick: witness.ticks as u8 })?;
         witness.ticks = witness.ticks.wrapping_add(1);
 
-        // Those gone, or no longer in its space.
+        // Those gone, no longer in its space, or out of its interest.
+        witness.shown.retain(|key| space.entities.contains(key));
+        let interest = witness.interest;
+        let shown = &witness.shown;
+        let has = |key, known| cell(key).is_some_and(|(_, other)| interest.has(own.position, shown, own_id, key, other, known));
         let mut known = Vec::with_capacity(witness.known.len());
         for entry in std::mem::take(&mut witness.known) {
-            if space.entities.contains(&entry.entity) {
+            if space.entities.contains(&entry.entity) && has(entry.entity, true) {
                 known.push(entry);
             } else {
                 out.write_simple(client::element::LeaveAoi { entity_id: entry.entity.id, last_event_numbers: Vec::new() })?;
@@ -1037,12 +1070,12 @@ impl App {
 
         // Those new to it, in the order they got in the space.
         for &key in &space.entities {
-            if key.id == own_id || witness.known.iter().any(|known| known.entity == key) {
+            if key.id == own_id || witness.known.iter().any(|known| known.entity == key) || !has(key, false) {
                 continue;
             }
             let Some((_, other)) = cell(key) else { continue };
             let alias = match other.alias {
-                true => Some(witness.take_alias().ok_or_else(|| io_invalid_data(format_args!("no alias left for {key}")))?),
+                true => Some(take_alias(&mut witness.aliases).ok_or_else(|| io_invalid_data(format_args!("no alias left for {key}")))?),
                 false => None,
             };
             out.write_simple(client::element::EnterAoi { entity_id: key.id, id_alias: alias.unwrap_or(NO_ALIAS) })?;
@@ -1380,10 +1413,56 @@ pub struct EntityInit {
     /// created right away, an arena's info entity say.
     pub alias: bool,
     /// The entity whose client is its own, for those of its properties that only its own
-    /// client gets: the avatar driving a vehicle, say.
+    /// client gets: the avatar driving a vehicle, say. Its own client always knows it.
     pub controlled_by: Option<EntityKey<AnyEntity>>,
+    pub visibility: Visibility,
     /// Its first property values, given in its type's property table.
     pub properties: ChangedProperties,
+}
+
+/// What of its space a client knows, see [`App::set_interest`]: which entities are in its
+/// area of interest, besides its own and those always visible (see [`Visibility`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Interest {
+    /// Every entity of its space.
+    #[default]
+    WholeSpace,
+    /// The entities within `enter` metres of its player entity on the ground plane, until
+    /// farther than `leave`, so that one on the edge doesn't come and go.
+    Radius { enter: f32, leave: f32 },
+    /// The entities shown to it, see [`App::show`]: those an enemy spotted, say.
+    Manual,
+}
+
+/// Which clients of its space know an entity, see [`EntityInit::visibility`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Those whose interest has it, see [`Interest`].
+    #[default]
+    Interest,
+    /// Every one of them, whatever their interest: an arena's info entity, say.
+    Always,
+}
+
+impl Interest {
+
+    /// Whether a client whose player entity is at `from`, interested in this, has an
+    /// entity of its space in its area of interest, knowing it already or not.
+    fn has(&self, from: Vec3, shown: &HashSet<EntityKey<AnyEntity>>, own_id: u32, key: EntityKey<AnyEntity>, other: &CellPart, known: bool) -> bool {
+        if other.visibility == Visibility::Always || other.controlled_by.is_some_and(|controller| controller.id == own_id) {
+            return true;
+        }
+        match *self {
+            Self::WholeSpace => true,
+            Self::Radius { enter, leave } => {
+                let offset = other.position - from;
+                let distance = (offset.x * offset.x + offset.z * offset.z).sqrt();
+                distance <= if known { leave.max(enter) } else { enter }
+            }
+            Self::Manual => shown.contains(&key),
+        }
+    }
+
 }
 
 /// The cell part of a client's player entity, see [`App::create_cell_player`].
@@ -1408,9 +1487,11 @@ struct CellPart {
     direction: Vec3,
     /// Whether it moved during the tick.
     moved: bool,
-    /// See [`EntityInit::alias`] and [`EntityInit::controlled_by`].
+    /// See [`EntityInit::alias`], [`EntityInit::controlled_by`] and
+    /// [`EntityInit::visibility`].
     alias: bool,
     controlled_by: Option<EntityKey<AnyEntity>>,
+    visibility: Visibility,
     /// Its dynamic components, and its NRL node once it has any.
     components: Slots<ComponentEntry>,
     nrl_node: Option<u16>,
@@ -1418,8 +1499,8 @@ struct CellPart {
 
 impl CellPart {
 
-    fn new(space: SpaceKey, position: Vec3, direction: Vec3, alias: bool, controlled_by: Option<EntityKey<AnyEntity>>) -> Self {
-        Self { space, position, direction, moved: false, alias, controlled_by, components: Slots::default(), nrl_node: None }
+    fn new(space: SpaceKey, position: Vec3, direction: Vec3, alias: bool, controlled_by: Option<EntityKey<AnyEntity>>, visibility: Visibility) -> Self {
+        Self { space, position, direction, moved: false, alias, controlled_by, visibility, components: Slots::default(), nrl_node: None }
     }
 
 }
@@ -1439,6 +1520,9 @@ struct Witness {
     aliases: Vec<bool>,
     /// The ticks sent to it, the first being tick 0.
     ticks: u32,
+    /// What of its space it knows, and the entities shown to it, see [`App::show`].
+    interest: Interest,
+    shown: HashSet<EntityKey<AnyEntity>>,
     /// The entities whose NRL node it has, with their components it has.
     nrl: HashMap<EntityKey<AnyEntity>, Vec<SlotKey>>,
 }
@@ -1446,16 +1530,16 @@ struct Witness {
 impl Witness {
 
     fn new(entity: EntityKey<AnyEntity>) -> Self {
-        Self { entity, known: Vec::new(), aliases: vec![false; usize::from(NO_ALIAS)], ticks: 0, nrl: HashMap::new() }
+        Self { entity, known: Vec::new(), aliases: vec![false; usize::from(NO_ALIAS)], ticks: 0, interest: Interest::WholeSpace, shown: HashSet::new(), nrl: HashMap::new() }
     }
 
-    /// Take the first free id alias.
-    fn take_alias(&mut self) -> Option<u8> {
-        let alias = self.aliases.iter().position(|&taken| !taken)?;
-        self.aliases[alias] = true;
-        Some(alias as u8)
-    }
+}
 
+/// Take the first free id alias of a witness.
+fn take_alias(aliases: &mut [bool]) -> Option<u8> {
+    let alias = aliases.iter().position(|&taken| !taken)?;
+    aliases[alias] = true;
+    Some(alias as u8)
 }
 
 /// An entity in the area of interest of a witness.
@@ -1554,4 +1638,41 @@ pub struct AvatarUpdateEvent {
 pub struct EnteredEvent {
     pub client: ClientKey,
     pub entity: EntityKey<AnyEntity>,
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn interest_keeps_entities_until_past_the_leave_radius_and_shows_others() {
+
+        let mut slots = Slots::default();
+        let space = SpaceKey { slot: slots.insert(()), id: 1 };
+        let key = EntityKey::new(slots.insert(()), 2);
+        let player = EntityKey::new(slots.insert(()), 3);
+        let at = |x| CellPart::new(space, Vec3::new(x, 5.0, 0.0), Vec3::ZERO, true, None, Visibility::Interest);
+        let none = HashSet::new();
+        let has = |interest: Interest, shown: &HashSet<_>, other: &CellPart, known| interest.has(Vec3::ZERO, shown, player.id, key, other, known);
+
+        let radius = Interest::Radius { enter: 10.0, leave: 15.0 };
+        assert!(has(radius, &none, &at(9.0), false));
+        assert!(!has(radius, &none, &at(12.0), false));
+        assert!(has(radius, &none, &at(12.0), true));
+        assert!(!has(radius, &none, &at(16.0), true));
+
+        assert!(!has(Interest::Manual, &none, &at(0.0), false));
+        assert!(has(Interest::Manual, &HashSet::from([key]), &at(0.0), false));
+
+        let mut always = at(1000.0);
+        always.visibility = Visibility::Always;
+        assert!(has(Interest::Manual, &none, &always, false));
+        let mut controlled = at(1000.0);
+        controlled.controlled_by = Some(player);
+        assert!(has(radius, &none, &controlled, false));
+
+    }
+
 }

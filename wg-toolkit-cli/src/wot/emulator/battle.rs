@@ -9,7 +9,7 @@ use std::io;
 use glam::Vec3;
 use tracing::{debug, info, warn};
 
-use wgtk::app::base::{self, ClientKey, EntityInit, SpaceKey};
+use wgtk::app::base::{self, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::client::element::NrlMessage;
 use wgtk::app::component::{Audience, ComponentKey};
 use wgtk::app::dispatch::MethodCall;
@@ -79,6 +79,8 @@ struct Target {
     bot: Option<Bot>,
     collision: Option<Arc<VehicleCollision>>,
     entered: bool,
+    /// Whether the player's vehicle spots it, see [`VIEW_RANGE`].
+    spotted: bool,
     health: i64,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
@@ -114,8 +116,11 @@ impl BaseThread {
 
     /// A client's avatar got into its battle's space: set the space up as the captured
     /// server did, with its properties and its map, then the player's vehicle, the
-    /// target and the arena's info entity, which the client gets in that order.
+    /// target and the arena's info entity, which the client gets in that order. It sees
+    /// the vehicles its own spots, see [`Self::step`].
     pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey) -> io::Result<()> {
+
+        self.app.set_interest(client, Interest::Manual)?;
 
         let config = self.battle_clients.get(&client).and_then(|c| c.config.clone());
         let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: None, driven: None, target: None };
@@ -163,6 +168,7 @@ impl BaseThread {
             let vehicles = arena_vehicles(&arena.nrl, vehicle_id, target_id, battle.config.as_ref());
             let info = self.app.create_entity::<AvatarInfo>(space, EntityInit {
                 id: Some(EntityId(arena.entity_id)),
+                visibility: Visibility::Always,
                 properties,
                 ..EntityInit::default()
             })?;
@@ -210,6 +216,7 @@ impl BaseThread {
             direction: position.direction,
             alias: true,
             controlled_by: Some(battle.avatar.any()),
+            visibility: Visibility::Interest,
             properties,
         })?;
         Ok(Some(vehicle))
@@ -343,6 +350,7 @@ impl BaseThread {
             direction,
             alias: true,
             controlled_by: None,
+            visibility: Visibility::Interest,
             properties,
         })?;
         target.bot = Some(Bot::new(Vehicle::new(position, direction, limits, def.aiming.clone()), gun, position));
@@ -561,6 +569,24 @@ impl BaseThread {
             avatar_view.set_ownVehicleGear(gear)?;
         }
 
+        // The player's vehicle spots the target while within its view range, and its client
+        // only sees it then.
+        if let Some(target) = battle.target.as_mut() {
+            if let (Some(entity), Some(bot)) = (target.entity, &target.bot) {
+                let offset = bot.vehicle.hull.position - driven.vehicle.hull.position;
+                let spotted = offset.x.hypot(offset.z) <= VIEW_RANGE;
+                if spotted != target.spotted {
+                    target.spotted = spotted;
+                    if spotted {
+                        app.show(client, entity)?;
+                    } else {
+                        app.hide(client, entity)?;
+                    }
+                    info!(%client, "Target {} {}", target.entity_id, if spotted { "spotted" } else { "lost" });
+                }
+            }
+        }
+
         // The target drives, aims at the player and fires once on them.
         let Some(target) = battle.target.as_mut().filter(|target| target.entered && target.health > 0) else { return Ok(()) };
         let (Some(bot), Some(target_entity)) = (target.bot.as_mut(), target.entity) else { return Ok(()) };
@@ -674,6 +700,7 @@ fn enemy_of(arena: &[NrlMessage], vehicle_id: u32) -> Option<Target> {
             bot: None,
             collision: None,
             entered: false,
+            spotted: false,
             engine_mode: None,
             damage_stickers: Vec::new(),
         }))
@@ -696,6 +723,10 @@ const TARGET_FIRST_SHOT_ID: i32 = 1_000_000;
 
 /// How far in front of the player's start the target stands, in metres.
 const TARGET_DISTANCE: f32 = 40.0;
+
+/// How far the player's vehicle spots others, in metres on the ground plane: the most
+/// any vehicle can see, until vehicles have their own.
+const VIEW_RANGE: f32 = 445.0;
 
 /// Whether the target fires back at the player.
 const TARGET_FIRES: bool = false;
