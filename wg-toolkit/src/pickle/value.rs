@@ -96,6 +96,36 @@ impl From<&str> for Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Bool(value)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::I64(value)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(value: i32) -> Self {
+        Value::I64(value.into())
+    }
+}
+
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Value::I64(value.into())
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::F64(value)
+    }
+}
+
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
@@ -159,7 +189,8 @@ impl fmt::Display for Value {
                 seq(f, items)?;
                 f.write_str(if items.len() == 1 { ",)" } else { ")" })
             }
-            Value::Set(items) | Value::FrozenSet(items) => {
+            Value::Set(items) | 
+            Value::FrozenSet(items) => {
                 f.write_str(if matches!(self, Value::Set(_)) { "set([" } else { "frozenset([" })?;
                 seq(f, items)?;
                 f.write_str("])")

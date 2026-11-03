@@ -12,6 +12,37 @@ pub use value::{Value, Global, Object};
 pub use ser::{to_writer, to_bytes};
 
 
+/// A [`Value`] written as in Python: `{key: value}` dicts, `{item}` sets, `[item]`
+/// lists, `(item,)` tuples and `None`, while anything else is converted with
+/// [`Value::from`], so string literals are Python 2 `str`. As in Python, `{}` is a dict
+/// and `(x)` is just `x`, which is how to write an item that is more than a single
+/// token, a negative number say.
+///
+/// ```
+/// let value = wgtk::pickle!({"rate": 400, "costs": {7: (1500, 0)}, "loss": (-0.2), "none": None});
+/// assert_eq!(value.to_string(), "{'costs': {7: (1500, 0)}, 'loss': -0.2, 'none': None, 'rate': 400}");
+/// ```
+#[macro_export]
+macro_rules! pickle {
+    (None) => { $crate::pickle::Value::None };
+    ({ $($key:tt : $value:tt),* $(,)? }) => {
+        $crate::pickle::Value::Dict([$(($crate::pickle!($key), $crate::pickle!($value))),*].into_iter().collect())
+    };
+    ({ $($item:tt),+ $(,)? }) => {
+        $crate::pickle::Value::Set([$($crate::pickle!($item)),+].into_iter().collect())
+    };
+    ([ $($item:tt),* $(,)? ]) => {
+        $crate::pickle::Value::List(vec![$($crate::pickle!($item)),*])
+    };
+    (()) => { $crate::pickle::Value::Tuple(Vec::new()) };
+    (( $first:tt, $($item:tt),* $(,)? )) => {
+        $crate::pickle::Value::Tuple(vec![$crate::pickle!($first), $($crate::pickle!($item)),*])
+    };
+    (( $($value:tt)+ )) => { $crate::pickle!($($value)+) };
+    ($value:expr) => { $crate::pickle::Value::from($value) };
+}
+
+
 /// The opcodes of protocols 0 to 2.
 mod op {
     pub const MARK: u8 = b'(';

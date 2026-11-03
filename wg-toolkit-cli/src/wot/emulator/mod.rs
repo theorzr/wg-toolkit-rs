@@ -7,6 +7,7 @@ mod capture;
 mod bot;
 mod gun;
 mod physics;
+mod shop;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
@@ -38,7 +39,7 @@ use crate::wot::schema::{
 };
 use crate::wot::account_commands::{
     token_type, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS,
-    CMD_SYNC_DATA, REQUEST_ID_NO_RESPONSE, RES_SUCCESS,
+    CMD_SYNC_DATA, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
@@ -50,6 +51,7 @@ use capture::{Answer, CapturedSession};
 use physics::MotionLimits;
 use account::AccountData;
 use battle::Battle;
+use shop::Shop;
 
 
 pub fn run(
@@ -118,6 +120,8 @@ pub fn run(
         .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
     info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
 
+    let shop = Shop::new().map_err(|e| format!("Failed to encode the shop: {e}"))?;
+
     let shared = Arc::new(Shared {
         login_clients: Mutex::new(HashMap::new()),
     });
@@ -135,6 +139,7 @@ pub fn run(
         shared,
         session,
         account,
+        shop,
         game_dir: game_dir.to_path_buf(),
         map,
         terrain,
@@ -173,6 +178,7 @@ struct BaseThread {
     session: Option<Arc<CapturedSession>>,
     /// The account's data as served, which the vehicles going to battle are read from.
     account: Option<AccountData>,
+    shop: Shop,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
     /// The battles' map, and its terrain.
@@ -554,6 +560,15 @@ impl BaseThread {
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_SERVER_STATS, .. } => {
                 let online = self.players.len() as u32;
                 self.app.entity(account)?.receiveServerStats(ServerStats { clusterCCU: online, regionCCU: online })?;
+            }
+            // `[revision, len, crc32]` of the client's cached shop.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_SHOP, arg1: len, arg2: crc32, .. } => {
+                if self.shop.is_cached(len, crc32) {
+                    self.app.entity(account)?.onCmdResponse(request_id, RES_CACHE, String::new())?;
+                } else {
+                    self.app.entity(account)?.onCmdResponse(request_id, RES_STREAM, String::new())?;
+                    self.app.push_resource(client, request_id as u16, self.shop.description.clone(), &self.shop.data)?;
+                }
             }
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
                 self.app.entity(account)?.receiveQueueInfo(queue_info())?;
