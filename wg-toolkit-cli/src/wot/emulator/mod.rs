@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::io::{self, Write};
 use std::thread;
 
+use serde_pickle::{HashableValue, Value as PickleValue};
 use tracing::{debug, info, instrument, warn};
 use rsa::rand_core::{OsRng, RngCore};
 use flate2::write::ZlibEncoder;
@@ -80,8 +81,7 @@ pub fn run(
         Some(path) => {
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
-            info!("Serving from capture {}: server settings {}, {} requests",
-                path.display(), if session.server_settings.is_some() { "found" } else { "missing" }, session.requests.len());
+            info!("Serving from capture {}: {} requests", path.display(), session.requests.len());
             for request in &session.requests {
                 let answers: Vec<String> = request.answers.iter().map(|answer| match answer {
                     Answer::Call { method, .. } => method.to_string(),
@@ -335,17 +335,12 @@ impl BaseThread {
     fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(player) = self.players.get(&client) else { return Ok(()) };
-        // The server's settings are still captured.
-        let Some(server_settings) = self.session.as_ref().and_then(|s| s.server_settings.clone()) else {
-            warn!(%client, "The capture has no server settings");
-            return Ok(());
-        };
 
         let data = schema::AccountData {
             name: player.name.clone(),
             incarnationID: ACCOUNT_SESSIONS,
             requiredVersion_2410: REQUIRED_VERSION.to_string(),
-            initialServerSettings: server_settings,
+            initialServerSettings: server_settings(),
         };
         let account = self.app.create_base_player::<Account>(client, data)?;
         self.accounts.insert(client, account);
@@ -823,12 +818,32 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
+/// A pickled dict of the given entries, keyed by their names as bytes, as the game's
+/// Python 2 strings.
+fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -> PickleValue {
+    PickleValue::Dict(entries.into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect())
+}
+
+/// The server's settings: only what the client reads without a default, every other
+/// feature taking the client's own. Game days start at 4:00 UTC and weeks on Mondays,
+/// as the captured server's, there is no web content and no ranked battles.
+fn server_settings() -> Pickle {
+    Pickle(pickle_dict([
+        ("file_server", pickle_dict([])),
+        ("ranked_config", pickle_dict([("isEnabled", PickleValue::Bool(false))])),
+        ("regional_settings", pickle_dict([
+            ("starting_day_of_a_new_week", PickleValue::I64(0)),
+            ("starting_time_of_a_new_day", PickleValue::I64(4 * 3600)),
+            ("starting_time_of_a_new_game_day", PickleValue::I64(4 * 3600)),
+        ])),
+    ]))
+}
+
 /// The `showGUI` context of the player's account: its id, the server's time and the
 /// session's start, now, and no play time limits nor UI statistics.
 fn show_gui_ctx() -> Pickle {
-    use serde_pickle::{HashableValue, Value as PickleValue};
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    Pickle(PickleValue::Dict([
+    Pickle(pickle_dict([
         ("aogasStartedAt", PickleValue::F64(now.as_secs_f64())),
         ("collectUiStats", PickleValue::Bool(false)),
         ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
@@ -836,37 +851,34 @@ fn show_gui_ctx() -> Pickle {
         ("logUXEvents", PickleValue::Bool(false)),
         ("serverUTC", PickleValue::F64(now.as_secs_f64())),
         ("sessionStartedAt", PickleValue::I64(now.as_secs() as i64)),
-    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
+    ]))
 }
 
 /// The random battle queue as the player sees it: alone, the battle starting at once,
 /// so no players counted by vehicle class (light, medium, heavy, SPG, AT-SPG).
 fn queue_info() -> Pickle {
-    use serde_pickle::{HashableValue, Value as PickleValue};
-    Pickle(PickleValue::Dict([
+    Pickle(pickle_dict([
         ("classes", PickleValue::List(vec![PickleValue::I64(0); 5])),
         ("players", PickleValue::I64(1)),
-    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
+    ]))
 }
 
 /// A token of the given type for the player, to log into a web service: there are
 /// none, so it is empty, of the type the client expects, an int for the chat's.
 fn token_data(token_type: u8) -> Pickle {
-    use serde_pickle::{HashableValue, Value as PickleValue};
     let token = match token_type {
         token_type::XMPPCS => PickleValue::I64(0),
         _ => PickleValue::Bytes(Vec::new()),
     };
-    Pickle(PickleValue::Dict([
+    Pickle(pickle_dict([
         ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
         ("token", token),
-    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
+    ]))
 }
 
 /// The base data of a random battle's avatar, for the given player and map: no limits,
 /// boosters nor modifiers, and no kill cam, whose data the server sends.
 fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
-    use serde_pickle::{HashableValue, Value as PickleValue};
     let extra_data = PickleValue::Dict([
         (HashableValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
         (HashableValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),

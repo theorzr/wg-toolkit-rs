@@ -1,6 +1,5 @@
 //! What the real server answered in a captured session, extracted to be served again:
-//! the server's settings and, for each request the client made, everything the server
-//! sent back for it.
+//! for each request the client made, everything the server sent back for it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -16,15 +15,12 @@ use wgtk::app::proxy::{self, capture::CaptureReader, PacketChannel, PacketDirect
 use wgtk::net::element::{DebugElementVariable32, Element, ElementLength, SimpleElement};
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
 use wgtk::net::bundle::{Bundle, NextElementReader};
-use wgtk::app::entity::{Pickle, ScriptType};
 use wgtk::script::Value;
 
 
 /// Everything served from a capture, see the module documentation.
 #[derive(Debug, Default)]
 pub struct CapturedSession {
-    /// The server's settings, from the `Account` entity's creation data.
-    pub server_settings: Option<Pickle>,
     /// Each base method call the client made to its account, in order, with the
     /// server's answers.
     pub requests: Vec<CapturedRequest>,
@@ -192,9 +188,6 @@ impl Extractor<'_> {
                     self.in_account = type_named("Account");
                     self.pending.clear();
                     self.latest = None;
-                    if let (true, Value::Dict(mut data)) = (self.in_account, e.entity_data.into_owned()) {
-                        self.session.server_settings = data.remove("initialServerSettings").and_then(Pickle::from_value);
-                    }
                 }
                 SelectPlayerEntity::ID => {
                     elt.read_simple::<SelectPlayerEntity>()?;
