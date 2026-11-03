@@ -32,17 +32,18 @@ use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
 use wgtk::app::{login, base};
+use wgtk::pxml;
 
 use crate::wot::schema::{
     self, Account, AccountBase, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarData, BattleChatRestriction,
     GunReloadTime, PlayLimits, RemoteCamera, ServerStats, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
 };
 use crate::wot::account_commands::{
-    token_type, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS,
-    CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
+    token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
+    CMD_REQ_SERVER_STATS, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
-use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
+use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
 use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::collision::VehicleCollision;
 use crate::CliResult;
@@ -120,6 +121,9 @@ pub fn run(
         .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
     info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
 
+    let required_version = required_version(&fs)
+        .map_err(|e| format!("Failed to read the required client version: {e}"))?;
+
     let shop = Shop::new().map_err(|e| format!("Failed to encode the shop: {e}"))?;
 
     let shared = Arc::new(Shared {
@@ -140,6 +144,7 @@ pub fn run(
         session,
         account,
         shop,
+        required_version,
         game_dir: game_dir.to_path_buf(),
         map,
         terrain,
@@ -179,6 +184,8 @@ struct BaseThread {
     /// The account's data as served, which the vehicles going to battle are read from.
     account: Option<AccountData>,
     shop: Shop,
+    /// The client version required, the client's own.
+    required_version: String,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
     /// The battles' map, and its terrain.
@@ -237,9 +244,6 @@ const ACCOUNT_SESSIONS: u64 = 1000;
 /// The version of the vehicle dossiers, any: the client drops its cached ones when
 /// it differs from theirs.
 const DOSSIERS_VERSION: i32 = 1;
-/// The client version the server requires, `requiredVersion_2410`'s default in
-/// `AccountVersion.def`.
-const REQUIRED_VERSION: &str = "eu_2.4.1_2";
 /// The player's account id, any but 0 which is no account, until accounts are stored.
 const PLAYER_ACCOUNT_DBID: u64 = 1;
 /// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
@@ -265,6 +269,8 @@ struct LoginClient {
 #[derive(Debug, Clone)]
 struct Player {
     name: String,
+    /// The revision of the account's data, which each update brings to the next.
+    revision: i64,
 }
 
 impl LoginThread {
@@ -315,7 +321,7 @@ impl LoginThread {
                         slot.insert(LoginClient {
                             addr: login.addr,
                             blowfish,
-                            player: Player { name: self.name.clone() },
+                            player: Player { name: self.name.clone(), revision: 0 },
                         });
 
                         // app.answer_login_error(login.addr, LoginError::Banned, "{\"bans\":\"{\\\"expiryTime\\\":1726435530,\\\"reason\\\":\\\"It's the reason\\\"}\"}".to_string());
@@ -342,12 +348,14 @@ impl BaseThread {
     /// the `Account` entity, then `showGUI`.
     fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(player) = self.players.get(&client) else { return Ok(()) };
+        let Some(player) = self.players.get_mut(&client) else { return Ok(()) };
+        // The client is brought to the revision of the data served.
+        player.revision = player.revision.max(self.account.as_ref().and_then(AccountData::revision).unwrap_or(0));
 
         let data = schema::AccountData {
             name: player.name.clone(),
             incarnationID: ACCOUNT_SESSIONS,
-            requiredVersion_2410: REQUIRED_VERSION.to_string(),
+            requiredVersion_2410: self.required_version.clone(),
             initialServerSettings: server_settings(),
         };
         let account = self.app.create_base_player::<Account>(client, data)?;
@@ -580,6 +588,12 @@ impl BaseThread {
                 let data = account::compress(&wgtk::pickle!((DOSSIERS_VERSION, [])))?;
                 self.stream(client, account, request_id, &data)?;
             }
+            // `[key, value, ...]` of the settings to set, kept by the client only for now.
+            AccountBase::DoCmdIntArr { request_id, cmd: CMD_ADD_INT_USER_SETTINGS, args: settings, .. } => {
+                let settings = settings.chunks_exact(2).map(|pair| (PickleValue::from(pair[0]), PickleValue::from(pair[1])));
+                self.update(client, account, [("intUserSettings", PickleValue::Dict(settings.collect()))])?;
+                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+            }
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
                 self.app.entity(account)?.receiveQueueInfo(queue_info())?;
                 if let Some(vehicle_id) = self.enqueued.remove(&client) {
@@ -610,6 +624,16 @@ impl BaseThread {
             _ => self.request(client, name, args),
         }
         Ok(())
+    }
+
+    /// Update the client's account data with the given sections, to its next revision.
+    fn update(&mut self, client: ClientKey, account: EntityKey<Account>, diff: impl IntoIterator<Item = (&'static str, PickleValue)>) -> io::Result<()> {
+        let player = self.players.get_mut(&client)
+            .ok_or_else(|| invalid_data("Updating the account of no player"))?;
+        let prev_rev = player.revision;
+        player.revision += 1;
+        let revs = [("prevRev", PickleValue::from(prev_rev)), ("rev", PickleValue::from(player.revision))];
+        self.app.entity(account)?.update(Pickle(pickle_dict(diff.into_iter().chain(revs))))
     }
 
     /// Answer an account command with a stream of its data, zlib-compressed.
@@ -807,6 +831,15 @@ fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[Vehicle
                 info!("Gave vehicle {} as {id}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
             }
 
+            // TEMPORARY: keep only the comma-separated sections, to find those required.
+            if let (Ok(keep), PickleValue::Dict(dict)) = (std::env::var("WGTK_ACCOUNT_KEEP"), &mut account.data) {
+                let keep = keep.split(',').map(str::as_bytes).collect::<Vec<_>>();
+                dict.retain(|key, _| match key {
+                    PickleValue::Bytes(name) => name == b"rev" || keep.contains(&&name[..]),
+                    PickleValue::Tuple(items) => matches!(items.first(), Some(PickleValue::Bytes(name)) if keep.contains(&&name[..])),
+                    _ => false,
+                });
+            }
             let (new_description, new_data) = account.encode()?;
             info!("Account data: revision {:?}, {} sections, {vehicles} vehicles, {tankmen} tankmen, {} bytes re-encoded to {}",
                 account.revision(), account.dict().map_or(0, |d| d.len()), data.len(), new_data.len());
@@ -844,6 +877,16 @@ struct VehicleConfig {
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
+}
+
+/// The client version the server requires, which the client checks against the
+/// default of the same property in its own `AccountVersion.def`, so it is the game's.
+fn required_version(fs: &ResFilesystem) -> io::Result<String> {
+    let def = item_defs::read_xml(fs, "scripts/entity_defs/interfaces/AccountVersion.def")?;
+    def.get_child_value_at(&["Properties", "requiredVersion_2410", "Default"])
+        .and_then(pxml::Value::as_string)
+        .map(str::to_string)
+        .ok_or_else(|| invalid_data("No requiredVersion_2410 in AccountVersion.def, the game is another version"))
 }
 
 /// A pickled dict of the given entries, keyed by their names as bytes, as the game's

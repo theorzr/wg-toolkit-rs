@@ -28,6 +28,7 @@ entity_schema! {
             fn showGUI(ctx: Pickle);
             fn onArenaCreated();
             fn onCmdResponse(request_id: i16, result_id: i16, error: String);
+            fn update(diff: Pickle);
             fn receiveServerStats(stats: ServerStats);
             fn receiveQueueInfo(info: Pickle);
             fn onEnqueued(queue_type: u8);
