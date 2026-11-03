@@ -6,6 +6,8 @@ use std::fmt;
 
 use glam::{Vec2, Vec3, Vec4};
 
+use crate::pickle;
+
 
 #[derive(Clone, PartialEq)]
 pub enum Value {
@@ -90,7 +92,7 @@ impl Value {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringValue {
     String(String),
-    Python(serde_pickle::Value),
+    Python(pickle::Value),
     Raw(Vec<u8>),
 }
 
@@ -103,6 +105,6 @@ pub enum StringValue {
 /// everything read after it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PythonValue {
-    Decoded(serde_pickle::Value),
+    Decoded(pickle::Value),
     Raw(Vec<u8>),
 }

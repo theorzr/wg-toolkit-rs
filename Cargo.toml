@@ -1,5 +1,5 @@
 [workspace]
-members = ["wg-toolkit", "wg-toolkit-cli", "serde-pickle"]
+members = ["wg-toolkit", "wg-toolkit-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -15,14 +15,11 @@ readme = "./README.md"
 
 # Special local dependencies...
 wg-toolkit = { path = "wg-toolkit", version = "=0.5.0" }
-serde-pickle = { path = "serde-pickle", version = "=1.2.0-beta.0" }
-# serde-pickle = "1.1"
 
 # Common crates mandatory for almost everything:
 thiserror = "1.0"
 byteorder = "1.5"
 tracing = "0.1"
-serde = "1.0"
 bitflags = "2.6"
 
 # Macros:

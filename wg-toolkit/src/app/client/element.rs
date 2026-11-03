@@ -11,12 +11,13 @@ use tracing::warn;
 use glam::Vec3;
 
 use crate::net::element::{DebugElementFixed, DebugElementVariable16, ElementLength, Element, SimpleElement};
-use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options, serde_pickle_ser_options};
+use crate::util::io::{WgReadExt, WgWriteExt};
 use crate::app::dispatch::{ScriptDispatch, EntityDispatch, MethodDef, PropertyDef, MethodCall};
 use crate::net::codec::{Codec, SimpleCodec, WgSocketAddrV4};
 use crate::script::{Ty, TyKind, TyDict, Value, PythonValue};
 use crate::app::bit::{BitReader, BitWriter};
 use crate::util::AsciiFmt;
+use crate::pickle;
 
 pub use crate::app::math::{PackedXyz, PackedXz, PackedYawPitch, PackedYawPitchRoll, PackedYaw};
 
@@ -3364,8 +3365,7 @@ fn write_property(write: &mut dyn Write, config: &[PropertyDef], exposed_id: u16
     match (def.ty.kind(), value) {
         (TyKind::Python, Value::Python(PythonValue::Raw(raw))) => write.write_all(raw)?,
         (TyKind::Python, Value::Python(PythonValue::Decoded(value))) =>
-            write.write_all(&serde_pickle::value_to_vec(value, serde_pickle_ser_options())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)?,
+            pickle::to_writer(&mut *write, value)?,
         _ => Codec::write(value, write, &def.ty)?,
     }
     Ok(id::ENTITY_PROPERTY.from_exposed_id(config.len() as u16, exposed_id).0)
@@ -3426,7 +3426,7 @@ impl Element<[PropertyDef]> for EntityProperty {
         let value = if matches!(def.ty.kind(), TyKind::Python) {
             let mut raw = Vec::new();
             read.read_to_end(&mut raw)?;
-            Value::Python(match serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
+            Value::Python(match pickle::from_reader(&raw[..]) {
                 Ok(v) => PythonValue::Decoded(v),
                 Err(_) => PythonValue::Raw(raw),
             })

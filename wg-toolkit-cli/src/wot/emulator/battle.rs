@@ -209,7 +209,7 @@ impl BaseThread {
         let mut entity = self.app.entity(vehicle)?;
         init_vehicle(&mut entity, avatar.id(), public.clone(), gun_angles)?;
 
-        let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
+        let empty = || Pickle(wgtk::pickle::Value::Dict(Default::default()));
         entity.set_isMyVehicle(true)?;
         entity.set_quickShellChangerFactor(QUICK_SHELL_CHANGER_FACTOR)?;
         entity.set_onRespawnReloadTimeFactor(1.0)?;
@@ -680,7 +680,7 @@ impl BaseThread {
 /// The `vehiclesInfo` entry of a vehicle of the given id and public info, alive, as in
 /// a random battle: no clan, badges nor missions.
 fn vehicle_info(id: EntityId, public: &PublicVehicleInfo, account_dbid: u64) -> VehicleInfo {
-    use serde_pickle::Value as PickleValue;
+    use wgtk::pickle::Value as PickleValue;
     let empty = || Pickle(PickleValue::Dict(Default::default()));
     VehicleInfo {
         vehicleID: id,

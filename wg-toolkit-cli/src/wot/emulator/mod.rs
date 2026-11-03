@@ -13,10 +13,9 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::collections::{hash_map, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::io::{self, Write};
+use std::io;
 use std::thread;
 
-use serde_pickle::{HashableValue, Value as PickleValue};
 use tracing::{debug, info, instrument, warn};
 use rsa::rand_core::{OsRng, RngCore};
 use flate2::write::ZlibEncoder;
@@ -25,7 +24,7 @@ use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
-use wgtk::util::io::serde_pickle_ser_options;
+use wgtk::pickle::{self, Value as PickleValue};
 use wgtk::app::dispatch::MethodCall;
 use wgtk::script::{Script, Value};
 use wgtk::space::terrain::Terrain;
@@ -399,16 +398,14 @@ impl BaseThread {
         let game_time = f64::from(self.app.ticks(client).unwrap_or(0)) * TICK.as_secs_f64();
         let end = game_time + length.as_secs_f64();
 
-        let info = serde_pickle::Value::Tuple(vec![
-            serde_pickle::Value::I64(period.into()),
-            serde_pickle::Value::F64(end),
-            serde_pickle::Value::I64(length.as_secs() as i64),
-            serde_pickle::Value::List(Vec::new()),
+        let info = PickleValue::Tuple(vec![
+            PickleValue::I64(period.into()),
+            PickleValue::F64(end),
+            PickleValue::I64(length.as_secs() as i64),
+            PickleValue::List(Vec::new()),
         ]);
-        let pickled = serde_pickle::value_to_vec(&info, serde_pickle_ser_options())
-            .map_err(|e| invalid_data(&e.to_string()))?;
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&pickled)?;
+        pickle::to_writer(&mut encoder, &info)?;
         let data = encoder.finish()?;
 
         self.app.entity(avatar)?.updateArena(ARENA_UPDATE_PERIOD, Bytes(data))?;
@@ -749,7 +746,7 @@ fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[Vehicle
 
             let Answer::Resource { description, data } = answer else { continue };
 
-            if account::resource_description(data)? != *description {
+            if account::resource_description(data) != *description {
                 warn!("The captured account data description differs from ours: {description:02X?}");
             }
 
@@ -803,8 +800,8 @@ struct VehicleConfig {
     /// Its crew's compact descriptors, in crew order.
     crew: Vec<Vec<u8>>,
     /// Its loadouts and the selected ones, see `AccountData::vehicle_setups`.
-    setups: serde_pickle::Value,
-    setup_indexes: serde_pickle::Value,
+    setups: pickle::Value,
+    setup_indexes: pickle::Value,
     limits: MotionLimits,
     aiming: AimingDef,
     /// Its shells, by integer descriptor, and how many of each.
@@ -821,7 +818,7 @@ fn invalid_data(message: &str) -> io::Error {
 /// A pickled dict of the given entries, keyed by their names as bytes, as the game's
 /// Python 2 strings.
 fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -> PickleValue {
-    PickleValue::Dict(entries.into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect())
+    PickleValue::Dict(entries.into_iter().map(|(key, value)| (PickleValue::Bytes(key.as_bytes().to_vec()), value)).collect())
 }
 
 /// The server's settings: only what the client reads without a default, every other
@@ -880,8 +877,8 @@ fn token_data(token_type: u8) -> Pickle {
 /// boosters nor modifiers, and no kill cam, whose data the server sends.
 fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
     let extra_data = PickleValue::Dict([
-        (HashableValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
-        (HashableValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
+        (PickleValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
+        (PickleValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
     ].into_iter().collect());
     AvatarData {
         name,

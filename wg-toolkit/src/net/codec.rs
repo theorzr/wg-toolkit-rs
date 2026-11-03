@@ -11,8 +11,9 @@ use std::fmt;
 
 use glam::{Vec2, Vec3, Vec4};
 
-use crate::util::io::{WgReadExt, WgWriteExt, serde_pickle_de_options, serde_pickle_ser_options};
+use crate::util::io::{WgReadExt, WgWriteExt};
 use crate::script::{Ty, TyKind, Value, StringValue, PythonValue};
+use crate::pickle;
 
 
 /// Represent a codec for some data that can be both encoded and decoded, with a 
@@ -257,7 +258,7 @@ impl SimpleCodec for StringValue {
     fn write(&self, write: &mut dyn Write) -> io::Result<()> {
         write.write_blob_variable(&*(match self {
             StringValue::String(v) => Cow::Borrowed(v.as_bytes()),
-            StringValue::Python(v) => Cow::Owned(serde_pickle::value_to_vec(v, serde_pickle_ser_options()).unwrap()),
+            StringValue::Python(v) => Cow::Owned(pickle::to_bytes(v)),
             StringValue::Raw(v) => Cow::Borrowed(&v[..]),
         }))
     }
@@ -266,7 +267,7 @@ impl SimpleCodec for StringValue {
 
         let raw = read.read_blob_variable()?;
 
-        if let Ok(v) = serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
+        if let Ok(v) = pickle::from_reader(&raw[..]) {
             return Ok(Self::Python(v));
         }
 
@@ -291,7 +292,7 @@ impl SimpleCodec for PythonValue {
 
     fn read(read: &mut dyn Read) -> io::Result<Self> {
         let raw = read.read_blob_variable()?;
-        Ok(match serde_pickle::value_from_reader(&raw[..], serde_pickle_de_options()) {
+        Ok(match pickle::from_reader(&raw[..]) {
             Ok(v) => PythonValue::Decoded(v),
             Err(_) => PythonValue::Raw(raw),
         })

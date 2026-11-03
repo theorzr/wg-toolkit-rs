@@ -6,13 +6,12 @@
 //! to; later syncs give `prevRev` and `rev` in the `onCmdResponseExt` answer instead.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use serde_pickle::{HashableValue, Value};
-use wgtk::util::io::{serde_pickle_de_options, serde_pickle_ser_options};
+use wgtk::pickle::{self, Value};
 
 use crate::wot::item_defs::VehicleDef;
 use crate::wot::items::{item_type, TankmanDescr};
@@ -30,19 +29,17 @@ impl AccountData {
     pub fn decode(data: &[u8]) -> io::Result<Self> {
         let mut raw = Vec::new();
         ZlibDecoder::new(data).read_to_end(&mut raw)?;
-        let data = serde_pickle::value_from_slice(&raw, serde_pickle_de_options())
+        let data = pickle::from_bytes(&raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Self { data })
     }
 
     /// Encode as a sync resource: its description, then its data.
     pub fn encode(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
-        let raw = serde_pickle::value_to_vec(&self.data, serde_pickle_ser_options())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&raw)?;
+        pickle::to_writer(&mut encoder, &self.data)?;
         let data = encoder.finish()?;
-        Ok((resource_description(&data)?, data))
+        Ok((resource_description(&data), data))
     }
 
     /// The revision a full sync brings the client to.
@@ -61,7 +58,7 @@ impl AccountData {
     /// The compact descriptors of a vehicle's crew, in crew order, by the vehicle's
     /// inventory id. An empty seat has none.
     pub fn crew_descrs(&self, vehicle_id: i64) -> Vec<&[u8]> {
-        let crew = self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key("crew"), HashableValue::I64(vehicle_id)]);
+        let crew = self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key("crew"), Value::I64(vehicle_id)]);
         let Some(Value::List(crew)) = crew else { return Vec::new() };
         crew.iter().filter_map(|id| match id {
             Value::I64(id) => self.compact_descrs(item_type::TANKMAN).find(|(tankman, _)| tankman == id).map(|(_, cd)| cd),
@@ -72,7 +69,7 @@ impl AccountData {
     /// A vehicle's setups, as the battle gives them to its vehicle: its loadouts of
     /// shells, equipment, optional devices and boosters, by inventory id.
     pub fn vehicle_setups(&self, vehicle_id: i64) -> Value {
-        let table = |name: &str| self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key(name), HashableValue::I64(vehicle_id)]);
+        let table = |name: &str| self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key(name), Value::I64(vehicle_id)]);
         let empty = || Value::List(vec![Value::List(Vec::new())]);
         // Shell layouts are kept by turret and gun, the mounted ones being the only.
         let shells = match table("shellsLayout") {
@@ -89,7 +86,7 @@ impl AccountData {
 
     /// Which of a vehicle's setups are selected, by inventory id.
     pub fn vehicle_setup_indexes(&self, vehicle_id: i64) -> Value {
-        self.get(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into()), key("layoutIndexes"), HashableValue::I64(vehicle_id)])
+        self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key("layoutIndexes"), Value::I64(vehicle_id)])
             .cloned()
             .unwrap_or_else(|| Value::Dict(BTreeMap::new()))
     }
@@ -97,13 +94,13 @@ impl AccountData {
     /// The compact descriptors of an item type's inventory entries, by inventory id:
     /// `inventory[item_type]['compDescr']`.
     pub fn compact_descrs(&self, item_type: u8) -> impl Iterator<Item = (i64, &[u8])> + '_ {
-        let descrs = self.get(&[key("inventory"), HashableValue::I64(item_type.into()), key("compDescr")]);
+        let descrs = self.get(&[key("inventory"), Value::I64(item_type.into()), key("compDescr")]);
         let descrs = match descrs {
             Some(Value::Dict(descrs)) => Some(descrs),
             _ => None,
         };
         descrs.into_iter().flatten().filter_map(|(id, cd)| match (id, cd) {
-            (HashableValue::I64(id), Value::Bytes(cd)) => Some((*id, &cd[..])),
+            (Value::I64(id), Value::Bytes(cd)) => Some((*id, &cd[..])),
             _ => None,
         })
     }
@@ -130,7 +127,7 @@ impl AccountData {
         }
 
         let crew: Vec<i64> = (first_tankman_id..).take(def.crew_roles.len()).collect();
-        let tankmen = self.section_mut(&[key("inventory"), HashableValue::I64(item_type::TANKMAN.into())])?;
+        let tankmen = self.section_mut(&[key("inventory"), Value::I64(item_type::TANKMAN.into())])?;
         for ((&id, &role), &(first_name_id, last_name_id, icon_id)) in crew.iter().zip(&def.crew_roles).zip(&names) {
             let tankman = TankmanDescr {
                 nation: def.descr.nation,
@@ -148,22 +145,22 @@ impl AccountData {
                 free_xp: 0,
                 dossier: Vec::new(),
             };
-            table(tankmen, "compDescr").insert(HashableValue::I64(id), Value::Bytes(tankman.encode()));
-            table(tankmen, "vehicle").insert(HashableValue::I64(id), Value::I64(vehicle_id));
+            table(tankmen, "compDescr").insert(Value::I64(id), Value::Bytes(tankman.encode()));
+            table(tankmen, "vehicle").insert(Value::I64(id), Value::I64(vehicle_id));
         }
 
         let shells: Vec<Value> = def.default_ammo().into_iter()
             .flat_map(|(cd, count)| [Value::I64(cd.to_int()), Value::I64(count.into())])
             .collect();
-        let layout_key = HashableValue::Tuple(vec![
-            HashableValue::I64(def.turret_int_descr().to_int()),
-            HashableValue::I64(def.gun_int_descr().to_int()),
+        let layout_key = Value::Tuple(vec![
+            Value::I64(def.turret_int_descr().to_int()),
+            Value::I64(def.gun_int_descr().to_int()),
         ]);
         let crew = Value::List(crew.into_iter().map(Value::I64).collect());
         let empty_layout = || Value::List(vec![Value::List(Vec::new())]);
 
-        let vehicles = self.section_mut(&[key("inventory"), HashableValue::I64(item_type::VEHICLE.into())])?;
-        let id = HashableValue::I64(vehicle_id);
+        let vehicles = self.section_mut(&[key("inventory"), Value::I64(item_type::VEHICLE.into())])?;
+        let id = Value::I64(vehicle_id);
         let mut set = |name: &str, value: Value| table(vehicles, name).insert(id.clone(), value);
         set("compDescr", Value::Bytes(def.descr.encode()));
         set("crew", crew.clone());
@@ -184,7 +181,7 @@ impl AccountData {
     }
 
     /// The dict at a path of dict keys.
-    fn section_mut(&mut self, path: &[HashableValue]) -> io::Result<&mut BTreeMap<HashableValue, Value>> {
+    fn section_mut(&mut self, path: &[Value]) -> io::Result<&mut BTreeMap<Value, Value>> {
         path.iter().try_fold(&mut self.data, |value, k| match value {
             Value::Dict(dict) => dict.get_mut(k),
             _ => None,
@@ -195,14 +192,14 @@ impl AccountData {
     }
 
     /// The value at a path of dict keys.
-    pub fn get(&self, path: &[HashableValue]) -> Option<&Value> {
+    pub fn get(&self, path: &[Value]) -> Option<&Value> {
         path.iter().try_fold(&self.data, |value, k| match value {
             Value::Dict(dict) => dict.get(k),
             _ => None,
         })
     }
 
-    pub fn dict(&self) -> Option<&BTreeMap<HashableValue, Value>> {
+    pub fn dict(&self) -> Option<&BTreeMap<Value, Value>> {
         match &self.data {
             Value::Dict(dict) => Some(dict),
             _ => None,
@@ -212,22 +209,21 @@ impl AccountData {
 }
 
 /// A dict key as the server writes them: Python 2 `str`, so bytes.
-pub fn key(name: &str) -> HashableValue {
-    HashableValue::Bytes(name.as_bytes().to_vec())
+pub fn key(name: &str) -> Value {
+    Value::Bytes(name.as_bytes().to_vec())
 }
 
 /// The description of a resource stream: the pickled `(len, crc32)` the client checks
 /// the data against (`game.onStreamComplete`), the CRC signed as Python 2's
 /// `zlib.crc32` gives it.
-pub fn resource_description(data: &[u8]) -> io::Result<Vec<u8>> {
+pub fn resource_description(data: &[u8]) -> Vec<u8> {
     let crc32 = crc32fast::hash(data) as i32;
     let description = Value::Tuple(vec![Value::I64(data.len() as i64), Value::I64(crc32.into())]);
-    serde_pickle::value_to_vec(&description, serde_pickle_ser_options())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    pickle::to_bytes(&description)
 }
 
 /// A section's table by name, created empty if missing.
-fn table<'a>(section: &'a mut BTreeMap<HashableValue, Value>, name: &str) -> &'a mut BTreeMap<HashableValue, Value> {
+fn table<'a>(section: &'a mut BTreeMap<Value, Value>, name: &str) -> &'a mut BTreeMap<Value, Value> {
     let table = section.entry(key(name)).or_insert_with(|| Value::Dict(BTreeMap::new()));
     if !matches!(table, Value::Dict(_)) {
         *table = Value::Dict(BTreeMap::new());

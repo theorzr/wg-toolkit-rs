@@ -29,9 +29,10 @@ use std::io;
 
 use glam::{Vec2, Vec3, Vec4};
 
-use crate::util::io::{serde_pickle_de_options, serde_pickle_ser_options, WgWriteExt};
+use crate::util::io::WgWriteExt;
 use crate::script::{PropertyFlags, PythonValue, StringValue, Ty, TyKind, Value};
 use crate::net::codec::Codec;
+use crate::pickle;
 
 use super::client::element::{
     encode_nested_path, ChangedProperties, EntityMethod, IndexedEntityProperty, NrlBody, NrlChild, NrlComponentData,
@@ -177,11 +178,10 @@ impl ScriptType for Bytes {
         }
     }
     fn from_value(value: Value) -> Option<Self> {
-        let pickle = |value| serde_pickle::value_to_vec(&value, serde_pickle_ser_options()).ok();
         Some(Self(match value {
             Value::String(StringValue::Raw(raw)) | Value::Python(PythonValue::Raw(raw)) => raw,
             Value::String(StringValue::String(s)) => s.into_bytes(),
-            Value::String(StringValue::Python(value)) | Value::Python(PythonValue::Decoded(value)) => pickle(value)?,
+            Value::String(StringValue::Python(value)) | Value::Python(PythonValue::Decoded(value)) => pickle::to_bytes(&value),
             _ => return None,
         }))
     }
@@ -189,7 +189,7 @@ impl ScriptType for Bytes {
 
 /// A pickled Python value, in a `PYTHON` or a `STRING` value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Pickle(pub serde_pickle::Value);
+pub struct Pickle(pub pickle::Value);
 
 impl ScriptType for Pickle {
     fn check(ty: &Ty) -> bool {
@@ -202,7 +202,7 @@ impl ScriptType for Pickle {
         }
     }
     fn from_value(value: Value) -> Option<Self> {
-        let unpickle = |raw: Vec<u8>| serde_pickle::value_from_slice(&raw, serde_pickle_de_options()).ok();
+        let unpickle = |raw: Vec<u8>| pickle::from_bytes(&raw).ok();
         Some(Self(match value {
             Value::String(StringValue::Python(value)) | Value::Python(PythonValue::Decoded(value)) => value,
             Value::String(StringValue::Raw(raw)) | Value::Python(PythonValue::Raw(raw)) => unpickle(raw)?,

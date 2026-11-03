@@ -24,7 +24,7 @@ use wgtk::app::math::{PackedXyz, PackedXz, calculate_reference_position};
 use wgtk::app::base::element::{CellMethodTables, BaseAppLoginReply};
 use wgtk::app::proxy::capture::{CaptureReader, CaptureWriter};
 use wgtk::app::{proxy, login_proxy, base, client};
-use wgtk::util::io::serde_pickle_de_options;
+use wgtk::pickle;
 use wgtk::net::codec::WgSocketAddrV4;
 use wgtk::script::{Script, Value};
 use wgtk::net::packet::Packet;
@@ -398,12 +398,12 @@ fn start_round_trip_check() -> Rc<RefCell<BTreeMap<&'static str, RoundTripStats>
 /// A body split into its pickles (protocol 2, starting `80 02`), decoded without
 /// running anything, and the bytes around them. A pickle's own packed length, when it
 /// directly precedes it, is left out of those bytes: it follows from the pickle.
-fn split_pickles(data: &[u8]) -> (Vec<&[u8]>, Vec<serde_pickle::Value>) {
+fn split_pickles(data: &[u8]) -> (Vec<&[u8]>, Vec<pickle::Value>) {
     let mut around = Vec::new();
     let mut values = Vec::new();
     let (mut at, mut search) = (0, 0);
     while let Some(start) = data[search..].windows(2).position(|w| w == [0x80, 0x02]).map(|i| search + i) {
-        let Ok((value, len)) = serde_pickle::value_from_slice_prefix(&data[start..], wgtk::util::io::serde_pickle_de_options()) else {
+        let Ok((value, len)) = pickle::from_bytes_prefix(&data[start..]) else {
             search = start + 1;
             continue;
         };
@@ -439,7 +439,7 @@ fn describe_difference(original: &[u8], encoded: &[u8]) -> String {
         return "no difference found".to_string();
     };
     match (&values_a[i], &values_b[i]) {
-        (serde_pickle::Value::Dict(a), serde_pickle::Value::Dict(b)) => {
+        (pickle::Value::Dict(a), pickle::Value::Dict(b)) => {
             let differing: Vec<String> = a.keys().chain(b.keys()).collect::<BTreeSet<_>>().into_iter()
                 .filter(|key| a.get(key) != b.get(key))
                 .take(4)
@@ -452,7 +452,7 @@ fn describe_difference(original: &[u8], encoded: &[u8]) -> String {
     }
 }
 
-fn preview(value: Option<&serde_pickle::Value>) -> String {
+fn preview(value: Option<&pickle::Value>) -> String {
     let text = format!("{value:?}");
     if text.len() > 160 { format!("{}…", &text[..text.floor_char_boundary(160)]) } else { text }
 }
@@ -1717,9 +1717,9 @@ impl BaseHandler {
                 let data: Vec<u8> = resource.fragments.into_values().flatten().collect();
 
                 // See: scripts/client/game.py#L223
-                let (total_len, crc32) = match serde_pickle::value_from_reader(&resource.description[..], serde_pickle_de_options()) {
-                    Ok(serde_pickle::Value::Tuple(values)) if values.len() == 2 => {
-                        if let &[serde_pickle::Value::I64(total_len), serde_pickle::Value::I64(crc32)] = &values[..] {
+                let (total_len, crc32) = match pickle::from_reader(&resource.description[..]) {
+                    Ok(pickle::Value::Tuple(values)) if values.len() == 2 => {
+                        if let &[pickle::Value::I64(total_len), pickle::Value::I64(crc32)] = &values[..] {
                             (total_len as u32, crc32 as u32)
                         } else {
                             warn!(%addr, "<- Invalid resource description: unexpected values: {values:?}");
@@ -1759,7 +1759,7 @@ impl BaseHandler {
                 // The full data is a zlib-compressed pickle. Decoded and logged in full
                 // here (rather than written to a separate dump file) so it lands in the
                 // same ordered trace as everything else.
-                match serde_pickle::value_from_reader(ZlibDecoder::new(&data[..]), serde_pickle_de_options()) {
+                match pickle::from_reader(ZlibDecoder::new(&data[..])) {
                     Ok(val) => {
                         info!(%addr, res_id, answers, len = actual_total_len, crc32 = format!("0x{crc32:08X}"), python = %val,
                             "<- Resource completed");

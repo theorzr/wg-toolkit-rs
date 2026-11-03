@@ -6,6 +6,8 @@ use std::io::{self, Read, Write, Cursor};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use glam::{Vec2, Vec3, Vec4};
 
+use crate::pickle;
+
 
 /// An extension to the [`Read`] trait specifically used to decode WG formats
 /// and used for network protocol.
@@ -444,11 +446,10 @@ pub trait WgWriteExt: Write {
         Ok(())
     }
 
-    /// Write a Python Pickle from the given `serde::Serialize` value, the pickle's
-    /// data is prefixed with the variable length of the data (like a variable blob
-    /// or string).
-    fn write_python_pickle(&mut self, value: &serde_pickle::Value) -> io::Result<()> {
-        self.write_blob_variable(&serde_pickle::value_to_vec(value, serde_pickle_ser_options()).unwrap())
+    /// Write a Python pickle of the given value, prefixed with the variable length of
+    /// its data (like a variable blob or string).
+    fn write_python_pickle(&mut self, value: &pickle::Value) -> io::Result<()> {
+        self.write_blob_variable(&pickle::to_bytes(value))
     }
 
     /// Write header for vector of structure.
@@ -577,17 +578,4 @@ impl<'a> SliceCursor<'a> {
     //     self.pop_back(len).map(Cursor::new)
     // }
 
-}
-
-
-#[inline]
-pub fn serde_pickle_de_options() -> serde_pickle::DeOptions {
-    // Python 2 `str` stays bytes, distinct from `unicode`, so it encodes back as `str`.
-    serde_pickle::DeOptions::new().replace_recursive_structures()
-}
-
-#[inline]
-pub fn serde_pickle_ser_options() -> serde_pickle::SerOptions {
-    // The client unpickles with Python 2.
-    serde_pickle::SerOptions::new().proto_v2().python2_strings()
 }

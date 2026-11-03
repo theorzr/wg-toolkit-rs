@@ -15,6 +15,7 @@ pub mod havok;
 
 pub mod res;
 pub mod script;
+pub mod pickle;
 
 pub mod net;
 
