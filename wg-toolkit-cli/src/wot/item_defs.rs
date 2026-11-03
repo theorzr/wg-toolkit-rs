@@ -397,14 +397,6 @@ impl VehicleDef {
 
     }
 
-    pub fn turret_int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::TURRET, nation: self.descr.nation, id: self.descr.turret }
-    }
-
-    pub fn gun_int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::GUN, nation: self.descr.nation, id: self.descr.gun }
-    }
-
     /// The default ammunition, by shell: the capacity split by the shells' default
     /// shares, the rounding remainder to the first shell.
     pub fn default_ammo(&self) -> Vec<(IntCompactDescr, u32)> {

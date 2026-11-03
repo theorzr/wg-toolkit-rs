@@ -231,10 +231,10 @@ pub struct WotArgs {
     /// from this capture, recorded with `--capture`.
     #[arg(long, conflicts_with_all = ["replay", "real_login_app"])]
     pub from_capture: Option<PathBuf>,
-    /// With `--from-capture`, give the account this vehicle too, as `<nation>:<name>`
+    /// In emulator mode, give the account this vehicle, as `<nation>:<name>`
     /// (`uk:GB98_T95_FV4201_Chieftain`, names as in the game's
     /// `scripts/item_defs/vehicles/<nation>/list.xml`). Can be repeated.
-    #[arg(long, requires = "from_capture")]
+    #[arg(long)]
     pub give_vehicle: Vec<String>,
     /// In emulator mode, the map battles are on, by its name in the game's
     /// `scripts/arena_defs/_list_.xml`.

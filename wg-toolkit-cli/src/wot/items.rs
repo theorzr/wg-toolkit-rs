@@ -145,6 +145,26 @@ impl VehicleDescr {
         IntCompactDescr { item_type: item_type::VEHICLE, nation: self.nation, id: self.type_id }
     }
 
+    pub fn turret_int_descr(&self) -> IntCompactDescr {
+        IntCompactDescr { item_type: item_type::TURRET, nation: self.nation, id: self.turret }
+    }
+
+    pub fn gun_int_descr(&self) -> IntCompactDescr {
+        IntCompactDescr { item_type: item_type::GUN, nation: self.nation, id: self.gun }
+    }
+
+    /// The mounted modules: chassis, engine, fuel tank, radio, turret and gun.
+    pub fn module_int_descrs(&self) -> [IntCompactDescr; 6] {
+        [
+            (item_type::CHASSIS, self.chassis),
+            (item_type::ENGINE, self.engine),
+            (item_type::FUEL_TANK, self.fuel_tank),
+            (item_type::RADIO, self.radio),
+            (item_type::TURRET, self.turret),
+            (item_type::GUN, self.gun),
+        ].map(|(item_type, id)| IntCompactDescr { item_type, nation: self.nation, id })
+    }
+
     pub fn decode(cd: &[u8]) -> Result<Self, DescrError> {
 
         let mut cur = Cursor(cd);

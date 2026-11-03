@@ -42,7 +42,7 @@ use crate::wot::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
     CMD_REQ_SERVER_STATS, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
+use crate::wot::items::TankmanDescr;
 use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
 use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::item_prices::ItemPrices;
@@ -82,7 +82,7 @@ pub fn run(
 
     let session = match from_capture {
         Some(path) => {
-            let mut session = CapturedSession::load(path, base_app.dispatch())
+            let session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             info!("Serving from capture {}: {} requests", path.display(), session.requests.len());
             for request in &session.requests {
@@ -92,24 +92,10 @@ pub fn run(
                 }).collect();
                 debug!("  {} {:?} -> {}", request.method, request.args.get(..2), answers.join(", "));
             }
-            let mut vehicles = Vec::new();
-            if !give_vehicles.is_empty() {
-                let fs = ResFilesystem::new(game_dir.join("res"))
-                    .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
-                for vehicle in give_vehicles {
-                    let (nation, name) = vehicle.split_once(':')
-                        .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
-                    vehicles.push(VehicleDef::load(&fs, nation, name)
-                        .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
-                }
-            }
-            let account = reencode_account_data(&mut session, &vehicles)
-                .map_err(|e| format!("Failed to re-encode the captured account data: {e}"))?;
-            (Some(session), account)
+            Some(session)
         }
-        None => (None, None),
+        None => None,
     };
-    let (session, account) = session;
     let session = session.map(Arc::new);
 
     // The battles' map, with its terrain for vehicles to rest on.
@@ -121,6 +107,19 @@ pub fn run(
     let terrain = Terrain::load(&fs, &map.geometry)
         .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
     info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
+
+    let mut vehicles = Vec::new();
+    for vehicle in give_vehicles {
+        let (nation, name) = vehicle.split_once(':')
+            .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
+        vehicles.push(VehicleDef::load(&fs, nation, name)
+            .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
+    }
+    let account = AccountData::new(&fs, &vehicles)
+        .map_err(|e| format!("Failed to create the account: {e}"))?;
+    for vehicle in &vehicles {
+        info!("Account vehicle {}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
+    }
 
     let required_version = required_version(&fs)
         .map_err(|e| format!("Failed to read the required client version: {e}"))?;
@@ -186,8 +185,8 @@ struct BaseThread {
     shared: Arc<Shared>,
     /// What to serve, when running from a capture.
     session: Option<Arc<CapturedSession>>,
-    /// The account's data as served, which the vehicles going to battle are read from.
-    account: Option<AccountData>,
+    /// Every player's account, until accounts are stored.
+    account: AccountData,
     shop: Shop,
     /// The client version required, the client's own.
     required_version: String,
@@ -326,7 +325,7 @@ impl LoginThread {
                         slot.insert(LoginClient {
                             addr: login.addr,
                             blowfish,
-                            player: Player { name: self.name.clone(), revision: 0 },
+                            player: Player { name: self.name.clone(), revision: 1 },
                         });
 
                         // app.answer_login_error(login.addr, LoginError::Banned, "{\"bans\":\"{\\\"expiryTime\\\":1726435530,\\\"reason\\\":\\\"It's the reason\\\"}\"}".to_string());
@@ -353,9 +352,7 @@ impl BaseThread {
     /// the `Account` entity, then `showGUI`.
     fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(player) = self.players.get_mut(&client) else { return Ok(()) };
-        // The client is brought to the revision of the data served.
-        player.revision = player.revision.max(self.account.as_ref().and_then(AccountData::revision).unwrap_or(0));
+        let Some(player) = self.players.get(&client) else { return Ok(()) };
 
         let data = schema::AccountData {
             name: player.name.clone(),
@@ -440,18 +437,16 @@ impl BaseThread {
     /// The configuration of the vehicle of the given inventory id: its descriptor, crew
     /// and setups from the account, the rest from the game's definitions.
     fn vehicle_config(&self, vehicle_id: i64) -> io::Result<VehicleConfig> {
-        let account = self.account.as_ref().ok_or_else(|| invalid_data("no account data"))?;
-        let descr = account.vehicle_descr(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?.to_vec();
-        let decoded = VehicleDescr::decode(&descr).map_err(|e| invalid_data(&e.to_string()))?;
+        let vehicle = self.account.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
-        let def = VehicleDef::load_by_id(&fs, decoded.nation, decoded.type_id)?;
+        let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
         info!("Battle vehicle {vehicle_id}: {}, {} health", def.name, def.max_health);
         Ok(VehicleConfig {
-            descr,
+            descr: vehicle.descr.encode(),
             max_health: def.max_health,
-            crew: account.crew_descrs(vehicle_id).into_iter().map(<[u8]>::to_vec).collect(),
-            setups: account.vehicle_setups(vehicle_id),
-            setup_indexes: account.vehicle_setup_indexes(vehicle_id),
+            crew: vehicle.crew.iter().map(TankmanDescr::encode).collect(),
+            setups: vehicle.setups(),
+            setup_indexes: wgtk::pickle!({}),
             limits: MotionLimits {
                 speed_forward: def.speed_forward,
                 speed_backward: def.speed_backward,
@@ -584,6 +579,20 @@ impl BaseThread {
                 } else {
                     let data = self.shop.data.clone();
                     self.stream(client, account, request_id, &data)?;
+                }
+            }
+            // `[revision, crc32 of the cached data, 0]`: a full sync from revision 0, else
+            // nothing new, the updates being sent as they happen.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DATA, arg0: revision, .. } => {
+                let current = self.players.get(&client)
+                    .ok_or_else(|| invalid_data("Syncing the account of no player"))?
+                    .revision;
+                if revision == 0 {
+                    let data = account::compress(&self.account.data(current))?;
+                    self.stream(client, account, request_id, &data)?;
+                } else {
+                    let ext = pickle_dict([("prevRev", PickleValue::from(revision)), ("rev", PickleValue::from(current))]);
+                    self.app.entity(account)?.onCmdResponseExt(request_id, RES_SUCCESS, String::new(), Pickle(ext))?;
                 }
             }
             // `[cache version, latest change time in cache, 0]`, answered with the
@@ -786,80 +795,6 @@ impl BaseThread {
 
 }
 
-/// Serve the captured account data as we encode it rather than as captured: decode
-/// each full sync answer, check that its vehicles and tankmen decode and encode back
-/// the same, give it the vehicles asked for, and encode it back. Returns the account
-/// data served.
-fn reencode_account_data(session: &mut CapturedSession, give_vehicles: &[VehicleDef]) -> io::Result<Option<AccountData>> {
-
-    let mut served = None;
-    for request in &mut session.requests {
-
-        let is_full_sync = &*request.method == "doCmdInt3"
-            && request.args.get(1).and_then(Value::as_i64) == Some(CMD_SYNC_DATA.into())
-            && request.args.get(2).and_then(Value::as_i64) == Some(0);
-        if !is_full_sync {
-            continue;
-        }
-
-        for answer in &mut request.answers {
-
-            let Answer::Resource { description, data } = answer else { continue };
-
-            if account::resource_description(data) != *description {
-                warn!("The captured account data description differs from ours: {description:02X?}");
-            }
-
-            let mut account = AccountData::decode(data)?;
-            let invalid = |what: &str, id: i64, e: &dyn std::fmt::Display| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{what} {id}: {e}"))
-            };
-            let mut vehicles = 0;
-            for (id, cd) in account.compact_descrs(item_type::VEHICLE) {
-                let descr = VehicleDescr::decode(cd).map_err(|e| invalid("vehicle", id, &e))?;
-                if descr.encode() != cd {
-                    return Err(invalid("vehicle", id, &"encodes differently"));
-                }
-                vehicles += 1;
-            }
-            let mut tankmen = 0;
-            for (id, cd) in account.compact_descrs(item_type::TANKMAN) {
-                let descr = TankmanDescr::decode(cd).map_err(|e| invalid("tankman", id, &e))?;
-                if descr.encode() != cd {
-                    return Err(invalid("tankman", id, &"encodes differently"));
-                }
-                tankmen += 1;
-            }
-
-            for vehicle in give_vehicles {
-                let id = account.add_vehicle(vehicle)?;
-                info!("Gave vehicle {} as {id}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
-            }
-
-            // TEMPORARY: keep only the comma-separated sections, to find those required.
-            if let (Ok(keep), PickleValue::Dict(dict)) = (std::env::var("WGTK_ACCOUNT_KEEP"), &mut account.data) {
-                let keep = keep.split(',').map(str::as_bytes).collect::<Vec<_>>();
-                dict.retain(|key, _| match key {
-                    PickleValue::Bytes(name) => name == b"rev" || keep.contains(&&name[..]),
-                    PickleValue::Tuple(items) => matches!(items.first(), Some(PickleValue::Bytes(name)) if keep.contains(&&name[..])),
-                    _ => false,
-                });
-            }
-            let (new_description, new_data) = account.encode()?;
-            info!("Account data: revision {:?}, {} sections, {vehicles} vehicles, {tankmen} tankmen, {} bytes re-encoded to {}",
-                account.revision(), account.dict().map_or(0, |d| d.len()), data.len(), new_data.len());
-            *description = new_description;
-            *data = new_data;
-            served = Some(account);
-
-        }
-
-    }
-
-    Ok(served)
-
-}
-
 /// The configuration of the vehicle a client went to battle with: what the battle tells
 /// about it, and what the server simulates it with.
 #[derive(Debug, Clone)]
@@ -868,7 +803,7 @@ struct VehicleConfig {
     max_health: u32,
     /// Its crew's compact descriptors, in crew order.
     crew: Vec<Vec<u8>>,
-    /// Its loadouts and the selected ones, see `AccountData::vehicle_setups`.
+    /// Its loadouts and the selected ones, see `account::Vehicle::setups`.
     setups: pickle::Value,
     setup_indexes: pickle::Value,
     limits: MotionLimits,
@@ -906,8 +841,9 @@ fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -
 ///
 /// The configs that the client deserializes into models must be there, with their
 /// required fields, else reading them raises: they are the captured server's, without
-/// their optional fields and with empty lists. Story mode and fort rush are disabled,
-/// and the dates are the captured ones.
+/// their optional fields and with empty lists. Story mode, fort rush and the newbie
+/// hints (accounts have no battles yet) are disabled, and the dates are the captured
+/// ones.
 fn server_settings() -> Pickle {
     Pickle(wgtk::pickle!({
         "file_server": {},
@@ -955,8 +891,8 @@ fn server_settings() -> Pickle {
         "halloween_bestiary_config": {"enemies": {"enemy": []}},
         "halloween_gsw_config": {"cards": {"card": []}},
         "halloween_loot_config": {"loot": []},
-        "newbie_battle_hints_config": {"enabled": true},
-        "newbie_prebattle_hints_config": {"enabled": true, "hintDisplayCount": 2},
+        "newbie_battle_hints_config": {"enabled": false},
+        "newbie_prebattle_hints_config": {"enabled": false, "hintDisplayCount": 2},
         "oit_availability_config": {},
         "player_satisfaction_config": {"enabled": true, "enabledInterfaces": {}},
         "prebattle_hints_config": {"enabled": true, "battleTimerThreshold": 5},

@@ -1,134 +1,70 @@
 //! The account data: everything the client knows about the account (inventory, stats,
-//! quests, server settings...), sent as a resource in answer to `CMD_SYNC_DATA`, as a
-//! zlib-compressed pickled dict. The client merges it in `Account._update`: a key
-//! `(name, '_r')` replaces the cache entry `name` whole, a plain `name` is merged into
-//! it. A full sync (the first, with revision 0) carries the `rev` it brings the client
-//! to; later syncs give `prevRev` and `rev` in the `onCmdResponseExt` answer instead.
+//! quests...), sent as a resource in answer to `CMD_SYNC_DATA`, as a zlib-compressed
+//! pickled dict. The client merges it in `Account._update`: a key `(name, '_r')`
+//! replaces the cache entry `name` whole, a plain `name` is merged into it. A full sync
+//! (the first, with revision 0) carries the `rev` it brings the client to; later syncs
+//! give `prevRev` and `rev` in the `onCmdResponseExt` answer instead.
+//!
+//! Only the sections the client needs are given: the inventory, the stats with the
+//! money, the personal missions and the cache allowing to spend it.
 
-use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io;
 
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+
 use wgtk::pickle::{self, Value};
+use wgtk::res::fs::ResFilesystem;
+use wgtk::pxml::Element;
 
-use crate::wot::item_defs::VehicleDef;
-use crate::wot::items::{item_type, TankmanDescr};
+use crate::wot::items::{item_type, IntCompactDescr, TankmanDescr, VehicleDescr};
+use crate::wot::item_defs::{self, VehicleDef, NATIONS};
 
 
-/// The account data, as the pickled dict it is.
+/// The money of every account, until accounts are stored.
+const CREDITS: i64 = 100_000_000;
+const GOLD: i64 = 1_000_000;
+const FREE_XP: i64 = 1_000_000;
+/// The garage slots and barracks berths of every account, plenty.
+const SLOTS: i64 = 100;
+const BERTHS: i64 = 100;
+/// `VEHICLE_SETTINGS_FLAG`: auto repair, auto load, auto equip.
+const VEHICLE_SETTINGS: i64 = 14;
+
+/// A player's account, standing in for its stored one.
 #[derive(Debug, Clone)]
 pub struct AccountData {
-    pub data: Value,
+    /// Its vehicles, whose inventory ids are their indices from 1.
+    pub vehicles: Vec<Vehicle>,
+}
+
+/// A vehicle of the account, as bought: the default modules and ammunition, no
+/// equipment, and a new crew trained for it (full role experience, no skills).
+#[derive(Debug, Clone)]
+pub struct Vehicle {
+    pub descr: VehicleDescr,
+    /// Its crew, in crew order, whose inventory ids follow those of the crews of the
+    /// vehicles before.
+    pub crew: Vec<TankmanDescr>,
+    /// Its shells, by integer descriptor, and how many of each.
+    pub shells: Vec<(IntCompactDescr, u32)>,
 }
 
 impl AccountData {
 
-    /// Decode a sync resource's data.
-    pub fn decode(data: &[u8]) -> io::Result<Self> {
-        let mut raw = Vec::new();
-        ZlibDecoder::new(data).read_to_end(&mut raw)?;
-        let data = pickle::from_bytes(&raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Ok(Self { data })
-    }
-
-    /// Encode as a sync resource: its description, then its data.
-    pub fn encode(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
-        let data = compress(&self.data)?;
-        Ok((resource_description(&data), data))
-    }
-
-    /// The revision a full sync brings the client to.
-    pub fn revision(&self) -> Option<i64> {
-        match self.get(&[key("rev")])? {
-            Value::I64(rev) => Some(*rev),
-            _ => None,
-        }
-    }
-
-    /// A vehicle's compact descriptor, by inventory id.
-    pub fn vehicle_descr(&self, vehicle_id: i64) -> Option<&[u8]> {
-        self.compact_descrs(item_type::VEHICLE).find(|&(id, _)| id == vehicle_id).map(|(_, cd)| cd)
-    }
-
-    /// The compact descriptors of a vehicle's crew, in crew order, by the vehicle's
-    /// inventory id. An empty seat has none.
-    pub fn crew_descrs(&self, vehicle_id: i64) -> Vec<&[u8]> {
-        let crew = self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key("crew"), Value::I64(vehicle_id)]);
-        let Some(Value::List(crew)) = crew else { return Vec::new() };
-        crew.iter().filter_map(|id| match id {
-            Value::I64(id) => self.compact_descrs(item_type::TANKMAN).find(|(tankman, _)| tankman == id).map(|(_, cd)| cd),
-            _ => None,
-        }).collect()
-    }
-
-    /// A vehicle's setups, as the battle gives them to its vehicle: its loadouts of
-    /// shells, equipment, optional devices and boosters, by inventory id.
-    pub fn vehicle_setups(&self, vehicle_id: i64) -> Value {
-        let table = |name: &str| self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key(name), Value::I64(vehicle_id)]);
-        let empty = || Value::List(vec![Value::List(Vec::new())]);
-        // Shell layouts are kept by turret and gun, the mounted ones being the only.
-        let shells = match table("shellsLayout") {
-            Some(Value::Dict(layouts)) => layouts.values().next().cloned(),
-            _ => None,
-        };
-        Value::Dict(BTreeMap::from([
-            (key("boostersSetups"), table("boostersLayout").cloned().unwrap_or_else(empty)),
-            (key("devicesSetups"), table("devicesLayout").cloned().unwrap_or_else(empty)),
-            (key("eqsSetups"), table("eqsLayout").cloned().unwrap_or_else(empty)),
-            (key("shellsSetups"), shells.unwrap_or_else(empty)),
-        ]))
-    }
-
-    /// Which of a vehicle's setups are selected, by inventory id.
-    pub fn vehicle_setup_indexes(&self, vehicle_id: i64) -> Value {
-        self.get(&[key("inventory"), Value::I64(item_type::VEHICLE.into()), key("layoutIndexes"), Value::I64(vehicle_id)])
-            .cloned()
-            .unwrap_or_else(|| Value::Dict(BTreeMap::new()))
-    }
-
-    /// The compact descriptors of an item type's inventory entries, by inventory id:
-    /// `inventory[item_type]['compDescr']`.
-    pub fn compact_descrs(&self, item_type: u8) -> impl Iterator<Item = (i64, &[u8])> + '_ {
-        let descrs = self.get(&[key("inventory"), Value::I64(item_type.into()), key("compDescr")]);
-        let descrs = match descrs {
-            Some(Value::Dict(descrs)) => Some(descrs),
-            _ => None,
-        };
-        descrs.into_iter().flatten().filter_map(|(id, cd)| match (id, cd) {
-            (Value::I64(id), Value::Bytes(cd)) => Some((*id, &cd[..])),
-            _ => None,
-        })
-    }
-
-    /// Give the account a vehicle, as bought: the default modules and ammunition, no
-    /// equipment, and a new crew trained for it (full role experience, no skills).
-    /// Returns its inventory id.
-    pub fn add_vehicle(&mut self, def: &VehicleDef) -> io::Result<i64> {
-
-        let next_id = |item_type| self.compact_descrs(item_type).map(|(id, _)| id).max().unwrap_or(0) + 1;
-        let vehicle_id = next_id(item_type::VEHICLE);
-        let first_tankman_id = next_id(item_type::TANKMAN);
-
-        // The client checks names and portraits against its nation's tables, so take
-        // valid ones from the account's other tankmen of that nation.
-        let names: Vec<_> = self.compact_descrs(item_type::TANKMAN)
-            .filter_map(|(_, cd)| TankmanDescr::decode(cd).ok())
-            .filter(|tankman| tankman.nation == def.descr.nation)
-            .map(|tankman| (tankman.first_name_id, tankman.last_name_id, tankman.icon_id))
-            .take(def.crew_roles.len())
-            .collect();
-        if names.len() < def.crew_roles.len() {
-            return Err(invalid("not enough tankmen of the vehicle's nation to name a crew after"));
-        }
-
-        let crew: Vec<i64> = (first_tankman_id..).take(def.crew_roles.len()).collect();
-        let tankmen = self.section_mut(&[key("inventory"), Value::I64(item_type::TANKMAN.into())])?;
-        for ((&id, &role), &(first_name_id, last_name_id, icon_id)) in crew.iter().zip(&def.crew_roles).zip(&names) {
-            let tankman = TankmanDescr {
-                nation: def.descr.nation,
+    /// An account with the given vehicles.
+    pub fn new(fs: &ResFilesystem, defs: &[VehicleDef]) -> io::Result<Self> {
+        let mut passports = HashMap::new();
+        let mut vehicles = Vec::new();
+        for def in defs {
+            let nation = def.descr.nation;
+            if !passports.contains_key(&nation) {
+                passports.insert(nation, Passports::load(fs, nation)?);
+            }
+            let passports = &passports[&nation];
+            let crew = def.crew_roles.iter().enumerate().map(|(i, &role)| TankmanDescr {
+                nation,
                 flags: vec![0],
                 vehicle_type_id: def.descr.type_id,
                 role,
@@ -137,78 +73,258 @@ impl AccountData {
                 last_skill_level: 0,
                 free_skills: 0,
                 bonus_skills: Vec::new(),
-                first_name_id,
-                last_name_id,
-                icon_id,
+                first_name_id: passports.first_names[i % passports.first_names.len()],
+                last_name_id: passports.last_names[i % passports.last_names.len()],
+                icon_id: passports.icons[i % passports.icons.len()],
                 free_xp: 0,
                 dossier: Vec::new(),
-            };
-            table(tankmen, "compDescr").insert(Value::I64(id), Value::Bytes(tankman.encode()));
-            table(tankmen, "vehicle").insert(Value::I64(id), Value::I64(vehicle_id));
+            }).collect();
+            vehicles.push(Vehicle { descr: def.descr.clone(), crew, shells: def.default_ammo() });
         }
-
-        let shells: Vec<Value> = def.default_ammo().into_iter()
-            .flat_map(|(cd, count)| [Value::I64(cd.to_int()), Value::I64(count.into())])
-            .collect();
-        let layout_key = Value::Tuple(vec![
-            Value::I64(def.turret_int_descr().to_int()),
-            Value::I64(def.gun_int_descr().to_int()),
-        ]);
-        let crew = Value::List(crew.into_iter().map(Value::I64).collect());
-        let empty_layout = || Value::List(vec![Value::List(Vec::new())]);
-
-        let vehicles = self.section_mut(&[key("inventory"), Value::I64(item_type::VEHICLE.into())])?;
-        let id = Value::I64(vehicle_id);
-        let mut set = |name: &str, value: Value| table(vehicles, name).insert(id.clone(), value);
-        set("compDescr", Value::Bytes(def.descr.encode()));
-        set("crew", crew.clone());
-        set("lastCrew", crew);
-        set("shells", Value::List(shells.clone()));
-        set("shellsLayout", Value::Dict(BTreeMap::from([(layout_key, Value::List(vec![Value::List(shells)]))])));
-        set("eqs", Value::List(Vec::new()));
-        set("eqsLayout", empty_layout());
-        set("devicesLayout", empty_layout());
-        set("boosters", Value::List(Vec::new()));
-        set("boostersLayout", empty_layout());
-        // `VEHICLE_SETTINGS_FLAG`: auto repair, auto load, auto equip.
-        set("settings", Value::I64(14));
-        set("extraSettings", Value::I64(0));
-
-        Ok(vehicle_id)
-
+        Ok(Self { vehicles })
     }
 
-    /// The dict at a path of dict keys.
-    fn section_mut(&mut self, path: &[Value]) -> io::Result<&mut BTreeMap<Value, Value>> {
-        path.iter().try_fold(&mut self.data, |value, k| match value {
-            Value::Dict(dict) => dict.get_mut(k),
-            _ => None,
-        }).and_then(|value| match value {
-            Value::Dict(dict) => Some(dict),
-            _ => None,
-        }).ok_or_else(|| invalid("missing account data section"))
+    /// A vehicle, by inventory id.
+    pub fn vehicle(&self, vehicle_id: i64) -> Option<&Vehicle> {
+        self.vehicles.get(usize::try_from(vehicle_id).ok()?.checked_sub(1)?)
     }
 
-    /// The value at a path of dict keys.
-    pub fn get(&self, path: &[Value]) -> Option<&Value> {
-        path.iter().try_fold(&self.data, |value, k| match value {
-            Value::Dict(dict) => dict.get(k),
-            _ => None,
+    /// Each vehicle with its inventory id and its crew's.
+    fn vehicles(&self) -> impl Iterator<Item = (i64, Vec<i64>, &Vehicle)> {
+        let mut next_tankman_id = 1;
+        self.vehicles.iter().zip(1..).map(move |(vehicle, id)| {
+            let crew = (next_tankman_id..).take(vehicle.crew.len()).collect();
+            next_tankman_id += vehicle.crew.len() as i64;
+            (id, crew, vehicle)
         })
     }
 
-    pub fn dict(&self) -> Option<&BTreeMap<Value, Value>> {
-        match &self.data {
-            Value::Dict(dict) => Some(dict),
-            _ => None,
+    /// The data of a full sync, bringing the client to the given revision.
+    pub fn data(&self, revision: i64) -> Value {
+        wgtk::pickle!({
+            "rev": revision,
+            "inventory": (self.inventory()),
+            "stats": (self.stats()),
+            "potapovQuests": (potapov_quests()),
+            "cache": (cache()),
+        })
+    }
+
+    /// The items the account has, by item type: the vehicles' tables of their state by
+    /// inventory id, the tankmen's likewise, the crew skins' tables, and the other
+    /// items' counts by integer descriptor, of which there are none.
+    fn inventory(&self) -> Value {
+
+        let mut vehicles = BTreeMap::<&str, BTreeMap<Value, Value>>::new();
+        let mut tankmen = BTreeMap::<&str, BTreeMap<Value, Value>>::new();
+        // The client reads these tables of every vehicle, which have no entry when empty.
+        for table in ["customRoleSlots", "customizationExpiryTime", "enhancements", "igrCustomizationLayout",
+            "layoutIndexes", "postProgression", "rent", "repair"] {
+            vehicles.insert(table, BTreeMap::new());
         }
+
+        for (id, crew, vehicle) in self.vehicles() {
+            let shells = vehicle.shells_value();
+            let layout_key = wgtk::pickle!(((vehicle.descr.turret_int_descr().to_int()), (vehicle.descr.gun_int_descr().to_int())));
+            let crew_ids = Value::List(crew.iter().copied().map(Value::from).collect());
+            let empty_layout = || wgtk::pickle!([[]]);
+            for (table, value) in [
+                ("compDescr", Value::Bytes(vehicle.descr.encode())),
+                ("crew", crew_ids.clone()),
+                ("lastCrew", crew_ids),
+                ("shells", shells.clone()),
+                ("shellsLayout", Value::Dict(BTreeMap::from([(layout_key, Value::List(vec![shells]))]))),
+                ("eqs", wgtk::pickle!([])),
+                ("eqsLayout", empty_layout()),
+                ("devicesLayout", empty_layout()),
+                ("boosters", wgtk::pickle!([])),
+                ("boostersLayout", empty_layout()),
+                ("settings", Value::from(VEHICLE_SETTINGS)),
+                ("extraSettings", Value::from(0)),
+            ] {
+                vehicles.entry(table).or_default().insert(Value::from(id), value);
+            }
+            for (&tankman_id, tankman) in crew.iter().zip(&vehicle.crew) {
+                tankmen.entry("compDescr").or_default().insert(Value::from(tankman_id), Value::Bytes(tankman.encode()));
+                tankmen.entry("vehicle").or_default().insert(Value::from(tankman_id), Value::from(id));
+            }
+        }
+
+        let tables = |tables: BTreeMap<&str, BTreeMap<Value, Value>>| {
+            Value::dict(tables.into_iter().map(|(name, table)| (name, Value::Dict(table))))
+        };
+        let mut inventory = BTreeMap::from([
+            (Value::from(item_type::VEHICLE as i64), tables(vehicles)),
+            (Value::from(item_type::TANKMAN as i64), tables(tankmen)),
+            // `SkinInvData`: the skins by id, and those worn by tankman, which the
+            // client reads without a default.
+            (Value::from(item_type::CREW_SKIN as i64), wgtk::pickle!({1: {}, 2: {}})),
+            (Value::from("enhancements"), wgtk::pickle!({})),
+            (Value::from("telecomOrders"), wgtk::pickle!({})),
+        ]);
+        for item_type in item_type::CHASSIS..=item_type::CREW_BOOK {
+            inventory.entry(Value::from(item_type as i64)).or_insert_with(|| wgtk::pickle!({}));
+        }
+        Value::Dict(inventory)
+
+    }
+
+    /// The account's money, its research (the vehicles and their modules) and its
+    /// limits, a new account's.
+    fn stats(&self) -> Value {
+        let unlocks = self.vehicles.iter()
+            .flat_map(|vehicle| [vehicle.descr.int_descr()].into_iter().chain(vehicle.descr.module_int_descrs()))
+            .map(|cd| Value::from(cd.to_int()));
+        let set = |items: BTreeSet<Value>| Value::Set(items);
+        wgtk::pickle!({
+            "credits": CREDITS,
+            "gold": GOLD,
+            "crystal": 0,
+            "freeXP": FREE_XP,
+            "equipCoin": 0,
+            "eventCoin": 0,
+            "bpcoin": 0,
+            "slots": SLOTS,
+            "berths": BERTHS,
+            "unlocks": (set(unlocks.collect())),
+            "eliteVehicles": (set(BTreeSet::new())),
+            "multipliedXPVehs": (set(BTreeSet::new())),
+            "multipliedRankedBattlesVehs": (set(BTreeSet::new())),
+            "vehTypeXP": {},
+            "vehTypeLocks": {},
+            "globalVehicleLocks": {},
+            "maxResearchedLevelByNation": {},
+            "prestigeMilestonesAchieved": {},
+            "weeklyVehicleCrystals": {},
+            "restrictions": {},
+            "dossier": (Value::Bytes(Vec::new())),
+            "clanInfo": None,
+            "language": "en",
+            "XPpp": 0.0,
+            "accOnline": 0,
+            "accOffline": 0,
+            "applyAdditionalXPCount": 0,
+            "applyAdditionalWoTPlusXPCount": 0,
+            "dailyPlayHours": [0],
+            "playLimits": ((172800, ""), (1209600, "")),
+            "dummySessionStats": {
+                "base": {"credits": 0, "xp": 0},
+                "premium": {"credits": 0, "xp": 0},
+                "totalDailyAppliedAdditionalXP": 0,
+            },
+            "denunciationsLeft": 10,
+            "finPswdAttemptsLeft": 5,
+            "hasFinPassword": false,
+            "freeTMenLeft": 0,
+            "freeVehiclesLeft": 0,
+            "vehicleSellsLeft": 5,
+            "fortResource": 0,
+            "tkillIsSuspected": false,
+        })
     }
 
 }
 
-/// A dict key as the server writes them: Python 2 `str`, so bytes.
-pub fn key(name: &str) -> Value {
-    Value::Bytes(name.as_bytes().to_vec())
+impl Vehicle {
+
+    /// The vehicle's setups, as the battle gives them to its vehicle: its loadouts of
+    /// shells, equipment, optional devices and boosters, only of shells for now.
+    pub fn setups(&self) -> Value {
+        wgtk::pickle!({
+            "boostersSetups": [[]],
+            "devicesSetups": [[]],
+            "eqsSetups": [[]],
+            "shellsSetups": [(self.shells_value())],
+        })
+    }
+
+    /// Its shells as the account lists them, `[shell, count, ...]`.
+    fn shells_value(&self) -> Value {
+        Value::List(self.shells.iter()
+            .flat_map(|&(cd, count)| [Value::from(cd.to_int()), Value::from(count)])
+            .collect())
+    }
+
+}
+
+/// The personal missions of an account that has none.
+fn potapov_quests() -> Value {
+    let campaign = || wgtk::pickle!({
+        "lastIDs": {},
+        "rewards": ({}, {}),
+        "selected": (Value::Set(BTreeSet::new())),
+        "slots": 3,
+    });
+    wgtk::pickle!({
+        "activeCampaigns": [],
+        // The progress of no quest.
+        "compDescr": (Value::Bytes(Vec::new())),
+        "lastActiveOperationID": None,
+        "regular": (campaign()),
+        "pm2": (campaign()),
+        "pm3": (campaign()),
+        "pm4": (campaign()),
+        "tiles": (Value::Set(BTreeSet::new())),
+    })
+}
+
+/// What the client caches of the account's state on the server, notably that it may
+/// spend its money.
+fn cache() -> Value {
+    wgtk::pickle!({
+        "isResourcesConsumptionAllowed": true,
+        "isEmergencyModeEnabled": false,
+        "isFinPswdVerified": false,
+        "isSsrPlayEnabled": false,
+        "SPA": {},
+        "activeOrders": {},
+        "clanFortState": 0,
+        "clanMembers": {},
+        "comp7": {"isOnline": false, "qualification": {"battles": [], "state": "in_progress"}},
+        "dynamicCurrencies": {},
+        "entitlements": {},
+        "gameRestrictions": {"payment": {}, "privateChat": {}, "publicChat": {}, "session": {}, "settings": {}},
+        "giftsData": {"isReady": false},
+        "potapovQuestIDs": {},
+        "vehsLock": {},
+    })
+}
+
+/// The ids of the names and portraits a nation's tankmen are given: those of its first
+/// normal group of men, which the client checks theirs against.
+#[derive(Debug)]
+struct Passports {
+    first_names: Vec<u16>,
+    last_names: Vec<u16>,
+    icons: Vec<u16>,
+}
+
+impl Passports {
+
+    fn load(fs: &ResFilesystem, nation: u8) -> io::Result<Self> {
+        let nation_name = NATIONS.get(nation as usize)
+            .ok_or_else(|| item_defs::invalid(format!("no nation {nation}")))?;
+        let config = item_defs::read_xml(fs, &format!("scripts/item_defs/tankmen/{nation_name}.xml"))?;
+        let group = config.get_child_element("normalGroups").into_iter()
+            .flat_map(Element::iter_child_elements)
+            .map(|(_, group)| group)
+            .find(|group| group.get_child_string("sex").map(str::trim) == Some("male")
+                && group.get_child_boolean("notInShop") != Some(true))
+            .ok_or_else(|| item_defs::invalid(format!("no group of men among the {nation_name} tankmen")))?;
+        // Ids are named `_<id>`.
+        let ids = |name: &str| -> io::Result<Vec<u16>> {
+            let ids = group.get_child_element(name).into_iter()
+                .flat_map(Element::iter_children_all)
+                .filter_map(|(key, _)| key.strip_prefix('_')?.parse().ok())
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Err(item_defs::invalid(format!("no {name} for the {nation_name} tankmen")));
+            }
+            Ok(ids)
+        };
+        Ok(Self { first_names: ids("firstNames")?, last_names: ids("lastNames")?, icons: ids("icons")? })
+    }
+
 }
 
 /// A value as streamed: pickled, then zlib-compressed.
@@ -225,20 +341,4 @@ pub fn resource_description(data: &[u8]) -> Vec<u8> {
     let crc32 = crc32fast::hash(data) as i32;
     let description = Value::Tuple(vec![Value::I64(data.len() as i64), Value::I64(crc32.into())]);
     pickle::to_bytes(&description)
-}
-
-/// A section's table by name, created empty if missing.
-fn table<'a>(section: &'a mut BTreeMap<Value, Value>, name: &str) -> &'a mut BTreeMap<Value, Value> {
-    let table = section.entry(key(name)).or_insert_with(|| Value::Dict(BTreeMap::new()));
-    if !matches!(table, Value::Dict(_)) {
-        *table = Value::Dict(BTreeMap::new());
-    }
-    match table {
-        Value::Dict(dict) => dict,
-        _ => unreachable!(),
-    }
-}
-
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
 }

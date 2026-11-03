@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io;
 
-use wgtk::pxml::Element;
+use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
 
 use super::item_defs::{self, NATIONS};
@@ -124,13 +124,13 @@ impl ItemPrices {
     /// Add an item from its definition, which prices it in credits unless it says
     /// otherwise, free if it says nothing.
     fn add(&mut self, cd: IntCompactDescr, def: &Element) {
-        let price_def = def.get_child_element("price");
-        let currency = CURRENCIES.iter()
-            .find(|&&currency| price_def.is_some_and(|price| price.get_child(currency).is_some()))
-            .copied()
-            .unwrap_or("credits");
-        let amount = def.get_child_integer("price").unwrap_or(0);
-        self.prices.push((cd, Price { currency, amount }));
+        // The price is an element only to hold its currency's marker.
+        let (amount, currency) = match def.get_child("price") {
+            Some(pxml::Value::Element(price)) => (price.value.as_integer(), CURRENCIES.iter().copied().find(|&currency| price.get_child(currency).is_some())),
+            Some(price) => (price.as_integer(), None),
+            None => (None, None),
+        };
+        self.prices.push((cd, Price { currency: currency.unwrap_or("credits"), amount: amount.unwrap_or(0) }));
         if def.get_child_boolean("notInShop") == Some(true) {
             self.not_in_shop.push(cd);
         }
