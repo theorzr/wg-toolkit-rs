@@ -26,7 +26,7 @@ use rsa::RsaPrivateKey;
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle, ScriptType};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
-use wgtk::script::{Script, Value};
+use wgtk::script::{Script, StringValue, Value};
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
@@ -452,13 +452,11 @@ impl BaseThread {
     /// Bring a client that reconnected for its battle to its avatar.
     fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
-        // The captured avatar names the player and the map, until the account and the
-        // battle do.
-        let Some(captured) = self.session.as_ref()
-            .and_then(|s| s.battle.as_ref())
-            .and_then(|b| b.avatar.as_ref())
-            .and_then(|data| AvatarData::from_value(data.clone())) else {
-            warn!(%client, "The capture has no avatar to create");
+        // The player is named as its account, the captured one until accounts are stored.
+        let Some(name) = self.session.as_ref()
+            .and_then(|s| s.account.as_ref())
+            .and_then(|(data, _)| account_name(data)) else {
+            warn!(%client, "The captured account has no name");
             return Ok(());
         };
 
@@ -466,7 +464,7 @@ impl BaseThread {
             warn!(%client, "No map to battle on");
             return Ok(());
         };
-        let data = avatar_data(captured.name, *arena_type_id);
+        let data = avatar_data(name, *arena_type_id);
         let avatar = self.app.create_base_player::<Avatar>(client, data, AVATAR_COMPONENTS_COUNT)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
@@ -779,6 +777,16 @@ struct VehicleConfig {
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
+}
+
+/// The name of an account, from its base data.
+fn account_name(data: &Value) -> Option<String> {
+    let Value::Dict(properties) = data else { return None };
+    match properties.get("name")? {
+        Value::String(StringValue::String(name)) => Some(name.clone()),
+        Value::String(StringValue::Raw(name)) => String::from_utf8(name.clone()).ok(),
+        _ => None,
+    }
 }
 
 /// The base data of a random battle's avatar, for the given player and map: no limits,
