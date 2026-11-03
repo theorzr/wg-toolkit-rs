@@ -76,14 +76,7 @@ pub fn run(
         Some(path) => {
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
-            let battle = match &session.battle {
-                Some(battle) => format!("cell player {}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
-                    battle.cell_player.is_some(), battle.vehicle_alias,
-                    battle.vehicle_position.is_some(), battle.vehicle_entity.is_some(),
-                    battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len()))))),
-                None => "none".to_string(),
-            };
-            info!("Serving from capture {}: account {}, {} requests, battle: {battle}",
+            info!("Serving from capture {}: account {}, {} requests",
                 path.display(), if session.account.is_some() { "found" } else { "missing" }, session.requests.len());
             for request in &session.requests {
                 let answers: Vec<String> = request.answers.iter().map(|answer| match answer {

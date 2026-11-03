@@ -8,11 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use wgtk::app::client::element::{
-    self as client_el, AddSpaceGeometryMapping, AvatarUpdateAliasDetailed, ChangedProperties, CreateBasePlayer,
-    CreateCellPlayer, CreateEntity, CreateEntityDetailed, EnterAoi, NrlBody, NrlChild, NrlCreateNode,
-    NrlMessage, NrlNode, EntityMethod, ResourceFragment, ResourceHeader,
-    SelectAliasedEntity, SelectEntity, SelectPlayerEntity, SpaceProperty, SwitchBaseApp, TickSync, UpdateEntity,
-    UpdateFrequencyNotification,
+    self as client_el, CreateBasePlayer, EntityMethod, ResourceFragment, ResourceHeader, SelectEntity,
+    SelectPlayerEntity, SwitchBaseApp, UpdateFrequencyNotification,
 };
 use wgtk::app::base::element::{self as base_el, BaseEntityMethod, EnableEntities, SessionKey};
 use wgtk::app::proxy::{self, capture::CaptureReader, PacketChannel, PacketDirection, Peer};
@@ -34,44 +31,6 @@ pub struct CapturedSession {
     /// Each base method call the client made to its account, in order, with the
     /// server's answers.
     pub requests: Vec<CapturedRequest>,
-    /// The battle the client entered, if it entered one.
-    pub battle: Option<CapturedBattle>,
-}
-
-/// A battle the client entered: the server tells the account `onArenaCreated`, then
-/// switches the client to the base app holding its `Avatar`.
-///
-/// What the server sends the avatar until the map is loaded is kept, for the emulator to
-/// build its own battle from: stand-ins for the values a game server will generate.
-#[derive(Debug, Default)]
-pub struct CapturedBattle {
-    /// The `Avatar` entity's creation data, which names the player and the map.
-    pub avatar: Option<Value>,
-    /// The avatar's cell side, which names the space and the player's vehicle.
-    pub cell_player: Option<CreateCellPlayer>,
-    /// Whether the map got into the space, which ends the battle's setup.
-    pub mapped: bool,
-    /// The player's vehicle: its id alias when entering the area of interest, its
-    /// position, and its creation, answering the client.
-    pub vehicle_alias: Option<u8>,
-    pub vehicle_position: Option<AvatarUpdateAliasDetailed>,
-    pub vehicle_entity: Option<CreateEntity>,
-    /// [`Self::vehicle_entity`]'s properties, decoded.
-    pub vehicle_properties: Option<ChangedProperties>,
-    /// The arena's info entity, whose `AvatarVehiclesInfo` component tells the client
-    /// the arena's vehicles.
-    pub arena_info: Option<CapturedArenaInfo>,
-}
-
-/// The arena's info entity: its type and properties, from its creation, then the NRL
-/// tree creating its node and its component, decoded. Like other entities without an id
-/// alias, it is created right after entering the area of interest, the client asking
-/// for nothing.
-#[derive(Debug)]
-pub struct CapturedArenaInfo {
-    pub entity_id: u32,
-    pub created: Option<(u16, ChangedProperties)>,
-    pub nrl: Vec<NrlMessage>,
 }
 
 /// A base method call the client made, and the answers to it.
@@ -101,8 +60,6 @@ impl CapturedSession {
             dispatch,
             player_type: None,
             in_account: false,
-            in_avatar: false,
-            detailed_entities: HashMap::new(),
             selected: None,
             session: CapturedSession::default(),
             pending: HashMap::new(),
@@ -140,14 +97,9 @@ struct Extractor<'d> {
     /// The type of the client's current player entity, which its method calls decode
     /// against in both directions.
     player_type: Option<u16>,
-    /// Whether the player is the avatar, whose battle setup is kept.
-    in_avatar: bool,
     /// Whether the entity selected for the next method calls and property updates is
     /// the player, rather than one picked with `SelectEntity`, and that one.
     selected: Option<u32>,
-    /// The type and properties of the entities created in detail in the battle, by id:
-    /// the arena's info entity among them, before its NRL tree tells which it is.
-    detailed_entities: HashMap<u32, (u16, ChangedProperties)>,
     /// Whether the player is the account: only its requests are served. Request ids
     /// start over with each player, so a later player's answers would land on the
     /// account's requests.
@@ -184,26 +136,6 @@ impl proxy::Handler for Extractor<'_> {
 }
 
 impl Extractor<'_> {
-
-    /// The battle being set up, until its map arrives.
-    fn setting_up_battle(&mut self) -> Option<&mut CapturedBattle> {
-        let battle = self.session.battle.as_mut().filter(|_| self.in_avatar)?;
-        (!battle.mapped).then_some(battle)
-    }
-
-    /// The player's vehicle, if it has this alias. Only the vehicle's alias is tracked,
-    /// any other names some other entity.
-    fn vehicle_by_alias(&self, alias: u8) -> Option<u32> {
-        let battle = self.session.battle.as_ref().filter(|_| self.in_avatar)?;
-        battle.cell_player.as_ref().map(|cell| cell.vehicle_id).filter(|_| battle.vehicle_alias == Some(alias))
-    }
-
-    /// The battle, if the given entity is its player's vehicle.
-    fn battle_vehicle(&mut self, entity_id: u32) -> Option<&mut CapturedBattle> {
-        let battle = self.session.battle.as_mut().filter(|_| self.in_avatar)?;
-        let vehicle_id = battle.cell_player.as_ref()?.vehicle_id;
-        (vehicle_id == entity_id).then_some(battle)
-    }
 
     /// The request a call answers, from its first argument: an answer repeats the
     /// request id with the same type, which tells it apart from a call whose first
@@ -264,14 +196,10 @@ impl Extractor<'_> {
                     self.player_type = Some(e.entity_type_id);
                     let type_named = |name| self.dispatch.entity_from_name(name).map(|(t, _)| t) == Some(e.entity_type_id);
                     self.in_account = type_named("Account");
-                    self.in_avatar = type_named("Avatar");
                     self.pending.clear();
                     self.latest = None;
-                    if type_named("Account") {
+                    if self.in_account {
                         self.session.account = Some((e.entity_data.into_owned(), e.entity_components_count));
-                    } else if type_named("Avatar") {
-                        let battle = self.session.battle.get_or_insert_with(CapturedBattle::default);
-                        battle.avatar.get_or_insert(e.entity_data.into_owned());
                     }
                 }
                 SelectPlayerEntity::ID => {
@@ -281,71 +209,6 @@ impl Extractor<'_> {
                 SelectEntity::ID => {
                     self.selected = Some(elt.read_simple::<SelectEntity>()?.element.entity_id);
                 }
-                AvatarUpdateAliasDetailed::ID => {
-                    // A position update also selects its entity.
-                    let e = elt.read_simple::<AvatarUpdateAliasDetailed>()?.element;
-                    self.selected = Some(self.vehicle_by_alias(e.id_alias).unwrap_or(u32::MAX));
-                    if let Some(battle) = self.session.battle.as_mut().filter(|b| b.vehicle_alias == Some(e.id_alias)) {
-                        battle.vehicle_position.get_or_insert(e);
-                    }
-                }
-                SelectAliasedEntity::ID => {
-                    let alias = elt.read_simple::<SelectAliasedEntity>()?.element.id_alias;
-                    self.selected = Some(self.vehicle_by_alias(alias).unwrap_or(u32::MAX));
-                }
-                CreateCellPlayer::ID => {
-                    let e = elt.read_simple::<CreateCellPlayer>()?.element;
-                    if let Some(battle) = self.setting_up_battle() {
-                        battle.cell_player.get_or_insert(e);
-                    }
-                }
-                SpaceProperty::ID => { elt.read_simple::<SpaceProperty>()?; }
-                AddSpaceGeometryMapping::ID => {
-                    elt.read_simple::<AddSpaceGeometryMapping>()?;
-                    if let Some(battle) = self.setting_up_battle() {
-                        battle.mapped = true;
-                    }
-                }
-                EnterAoi::ID => {
-                    let e = elt.read_simple::<EnterAoi>()?.element;
-                    if let Some(battle) = self.battle_vehicle(e.entity_id) {
-                        battle.vehicle_alias.get_or_insert(e.id_alias);
-                    }
-                }
-                NrlCreateNode::ID => {
-                    let mut stream = elt.read_simple::<NrlCreateNode>()?.element.0;
-                    let decoded = self.in_avatar && stream.decode_components(self.dispatch).is_ok();
-                    if decoded && carries_vehicles_info(&stream.messages) {
-                        let entity_id = stream.messages.iter().find_map(|message| match &message.body {
-                            NrlBody::CreateNode { node: NrlNode::Entity { entity_id }, .. } => Some(*entity_id),
-                            _ => None,
-                        });
-                        if let (Some(battle), Some(entity_id)) = (self.session.battle.as_mut(), entity_id) {
-                            let created = self.detailed_entities.remove(&entity_id);
-                            battle.arena_info.get_or_insert(CapturedArenaInfo { entity_id, created, nrl: stream.messages });
-                        }
-                    }
-                }
-                CreateEntityDetailed::ID => {
-                    let e = elt.read_simple::<CreateEntityDetailed>()?.element;
-                    let properties = self.dispatch.entity_from_id(e.entity_type_id).map(|d| e.client_properties(&d.properties));
-                    if let Some(properties) = properties.filter(|_| self.in_avatar) {
-                        self.detailed_entities.insert(e.entity_id, (e.entity_type_id, properties));
-                    }
-                }
-                CreateEntity::ID => {
-                    let e = elt.read_simple::<CreateEntity>()?.element;
-                    let properties = self.dispatch.entity_from_id(e.entity_type_id).map(|d| e.client_properties(&d.properties));
-                    if let Some(battle) = self.battle_vehicle(e.entity_id) {
-                        battle.vehicle_properties = properties;
-                        battle.vehicle_entity.get_or_insert(e);
-                    }
-                }
-                UpdateEntity::ID => {
-                    // The vehicle's inner level of detail, which the emulator builds.
-                    elt.read::<Skipped, _>(&())?;
-                }
-                TickSync::ID => { elt.read_simple::<TickSync>()?; }
                 SwitchBaseApp::ID => { elt.read_simple::<SwitchBaseApp>()?; }
                 id if client_el::id::ENTITY_METHOD.contains(id) => {
                     // A call on another entity reads against that entity's methods.
@@ -360,11 +223,6 @@ impl Extractor<'_> {
                         self.session.show_gui.get_or_insert(args);
                     } else if &*name == "onArenaCreated" {
                         // Not an answer: the emulator decides when the arena is ready.
-                        self.session.battle.get_or_insert_with(CapturedBattle::default);
-                    } else if self.setting_up_battle().is_some() {
-                        // The arena's setup (`updateArena`): settings, sync objects and
-                        // view points the client defaults to empty, then the waiting
-                        // period, its default too.
                         continue;
                     } else if !self.in_account {
                         continue;
@@ -425,17 +283,4 @@ impl Element<()> for Skipped {
         Ok(Self)
     }
 
-}
-
-/// Whether NRL messages create a component with a `vehiclesInfo` property.
-fn carries_vehicles_info(messages: &[NrlMessage]) -> bool {
-    messages.iter().any(|message| creates_component_with(message, "vehiclesInfo"))
-}
-
-/// Whether an NRL message creates a component with the given property.
-fn creates_component_with(message: &NrlMessage, property: &str) -> bool {
-    let NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } = &message.body else {
-        return false;
-    };
-    data.children.iter().any(|(_, child)| matches!(child, NrlChild::Property { name, .. } if &**name == property))
 }
