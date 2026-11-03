@@ -236,6 +236,10 @@ pub struct WotArgs {
     /// `scripts/item_defs/vehicles/<nation>/list.xml`). Can be repeated.
     #[arg(long, requires = "from_capture")]
     pub give_vehicle: Vec<String>,
+    /// In emulator mode, the map battles are on, by its name in the game's
+    /// `scripts/arena_defs/_list_.xml`.
+    #[arg(long, default_value = "02_malinovka")]
+    pub map: String,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output

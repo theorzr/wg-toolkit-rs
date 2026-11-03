@@ -9,11 +9,11 @@ use tracing::{debug, info, warn};
 use glam::Vec3;
 
 use wgtk::app::entity::{
-    AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle, ScriptType,
+    AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle,
 };
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
-use wgtk::app::client::element::ChangedProperties;
 use wgtk::app::dispatch::MethodCall;
+use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
@@ -22,6 +22,7 @@ use crate::wot::schema::{
     ShotResult, VehicleCell, VehicleInfo, VehicleSyncAttrs,
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
+use crate::wot::arena_defs::{ArenaTypeDef, Spawn};
 use crate::wot::item_defs::VehicleDef;
 use crate::wot::items::VehicleDescr;
 
@@ -40,13 +41,13 @@ use super::bot::Bot;
 pub struct Battle {
     avatar: EntityKey<Avatar>,
     space: SpaceKey,
-    /// Its vehicle's configuration, the captured vehicle's when `None`.
-    config: Option<VehicleConfig>,
+    /// Its vehicle's configuration.
+    config: VehicleConfig,
     /// When it started, at 0: the battle's clock.
     joined: Instant,
     /// Its vehicle's entity and where it starts, and the vehicle the server simulates
     /// once the client has it, moving as the client drives it.
-    vehicle: Option<(EntityKey<schema::Vehicle>, Start)>,
+    vehicle: (EntityKey<schema::Vehicle>, Start),
     driven: Option<DrivenVehicle>,
     /// The enemy vehicle standing in front of it, to shoot at.
     target: Option<Target>,
@@ -127,20 +128,15 @@ struct DrivenVehicle {
 
 impl BaseThread {
 
-    /// Get a client's avatar into its battle's space, with its map: create the player's
-    /// vehicle, the avatar's cell side on it, then the target and the arena's info
-    /// entity, which the client gets in that order. It sees the vehicles its own spots,
-    /// see [`Self::step`].
-    pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey) -> io::Result<()> {
+    /// Get a client's avatar into its battle's space, with its map: create the vehicle of
+    /// the player of the given name, the avatar's cell side on it, then the target and
+    /// the arena's info entity, which the client gets in that order. It sees the vehicles
+    /// its own spots, see [`Self::step`].
+    pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey, name: String) -> io::Result<()> {
 
-        let config = self.battle_clients.get(&client).and_then(|c| c.config.clone());
-        let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: None, driven: None, target: None, vehicles_info: None };
-
-        let Some((vehicle, public, start)) = self.create_vehicle(&battle)? else {
-            self.set_battle(client, battle);
-            return Ok(());
-        };
-        battle.vehicle = Some((vehicle, start));
+        let Some(config) = self.battle_clients.get(&client).map(|c| c.config.clone()) else { return Ok(()) };
+        let (vehicle, public, start) = self.create_vehicle(avatar, space, &config, name)?;
+        let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: (vehicle, start), driven: None, target: None, vehicles_info: None };
 
         self.app.create_cell_player(avatar, space, CellPlayerInit {
             vehicle_id: vehicle.id().0,
@@ -184,60 +180,52 @@ impl BaseThread {
         }
     }
 
-    /// Create the player's vehicle in its battle's space, where the captured one starts,
-    /// with its own configuration: it belongs to the avatar. Returns it with its public
-    /// info and its start.
-    fn create_vehicle(&mut self, battle: &Battle) -> io::Result<Option<(EntityKey<schema::Vehicle>, PublicVehicleInfo, Start)>> {
+    /// Create the player's vehicle in its battle's space, at its team's start, of the
+    /// given configuration and named as the player: it belongs to the avatar. Returns it
+    /// with its public info and its start.
+    fn create_vehicle(
+        &mut self,
+        avatar: EntityKey<Avatar>,
+        space: SpaceKey,
+        config: &VehicleConfig,
+        name: String,
+    ) -> io::Result<(EntityKey<schema::Vehicle>, PublicVehicleInfo, Start)> {
 
-        let Some(captured) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(None) };
-        let (Some(properties), Some(position)) = (&captured.vehicle_properties, &captured.vehicle_position) else {
-            warn!(avatar = %battle.avatar, "The capture has no vehicle to create");
-            return Ok(None);
-        };
+        let public = public_info(name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
 
-        // The player's name is the only thing left from the capture, until accounts have
-        // their own.
-        let mut public = captured_public_info(properties)?;
-        if let Some(config) = &battle.config {
-            public = public_info(public.name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
-        }
-
-        let start = Start { position: position.position, direction: position.direction };
-        let vehicle = self.app.create_entity::<schema::Vehicle>(battle.space, EntityInit {
-            position: position.position,
-            direction: position.direction,
+        let start = team_start(&self.map, &self.terrain, PLAYER_TEAM);
+        let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
+            position: start.position,
+            direction: start.direction,
             alias: true,
-            controlled_by: Some(battle.avatar.any()),
+            controlled_by: Some(avatar.any()),
             visibility: Visibility::Interest,
             ..EntityInit::default()
         })?;
-        info!(avatar = %battle.avatar, "Created vehicle {}", vehicle.id());
+        info!(%avatar, "Created vehicle {} at {:?}", vehicle.id(), start.position);
 
         // Its turret at rest, as it is once driven.
-        let gun_angles = battle.config.as_ref()
-            .map(|config| Vehicle::new(position.position, position.direction, config.limits, config.aiming.clone()))
-            .map_or(REST_GUN_ANGLES, |vehicle| vehicle.turret.gun_angles_packed());
+        let gun_angles = Vehicle::new(start.position, start.direction, config.limits, config.aiming.clone())
+            .turret.gun_angles_packed();
         let mut entity = self.app.entity(vehicle)?;
-        init_vehicle(&mut entity, battle.avatar.id(), public.clone(), gun_angles)?;
+        init_vehicle(&mut entity, avatar.id(), public.clone(), gun_angles)?;
 
-        if let Some(config) = &battle.config {
-            let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
-            entity.set_isMyVehicle(true)?;
-            entity.set_quickShellChangerFactor(QUICK_SHELL_CHANGER_FACTOR)?;
-            entity.set_onRespawnReloadTimeFactor(1.0)?;
-            entity.set_perkEffects(PerkEffects::default())?;
-            entity.set_perks(Vec::new())?;
-            entity.set_perksRibbonNotify(Vec::new())?;
-            entity.set_crewCompactDescrs(config.crew.iter().cloned().map(Bytes).collect())?;
-            entity.set_enhancements(empty())?;
-            entity.set_setups(Pickle(config.setups.clone()))?;
-            entity.set_setupsIndexes(Pickle(config.setup_indexes.clone()))?;
-            entity.set_vehPerks(empty())?;
-            entity.set_disabledSwitches(Vec::new())?;
-            entity.set_ownVehiclePosition(None)?;
-        }
+        let empty = || Pickle(serde_pickle::Value::Dict(Default::default()));
+        entity.set_isMyVehicle(true)?;
+        entity.set_quickShellChangerFactor(QUICK_SHELL_CHANGER_FACTOR)?;
+        entity.set_onRespawnReloadTimeFactor(1.0)?;
+        entity.set_perkEffects(PerkEffects::default())?;
+        entity.set_perks(Vec::new())?;
+        entity.set_perksRibbonNotify(Vec::new())?;
+        entity.set_crewCompactDescrs(config.crew.iter().cloned().map(Bytes).collect())?;
+        entity.set_enhancements(empty())?;
+        entity.set_setups(Pickle(config.setups.clone()))?;
+        entity.set_setupsIndexes(Pickle(config.setup_indexes.clone()))?;
+        entity.set_vehPerks(empty())?;
+        entity.set_disabledSwitches(Vec::new())?;
+        entity.set_ownVehiclePosition(None)?;
 
-        Ok(Some((vehicle, public, start)))
+        Ok((vehicle, public, start))
 
     }
 
@@ -247,8 +235,8 @@ impl BaseThread {
     fn vehicle_entered(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
-        let Some((vehicle, start)) = battle.vehicle else { return Ok(()) };
-        let Some(config) = battle.config.as_ref() else { return Ok(()) };
+        let (vehicle, start) = battle.vehicle;
+        let config = &battle.config;
         let mut driven = DrivenVehicle {
             entity: vehicle,
             vehicle: Vehicle::new(start.position, start.direction, config.limits, config.aiming.clone()),
@@ -293,7 +281,7 @@ impl BaseThread {
 
         let yaw = start.direction.z;
         let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
-        if let Some(height) = self.terrain.as_ref().and_then(|terrain| terrain.height_at(position.x, position.z)) {
+        if let Some(height) = self.terrain.height_at(position.x, position.z) {
             position.y = height;
         }
         // Facing the player's start, in [-pi, pi) as angles are packed.
@@ -352,7 +340,7 @@ impl BaseThread {
             .collect();
         let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
-        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, self.terrain.as_ref(), &vehicles) else {
+        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, Some(&self.terrain), &vehicles) else {
             debug!(%client, "Not loaded, not shooting");
             return Ok(());
         };
@@ -542,7 +530,7 @@ impl BaseThread {
         let avatar_key = battle.avatar;
 
         let DrivenVehicle { entity, vehicle, own_vehicle, gun_marker, engine_mode, engine_gear, gun, .. } = driven;
-        vehicle.step(TICK.as_secs_f32(), terrain.as_ref());
+        vehicle.step(TICK.as_secs_f32(), Some(&*terrain));
         let Vehicle { hull, turret } = vehicle;
 
         if let (Some(own), true) = (*own_vehicle, gun.take_loaded(now)) {
@@ -606,11 +594,11 @@ impl BaseThread {
         let (Some(bot), Some(target_entity)) = (target.bot.as_mut(), target.entity) else { return Ok(()) };
         let enemy = hit_target(driven.entity.id().0, &driven.vehicle, &driven.collision);
         let enemy_hull = enemy.transforms[VehiclePart::Hull as usize].translation.into();
-        let on_target = bot.step(TICK.as_secs_f32(), terrain.as_ref(), enemy_hull, TARGET_DRIVES);
+        let on_target = bot.step(TICK.as_secs_f32(), Some(&*terrain), enemy_hull, TARGET_DRIVES);
         let mut bot_shot = None;
         if TARGET_FIRES && on_target && driven.health > 0 {
             let (position, velocity, dispersion) = bot.vehicle.turret.gun_marker(&bot.vehicle.hull);
-            if let Some(shot) = bot.gun.fire(now, position, velocity, dispersion, terrain.as_ref(), &[enemy]) {
+            if let Some(shot) = bot.gun.fire(now, position, velocity, dispersion, Some(&*terrain), &[enemy]) {
                 info!(%client, "Target shot {} lands at {:?} in {:.2} s", shot.id, shot.end, shot.flight_time);
                 driven.shots.push((now + f64::from(shot.flight_time), target_entity.id(), shot.clone()));
                 bot_shot = Some(shot);
@@ -668,7 +656,7 @@ impl BaseThread {
     pub fn entity_entered(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>) {
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return };
         debug!(%client, "Entity {entity} created on the client");
-        if battle.vehicle.is_some_and(|(vehicle, _)| vehicle.any() == entity) {
+        if battle.vehicle.0.any() == entity {
             if let Err(e) = self.vehicle_entered(client) {
                 warn!(%client, "Failed to drive the vehicle: {e}");
             }
@@ -772,6 +760,12 @@ const TARGET_NAME: &str = "Target";
 /// send detailed ones.
 const PACKED_XZ_SCALE: f32 = 0.007644442;
 
+/// How far behind its base a team starts, in metres, on maps without spawn points: about
+/// as captured.
+const SPAWN_BEHIND_BASE: f32 = 40.0;
+/// How far inside the map's bounds a team starts at least, in metres.
+const SPAWN_MARGIN: f32 = 20.0;
+
 /// How far in front of the player's start the target stands, in metres.
 const TARGET_DISTANCE: f32 = 40.0;
 
@@ -782,9 +776,6 @@ const VIEW_RANGE: f32 = 445.0;
 /// The `quickShellChangerFactor` of a vehicle, as captured: how much faster it changes
 /// shells, from its crew and equipment.
 const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
-
-/// The gun's angles of a vehicle without configuration: turret straight ahead.
-const REST_GUN_ANGLES: u16 = 512 << 6;
 
 /// The default dog tag's components, as captured: their ids and grades.
 const DEFAULT_DOG_TAG: [(i32, i8); 2] = [(300, 9), (66, 0)];
@@ -797,12 +788,23 @@ const TARGET_FIRES: bool = false;
 /// Whether the target drives around, else it stays where it is created.
 const TARGET_DRIVES: bool = false;
 
-/// The `publicInfo` of the captured player's vehicle, which vehicles are made from.
-fn captured_public_info(properties: &ChangedProperties) -> io::Result<PublicVehicleInfo> {
-    properties.values.iter()
-        .find(|(_, name, _)| &**name == "publicInfo")
-        .and_then(|(_, _, value)| PublicVehicleInfo::from_value(value.clone()))
-        .ok_or_else(|| invalid_data("the captured vehicle has no public info"))
+/// Where a team's vehicle starts on a map: at its spawn point, else [`SPAWN_BEHIND_BASE`]
+/// behind its base, facing the enemy's spawn, inside the map and on the ground.
+fn team_start(map: &ArenaTypeDef, terrain: &Terrain, team: u8) -> Start {
+    let at = |spawn: Spawn| match spawn { Spawn::Point(at) | Spawn::Base(at) => at };
+    let (own, enemy) = (map.spawns[team as usize - 1], map.spawns[2 - team as usize]);
+    let forward = (at(enemy) - at(own)).normalize_or_zero();
+    let at = match own {
+        Spawn::Point(at) => at,
+        Spawn::Base(at) => at - forward * SPAWN_BEHIND_BASE,
+    };
+    let (min, max) = map.bounds;
+    let at = at.clamp(min + SPAWN_MARGIN, max - SPAWN_MARGIN);
+    let height = terrain.height_at(at.x, at.y).unwrap_or(0.0);
+    Start {
+        position: Vec3::new(at.x, height, at.y),
+        direction: Vec3::new(0.0, 0.0, forward.x.atan2(forward.y)),
+    }
 }
 
 /// The `publicInfo` of a vehicle of the given name, descriptor, team, health and crew

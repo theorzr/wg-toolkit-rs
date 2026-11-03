@@ -23,7 +23,7 @@ use flate2::Compression;
 use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
-use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle, ScriptType};
+use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
 use wgtk::script::{Script, StringValue, Value};
@@ -57,6 +57,7 @@ pub fn run(
     from_capture: Option<&Path>,
     game_dir: &Path,
     give_vehicles: &[String],
+    map: &str,
 ) -> CliResult<()> {
 
     let mut login_app = login::App::new(login_app_addr.into())
@@ -111,25 +112,15 @@ pub fn run(
     let (session, account) = session;
     let session = session.map(Arc::new);
 
-    // The battle's map, the captured avatar's, with its terrain for vehicles to rest on.
-    let arena_type_id = session.as_ref()
-        .and_then(|s| s.battle.as_ref()?.avatar.clone())
-        .and_then(AvatarData::from_value)
-        .map(|avatar| avatar.arenaTypeID);
-    let (map, terrain) = match arena_type_id {
-        Some(arena_type_id) => {
-            let start = Instant::now();
-            let fs = ResFilesystem::new(game_dir.join("res"))
-                .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
-            let def = ArenaTypeDef::load_by_type_id(&fs, arena_type_id)
-                .map_err(|e| format!("Failed to load the arena type {arena_type_id}: {e}"))?;
-            let terrain = Terrain::load(&fs, &def.geometry)
-                .map_err(|e| format!("Failed to load the terrain of {}: {e}", def.geometry))?;
-            info!("Loaded the map {} and its terrain in {:.1?}", def.name, start.elapsed());
-            (Some((arena_type_id, def)), Some(terrain))
-        }
-        None => (None, None),
-    };
+    // The battles' map, with its terrain for vehicles to rest on.
+    let start = Instant::now();
+    let fs = ResFilesystem::new(game_dir.join("res"))
+        .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
+    let map = ArenaTypeDef::load(&fs, map)
+        .map_err(|e| format!("Failed to load the map {map}: {e}"))?;
+    let terrain = Terrain::load(&fs, &map.geometry)
+        .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
+    info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
 
     let shared = Arc::new(Shared {
         login_clients: Mutex::new(HashMap::new()),
@@ -184,10 +175,9 @@ struct BaseThread {
     account: Option<AccountData>,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
-    /// The battle's map, by its arena type id.
-    map: Option<(i32, ArenaTypeDef)>,
-    /// The battle map's terrain.
-    terrain: Option<Terrain>,
+    /// The battles' map, and its terrain.
+    map: ArenaTypeDef,
+    terrain: Terrain,
     /// Each client's account, outside of battles.
     accounts: HashMap<ClientKey, EntityKey<Account>>,
     /// Clients waiting in the battle queue, with the inventory id of their vehicle.
@@ -195,7 +185,7 @@ struct BaseThread {
     /// Clients told to switch base app for their battle, by the session key they will
     /// log in again with, with the IP they will come from, their blowfish key and
     /// their vehicle.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Option<VehicleConfig>)>,
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, VehicleConfig)>,
     /// Clients told to switch base app back to their account, leaving their battle, by
     /// the session key they will log in with.
     pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>)>,
@@ -206,8 +196,8 @@ struct BaseThread {
 /// A client connected for a battle.
 #[derive(Debug)]
 struct BattleClient {
-    /// Its vehicle's configuration, the captured vehicle's when `None`.
-    config: Option<VehicleConfig>,
+    /// Its vehicle's configuration.
+    config: VehicleConfig,
     /// Its avatar, once created.
     avatar: Option<EntityKey<Avatar>>,
     /// The arena period to switch to, and when.
@@ -346,13 +336,15 @@ impl BaseThread {
     /// holding its avatar, this one, as the captured server did.
     fn start_battle(&mut self, client: ClientKey, vehicle_id: i64) -> io::Result<()> {
 
-        if self.session.as_ref().and_then(|s| s.battle.as_ref()).is_none() {
-            warn!(%client, "The capture has no battle to enter");
-            return Ok(());
-        }
-
         let (Some(&account), Some((session_key, blowfish))) = (self.accounts.get(&client), self.app.client_keys(client)) else {
             return Ok(());
+        };
+        let config = match self.vehicle_config(vehicle_id) {
+            Ok(config) => config,
+            Err(e) => {
+                warn!(%client, "Failed to read vehicle {vehicle_id}: {e}");
+                return Ok(());
+            }
         };
 
         self.app.entity(account)?.onArenaCreated()?;
@@ -360,9 +352,6 @@ impl BaseThread {
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        let config = self.vehicle_config(vehicle_id)
-            .inspect_err(|e| warn!(%client, "Failed to read vehicle {vehicle_id}, the captured one is used: {e}"))
-            .ok();
         self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, config));
         self.app.switch_base_app(client, base_addr, true)?;
         self.accounts.remove(&client);
@@ -460,11 +449,7 @@ impl BaseThread {
             return Ok(());
         };
 
-        let Some((arena_type_id, map)) = &self.map else {
-            warn!(%client, "No map to battle on");
-            return Ok(());
-        };
-        let data = avatar_data(name, *arena_type_id);
+        let data = avatar_data(name.clone(), self.map.type_id);
         let avatar = self.app.create_base_player::<Avatar>(client, data, AVATAR_COMPONENTS_COUNT)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
@@ -485,9 +470,9 @@ impl BaseThread {
         let SocketAddr::V4(entry_id) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        self.app.add_space_geometry_mapping(space, entry_id, &map.geometry)?;
-        info!(%client, "Entering space {space} with {}", map.geometry);
-        self.enter_space(client, avatar, space)
+        self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
+        info!(%client, "Entering space {space} with {}", self.map.geometry);
+        self.enter_space(client, avatar, space, name)
 
     }
 
