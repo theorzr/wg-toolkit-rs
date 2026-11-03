@@ -47,9 +47,6 @@ pub struct CapturedSession {
 pub struct CapturedBattle {
     /// The `Avatar` entity's creation data and dynamic components count.
     pub avatar: Option<(Value, u8)>,
-    /// The avatar's client method calls before the map: the arena's setup
-    /// (`updateArena`), in order.
-    pub calls: Vec<(Arc<str>, Vec<Value>)>,
     /// The avatar's cell side, which names the space and the player's vehicle.
     pub cell_player: Option<CreateCellPlayer>,
     /// The space's properties, still raw, see [`SpaceProperty`].
@@ -371,8 +368,11 @@ impl Extractor<'_> {
                     } else if &*name == "onArenaCreated" {
                         // Not an answer: the emulator decides when the arena is ready.
                         self.session.battle.get_or_insert_with(CapturedBattle::default);
-                    } else if let Some(battle) = self.setting_up_battle() {
-                        battle.calls.push((name, args));
+                    } else if self.setting_up_battle().is_some() {
+                        // The arena's setup (`updateArena`): settings, sync objects and
+                        // view points the client defaults to empty, then the waiting
+                        // period, its default too.
+                        continue;
                     } else if !self.in_account {
                         continue;
                     } else if let Some(index) = self.answered_request(&args) {

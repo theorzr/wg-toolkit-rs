@@ -75,8 +75,8 @@ pub fn run(
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             let battle = match &session.battle {
-                Some(battle) => format!("{} calls, cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
-                    battle.calls.len(), battle.cell_player.is_some(), battle.space_properties.len(),
+                Some(battle) => format!("cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
+                    battle.cell_player.is_some(), battle.space_properties.len(),
                     battle.geometry.as_ref().map(|g| &g.path), battle.vehicle_alias,
                     battle.vehicle_position.is_some(), battle.vehicle_entity.is_some(),
                     battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len()))))),
@@ -444,13 +444,11 @@ impl BaseThread {
         }
         info!(%client, "Created avatar {avatar}");
 
-        // The battle's setup, as the captured server sent it: the arena, the avatar's
-        // cell side in the space, the space and its map, then the player's vehicle
-        // entering the area of interest.
+        // The battle's setup, as the captured server sent it: the avatar's cell side in
+        // the space, the space and its map, then the player's vehicle entering the area
+        // of interest. Not its arena updates, which the client defaults to, see the
+        // capture.
         let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
-        for (method, args) in &battle.calls {
-            self.app.call_method(avatar, method, args.clone())?;
-        }
 
         // No `SetCellAppExtAddress`, which the captured server sends: given one, the
         // client opens a direct connection to the cell app and waits for a cell login we
