@@ -23,7 +23,6 @@ use flate2::Compression;
 use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
-use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode};
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle, ScriptType};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
@@ -780,17 +779,6 @@ struct VehicleConfig {
 
 fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
-}
-
-/// A property of the component a captured NRL message creates, if given.
-fn captured_property<'m>(message: &'m NrlMessage, name: &str) -> Option<&'m Value> {
-    let NrlBody::CreateNode { node: NrlNode::DynComponent { data: Some(data), .. }, .. } = &message.body else {
-        return None;
-    };
-    data.children.iter().find_map(|(_, child)| match child {
-        NrlChild::Property { name: child_name, value } if &**child_name == name => Some(value),
-        _ => None,
-    })
 }
 
 /// The base data of a random battle's avatar, for the given player and map: no limits,

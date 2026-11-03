@@ -12,10 +12,9 @@ use wgtk::app::entity::{
     AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle, ScriptType,
 };
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
-use wgtk::app::client::element::{ChangedProperties, NrlMessage};
+use wgtk::app::client::element::ChangedProperties;
 use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
-use wgtk::script::Value;
 
 use crate::wot::schema::{
     self, Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag,
@@ -27,7 +26,7 @@ use crate::wot::item_defs::VehicleDef;
 use crate::wot::items::VehicleDescr;
 
 use super::{
-    ammo_list, avatar_cell_data, captured_property, gun_reload_time, invalid_data, targeting_info, vehicle_health_info,
+    ammo_list, avatar_cell_data, gun_reload_time, invalid_data, targeting_info, vehicle_health_info,
     vehicle_settings, BaseThread, VehicleConfig, AVATAR_COMPONENTS_COUNT, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
     NO_PREFAB_EFFECTS, TICK,
 };
@@ -77,18 +76,17 @@ impl Battle {
 
 }
 
-/// An enemy vehicle the server places in front of the player and drives: one of the
-/// captured arena's, with its entry in `vehiclesInfo`.
+/// An enemy vehicle the server places in front of the player and drives, with its entry
+/// in `vehiclesInfo`.
 #[derive(Debug, Clone)]
 struct Target {
-    /// Its entity and the entity's id, once created.
+    /// Its entity and the entity's id.
     entity_id: u32,
     entity: Option<EntityKey<schema::Vehicle>>,
-    /// Its `vehiclesInfo` entry: the captured one its vehicle is made from, then its own
-    /// once created, at `info_index`.
+    /// Its `vehiclesInfo` entry, at `info_index`.
     info: VehicleInfo,
     info_index: u32,
-    /// Its driver and its collision models, once created, and whether the client has it.
+    /// Its driver and its collision models, and whether the client has it.
     bot: Option<Bot>,
     collision: Option<Arc<VehicleCollision>>,
     entered: bool,
@@ -127,28 +125,6 @@ struct DrivenVehicle {
     damage_stickers: Vec<HitPoint>,
 }
 
-impl Target {
-
-    /// A target of the given `vehiclesInfo` entry, at full health, not created yet.
-    fn new(info: VehicleInfo) -> Self {
-        Self {
-            entity_id: 0,
-            entity: None,
-            health: info.maxHealth.into(),
-            info,
-            info_index: 0,
-            bot: None,
-            collision: None,
-            entered: false,
-            spotted: false,
-            engine_mode: None,
-            damage_stickers: Vec::new(),
-            fire: None,
-        }
-    }
-
-}
-
 impl BaseThread {
 
     /// Get a client's avatar into its battle's space, with its map: create the player's
@@ -159,12 +135,6 @@ impl BaseThread {
 
         let config = self.battle_clients.get(&client).and_then(|c| c.config.clone());
         let mut battle = Battle { avatar, space, config, joined: Instant::now(), vehicle: None, driven: None, target: None, vehicles_info: None };
-
-        let session = self.session.clone();
-        let Some(captured) = session.as_ref().and_then(|s| s.battle.as_ref()) else {
-            self.set_battle(client, battle);
-            return Ok(());
-        };
 
         let Some((vehicle, public, start)) = self.create_vehicle(&battle)? else {
             self.set_battle(client, battle);
@@ -183,23 +153,12 @@ impl BaseThread {
         })?;
         self.app.set_interest(client, Interest::Manual)?;
 
-        // The captured arena's vehicles: the player's, for its account, and its first
-        // enemy, as the target.
-        let captured_id = captured.cell_player.as_ref().map(|cell| cell.vehicle_id);
-        let captured_vehicles = captured.arena_info.as_ref().map_or_else(Vec::new, |arena| captured_vehicles(&arena.nrl));
-        let player = captured_vehicles.iter().find(|info| Some(info.vehicleID.0) == captured_id);
-        battle.target = player
-            .and_then(|player| captured_vehicles.iter().find(|info| info.team != player.team))
-            .map(|info| Target::new(info.clone()));
-
-        let mut vehicles = vec![vehicle_info(vehicle.id(), &public, player.map_or(0, |player| player.accountDBID))];
-        if let Some(target) = &mut battle.target {
-            let public = self.create_target(space, start, target)?;
-            info!(%client, "Target {} ({})", target.entity_id, target.info.name);
-            target.info = vehicle_info(EntityId(target.entity_id), &public, 0);
-            target.info_index = vehicles.len() as u32;
-            vehicles.push(target.info.clone());
-        }
+        // The player's vehicle, then the target, a copy of it in the other team.
+        let mut vehicles = vec![vehicle_info(vehicle.id(), &public, PLAYER_ACCOUNT_DBID)];
+        let target = self.create_target(space, start, &public.compDescr.0, vehicles.len() as u32)?;
+        info!(%client, "Target {} ({})", target.entity_id, target.info.name);
+        vehicles.push(target.info.clone());
+        battle.target = Some(target);
 
         // The arena's info entity, created right away as entities without an alias are,
         // with its vehicles.
@@ -327,10 +286,10 @@ impl BaseThread {
 
     }
 
-    /// Create the target in its battle's space, from its arena entry: its descriptor,
-    /// name and team, no avatar, [`TARGET_DISTANCE`] in front of the player's start,
-    /// facing it. Returns its public info.
-    fn create_target(&mut self, space: SpaceKey, start: Start, target: &mut Target) -> io::Result<PublicVehicleInfo> {
+    /// Create the target in its battle's space, of the given descriptor, in the other
+    /// team, no avatar, [`TARGET_DISTANCE`] in front of the player's start, facing it,
+    /// with its `vehiclesInfo` entry at the given index.
+    fn create_target(&mut self, space: SpaceKey, start: Start, compact_descr: &[u8], info_index: u32) -> io::Result<Target> {
 
         let yaw = start.direction.z;
         let mut position = start.position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * TARGET_DISTANCE;
@@ -342,7 +301,6 @@ impl BaseThread {
         let direction = Vec3::new(0.0, 0.0, facing);
 
         // Driven as its own vehicle, by its definition.
-        let compact_descr = &target.info.compDescr.0;
         let decoded = VehicleDescr::decode(compact_descr).map_err(|e| invalid_data(&e.to_string()))?;
         let def = VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?;
         let limits = MotionLimits { speed_forward: def.speed_forward, speed_backward: def.speed_backward, rotation_speed: def.rotation_speed };
@@ -351,7 +309,7 @@ impl BaseThread {
         let driven = Vehicle::new(position, direction, limits, def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
 
-        let public = public_info(target.info.name.clone(), compact_descr, target.info.team as u8, def.max_health as u16, def.crew_roles.len());
+        let public = public_info(TARGET_NAME.to_string(), compact_descr, TARGET_TEAM, def.max_health as u16, def.crew_roles.len());
 
         let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
             position,
@@ -362,12 +320,22 @@ impl BaseThread {
             ..EntityInit::default()
         })?;
         info!("Created target {} ({}) at {position:?}", vehicle.id(), def.name);
-        init_vehicle(&mut self.app.entity(vehicle)?, EntityId(0), public.clone(), gun_angles)?;
-        target.bot = Some(Bot::new(driven, gun, position));
-        target.collision = Some(def.collision.clone());
-        target.entity = Some(vehicle);
-        target.entity_id = vehicle.id().0;
-        Ok(public)
+        let info = vehicle_info(vehicle.id(), &public, 0);
+        init_vehicle(&mut self.app.entity(vehicle)?, EntityId(0), public, gun_angles)?;
+        Ok(Target {
+            entity_id: vehicle.id().0,
+            entity: Some(vehicle),
+            health: def.max_health.into(),
+            info,
+            info_index,
+            bot: Some(Bot::new(driven, gun, position)),
+            collision: Some(def.collision.clone()),
+            entered: false,
+            spotted: false,
+            engine_mode: None,
+            damage_stickers: Vec::new(),
+            fire: None,
+        })
 
     }
 
@@ -722,14 +690,6 @@ impl BaseThread {
 
 }
 
-/// The `vehiclesInfo` entries of the captured arena.
-fn captured_vehicles(arena: &[NrlMessage]) -> Vec<VehicleInfo> {
-    match arena.iter().find_map(|message| captured_property(message, "vehiclesInfo")) {
-        Some(Value::Seq(entries)) => entries.iter().cloned().filter_map(VehicleInfo::from_value).collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// The `vehiclesInfo` entry of a vehicle of the given id and public info, alive, as in
 /// a random battle: no clan, badges nor missions.
 fn vehicle_info(id: EntityId, public: &PublicVehicleInfo, account_dbid: u64) -> VehicleInfo {
@@ -800,6 +760,13 @@ const TARGET_FIRST_SHOT_ID: i32 = 1_000_000;
 
 /// The player's team, the target being in the other.
 const PLAYER_TEAM: u8 = 1;
+const TARGET_TEAM: u8 = 2;
+
+/// The player's account id, any but 0 which is no account, until accounts are stored.
+const PLAYER_ACCOUNT_DBID: u64 = 1;
+
+/// The target's name, as players see it.
+const TARGET_NAME: &str = "Target";
 
 /// The scale of the packed horizontal offsets in position updates, as captured: we only
 /// send detailed ones.
