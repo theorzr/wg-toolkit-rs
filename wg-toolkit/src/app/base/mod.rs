@@ -794,7 +794,6 @@ impl App {
         &mut self,
         client: ClientKey,
         entity_data: impl ScriptType,
-        entity_components_count: u8,
     ) -> io::Result<EntityKey<T>> {
 
         self.client(client)?;
@@ -813,7 +812,7 @@ impl App {
                 entity_id,
                 entity_type_id,
                 entity_data: Cow::Borrowed(&entity_data),
-                entity_components_count,
+                entity_components_count: dispatch.static_components_count,
             },
             dispatch,
         )?;
@@ -1090,7 +1089,7 @@ impl App {
         }
         let mut cell_data = Vec::new();
         init.data.into_value(&dispatch.cell_data_ty).write(&mut cell_data, &dispatch.cell_data_ty)?;
-        cell_data.push(init.components_count);
+        cell_data.push(dispatch.static_components_count);
         init.components_data.into_value(&dispatch.cell_components_data_ty).write(&mut cell_data, &dispatch.cell_components_data_ty)?;
         let data = &self.spaces.get(space.slot)
             .ok_or_else(|| io_invalid_data(format_args!("no such space: {space}")))?
@@ -1330,8 +1329,6 @@ pub struct CellPlayerInit<D, C> {
     pub packed_xz_scale: f32,
     /// The player's cell-hosted, client-visible properties, as a dict.
     pub data: D,
-    /// See [`client::element::CellPlayerData::components_count`].
-    pub components_count: u8,
     /// Its static components' cell-hosted, client-visible properties, as one dict.
     pub components_data: C,
 }

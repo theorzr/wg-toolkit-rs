@@ -240,6 +240,10 @@ pub struct WotArgs {
     /// `scripts/arena_defs/_list_.xml`.
     #[arg(long, default_value = "02_malinovka")]
     pub map: String,
+    /// In emulator mode, the name of every player, until accounts are stored: a client
+    /// logging in with a token doesn't give one.
+    #[arg(long, default_value = "Player")]
+    pub name: String,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output

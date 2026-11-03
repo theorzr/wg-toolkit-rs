@@ -28,7 +28,7 @@ use crate::wot::items::VehicleDescr;
 
 use super::{
     ammo_list, avatar_cell_data, gun_reload_time, invalid_data, targeting_info, vehicle_health_info,
-    vehicle_settings, BaseThread, VehicleConfig, AVATAR_COMPONENTS_COUNT, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
+    vehicle_settings, BaseThread, VehicleConfig, PLAYER_ACCOUNT_DBID, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
     NO_PREFAB_EFFECTS, TICK,
 };
 use super::gun::{Gun, HitTarget, Landing, Shot};
@@ -144,7 +144,6 @@ impl BaseThread {
             direction: start.direction,
             packed_xz_scale: PACKED_XZ_SCALE,
             data: avatar_cell_data(PLAYER_TEAM, vehicle.id()),
-            components_count: AVATAR_COMPONENTS_COUNT,
             components_data: AvatarComponentsData::default(),
         })?;
         self.app.set_interest(client, Interest::Manual)?;
@@ -749,9 +748,6 @@ const TARGET_FIRST_SHOT_ID: i32 = 1_000_000;
 /// The player's team, the target being in the other.
 const PLAYER_TEAM: u8 = 1;
 const TARGET_TEAM: u8 = 2;
-
-/// The player's account id, any but 0 which is no account, until accounts are stored.
-const PLAYER_ACCOUNT_DBID: u64 = 1;
 
 /// The target's name, as players see it.
 const TARGET_NAME: &str = "Target";

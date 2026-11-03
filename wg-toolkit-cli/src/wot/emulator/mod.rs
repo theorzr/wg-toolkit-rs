@@ -8,9 +8,9 @@ mod bot;
 mod gun;
 mod physics;
 
-use std::collections::{hash_map, HashMap};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::time::{Duration, Instant};
+use std::collections::{hash_map, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::io::{self, Write};
@@ -26,7 +26,7 @@ use rsa::RsaPrivateKey;
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
-use wgtk::script::{Script, StringValue, Value};
+use wgtk::script::{Script, Value};
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
@@ -58,6 +58,7 @@ pub fn run(
     game_dir: &Path,
     give_vehicles: &[String],
     map: &str,
+    name: &str,
 ) -> CliResult<()> {
 
     let mut login_app = login::App::new(login_app_addr.into())
@@ -76,8 +77,8 @@ pub fn run(
         Some(path) => {
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
-            info!("Serving from capture {}: account {}, {} requests",
-                path.display(), if session.account.is_some() { "found" } else { "missing" }, session.requests.len());
+            info!("Serving from capture {}: server settings {}, {} requests",
+                path.display(), if session.server_settings.is_some() { "found" } else { "missing" }, session.requests.len());
             for request in &session.requests {
                 let answers: Vec<String> = request.answers.iter().map(|answer| match answer {
                     Answer::Call { method, .. } => method.to_string(),
@@ -124,6 +125,7 @@ pub fn run(
         shared: Arc::clone(&shared),
         base_app_addr,
         login_challenges: HashMap::new(),
+        name: name.to_string(),
     };
 
     let base_thread = BaseThread {
@@ -134,6 +136,7 @@ pub fn run(
         game_dir: game_dir.to_path_buf(),
         map,
         terrain,
+        players: HashMap::new(),
         accounts: HashMap::new(),
         enqueued: HashMap::new(),
         pending_switches: HashMap::new(),
@@ -156,6 +159,8 @@ struct LoginThread {
     shared: Arc<Shared>,
     base_app_addr: SocketAddrV4,
     login_challenges: HashMap<SocketAddr, bool>,
+    /// The name of every player, until accounts are stored.
+    name: String,
 }
 
 #[derive(Debug)]
@@ -171,17 +176,19 @@ struct BaseThread {
     /// The battles' map, and its terrain.
     map: ArenaTypeDef,
     terrain: Terrain,
+    /// Each logged in client's player.
+    players: HashMap<ClientKey, Player>,
     /// Each client's account, outside of battles.
     accounts: HashMap<ClientKey, EntityKey<Account>>,
     /// Clients waiting in the battle queue, with the inventory id of their vehicle.
     enqueued: HashMap<ClientKey, i64>,
     /// Clients told to switch base app for their battle, by the session key they will
     /// log in again with, with the IP they will come from, their blowfish key and
-    /// their vehicle.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, VehicleConfig)>,
+    /// their player and vehicle.
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleConfig)>,
     /// Clients told to switch base app back to their account, leaving their battle, by
-    /// the session key they will log in with.
-    pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>)>,
+    /// the session key they will log in with, likewise.
+    pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>, Player)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
     battle_clients: HashMap<ClientKey, BattleClient>,
 }
@@ -214,12 +221,18 @@ const ARENA_GUI_TYPE_RANDOM: u8 = 1;
 const BATTLE_LEVEL: i64 = 10;
 /// How many players a player may report each day.
 const DENUNCIATIONS: i16 = 10;
-/// The avatar's dynamic components count, as captured, see [`CreateBasePlayer`].
-///
-/// [`CreateBasePlayer`]: wgtk::app::client::element::CreateBasePlayer
-const AVATAR_COMPONENTS_COUNT: u8 = 2;
 /// The avatar's `customizationDisplayType`, as captured.
 const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
+/// The account's sessions count, enough not to be a new player, until accounts are
+/// stored.
+const ACCOUNT_SESSIONS: u64 = 1000;
+/// The client version the server requires, `requiredVersion_2410`'s default in
+/// `AccountVersion.def`.
+const REQUIRED_VERSION: &str = "eu_2.4.1_2";
+/// The player's account id, any but 0 which is no account, until accounts are stored.
+const PLAYER_ACCOUNT_DBID: u64 = 1;
+/// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
+const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
 
 #[derive(Debug)]
 struct Shared {
@@ -234,6 +247,13 @@ const TICK: Duration = Duration::from_millis(100);
 struct LoginClient {
     addr: SocketAddr,
     blowfish: Arc<Blowfish>,
+    player: Player,
+}
+
+/// A client's player, standing in for its stored account.
+#[derive(Debug, Clone)]
+struct Player {
+    name: String,
 }
 
 impl LoginThread {
@@ -268,7 +288,7 @@ impl LoginThread {
                         self.app.answer_login_challenge(login.addr);
                     } else {
 
-                        info!(addr = %login.addr, "Login success");
+                        info!(addr = %login.addr, "Login success, as {}", self.name);
 
                         let mut clients = self.shared.login_clients.lock().unwrap();
                         let (login_key, slot) = loop {
@@ -284,6 +304,7 @@ impl LoginThread {
                         slot.insert(LoginClient {
                             addr: login.addr,
                             blowfish,
+                            player: Player { name: self.name.clone() },
                         });
 
                         // app.answer_login_error(login.addr, LoginError::Banned, "{\"bans\":\"{\\\"expiryTime\\\":1726435530,\\\"reason\\\":\\\"It's the reason\\\"}\"}".to_string());
@@ -310,16 +331,24 @@ impl BaseThread {
     /// the `Account` entity, then `showGUI`.
     fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(session) = &self.session else { return Ok(()) };
+        let Some(player) = self.players.get(&client) else { return Ok(()) };
+        // The server's settings are still captured.
+        let Some(server_settings) = self.session.as_ref().and_then(|s| s.server_settings.clone()) else {
+            warn!(%client, "The capture has no server settings");
+            return Ok(());
+        };
 
-        let Some((data, components_count)) = &session.account else { return Ok(()) };
-        let account = self.app.create_base_player::<Account>(client, data.clone(), *components_count)?;
+        let data = schema::AccountData {
+            name: player.name.clone(),
+            incarnationID: ACCOUNT_SESSIONS,
+            requiredVersion_2410: REQUIRED_VERSION.to_string(),
+            initialServerSettings: server_settings,
+        };
+        let account = self.app.create_base_player::<Account>(client, data)?;
         self.accounts.insert(client, account);
         info!(%client, "Created account {account}");
 
-        if let Some(args) = &session.show_gui {
-            self.app.call_method(account, "showGUI", args.clone())?;
-        }
+        self.app.entity(account)?.showGUI(show_gui_ctx())?;
 
         Ok(())
 
@@ -329,9 +358,11 @@ impl BaseThread {
     /// holding its avatar, this one, as the captured server did.
     fn start_battle(&mut self, client: ClientKey, vehicle_id: i64) -> io::Result<()> {
 
-        let (Some(&account), Some((session_key, blowfish))) = (self.accounts.get(&client), self.app.client_keys(client)) else {
+        let (Some(&account), Some(player), Some((session_key, blowfish))) =
+            (self.accounts.get(&client), self.players.get(&client), self.app.client_keys(client)) else {
             return Ok(());
         };
+        let player = player.clone();
         let config = match self.vehicle_config(vehicle_id) {
             Ok(config) => config,
             Err(e) => {
@@ -345,9 +376,10 @@ impl BaseThread {
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, config));
+        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config));
         self.app.switch_base_app(client, base_addr, true)?;
         self.accounts.remove(&client);
+        self.players.remove(&client);
         info!(%client, "Arena created, switching to {base_addr}");
 
         Ok(())
@@ -418,11 +450,13 @@ impl BaseThread {
     /// Leave the client's battle, as the captured server does: switch it to the base
     /// app again, where it logs in back to its account.
     fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
-        let Some((session_key, blowfish)) = self.app.client_keys(client) else { return Ok(()) };
+        let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
+            return Ok(());
+        };
         let SocketAddr::V4(base_addr) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
-        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish));
+        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
         if let Some(battle) = self.battle_clients.remove(&client).and_then(|c| c.battle) {
             self.app.destroy_space(battle.space());
         }
@@ -434,16 +468,10 @@ impl BaseThread {
     /// Bring a client that reconnected for its battle to its avatar.
     fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
-        // The player is named as its account, the captured one until accounts are stored.
-        let Some(name) = self.session.as_ref()
-            .and_then(|s| s.account.as_ref())
-            .and_then(|(data, _)| account_name(data)) else {
-            warn!(%client, "The captured account has no name");
-            return Ok(());
-        };
+        let Some(name) = self.players.get(&client).map(|player| player.name.clone()) else { return Ok(()) };
 
         let data = avatar_data(name.clone(), self.map.type_id);
-        let avatar = self.app.create_base_player::<Avatar>(client, data, AVATAR_COMPONENTS_COUNT)?;
+        let avatar = self.app.create_base_player::<Avatar>(client, data)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
         }
@@ -510,10 +538,9 @@ impl BaseThread {
     /// Tell a client just logged in the update frequency, right after the login reply, as
     /// the captured server did.
     fn send_update_frequency(&mut self, client: ClientKey) {
-        if let Some((frequency, unknown)) = self.session.as_ref().and_then(|s| s.update_frequency) {
-            if let Err(e) = self.app.update_frequency(client, frequency, unknown, 0) {
-                warn!(%client, "Failed to send the update frequency: {e}");
-            }
+        let frequency = (1.0 / TICK.as_secs_f32()) as u8;
+        if let Err(e) = self.app.update_frequency(client, frequency, UPDATE_FREQUENCY_UNKNOWN, 0) {
+            warn!(%client, "Failed to send the update frequency: {e}");
         }
     }
 
@@ -575,7 +602,7 @@ impl BaseThread {
 
                     // A client coming back from its battle, see `leave_battle`: it gets its
                     // account again once it enables its entities.
-                    if let Some((ip, blowfish)) = self.pending_returns.remove(&login.login_key) {
+                    if let Some((ip, blowfish, player)) = self.pending_returns.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
                             continue;
@@ -583,12 +610,13 @@ impl BaseThread {
                         info!(addr = %login.addr, "Login #{}... Success, back from the battle", login.attempt_num);
                         if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                             self.send_update_frequency(client);
+                            self.players.insert(client, player);
                         }
                         continue;
                     }
 
                     // A client coming back for its battle, see `start_battle`.
-                    if let Some((ip, blowfish, config)) = self.pending_switches.remove(&login.login_key) {
+                    if let Some((ip, blowfish, player, config)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
                             continue;
@@ -596,6 +624,7 @@ impl BaseThread {
                         info!(addr = %login.addr, "Login #{}... Success, for the battle", login.attempt_num);
                         if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                             self.send_update_frequency(client);
+                            self.players.insert(client, player);
                             self.battle_clients.insert(client, BattleClient { config, avatar: None, next_period: None, battle: None });
                         }
                         continue;
@@ -616,10 +645,11 @@ impl BaseThread {
                     }
                     
                     info!(addr = %login.addr, "Login #{}... Success", login.attempt_num);
-                    let blowfish = client.blowfish;
+                    let LoginClient { blowfish, player, .. } = client;
                     drop(clients);
                     if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                         self.send_update_frequency(client);
+                        self.players.insert(client, player);
                     }
 
                 }
@@ -757,14 +787,20 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-/// The name of an account, from its base data.
-fn account_name(data: &Value) -> Option<String> {
-    let Value::Dict(properties) = data else { return None };
-    match properties.get("name")? {
-        Value::String(StringValue::String(name)) => Some(name.clone()),
-        Value::String(StringValue::Raw(name)) => String::from_utf8(name.clone()).ok(),
-        _ => None,
-    }
+/// The `showGUI` context of the player's account: its id, the server's time and the
+/// session's start, now, and no play time limits nor UI statistics.
+fn show_gui_ctx() -> Pickle {
+    use serde_pickle::{HashableValue, Value as PickleValue};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    Pickle(PickleValue::Dict([
+        ("aogasStartedAt", PickleValue::F64(now.as_secs_f64())),
+        ("collectUiStats", PickleValue::Bool(false)),
+        ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
+        ("isAogasEnabled", PickleValue::Bool(false)),
+        ("logUXEvents", PickleValue::Bool(false)),
+        ("serverUTC", PickleValue::F64(now.as_secs_f64())),
+        ("sessionStartedAt", PickleValue::I64(now.as_secs() as i64)),
+    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
 }
 
 /// The base data of a random battle's avatar, for the given player and map: no limits,

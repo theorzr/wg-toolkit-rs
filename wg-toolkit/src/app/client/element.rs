@@ -339,9 +339,8 @@ impl CreateCellPlayer {
 pub struct CellPlayerData {
     /// The entity's own cell-hosted, client-visible properties, as a dict.
     pub properties: Value,
-    /// Matches the number of the entity's static components in the one live sample (2,
-    /// for `Avatar`), which is also `CreateBasePlayer`'s `entity_components_count` for
-    /// that same entity, so which components it counts is not settled.
+    /// The number of the entity type's static components, as
+    /// [`CreateBasePlayer::entity_components_count`].
     pub components_count: u8,
     /// The static components' cell-hosted, client-visible properties, as one dict.
     pub components_properties: Value,
@@ -403,15 +402,9 @@ pub struct CreateBasePlayer<'a> {
     /// The actual data sent for creating the player's entity -- borrowed when writing
     /// (the caller already owns it), owned when read off the wire.
     pub entity_data: Cow<'a, Value>,
-    /// The number of *dynamic* components attached to this specific entity instance.
-    /// WoT's static components fold their methods and properties into the entity's own
-    /// tables, so they need no runtime handling and are not counted here. Dynamic
-    /// components are attached to individual instances at runtime (e.g. for one battle
-    /// mode) and claim no fixed exposed id.
-    ///
-    /// Nonzero counts are normal (an `Account` carries 19), yet no component data follows
-    /// the count: the element ends right after it. The components themselves are
-    /// replicated separately, over the NRL protocol (see the `Nrl*` elements).
+    /// The number of the entity type's static components, those whose `<ofEntity>`
+    /// names it: 19 for an `Account`, 2 for an `Avatar`, as captured. No component data
+    /// follows the count: the element ends right after it.
     pub entity_components_count: u8,
 }
 

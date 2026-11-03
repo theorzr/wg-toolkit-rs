@@ -1798,6 +1798,7 @@ mod tests {
             data_ty: empty.clone(),
             cell_data_ty: empty.clone(),
             cell_components_data_ty: empty,
+            static_components_count: 0,
         }
     }
 

@@ -25,6 +25,7 @@ pub fn register(app: &mut base::App) -> Result<(), BindError> {
 entity_schema! {
     pub Account {
         client {
+            fn showGUI(ctx: Pickle);
             fn onArenaCreated();
         }
     }
@@ -428,6 +429,21 @@ script_dict! {
         pub gunPosition: Vec3,
         pub shotVector: Vec3,
         pub dispersion: f32,
+    }
+}
+
+script_dict! {
+    /// The `Account`'s base data, which its client gets as it is created: its player,
+    /// the client version it requires and the server's settings.
+    #[derive(Debug, Clone)]
+    pub struct AccountData {
+        pub name: String,
+        /// How many sessions the player had, the client telling new players by it.
+        pub incarnationID: u64,
+        /// The client version the server requires, refusing others.
+        pub requiredVersion_2410: String,
+        /// A dict of the server's settings, of every feature the client reads at login.
+        pub initialServerSettings: Pickle,
     }
 }
 

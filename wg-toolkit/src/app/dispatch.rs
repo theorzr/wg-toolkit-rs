@@ -63,6 +63,9 @@ impl ScriptDispatch {
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &entity.interface, is_cell_property_exposed),
                 cell_components_data_ty: build_components_data_ty(&mut script.tys, &script.interfaces, &entity.interface, &script.static_components, is_cell_property_exposed),
+                static_components_count: script.static_components.iter()
+                    .filter(|component| component.of_entities.iter().any(|e| *e == *entity.interface.name))
+                    .count() as u8,
             });
         }
 
@@ -75,6 +78,7 @@ impl ScriptDispatch {
                 data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_base_property_exposed),
                 cell_data_ty: build_entity_data_ty(&mut script.tys, &script.interfaces, &component.interface, is_cell_property_exposed),
                 cell_components_data_ty: build_components_data_ty(&mut script.tys, &script.interfaces, &component.interface, &[], is_cell_property_exposed),
+                static_components_count: 0,
             });
         }
 
@@ -148,6 +152,11 @@ pub struct EntityDispatch {
     /// The type describing the static components' part of the `CreateCellPlayer` creation
     /// payload, which follows [`Self::cell_data_ty`] and a count byte.
     pub cell_components_data_ty: Ty,
+    /// How many static components fold into this entity, the count its creation
+    /// elements give, see [`client::element::CreateBasePlayer::entity_components_count`].
+    ///
+    /// [`client::element::CreateBasePlayer::entity_components_count`]: crate::app::client::element::CreateBasePlayer::entity_components_count
+    pub static_components_count: u8,
 }
 
 /// One exposed method slot in a dynamically-computed, exposed-id-ordered method table --

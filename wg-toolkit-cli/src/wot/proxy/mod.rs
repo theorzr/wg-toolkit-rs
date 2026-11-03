@@ -1404,7 +1404,7 @@ impl BaseHandler {
             UpdateFrequencyNotification::ID => {
                 let ufn = elt.read_simple::<UpdateFrequencyNotification>()?;
                 info!(%addr, id = UpdateFrequencyNotification::ID, request_id = ?ufn.request_id,
-                    "<- Update frequency: {} Hz, game time: {}", ufn.element.frequency, ufn.element.game_time);
+                    "<- Update frequency: {} Hz, unknown: {}, game time: {}", ufn.element.frequency, ufn.element.unknown, ufn.element.game_time);
             }
             TickSync::ID => {
                 let ts = elt.read_simple::<TickSync>()?;
@@ -2273,7 +2273,7 @@ impl BaseHandler {
 
                 if let Some((entity_id, dispatch)) = dispatch {
                     // An `Err` here is expected for any property belonging to a *dynamic*
-                    // component (attached per-instance, see `entity_components_count` --
+                    // component (attached per-instance --
                     // this project's model can't predict their exposed ids, see
                     // `doc/ENTITY.md`), not just a real mismatch -- and also, less
                     // obviously, for a property this table *does* recognize but whose

@@ -1,6 +1,6 @@
 //! What the real server answered in a captured session, extracted to be served again:
-//! the account's creation data and, for each request the client made, everything the
-//! server sent back for it.
+//! the server's settings and, for each request the client made, everything the server
+//! sent back for it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -16,18 +16,15 @@ use wgtk::app::proxy::{self, capture::CaptureReader, PacketChannel, PacketDirect
 use wgtk::net::element::{DebugElementVariable32, Element, ElementLength, SimpleElement};
 use wgtk::app::dispatch::{MethodCall, ScriptDispatch};
 use wgtk::net::bundle::{Bundle, NextElementReader};
+use wgtk::app::entity::{Pickle, ScriptType};
 use wgtk::script::Value;
 
 
 /// Everything served from a capture, see the module documentation.
 #[derive(Debug, Default)]
 pub struct CapturedSession {
-    /// The `UpdateFrequencyNotification` sent after login: frequency and unknown field.
-    pub update_frequency: Option<(u8, u16)>,
-    /// The `Account` entity's creation data and dynamic components count.
-    pub account: Option<(Value, u8)>,
-    /// The arguments of the `showGUI` call that follows the account's creation.
-    pub show_gui: Option<Vec<Value>>,
+    /// The server's settings, from the `Account` entity's creation data.
+    pub server_settings: Option<Pickle>,
     /// Each base method call the client made to its account, in order, with the
     /// server's answers.
     pub requests: Vec<CapturedRequest>,
@@ -187,10 +184,7 @@ impl Extractor<'_> {
                 }
             };
             match elt.id() {
-                UpdateFrequencyNotification::ID => {
-                    let e = elt.read_simple::<UpdateFrequencyNotification>()?.element;
-                    self.session.update_frequency.get_or_insert((e.frequency, e.unknown));
-                }
+                UpdateFrequencyNotification::ID => { elt.read_simple::<UpdateFrequencyNotification>()?; }
                 client_el::id::CREATE_BASE_PLAYER => {
                     let e = elt.read::<CreateBasePlayer, _>(self.dispatch)?.element;
                     self.player_type = Some(e.entity_type_id);
@@ -198,8 +192,8 @@ impl Extractor<'_> {
                     self.in_account = type_named("Account");
                     self.pending.clear();
                     self.latest = None;
-                    if self.in_account {
-                        self.session.account = Some((e.entity_data.into_owned(), e.entity_components_count));
+                    if let (true, Value::Dict(mut data)) = (self.in_account, e.entity_data.into_owned()) {
+                        self.session.server_settings = data.remove("initialServerSettings").and_then(Pickle::from_value);
                     }
                 }
                 SelectPlayerEntity::ID => {
@@ -219,10 +213,9 @@ impl Extractor<'_> {
                     let MethodCall::Known { name, args, .. } = elt.read::<EntityMethod, _>(&dispatch.client_methods)?.element.call else {
                         continue;
                     };
-                    if &*name == "showGUI" {
-                        self.session.show_gui.get_or_insert(args);
-                    } else if &*name == "onArenaCreated" {
-                        // Not an answer: the emulator decides when the arena is ready.
+                    if &*name == "showGUI" || &*name == "onArenaCreated" {
+                        // Not answers: the emulator decides when the account and the arena
+                        // are ready.
                         continue;
                     } else if !self.in_account {
                         continue;
