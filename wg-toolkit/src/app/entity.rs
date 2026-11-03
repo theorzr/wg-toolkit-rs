@@ -1573,6 +1573,8 @@ macro_rules! entity_schema {
     ) => { $crate::app::entity::__paste! {
 
         #[doc = concat!("The ", stringify!($side), " methods of [`", stringify!($name), "`] received.")]
+        // A schema declares every argument the client sends, used or not.
+        #[allow(dead_code)]
         #[derive(Debug)]
         $vis enum [<$name $side>] {
             $( $(#[$fn_meta])* [<$fn_name:camel>] { $( $arg: $ty ),* }, )*

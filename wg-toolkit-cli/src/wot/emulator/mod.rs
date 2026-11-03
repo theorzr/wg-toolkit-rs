@@ -33,10 +33,13 @@ use wgtk::app::base::ClientKey;
 use wgtk::app::{login, base};
 
 use crate::wot::schema::{
-    self, Account, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarData, BattleChatRestriction, GunReloadTime,
-    PlayLimits, RemoteCamera, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
+    self, Account, AccountBase, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarData, BattleChatRestriction,
+    GunReloadTime, PlayLimits, RemoteCamera, ServerStats, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
 };
-use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
+use crate::wot::account_commands::{
+    token_type, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS,
+    CMD_SYNC_DATA, REQUEST_ID_NO_RESPONSE, RES_SUCCESS,
+};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
 use crate::wot::arena_defs::ArenaTypeDef;
@@ -544,26 +547,52 @@ impl BaseThread {
         }
     }
 
-    /// A request of the client's account, answered as captured. The arena is ready as
-    /// soon as the client first asks how the queue is going.
+    /// A request of the client's account, answered as captured.
     fn request(&mut self, client: ClientKey, name: &str, args: &[Value]) {
         if let Err(e) = self.answer(client, name, args) {
             warn!(%client, "Failed to answer {name}: {e}");
         }
-        let command = args.get(1).and_then(Value::as_i64);
-        if command == Some(CMD_ENQUEUE_IN_BATTLE_QUEUE.into()) {
-            // `[queue type, vehicle inventory id, ...]`.
-            let vehicle_id = match args.get(2) {
-                Some(Value::Seq(values)) => values.get(1).and_then(Value::as_i64),
-                _ => None,
-            };
-            self.enqueued.insert(client, vehicle_id.unwrap_or(0));
-        } else if let Some(vehicle_id) = (command == Some(CMD_REQ_QUEUE_INFO.into()))
-            .then(|| self.enqueued.remove(&client)).flatten() {
-            if let Err(e) = self.start_battle(client, vehicle_id) {
-                warn!(%client, "Failed to start the battle: {e}");
+    }
+
+    /// A request of the client's account that we answer ourselves, others are answered
+    /// as captured. The arena is ready as soon as the client first asks how the queue is
+    /// going.
+    fn account_request(&mut self, client: ClientKey, account: EntityKey<Account>, request: AccountBase, name: &str, args: &[Value]) -> io::Result<()> {
+        match request {
+            AccountBase::DoCmdInt3 { cmd: CMD_REQ_SERVER_STATS, .. } => {
+                let online = self.players.len() as u32;
+                self.app.entity(account)?.receiveServerStats(ServerStats { clusterCCU: online, regionCCU: online })?;
             }
+            AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
+                self.app.entity(account)?.receiveQueueInfo(queue_info())?;
+                if let Some(vehicle_id) = self.enqueued.remove(&client) {
+                    self.start_battle(client, vehicle_id)?;
+                }
+            }
+            // `[queue type, vehicle inventory id, ...]`.
+            AccountBase::DoCmdIntArr { cmd: CMD_ENQUEUE_IN_BATTLE_QUEUE, args: queue_args, .. } => {
+                let (Some(&queue_type), Some(&vehicle_id)) = (queue_args.first(), queue_args.get(1)) else {
+                    return Err(invalid_data("Missing the queue type or the vehicle"));
+                };
+                self.enqueued.insert(client, vehicle_id.into());
+                self.app.entity(account)?.onEnqueued(queue_type as u8)?;
+            }
+            // Only logged by the real server, but answered when asked.
+            AccountBase::DoCmdIntArrStrArr { request_id, cmd: CMD_LOG_CLIENT_XMPP_EVENTS, .. } => {
+                if request_id != REQUEST_ID_NO_RESPONSE {
+                    self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+                }
+            }
+            AccountBase::RequestToken { request_id, token_type } => {
+                self.app.entity(account)?.onTokenReceived(request_id, token_type, token_data(token_type))?;
+            }
+            // No chat yet, and the captured server answered nothing.
+            AccountBase::ChatCommandFromClient { action, .. } => {
+                debug!(%client, "Ignoring chat action {action}");
+            }
+            _ => self.request(client, name, args),
         }
+        Ok(())
     }
 
     #[instrument(name = "base", skip_all)]
@@ -680,7 +709,14 @@ impl BaseThread {
                                 warn!(client = %event.client, "Failed to leave the battle: {e}");
                             }
                         }
-                        None => self.request(event.client, name, args),
+                        None => match self.app.decode::<AccountBase>(event.entity, &event.call) {
+                            Some((account, request)) => {
+                                if let Err(e) = self.account_request(event.client, account, request, name, args) {
+                                    warn!(client = %event.client, "Failed to answer {name}: {e}");
+                                }
+                            }
+                            None => self.request(event.client, name, args),
+                        }
                     }
                 }
                 base::Event::CellMethod(event) => self.cell_method(event.client, event.entity, &event.call),
@@ -800,6 +836,30 @@ fn show_gui_ctx() -> Pickle {
         ("logUXEvents", PickleValue::Bool(false)),
         ("serverUTC", PickleValue::F64(now.as_secs_f64())),
         ("sessionStartedAt", PickleValue::I64(now.as_secs() as i64)),
+    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
+}
+
+/// The random battle queue as the player sees it: alone, the battle starting at once,
+/// so no players counted by vehicle class (light, medium, heavy, SPG, AT-SPG).
+fn queue_info() -> Pickle {
+    use serde_pickle::{HashableValue, Value as PickleValue};
+    Pickle(PickleValue::Dict([
+        ("classes", PickleValue::List(vec![PickleValue::I64(0); 5])),
+        ("players", PickleValue::I64(1)),
+    ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
+}
+
+/// A token of the given type for the player, to log into a web service: there are
+/// none, so it is empty, of the type the client expects, an int for the chat's.
+fn token_data(token_type: u8) -> Pickle {
+    use serde_pickle::{HashableValue, Value as PickleValue};
+    let token = match token_type {
+        token_type::XMPPCS => PickleValue::I64(0),
+        _ => PickleValue::Bytes(Vec::new()),
+    };
+    Pickle(PickleValue::Dict([
+        ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
+        ("token", token),
     ].into_iter().map(|(key, value)| (HashableValue::Bytes(key.as_bytes().to_vec()), value)).collect()))
 }
 

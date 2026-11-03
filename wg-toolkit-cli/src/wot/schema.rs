@@ -27,7 +27,36 @@ entity_schema! {
         client {
             fn showGUI(ctx: Pickle);
             fn onArenaCreated();
+            fn onCmdResponse(request_id: i16, result_id: i16, error: String);
+            fn receiveServerStats(stats: ServerStats);
+            fn receiveQueueInfo(info: Pickle);
+            fn onEnqueued(queue_type: u8);
+            fn onTokenReceived(request_id: u16, token_type: u8, data: Pickle);
         }
+        base {
+            fn doCmdInt3(request_id: i16, cmd: i16, arg0: i64, arg1: i64, arg2: i64);
+            fn doCmdIntArr(request_id: i16, cmd: i16, args: Vec<i32>);
+            fn doCmdIntArrStrArr(request_id: i16, cmd: i16, ints: Vec<i64>, strings: Vec<String>);
+            fn requestToken(request_id: u16, token_type: u8);
+            fn chatCommandFromClient(
+                request_id: i64,
+                action: u8,
+                channel: EntityId,
+                int_arg: i64,
+                short_arg: i16,
+                str_arg: String,
+                str_arg2: String,
+            );
+        }
+    }
+}
+
+script_dict! {
+    /// How many players are online, on the player's cluster and the whole region.
+    #[derive(Debug, Clone)]
+    pub struct ServerStats {
+        pub clusterCCU: u32,
+        pub regionCCU: u32,
     }
 }
 
