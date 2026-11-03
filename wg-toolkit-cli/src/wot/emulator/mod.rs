@@ -34,19 +34,21 @@ use wgtk::res::fs::ResFilesystem;
 use wgtk::app::{login, base};
 
 use crate::wot::schema::{
-    self, Account, Avatar, AvatarBase, AvatarData, BattleChatRestriction, GunReloadTime, PlayLimits, TargetingInfo,
-    VehicleAmmo, VehicleHealthInfo, VehicleSetting,
+    self, Account, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarComponentsData, AvatarData,
+    BattleChatRestriction, GunReloadTime, PlayLimits, RemoteCamera, TargetingInfo, VehicleAmmo, VehicleHealthInfo,
+    VehicleSetting,
 };
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
+use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::collision::VehicleCollision;
 use crate::CliResult;
 
 use capture::{Answer, CapturedSession};
 use physics::MotionLimits;
 use account::AccountData;
-use battle::Battle;
+use battle::{Battle, PLAYER_TEAM};
 
 
 pub fn run(
@@ -76,9 +78,8 @@ pub fn run(
             let mut session = CapturedSession::load(path, base_app.dispatch())
                 .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
             let battle = match &session.battle {
-                Some(battle) => format!("cell player {}, {} space properties, map {:?}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
-                    battle.cell_player.is_some(), battle.space_properties.len(),
-                    battle.geometry.as_ref().map(|g| &g.path), battle.vehicle_alias,
+                Some(battle) => format!("cell player {}, vehicle alias {:?}, position {}, entity {}, arena info {:?}",
+                    battle.cell_player.is_some(), battle.vehicle_alias,
                     battle.vehicle_position.is_some(), battle.vehicle_entity.is_some(),
                     battle.arena_info.as_ref().map(|a| (a.entity_id, a.nrl.len(), a.created.as_ref().map(|(t, p)| (*t, p.values.len()))))),
                 None => "none".to_string(),
@@ -112,19 +113,24 @@ pub fn run(
     let (session, account) = session;
     let session = session.map(Arc::new);
 
-    // The battle's map, for vehicles to rest on.
-    let geometry = session.as_ref().and_then(|s| s.battle.as_ref()).and_then(|b| b.geometry.as_ref());
-    let terrain = match geometry {
-        Some(geometry) => {
+    // The battle's map, the captured avatar's, with its terrain for vehicles to rest on.
+    let arena_type_id = session.as_ref()
+        .and_then(|s| s.battle.as_ref()?.avatar.clone())
+        .and_then(AvatarData::from_value)
+        .map(|avatar| avatar.arenaTypeID);
+    let (map, terrain) = match arena_type_id {
+        Some(arena_type_id) => {
             let start = Instant::now();
             let fs = ResFilesystem::new(game_dir.join("res"))
                 .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
-            let terrain = Terrain::load(&fs, &geometry.path)
-                .map_err(|e| format!("Failed to load the terrain of {}: {e}", geometry.path))?;
-            info!("Loaded the terrain of {} in {:.1?}", geometry.path, start.elapsed());
-            Some(terrain)
+            let def = ArenaTypeDef::load_by_type_id(&fs, arena_type_id)
+                .map_err(|e| format!("Failed to load the arena type {arena_type_id}: {e}"))?;
+            let terrain = Terrain::load(&fs, &def.geometry)
+                .map_err(|e| format!("Failed to load the terrain of {}: {e}", def.geometry))?;
+            info!("Loaded the map {} and its terrain in {:.1?}", def.name, start.elapsed());
+            (Some((arena_type_id, def)), Some(terrain))
         }
-        None => None,
+        None => (None, None),
     };
 
     let shared = Arc::new(Shared {
@@ -144,6 +150,7 @@ pub fn run(
         session,
         account,
         game_dir: game_dir.to_path_buf(),
+        map,
         terrain,
         accounts: HashMap::new(),
         enqueued: HashMap::new(),
@@ -179,6 +186,8 @@ struct BaseThread {
     account: Option<AccountData>,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
+    /// The battle's map, by its arena type id.
+    map: Option<(i32, ArenaTypeDef)>,
     /// The battle map's terrain.
     terrain: Option<Terrain>,
     /// Each client's account, outside of battles.
@@ -228,6 +237,8 @@ const DENUNCIATIONS: i16 = 10;
 ///
 /// [`CreateBasePlayer`]: wgtk::app::client::element::CreateBasePlayer
 const AVATAR_COMPONENTS_COUNT: u8 = 2;
+/// The avatar's `customizationDisplayType`, as captured.
+const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
 
 #[derive(Debug)]
 struct Shared {
@@ -453,36 +464,47 @@ impl BaseThread {
             return Ok(());
         };
 
-        let data = avatar_data(captured.name, captured.arenaTypeID);
+        let Some((arena_type_id, map)) = &self.map else {
+            warn!(%client, "No map to battle on");
+            return Ok(());
+        };
+        let data = avatar_data(captured.name, *arena_type_id);
         let avatar = self.app.create_base_player::<Avatar>(client, data, AVATAR_COMPONENTS_COUNT)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
         }
         info!(%client, "Created avatar {avatar}");
 
-        // The battle's setup, as the captured server sent it: the avatar's cell side in
-        // the space, the space and its map, then the player's vehicle entering the area
-        // of interest. Not its arena updates, which the client defaults to, see the
-        // capture.
-        let Some(battle) = self.session.as_ref().and_then(|s| s.battle.as_ref()) else { return Ok(()) };
-
         // No `SetCellAppExtAddress`, which the captured server sends: given one, the
         // client opens a direct connection to the cell app and waits for a cell login we
         // can't answer yet, holding back its cell traffic. Without one, everything
-        // comes through this base app.
+        // comes through this base app. No arena updates either, which the client
+        // defaults to, see the capture.
 
-        // Then its cell side, in a space of its own, set up as the captured server's.
-        let Some(cell) = &battle.cell_player else {
+        // Then its cell side, in a space of its own with the map, with the player's
+        // vehicle, captured until battles place their own.
+        let Some(cell) = self.session.as_ref().and_then(|s| s.battle.as_ref()?.cell_player.as_ref()) else {
             warn!(%client, "The capture has no cell player");
             return Ok(());
         };
         let space = self.app.create_space(cell.space_id)?;
+        for data in space_properties(space.id()) {
+            self.app.set_space_property(space, data)?;
+        }
+        let SocketAddr::V4(entry_id) = self.app.addr()? else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
+        };
+        self.app.add_space_geometry_mapping(space, entry_id, &map.geometry)?;
+        info!(%client, "Entering space {space} with {}", map.geometry);
+
         self.app.create_cell_player(avatar, space, CellPlayerInit {
             vehicle_id: cell.vehicle_id,
             position: cell.position,
             direction: cell.direction,
             packed_xz_scale: cell.packed_xz_scale,
-            cell_data: cell.cell_data.clone(),
+            data: avatar_cell_data(PLAYER_TEAM, EntityId(cell.vehicle_id)),
+            components_count: AVATAR_COMPONENTS_COUNT,
+            components_data: AvatarComponentsData::default(),
         })?;
         self.enter_space(client, avatar, space)
 
@@ -811,6 +833,40 @@ fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
         battleChatRestriction: BattleChatRestriction { isBattleChatDisabled: false, restrictionReasonID: -1 },
         goodiesSnapshot: Vec::new(),
     }
+}
+
+/// The cell data of a random battle's avatar, in the given team on the given vehicle:
+/// not observing nor observed, its vehicle at rest until it moves.
+fn avatar_cell_data(team: u8, vehicle_id: EntityId) -> AvatarCellData {
+    AvatarCellData {
+        team,
+        playerVehicleID: vehicle_id,
+        isGunLocked: false,
+        ownVehicleGear: 0,
+        ownVehicleAuxPhysicsData: 0,
+        ownVehicleHullAimingPitchPacked: 0,
+        ammoViews: AmmoViews::default(),
+        customizationDisplayType: CUSTOMIZATION_DISPLAY_TYPE,
+        isObserverBothTeams: false,
+        isObserverFPV: false,
+        numOfObservers: 0,
+        observableTeamID: 0,
+        remoteCamera: RemoteCamera::default(),
+        shouldSendKillcamSimulationData: false,
+    }
+}
+
+/// The properties of a battle's space, as captured: three records the client expects,
+/// the space id then fixed bytes, see [`SpaceProperty`].
+///
+/// [`SpaceProperty`]: wgtk::app::client::element::SpaceProperty
+fn space_properties(space_id: u32) -> impl Iterator<Item = Vec<u8>> {
+    const RECORDS: [&[u8]; 3] = [
+        &[0, 0, 0, 0, 0, 1, 0, 0, 0],
+        &[2, 0, 0, 0, 0, 0],
+        &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ];
+    RECORDS.into_iter().map(move |record| [&space_id.to_le_bytes()[..], record].concat())
 }
 
 /// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and

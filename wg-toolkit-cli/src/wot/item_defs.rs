@@ -170,7 +170,7 @@ impl VehicleDef {
             .ok_or_else(|| invalid(format!("unknown nation id {nation_id}")))?;
         let list = read_xml(fs, &format!("scripts/item_defs/vehicles/{nation}/list.xml"))?;
         let name = list.iter_children_all()
-            .find(|(_, vehicle)| vehicle.as_element().and_then(|v| child_int(v, "id")) == Some(type_id.into()))
+            .find(|(_, vehicle)| vehicle.as_element().and_then(|v| v.get_child_integer("id")) == Some(type_id.into()))
             .map(|(name, _)| name.clone())
             .ok_or_else(|| invalid(format!("no vehicle {type_id} in {nation}")))?;
         Self::load(fs, nation, &name)
@@ -185,8 +185,8 @@ impl VehicleDef {
         let dir = format!("scripts/item_defs/vehicles/{nation}");
 
         let list = read_xml(fs, &format!("{dir}/list.xml"))?;
-        let type_id = child_element(&list, name)
-            .and_then(|vehicle| child_int(vehicle, "id"))
+        let type_id = list.get_child_element(name)
+            .and_then(|vehicle| vehicle.get_child_integer("id"))
             .ok_or_else(|| invalid(format!("no vehicle {name} in {nation}")))?;
 
         let vehicle = read_xml(fs, &format!("{dir}/{name}.xml"))?;
@@ -201,39 +201,39 @@ impl VehicleDef {
                 .ok_or_else(|| invalid(format!("{name} has no {what}")))
         };
         let module_id = |components: &Element, module: &str| -> io::Result<u16> {
-            child_element(components, "ids")
-                .and_then(|ids| child_int(ids, module))
+            components.get_child_element("ids")
+                .and_then(|ids| ids.get_child_integer(module))
                 .map(|id| id as u16)
                 .ok_or_else(|| invalid(format!("no id for {module}")))
         };
         let default_module = |section: &str, kind: &str| -> io::Result<u16> {
-            let section = child_element(&vehicle, section)
+            let section = vehicle.get_child_element(section)
                 .ok_or_else(|| invalid(format!("{name} has no {section}")))?;
             module_id(&*component_ids(kind)?, &first(section, kind)?)
         };
 
-        let turrets = child_element(&vehicle, "turrets0")
+        let turrets = vehicle.get_child_element("turrets0")
             .ok_or_else(|| invalid(format!("{name} has no turret")))?;
         let turret_name = first(turrets, "turret")?;
-        let turret = child_element(turrets, &turret_name).unwrap();
-        let guns = child_element(turret, "guns")
+        let turret = turrets.get_child_element(&turret_name).unwrap();
+        let guns = turret.get_child_element("guns")
             .ok_or_else(|| invalid(format!("{name} has no guns")))?;
         let gun_name = first(guns, "gun")?;
 
         let guns_components = component_ids("guns")?;
-        let gun_def = child_element(&guns_components, "shared")
-            .and_then(|shared| child_element(shared, &gun_name))
+        let gun_def = guns_components.get_child_element("shared")
+            .and_then(|shared| shared.get_child_element(&gun_name))
             .ok_or_else(|| invalid(format!("no definition for gun {gun_name}")))?;
         // The vehicle may set its own capacity for a shared gun.
-        let max_ammo = child_element(guns, &gun_name).and_then(|gun| child_int(gun, "maxAmmo"))
-            .or_else(|| child_int(gun_def, "maxAmmo"))
+        let max_ammo = guns.get_child_element(&gun_name).and_then(|gun| gun.get_child_integer("maxAmmo"))
+            .or_else(|| gun_def.get_child_integer("maxAmmo"))
             .ok_or_else(|| invalid(format!("no ammunition capacity for {gun_name}")))? as u32;
 
         let shells_components = component_ids("shells")?;
         // Shells are scaled as `gun_readers.readShot` does.
         let common = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?;
         let projectile_speed_factor = common
-            .get_child("miscParams").and_then(|params| child_float(params.as_element()?, "projectileSpeedFactor"))
+            .get_child_value_at(&["miscParams", "projectileSpeedFactor"]).and_then(pxml::Value::as_float)
             .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
         let shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/shot_effects.xml")?;
         let effects_index = |effects: &str| shot_effects.iter_children_all()
@@ -246,86 +246,86 @@ impl VehicleDef {
             .map(|(name, _)| name)
             .filter(|name| !name.starts_with("xmlns:") && *name != "texture")
             .position(|name| name == sticker);
-        let pierced_sticker = |effects: &str| child_element(&shot_effects, effects)
-            .and_then(|effects| child_string(child_element(effects, "targetStickers")?, "armorPierced"))
+        let pierced_sticker = |effects: &str| shot_effects.get_child_element(effects)
+            .and_then(|effects| effects.get_child_element("targetStickers")?.get_child_string("armorPierced"))
             .and_then(|sticker| sticker_index(sticker))
             .map(|index| index as u8);
         let prefab_shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/prefab_effects/shot_effects.xml")?;
-        let default_prefab_effects = child_element(&common, "defaultPrefabEffects").and_then(|defaults| child_element(defaults, "shot"));
-        let prefab_effects_index = |shell: &Element, kind: &str| child_string(shell, "prefabEffects")
-            .or_else(|| child_string(default_prefab_effects?, kind))
+        let default_prefab_effects = common.get_child_element("defaultPrefabEffects").and_then(|defaults| defaults.get_child_element("shot"));
+        let prefab_effects_index = |shell: &Element, kind: &str| shell.get_child_string("prefabEffects")
+            .or_else(|| default_prefab_effects?.get_child_string(kind))
             .and_then(|effects| prefab_shot_effects.iter_children_all().position(|(name, _)| name == effects))
             .map(|index| index as u8);
         let mut shells = Vec::new();
         let mut shots = Vec::new();
-        for (shell_name, shot) in child_element(gun_def, "shots").into_iter().flat_map(|shots| shots.iter_children_all()) {
-            let shell = child_element(&shells_components, shell_name)
+        for (shell_name, shot) in gun_def.get_child_element("shots").into_iter().flat_map(|shots| shots.iter_children_all()) {
+            let shell = shells_components.get_child_element(shell_name)
                 .ok_or_else(|| invalid(format!("no definition for shell {shell_name}")))?;
-            let shell_id = child_int(shell, "id")
+            let shell_id = shell.get_child_integer("id")
                 .ok_or_else(|| invalid(format!("no id for shell {shell_name}")))?;
             let shot = shot.as_element().ok_or_else(|| invalid(format!("no shot for shell {shell_name}")))?;
-            let portion = child_float(shot, "defaultPortion").unwrap_or(0.0);
+            let portion = shot.get_child_float("defaultPortion").unwrap_or(0.0);
             let cd = IntCompactDescr { item_type: item_type::SHELL, nation: nation_id, id: shell_id as u16 };
             shells.push((cd, portion));
-            let shot_float = |name: &str| child_float(shot, name)
+            let shot_float = |name: &str| shot.get_child_float(name)
                 .ok_or_else(|| invalid(format!("shell {shell_name} has no {name}")));
             shots.push(ShotDef {
                 compact_descr: cd,
-                kind_index: child_string(shell, "kind").and_then(|kind| SHELL_KINDS.iter().position(|&k| k == kind))
+                kind_index: shell.get_child_string("kind").and_then(|kind| SHELL_KINDS.iter().position(|&k| k == kind))
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no known kind")))? as u8,
-                caliber: child_float(shell, "caliber")
+                caliber: shell.get_child_float("caliber")
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no caliber")))?,
-                effects_index: child_string(shell, "effects").and_then(|effects| effects_index(&effects))
+                effects_index: shell.get_child_string("effects").and_then(|effects| effects_index(&effects))
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no known effects")))? as u8,
-                pierced_sticker: child_string(shell, "effects").and_then(|effects| pierced_sticker(effects)),
-                prefab_effects_index: child_string(shell, "kind").and_then(|kind| prefab_effects_index(shell, kind)),
+                pierced_sticker: shell.get_child_string("effects").and_then(|effects| pierced_sticker(effects)),
+                prefab_effects_index: shell.get_child_string("kind").and_then(|kind| prefab_effects_index(shell, kind)),
                 speed: shot_float("speed")? * projectile_speed_factor,
                 gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
                 max_distance: shot_float("maxDistance")?,
-                damage: child_float_at(shell, &["damage", "armor"])
+                damage: shell.get_child_value_at(&["damage", "armor"]).and_then(pxml::Value::as_float)
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no damage")))?,
             });
         }
 
-        let max_health = child_element(&vehicle, "hull").and_then(|hull| child_int(hull, "maxHealth"))
-            .zip(child_int(turret, "maxHealth"))
+        let max_health = vehicle.get_child_element("hull").and_then(|hull| hull.get_child_integer("maxHealth"))
+            .zip(turret.get_child_integer("maxHealth"))
             .map(|(hull, turret)| (hull + turret) as u32)
             .ok_or_else(|| invalid(format!("{name} has no health")))?;
 
-        let speed_limit = |direction| child_element(&vehicle, "speedLimits")
-            .and_then(|limits| child_float(limits, direction))
+        let speed_limit = |direction| vehicle.get_child_element("speedLimits")
+            .and_then(|limits| limits.get_child_float(direction))
             .map(|kmh| kmh / 3.6)
             .ok_or_else(|| invalid(format!("{name} has no {direction} speed")));
         let speed_forward = speed_limit("forward")?;
         let speed_backward = speed_limit("backward")?;
-        let rotation_speed = child_element(&vehicle, "chassis")
+        let rotation_speed = vehicle.get_child_element("chassis")
             .and_then(|chassis| chassis.iter_children_all().next())
-            .and_then(|(_, chassis)| child_float(chassis.as_element()?, "rotationSpeed"))
+            .and_then(|(_, chassis)| chassis.as_element()?.get_child_float("rotationSpeed"))
             .map(f32::to_radians)
             .ok_or_else(|| invalid(format!("{name} has no chassis rotation speed")))?;
 
         // The vehicle may set its own values for a shared gun.
-        let gun_float = |path: &[&str]| [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
-            .find_map(|gun| child_float_at(gun, path))
+        let gun_float = |path: &[&str]| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| gun.get_child_value_at(path).and_then(pxml::Value::as_float))
             .ok_or_else(|| invalid(format!("no {} for gun {gun_name}", path.join("/"))));
-        let chassis_float = |path: &[&str]| child_element(&vehicle, "chassis")
+        let chassis_float = |path: &[&str]| vehicle.get_child_element("chassis")
             .and_then(|chassis| chassis.iter_children_all().next())
-            .and_then(|(_, chassis)| child_float_at(chassis.as_element()?, path))
+            .and_then(|(_, chassis)| chassis.as_element()?.get_child_value_at(path).and_then(pxml::Value::as_float))
             .ok_or_else(|| invalid(format!("{name} has no chassis {}", path.join("/"))));
-        let pitch_curve = |limit: &str| [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
-            .find_map(|gun| child_string(child_element(gun, "pitchLimits")?, limit))
+        let pitch_curve = |limit: &str| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| gun.get_child_element("pitchLimits")?.get_child_string(limit))
             .and_then(PitchCurve::parse)
             .ok_or_else(|| invalid(format!("no valid {limit} for gun {gun_name}")));
         // The first shell's flight, scaled as every shell is, see `gun_readers.readShot`.
-        let first_shot = child_element(gun_def, "shots")
+        let first_shot = gun_def.get_child_element("shots")
             .and_then(|shots| shots.iter_children_all().next())
             .and_then(|(_, shot)| shot.as_element())
             .ok_or_else(|| invalid(format!("gun {gun_name} has no shot")))?;
-        let shot_float = |name: &str| child_float(first_shot, name)
+        let shot_float = |name: &str| first_shot.get_child_float(name)
             .ok_or_else(|| invalid(format!("gun {gun_name}'s first shot has no {name}")));
 
         let aiming = AimingDef {
-            turret_rotation_speed: child_float(turret, "rotationSpeed")
+            turret_rotation_speed: turret.get_child_float("rotationSpeed")
                 .ok_or_else(|| invalid(format!("{name} has no turret rotation speed")))?
                 .to_radians(),
             gun_rotation_speed: gun_float(&["rotationSpeed"])?.to_radians(),
@@ -340,28 +340,28 @@ impl VehicleDef {
             shot_speed: shot_float("speed")? * projectile_speed_factor,
             shot_gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
             reload_time: gun_float(&["reloadTime"])?,
-            turret_position: child_element(&vehicle, "chassis")
+            turret_position: vehicle.get_child_element("chassis")
                 .and_then(|chassis| chassis.iter_children_all().next())
-                .and_then(|(_, chassis)| child_vec3(chassis.as_element()?, "hullPosition"))
+                .and_then(|(_, chassis)| chassis.as_element()?.get_child_vec3("hullPosition"))
                 .ok_or_else(|| invalid(format!("{name} has no hull position")))?
-                + child_element(&vehicle, "hull")
-                .and_then(|hull| child_element(hull, "turretPositions"))
-                .and_then(|positions| child_vec3(positions, "turret"))
+                + vehicle.get_child_element("hull")
+                .and_then(|hull| hull.get_child_element("turretPositions"))
+                .and_then(|positions| positions.get_child_vec3("turret"))
                 .ok_or_else(|| invalid(format!("{name} has no turret position")))?,
-            gun_position: child_vec3(turret, "gunPosition")
+            gun_position: turret.get_child_vec3("gunPosition")
                 .ok_or_else(|| invalid(format!("{name} has no gun position")))?,
         };
 
         // The gun's hit tester is the vehicle's own for it, or the shared gun's.
-        let chassis = child_element(&vehicle, "chassis")
+        let chassis = vehicle.get_child_element("chassis")
             .and_then(|chassis| chassis.iter_children_all().next())
             .and_then(|(_, chassis)| chassis.as_element());
-        let gun = [child_element(guns, &gun_name), Some(gun_def)].into_iter().flatten()
-            .find(|gun| child_element(gun, "hitTester").is_some());
-        let parts = [("chassis", chassis), ("hull", child_element(&vehicle, "hull")), ("turret", Some(turret)), ("gun", gun)];
+        let gun = [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find(|gun| gun.get_child_element("hitTester").is_some());
+        let parts = [("chassis", chassis), ("hull", vehicle.get_child_element("hull")), ("turret", Some(turret)), ("gun", gun)];
         let mut models = Vec::new();
         for (part, module) in parts {
-            let path = module.and_then(|module| child_string(child_element(module, "hitTester")?, "collisionModelClient"))
+            let path = module.and_then(|module| module.get_child_element("hitTester")?.get_child_string("collisionModelClient"))
                 .ok_or_else(|| invalid(format!("{name} has no {part} collision model")))?;
             // The definitions name a `.model`, the game ships it as a `.havok`.
             let path = path.strip_suffix(".model").map_or_else(|| path.to_string(), |stem| format!("{stem}.havok"));
@@ -369,11 +369,11 @@ impl VehicleDef {
         }
         let collision = Arc::new(VehicleCollision {
             parts: models.try_into().unwrap(),
-            hull_position: chassis.and_then(|chassis| child_vec3(chassis, "hullPosition"))
+            hull_position: chassis.and_then(|chassis| chassis.get_child_vec3("hullPosition"))
                 .ok_or_else(|| invalid(format!("{name} has no hull position")))?,
         });
 
-        let crew_roles = child_element(&vehicle, "crew")
+        let crew_roles = vehicle.get_child_element("crew")
             .into_iter()
             .flat_map(|crew| crew.iter_children_all())
             .filter_map(|(role, _)| ROLES.iter().find(|(name, _)| name == role).map(|&(_, index)| index))
@@ -420,58 +420,11 @@ impl VehicleDef {
 
 }
 
-fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element>> {
+pub(crate) fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element>> {
     let file = fs.read(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
     pxml::from_reader(io::BufReader::new(file)).map_err(|e| invalid(format!("{path}: {e}")))
 }
 
-fn child_element<'a>(element: &'a Element, name: &str) -> Option<&'a Element> {
-    element.get_child(name)?.as_element()
-}
-
-/// A child's integer value, the child holding it directly or as its own value.
-fn child_int(element: &Element, name: &str) -> Option<i64> {
-    match element.get_child(name)? {
-        pxml::Value::Element(child) => child.value.as_integer(),
-        value => value.as_integer().or_else(|| value.as_string()?.trim().parse().ok()),
-    }
-}
-
-fn child_string<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
-    match element.get_child(name)? {
-        pxml::Value::Element(child) => child.value.as_string(),
-        value => value.as_string(),
-    }
-}
-
-fn child_float(element: &Element, name: &str) -> Option<f32> {
-    element.get_child(name)?.as_float()
-}
-
-/// A child holding three floats, as a packed vector or as space-separated text.
-fn child_vec3(element: &Element, name: &str) -> Option<Vec3> {
-    let value = match element.get_child(name)? {
-        pxml::Value::Element(child) => &child.value,
-        value => value,
-    };
-    let floats: Vec<f32> = match value {
-        pxml::Value::Vector(vector) => (0..vector.len()).filter_map(|i| vector.get(i)).collect(),
-        pxml::Value::String(text) => text.split_whitespace().filter_map(|n| n.parse().ok()).collect(),
-        _ => return None,
-    };
-    match floats[..] {
-        [x, y, z] => Some(Vec3::new(x, y, z)),
-        _ => None,
-    }
-}
-
-/// A float down a path of children.
-fn child_float_at(element: &Element, path: &[&str]) -> Option<f32> {
-    let (last, parents) = path.split_last()?;
-    let parent = parents.iter().try_fold(element, |element, name| child_element(element, name))?;
-    child_float(parent, last)
-}
-
-fn invalid(message: String) -> io::Error {
+pub(crate) fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }

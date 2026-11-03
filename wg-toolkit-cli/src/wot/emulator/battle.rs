@@ -142,9 +142,9 @@ impl Target {
 
 impl BaseThread {
 
-    /// A client's avatar got into its battle's space: set the space up as the captured
-    /// server did, with its properties and its map, then the player's vehicle, the
-    /// target and the arena's info entity, which the client gets in that order. It sees
+    /// A client's avatar got into its battle's space, with its map: create the player's
+    /// vehicle, the target and the arena's info entity, which the client gets in that
+    /// order. It sees
     /// the vehicles its own spots, see [`Self::step`].
     pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey) -> io::Result<()> {
 
@@ -158,14 +158,6 @@ impl BaseThread {
             self.set_battle(client, battle);
             return Ok(());
         };
-
-        for data in &captured.space_properties {
-            self.app.set_space_property(space, data.clone())?;
-        }
-        if let Some(geometry) = &captured.geometry {
-            self.app.add_space_geometry_mapping(space, geometry.entry_id.addr, &geometry.path)?;
-            info!(%client, "Entering space {space} with {}", geometry.path);
-        }
 
         let vehicle = self.create_vehicle(&battle)?;
         battle.vehicle = vehicle.as_ref().map(|(key, _)| *key);
@@ -796,7 +788,7 @@ const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
 const TARGET_FIRST_SHOT_ID: i32 = 1_000_000;
 
 /// The player's team, the target being in the other.
-const PLAYER_TEAM: u8 = 1;
+pub const PLAYER_TEAM: u8 = 1;
 
 /// How far in front of the player's start the target stands, in metres.
 const TARGET_DISTANCE: f32 = 40.0;

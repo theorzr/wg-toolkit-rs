@@ -30,6 +30,7 @@ use crate::net::element::{Element, ElementLength, SimpleElement};
 use crate::script::{Script, Ty, Value};
 use crate::net::socket::PacketSocket;
 use crate::net::proto::Protocol;
+use crate::net::codec::Codec;
 
 use super::entity::{
     self, AnyEntity, BindError, Component, ComponentKey, ComponentSchema, ComponentState, Entity, EntityComponents,
@@ -1067,10 +1068,23 @@ impl App {
     /// Get a client's base-player entity into a space, with a cell part: the client gets
     /// its cell player and the space's data right away, then what is in the space from
     /// the end of the tick on. Its cell method calls go to it.
-    pub fn create_cell_player<T>(&mut self, player: EntityKey<T>, space: SpaceKey, init: CellPlayerInit) -> io::Result<()> {
+    pub fn create_cell_player<T, D, C>(&mut self, player: EntityKey<T>, space: SpaceKey, init: CellPlayerInit<D, C>) -> io::Result<()>
+    where
+        D: ScriptType,
+        C: ScriptType,
+    {
 
         let state = self.entity_state(player)?;
         let client = state.client.ok_or_else(|| io_invalid_data(format_args!("entity {player} has no client")))?;
+        let dispatch = self.dispatch.entity_from_id(state.type_id)
+            .ok_or_else(|| io_invalid_data(format_args!("unknown entity type: {}", state.type_id)))?;
+        if !check_data(&init.data, &dispatch.cell_data_ty) || !check_data(&init.components_data, &dispatch.cell_components_data_ty) {
+            return Err(io_invalid_data(format_args!("not the cell data of entity {player}")));
+        }
+        let mut cell_data = Vec::new();
+        init.data.into_value(&dispatch.cell_data_ty).write(&mut cell_data, &dispatch.cell_data_ty)?;
+        cell_data.push(init.components_count);
+        init.components_data.into_value(&dispatch.cell_components_data_ty).write(&mut cell_data, &dispatch.cell_components_data_ty)?;
         let data = &self.spaces.get(space.slot)
             .ok_or_else(|| io_invalid_data(format_args!("no such space: {space}")))?
             .data;
@@ -1084,7 +1098,7 @@ impl App {
             position: init.position,
             packed_xz_scale: init.packed_xz_scale,
             direction: init.direction,
-            cell_data: init.cell_data,
+            cell_data,
         })?;
         for data in data {
             data.write(out, space)?;
@@ -1300,15 +1314,19 @@ pub struct EntityInit {
 
 /// The cell part of a client's player entity, see [`App::create_cell_player`].
 #[derive(Debug, Clone)]
-pub struct CellPlayerInit {
+pub struct CellPlayerInit<D, C> {
     /// The entity the player is on, see [`client::element::CreateCellPlayer`].
     pub vehicle_id: u32,
     pub position: Vec3,
     /// Roll, pitch and yaw.
     pub direction: Vec3,
     pub packed_xz_scale: f32,
-    /// The client's cell data, still encoded, given to its client as is.
-    pub cell_data: Vec<u8>,
+    /// The player's cell-hosted, client-visible properties, as a dict.
+    pub data: D,
+    /// See [`client::element::CellPlayerData::components_count`].
+    pub components_count: u8,
+    /// Its static components' cell-hosted, client-visible properties, as one dict.
+    pub components_data: C,
 }
 
 

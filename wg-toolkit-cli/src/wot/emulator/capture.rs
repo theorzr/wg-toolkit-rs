@@ -49,10 +49,8 @@ pub struct CapturedBattle {
     pub avatar: Option<Value>,
     /// The avatar's cell side, which names the space and the player's vehicle.
     pub cell_player: Option<CreateCellPlayer>,
-    /// The space's properties, still raw, see [`SpaceProperty`].
-    pub space_properties: Vec<Vec<u8>>,
-    /// The map, mapped into the space.
-    pub geometry: Option<AddSpaceGeometryMapping>,
+    /// Whether the map got into the space, which ends the battle's setup.
+    pub mapped: bool,
     /// The player's vehicle: its id alias when entering the area of interest, its
     /// position, and its creation, answering the client.
     pub vehicle_alias: Option<u8>,
@@ -190,7 +188,7 @@ impl Extractor<'_> {
     /// The battle being set up, until its map arrives.
     fn setting_up_battle(&mut self) -> Option<&mut CapturedBattle> {
         let battle = self.session.battle.as_mut().filter(|_| self.in_avatar)?;
-        battle.geometry.is_none().then_some(battle)
+        (!battle.mapped).then_some(battle)
     }
 
     /// The player's vehicle, if it has this alias. Only the vehicle's alias is tracked,
@@ -301,16 +299,11 @@ impl Extractor<'_> {
                         battle.cell_player.get_or_insert(e);
                     }
                 }
-                SpaceProperty::ID => {
-                    let e = elt.read_simple::<SpaceProperty>()?.element;
-                    if let Some(battle) = self.setting_up_battle() {
-                        battle.space_properties.push(e.data);
-                    }
-                }
+                SpaceProperty::ID => { elt.read_simple::<SpaceProperty>()?; }
                 AddSpaceGeometryMapping::ID => {
-                    let e = elt.read_simple::<AddSpaceGeometryMapping>()?.element;
+                    elt.read_simple::<AddSpaceGeometryMapping>()?;
                     if let Some(battle) = self.setting_up_battle() {
-                        battle.geometry = Some(e);
+                        battle.mapped = true;
                     }
                 }
                 EnterAoi::ID => {

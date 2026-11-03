@@ -480,3 +480,63 @@ script_dict! {
         pub restrictionReasonID: i8,
     }
 }
+
+script_dict! {
+    /// The `Avatar`'s cell data, which its client gets with its cell part: its team and
+    /// vehicle, and its vehicle's state that the client predicts.
+    #[derive(Debug, Clone)]
+    pub struct AvatarCellData {
+        pub team: u8,
+        pub playerVehicleID: EntityId,
+        pub isGunLocked: bool,
+        pub ownVehicleGear: u8,
+        pub ownVehicleAuxPhysicsData: u64,
+        pub ownVehicleHullAimingPitchPacked: u16,
+        pub ammoViews: AmmoViews,
+        pub customizationDisplayType: u8,
+        pub isObserverBothTeams: bool,
+        pub isObserverFPV: bool,
+        pub numOfObservers: u8,
+        pub observableTeamID: u8,
+        pub remoteCamera: RemoteCamera,
+        pub shouldSendKillcamSimulationData: bool,
+    }
+}
+
+script_dict! {
+    /// `AVATAR_AMMO_VIEWS`.
+    #[derive(Debug, Clone, Default)]
+    pub struct AmmoViews {
+        pub vehTypeCompDescrs: Vec<i32>,
+        pub compDescrs: Vec<Vec<i32>>,
+    }
+}
+
+script_dict! {
+    /// `REMOTE_CAMERA_DATA`: where an observed player aims.
+    #[derive(Debug, Clone, Default)]
+    pub struct RemoteCamera {
+        pub time: f64,
+        pub shotPoint: Vec3,
+        pub zoom: u8,
+        pub mode: u8,
+    }
+}
+
+script_dict! {
+    /// The cell data of the `Avatar`'s static components, as one dict: the in-battle
+    /// vehicle switch's spawns, and an application point check, all unused in a random
+    /// battle.
+    #[derive(Debug, Clone, Default)]
+    pub struct AvatarComponentsData {
+        pub isPositionValid: bool,
+        pub wrongApplicationPoint: Vec3,
+        pub isVehicleConfirmed: bool,
+        /// `RESPAWN_INFO_VEHICLE`, none.
+        pub spawnInfoForVehicle: Option<Value>,
+        /// `SPAWN_POINT_INFO`s.
+        pub spawnPoints: Vec<Value>,
+        /// `SPAWN_AVAILABLE_VEHICLE`s.
+        pub vehicleSpawnList: Vec<Value>,
+    }
+}

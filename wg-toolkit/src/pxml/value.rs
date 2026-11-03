@@ -81,6 +81,49 @@ impl Element {
         self.insert_child(self.children.len(), name, value)
     }
 
+    /// The first child of the given name, if an element.
+    pub fn get_child_element(&self, key: &str) -> Option<&Element> {
+        self.get_child(key)?.as_element()
+    }
+
+    /// The value of the first child of the given name: the child itself, or its own
+    /// value if it is an element, which holds it alongside its children.
+    pub fn get_child_value(&self, key: &str) -> Option<&Value> {
+        match self.get_child(key)? {
+            Value::Element(child) => Some(&child.value),
+            value => Some(value),
+        }
+    }
+
+    /// The value down a path of children, each but the last an element, see
+    /// [`Self::get_child_value`].
+    pub fn get_child_value_at(&self, path: &[&str]) -> Option<&Value> {
+        let (last, parents) = path.split_last()?;
+        parents.iter()
+            .try_fold(self, |element, key| element.get_child_element(key))?
+            .get_child_value(last)
+    }
+
+    /// The string value of the first child of the given name, see [`Self::get_child_value`].
+    pub fn get_child_string(&self, key: &str) -> Option<&str> {
+        self.get_child_value(key)?.as_string()
+    }
+
+    /// The integer value of the first child of the given name, see [`Value::as_integer`].
+    pub fn get_child_integer(&self, key: &str) -> Option<i64> {
+        self.get_child_value(key)?.as_integer()
+    }
+
+    /// The float value of the first child of the given name, see [`Value::as_float`].
+    pub fn get_child_float(&self, key: &str) -> Option<f32> {
+        self.get_child_value(key)?.as_float()
+    }
+
+    /// The vec3 value of the first child of the given name, see [`Value::as_vec3`].
+    pub fn get_child_vec3(&self, key: &str) -> Option<Vec3> {
+        self.get_child_value(key)?.as_vec3()
+    }
+
 }
 
 impl Value {
@@ -98,9 +141,16 @@ impl Value {
     }
 
     /// Try to get this value as an integer if possible.
+    ///
+    /// If the underlying value is not an integer, then the value may be interpreted from
+    /// a string that can be parsed.
     #[inline]
     pub fn as_integer(&self) -> Option<i64> {
-        if let Self::Integer(n) = *self { Some(n) } else { None }
+        match self {
+            &Self::Integer(n) => Some(n),
+            Self::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None
+        }
     }
 
     /// Try to get this value as a boolean is possible.
@@ -124,7 +174,7 @@ impl Value {
         match self {
             Self::Vector(v) => v.as_float(),
             &Self::Integer(n) => Some(n as f32),
-            Self::String(s) => s.parse::<f32>().ok(),
+            Self::String(s) => s.trim().parse::<f32>().ok(),
             _ => None
         }
     }
@@ -270,8 +320,9 @@ impl Index<usize> for Vector {
 
 fn parse_string_vector<const LEN: usize>(s: &str) -> Option<[f32; LEN]> {
     let mut ret = [0.0; LEN];
-    for (i, part) in s.splitn(LEN, ' ').enumerate() {
-        ret[i] = part.parse::<f32>().ok()?;
+    let mut parts = s.split_whitespace();
+    for component in &mut ret {
+        *component = parts.next()?.parse::<f32>().ok()?;
     }
-    Some(ret)
+    parts.next().is_none().then_some(ret)
 }
