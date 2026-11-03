@@ -39,7 +39,7 @@ use crate::wot::schema::{
 };
 use crate::wot::account_commands::{
     token_type, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS,
-    CMD_SYNC_DATA, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
+    CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{AimingDef, ShotDef, VehicleDef};
@@ -234,6 +234,9 @@ const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
 /// The account's sessions count, enough not to be a new player, until accounts are
 /// stored.
 const ACCOUNT_SESSIONS: u64 = 1000;
+/// The version of the vehicle dossiers, any: the client drops its cached ones when
+/// it differs from theirs.
+const DOSSIERS_VERSION: i32 = 1;
 /// The client version the server requires, `requiredVersion_2410`'s default in
 /// `AccountVersion.def`.
 const REQUIRED_VERSION: &str = "eu_2.4.1_2";
@@ -566,9 +569,16 @@ impl BaseThread {
                 if self.shop.is_cached(len, crc32) {
                     self.app.entity(account)?.onCmdResponse(request_id, RES_CACHE, String::new())?;
                 } else {
-                    self.app.entity(account)?.onCmdResponse(request_id, RES_STREAM, String::new())?;
-                    self.app.push_resource(client, request_id as u16, self.shop.description.clone(), &self.shop.data)?;
+                    let data = self.shop.data.clone();
+                    self.stream(client, account, request_id, &data)?;
                 }
+            }
+            // `[cache version, latest change time in cache, 0]`, answered with the
+            // `(cache version, [(vehicle type, change time, dossier)])` changed since,
+            // and there are no vehicle dossiers yet.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DOSSIERS, .. } => {
+                let data = account::compress(&wgtk::pickle!((DOSSIERS_VERSION, [])))?;
+                self.stream(client, account, request_id, &data)?;
             }
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
                 self.app.entity(account)?.receiveQueueInfo(queue_info())?;
@@ -600,6 +610,12 @@ impl BaseThread {
             _ => self.request(client, name, args),
         }
         Ok(())
+    }
+
+    /// Answer an account command with a stream of its data, zlib-compressed.
+    fn stream(&mut self, client: ClientKey, account: EntityKey<Account>, request_id: i16, data: &[u8]) -> io::Result<()> {
+        self.app.entity(account)?.onCmdResponse(request_id, RES_STREAM, String::new())?;
+        self.app.push_resource(client, request_id as u16, account::resource_description(data), data)
     }
 
     #[instrument(name = "base", skip_all)]

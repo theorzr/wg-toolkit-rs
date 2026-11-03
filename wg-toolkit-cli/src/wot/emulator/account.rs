@@ -36,9 +36,7 @@ impl AccountData {
 
     /// Encode as a sync resource: its description, then its data.
     pub fn encode(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        pickle::to_writer(&mut encoder, &self.data)?;
-        let data = encoder.finish()?;
+        let data = compress(&self.data)?;
         Ok((resource_description(&data), data))
     }
 
@@ -211,6 +209,13 @@ impl AccountData {
 /// A dict key as the server writes them: Python 2 `str`, so bytes.
 pub fn key(name: &str) -> Value {
     Value::Bytes(name.as_bytes().to_vec())
+}
+
+/// A value as streamed: pickled, then zlib-compressed.
+pub fn compress(value: &Value) -> io::Result<Vec<u8>> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    pickle::to_writer(&mut encoder, value)?;
+    encoder.finish()
 }
 
 /// The description of a resource stream: the pickled `(len, crc32)` the client checks

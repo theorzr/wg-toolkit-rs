@@ -8,31 +8,23 @@
 use std::collections::BTreeSet;
 use std::io;
 
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
-
-use wgtk::pickle::{self, Global, Value};
+use wgtk::pickle::{Global, Value};
 
 use crate::wot::item_defs::NATIONS;
 
 use super::account;
 
 
-/// The shop as sent: its data, and the description the client checks its cache
-/// against.
+/// The shop, as streamed.
 #[derive(Debug)]
 pub struct Shop {
-    pub description: Vec<u8>,
     pub data: Vec<u8>,
 }
 
 impl Shop {
 
     pub fn new() -> io::Result<Self> {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        pickle::to_writer(&mut encoder, &shop())?;
-        let data = encoder.finish()?;
-        Ok(Self { description: account::resource_description(&data), data })
+        Ok(Self { data: account::compress(&shop())? })
     }
 
     /// If the client's cached shop, given by the `(len, crc32)` of its data, is this one.
