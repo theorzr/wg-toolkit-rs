@@ -45,8 +45,8 @@ pub struct CapturedSession {
 /// build its own battle from: stand-ins for the values a game server will generate.
 #[derive(Debug, Default)]
 pub struct CapturedBattle {
-    /// The `Avatar` entity's creation data and dynamic components count.
-    pub avatar: Option<(Value, u8)>,
+    /// The `Avatar` entity's creation data, which names the player and the map.
+    pub avatar: Option<Value>,
     /// The avatar's cell side, which names the space and the player's vehicle.
     pub cell_player: Option<CreateCellPlayer>,
     /// The space's properties, still raw, see [`SpaceProperty`].
@@ -273,7 +273,7 @@ impl Extractor<'_> {
                         self.session.account = Some((e.entity_data.into_owned(), e.entity_components_count));
                     } else if type_named("Avatar") {
                         let battle = self.session.battle.get_or_insert_with(CapturedBattle::default);
-                        battle.avatar.get_or_insert((e.entity_data.into_owned(), e.entity_components_count));
+                        battle.avatar.get_or_insert(e.entity_data.into_owned());
                     }
                 }
                 SelectPlayerEntity::ID => {

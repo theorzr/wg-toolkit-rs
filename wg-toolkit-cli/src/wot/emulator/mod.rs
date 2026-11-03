@@ -24,7 +24,7 @@ use blowfish::Blowfish;
 use rsa::RsaPrivateKey;
 
 use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode};
-use wgtk::app::entity::{Bytes, EntityId, EntityKey};
+use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle, ScriptType};
 use wgtk::app::base::{CellPlayerInit, ClientKey};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
@@ -34,7 +34,8 @@ use wgtk::res::fs::ResFilesystem;
 use wgtk::app::{login, base};
 
 use crate::wot::schema::{
-    self, Account, Avatar, AvatarBase, GunReloadTime, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
+    self, Account, Avatar, AvatarBase, AvatarData, BattleChatRestriction, GunReloadTime, PlayLimits, TargetingInfo,
+    VehicleAmmo, VehicleHealthInfo, VehicleSetting,
 };
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
@@ -216,6 +217,17 @@ const PREBATTLE_LENGTH: Duration = Duration::from_secs(10);
 const BATTLE_LENGTH: Duration = Duration::from_secs(900);
 /// `ARENA_UPDATE.PERIOD`.
 const ARENA_UPDATE_PERIOD: u8 = 3;
+/// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
+const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
+const ARENA_GUI_TYPE_RANDOM: u8 = 1;
+/// The tier of the battle.
+const BATTLE_LEVEL: i64 = 10;
+/// How many players a player may report each day.
+const DENUNCIATIONS: i16 = 10;
+/// The avatar's dynamic components count, as captured, see [`CreateBasePlayer`].
+///
+/// [`CreateBasePlayer`]: wgtk::app::client::element::CreateBasePlayer
+const AVATAR_COMPONENTS_COUNT: u8 = 2;
 
 #[derive(Debug)]
 struct Shared {
@@ -431,14 +443,18 @@ impl BaseThread {
     /// Bring a client that reconnected for its battle to its avatar.
     fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some((data, components_count)) = self.session.as_ref()
+        // The captured avatar names the player and the map, until the account and the
+        // battle do.
+        let Some(captured) = self.session.as_ref()
             .and_then(|s| s.battle.as_ref())
-            .and_then(|b| b.avatar.as_ref()) else {
+            .and_then(|b| b.avatar.as_ref())
+            .and_then(|data| AvatarData::from_value(data.clone())) else {
             warn!(%client, "The capture has no avatar to create");
             return Ok(());
         };
 
-        let avatar = self.app.create_base_player::<Avatar>(client, data.clone(), *components_count)?;
+        let data = avatar_data(captured.name, captured.arenaTypeID);
+        let avatar = self.app.create_base_player::<Avatar>(client, data, AVATAR_COMPONENTS_COUNT)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
         }
@@ -769,6 +785,32 @@ fn captured_property<'m>(message: &'m NrlMessage, name: &str) -> Option<&'m Valu
         NrlChild::Property { name: child_name, value } if &**child_name == name => Some(value),
         _ => None,
     })
+}
+
+/// The base data of a random battle's avatar, for the given player and map: no limits,
+/// boosters nor modifiers, and no kill cam, whose data the server sends.
+fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
+    use serde_pickle::{HashableValue, Value as PickleValue};
+    let extra_data = PickleValue::Dict([
+        (HashableValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
+        (HashableValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
+    ].into_iter().collect());
+    AvatarData {
+        name,
+        sessionID: String::new(),
+        arenaUniqueID: OsRng.next_u64(),
+        arenaTypeID: arena_type_id,
+        arenaBonusType: ARENA_BONUS_TYPE_REGULAR,
+        arenaGuiType: ARENA_GUI_TYPE_RANDOM,
+        arenaExtraData: Pickle(extra_data),
+        weatherPresetID: 0,
+        denunciationsLeft: DENUNCIATIONS,
+        clientCtx: String::new(),
+        tkillIsSuspected: false,
+        playLimits: PlayLimits { curfew: -1, weeklyPlayLimit: -1, dailyPlayLimit: -1, sessionLimit: -1 },
+        battleChatRestriction: BattleChatRestriction { isBattleChatDisabled: false, restrictionReasonID: -1 },
+        goodiesSnapshot: Vec::new(),
+    }
 }
 
 /// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and

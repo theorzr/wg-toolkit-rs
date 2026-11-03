@@ -430,3 +430,53 @@ script_dict! {
         pub dispersion: f32,
     }
 }
+
+script_dict! {
+    /// The `Avatar`'s base data, which its client gets as it is created: its battle,
+    /// what it may do in it, and its player.
+    #[derive(Debug, Clone)]
+    pub struct AvatarData {
+        pub name: String,
+        /// Unused by the client.
+        pub sessionID: String,
+        pub arenaUniqueID: u64,
+        /// The map and gameplay, an index in `arena_defs/_list_.xml`.
+        pub arenaTypeID: i32,
+        /// The `ARENA_BONUS_TYPE`.
+        pub arenaBonusType: u8,
+        /// The `ARENA_GUI_TYPE`.
+        pub arenaGuiType: u8,
+        /// A dict the client reads with defaults: `battleLevel`, `bonusCapsOverrides`,
+        /// `battleModifiersDescr`, `postmortemSettings`...
+        pub arenaExtraData: Pickle,
+        pub weatherPresetID: u8,
+        /// How many players it may still report.
+        pub denunciationsLeft: i16,
+        pub clientCtx: String,
+        pub tkillIsSuspected: bool,
+        pub playLimits: PlayLimits,
+        pub battleChatRestriction: BattleChatRestriction,
+        /// `BATTLE_GOODIES_LIST`, its active boosters.
+        pub goodiesSnapshot: Vec<Value>,
+    }
+}
+
+script_dict! {
+    /// `PLAY_LIMITS`: the seconds left to play, -1 for none.
+    #[derive(Debug, Clone)]
+    pub struct PlayLimits {
+        pub curfew: i32,
+        pub weeklyPlayLimit: i32,
+        pub dailyPlayLimit: i32,
+        pub sessionLimit: i32,
+    }
+}
+
+script_dict! {
+    /// `BATTLE_CHAT_RESTRICTION`.
+    #[derive(Debug, Clone)]
+    pub struct BattleChatRestriction {
+        pub isBattleChatDisabled: bool,
+        pub restrictionReasonID: i8,
+    }
+}
