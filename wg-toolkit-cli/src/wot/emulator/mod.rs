@@ -45,6 +45,7 @@ use crate::wot::account_commands::{
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
 use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
 use crate::wot::arena_defs::ArenaTypeDef;
+use crate::wot::item_prices::ItemPrices;
 use crate::wot::collision::VehicleCollision;
 use crate::CliResult;
 
@@ -124,7 +125,11 @@ pub fn run(
     let required_version = required_version(&fs)
         .map_err(|e| format!("Failed to read the required client version: {e}"))?;
 
-    let shop = Shop::new().map_err(|e| format!("Failed to encode the shop: {e}"))?;
+    let start = Instant::now();
+    let prices = ItemPrices::load(&fs)
+        .map_err(|e| format!("Failed to read the item prices: {e}"))?;
+    info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
+    let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
 
     let shared = Arc::new(Shared {
         login_clients: Mutex::new(HashMap::new()),
@@ -898,16 +903,84 @@ fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -
 /// The server's settings: only what the client reads without a default, every other
 /// feature taking the client's own. Game days start at 4:00 UTC and weeks on Mondays,
 /// as the captured server's, there is no web content and no ranked battles.
+///
+/// The configs that the client deserializes into models must be there, with their
+/// required fields, else reading them raises: they are the captured server's, without
+/// their optional fields and with empty lists. Story mode and fort rush are disabled,
+/// and the dates are the captured ones.
 fn server_settings() -> Pickle {
-    Pickle(pickle_dict([
-        ("file_server", pickle_dict([])),
-        ("ranked_config", pickle_dict([("isEnabled", PickleValue::Bool(false))])),
-        ("regional_settings", pickle_dict([
-            ("starting_day_of_a_new_week", PickleValue::I64(0)),
-            ("starting_time_of_a_new_day", PickleValue::I64(4 * 3600)),
-            ("starting_time_of_a_new_game_day", PickleValue::I64(4 * 3600)),
-        ])),
-    ]))
+    Pickle(wgtk::pickle!({
+        "file_server": {},
+        "ranked_config": {"isEnabled": false},
+        "regional_settings": {
+            "starting_day_of_a_new_week": 0,
+            "starting_time_of_a_new_day": (4 * 3600),
+            "starting_time_of_a_new_game_day": (4 * 3600),
+        },
+        "armor_flashlight_config": {"enabled": true},
+        "armor_inspector_config": {"enabled": true},
+        "commendations_config": {"isCommendationsEnabled": true, "isLiveTagsEnabled": true},
+        "fort_rush_battles_config": {
+            "isEnabled": false,
+            "technicalPause": false,
+            "isInfoPageEnabled": false,
+            "startDatetime": "2024-06-06T02:00:00+00:00",
+            "endDatetime": "2028-07-03T22:00:00+00:00",
+            "eligibleVehicleTiers": "10",
+            "baseProgressionToken": "frevent:progression_token",
+            "completedProgressionToken": "frevent:progression_completed_token",
+            "progressionQuestPrefix": "frevent:progression:",
+            "maxRewardsAmountPerStage": 3,
+            "progression": {"stage": []},
+            "battleEconomy": {
+                "creditsByPlace": {
+                    "win": "25000 20000 15000 10000 10000 10000 5000",
+                    "draw": "20000 15000 10000 5000 5000 5000 1000",
+                    "loss": "20000 15000 10000 5000 5000 5000 1000",
+                },
+                "progressionPointsByPlace": {"win": "6 6 6 4 4 4 2", "draw": "4 4 4 2 2 2 0", "loss": "4 4 4 2 2 2 0"},
+            },
+            "dailyMissionsConfig": {
+                "dailyGroupsCount": 5,
+                "dailyMissionQuestPrefix": "fort_rush_daily_mission:",
+                "dailyMissionTokenPostfix": "{group}:{num}",
+                "dailyMissionTokenPrefix": "fort_rush_daily_token:",
+                "dailyMissionTokenTtl": 24,
+                "dailyQuestMaxDays": 12,
+                "hardDailyMissionQuestPrefix": "fort_rush_hard_daily_mission:",
+                "tokenLimit": 1,
+            },
+        },
+        "halloween_anomalies_config": {"anomalies": {"anomaly": []}, "recipes": {"recipe": []}},
+        "halloween_bestiary_config": {"enemies": {"enemy": []}},
+        "halloween_gsw_config": {"cards": {"card": []}},
+        "halloween_loot_config": {"loot": []},
+        "newbie_battle_hints_config": {"enabled": true},
+        "newbie_prebattle_hints_config": {"enabled": true, "hintDisplayCount": 2},
+        "oit_availability_config": {},
+        "player_satisfaction_config": {"enabled": true, "enabledInterfaces": {}},
+        "prebattle_hints_config": {"enabled": true, "battleTimerThreshold": 5},
+        "prefab_effects_availability_config": {},
+        "story_mode_battle_mgr_quotums": {"quotums": []},
+        "story_mode_missions": {"missions": [], "onboarding": {}},
+        "story_mode_settings": {
+            "enabled": false,
+            "waitTimeQueue": 20,
+            "hideGameLoadingTimeout": 20,
+            "modeSelectorCardColumn": 3,
+            "modeSelectorCardPriority": 50,
+            "entryPoint": {"eventStartAt": "2024-06-06T02:00:00+00:00", "eventEndAt": "2024-07-03T22:00:00+00:00"},
+            "newbieBannerEnabled": false,
+            "newbieAdvertisingEnabled": false,
+            "parallaxEnabled": true,
+            "eventName": "story_mode_vday",
+        },
+        "umgConfig": {"enableAllDaily": 1, "enableAllWeekly": 1, "enableDailyWeeklyUI": 1, "enablePM3Banner": 1, "slides": []},
+        "umgEvents": {"weights": []},
+        "umgMissions": {"weights": []},
+        "veh_playlists_config": {"isVehPlaylistsEnabled": true},
+        "weekly_quests_config": {"enabled": true, "rerollTimeout": 14400},
+    }))
 }
 
 /// The `showGUI` context of the player's account: its id, the server's time and the

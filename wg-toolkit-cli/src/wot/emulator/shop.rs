@@ -2,14 +2,14 @@
 //! `CMD_SYNC_SHOP` as a zlib-compressed pickled dict that the client keeps in its
 //! persistent cache, and read through `Shop.py` and the GUI's `ShopRequester`.
 //!
-//! The constants are the EU server's. The items are neither priced nor hidden yet:
-//! everything is free and in the shop.
+//! The constants are the EU server's, the items' prices those of the game's definitions.
 
 use std::collections::BTreeSet;
 use std::io;
 
 use wgtk::pickle::{Global, Value};
 
+use crate::wot::item_prices::ItemPrices;
 use crate::wot::item_defs::NATIONS;
 
 use super::account;
@@ -23,8 +23,8 @@ pub struct Shop {
 
 impl Shop {
 
-    pub fn new() -> io::Result<Self> {
-        Ok(Self { data: account::compress(&shop())? })
+    pub fn new(prices: &ItemPrices) -> io::Result<Self> {
+        Ok(Self { data: account::compress(&shop(prices))? })
     }
 
     /// If the client's cached shop, given by the `(len, crc32)` of its data, is this one.
@@ -34,10 +34,16 @@ impl Shop {
 
 }
 
-fn shop() -> Value {
+fn shop(prices: &ItemPrices) -> Value {
 
     let per_nation = |value: Value| Value::List(vec![value; NATIONS.len()]);
     let empty_set = || Value::Set(BTreeSet::new());
+
+    let item_prices = Value::Dict(prices.prices.iter()
+        .map(|(cd, price)| (Value::from(cd.to_int()), Value::dict([(price.currency, Value::from(price.amount))])))
+        .collect());
+    let item_prices = Value::object(Global::new("items", "ItemsPrices"), Value::dict([("_itemsPriceInfo", item_prices)]));
+    let not_in_shop = Value::Set(prices.not_in_shop.iter().map(|cd| Value::from(cd.to_int())).collect());
 
     wgtk::pickle!({
         "rev": 1,
@@ -70,10 +76,10 @@ fn shop() -> Value {
         "items": {
             "camouflagePriceFactors": (per_nation(wgtk::pickle!({}))),
             "inscriptionGroupPriceFactors": (per_nation(wgtk::pickle!({}))),
-            "itemPrices": (Value::object(Global::new("items", "ItemsPrices"), wgtk::pickle!({"_itemsPriceInfo": {}}))),
+            "itemPrices": item_prices,
             "notInShopCamouflages": (per_nation(empty_set())),
             "notInShopInscriptionGroups": (per_nation(empty_set())),
-            "notInShopItems": (empty_set()),
+            "notInShopItems": not_in_shop,
             "notInShopPlayerEmblemGroups": (empty_set()),
             "notInShopProgressionLvlItems": {},
             "operationPrices": {},

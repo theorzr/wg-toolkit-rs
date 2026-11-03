@@ -64,6 +64,12 @@ impl Element {
         self.children.iter_mut().filter_map(move |(k, v)| (k == key).then_some(v))
     }
 
+    /// The children that are elements, with their names, so without namespace
+    /// declarations, which are strings.
+    pub fn iter_child_elements(&self) -> impl Iterator<Item = (&'_ str, &'_ Element)> + DoubleEndedIterator {
+        self.children.iter().filter_map(|(k, v)| Some((k.as_str(), v.as_element()?)))
+    }
+
     pub fn get_child<'a, 'b>(&'a self, key: &'b str) -> Option<&'a Value> {
         self.children.iter().find_map(|(k, v)| (k == key).then_some(v))
     }
@@ -114,6 +120,11 @@ impl Element {
         self.get_child_value(key)?.as_integer()
     }
 
+    /// The boolean value of the first child of the given name, see [`Value::as_boolean`].
+    pub fn get_child_boolean(&self, key: &str) -> Option<bool> {
+        self.get_child_value(key)?.as_boolean()
+    }
+
     /// The float value of the first child of the given name, see [`Value::as_float`].
     pub fn get_child_float(&self, key: &str) -> Option<f32> {
         self.get_child_value(key)?.as_float()
@@ -154,9 +165,16 @@ impl Value {
     }
 
     /// Try to get this value as a boolean is possible.
+    ///
+    /// If the underlying value is not a boolean, then the value may be interpreted from
+    /// a `true` or `false` string.
     #[inline]
     pub fn as_boolean(&self) -> Option<bool> {
-        if let Self::Boolean(b) = *self { Some(b) } else { None }
+        match self {
+            &Self::Boolean(b) => Some(b),
+            Self::String(s) => s.trim().parse::<bool>().ok(),
+            _ => None
+        }
     }
 
     /// Try to get this value as a boolean is possible.
