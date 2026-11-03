@@ -3,7 +3,6 @@
 
 mod account;
 mod battle;
-mod capture;
 mod bot;
 mod gun;
 mod physics;
@@ -27,7 +26,7 @@ use rsa::RsaPrivateKey;
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::pickle::{self, Value as PickleValue};
 use wgtk::app::dispatch::MethodCall;
-use wgtk::script::{Script, Value};
+use wgtk::script::Script;
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
@@ -40,7 +39,7 @@ use crate::wot::schema::{
 };
 use crate::wot::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
-    CMD_REQ_SERVER_STATS, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
+    CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::items::TankmanDescr;
 use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
@@ -49,7 +48,6 @@ use crate::wot::item_prices::ItemPrices;
 use crate::wot::collision::VehicleCollision;
 use crate::CliResult;
 
-use capture::{Answer, CapturedSession};
 use physics::MotionLimits;
 use account::AccountData;
 use battle::Battle;
@@ -61,7 +59,6 @@ pub fn run(
     base_app_addr: SocketAddrV4,
     encryption_key: Option<Arc<RsaPrivateKey>>,
     script: Script,
-    from_capture: Option<&Path>,
     game_dir: &Path,
     give_vehicles: &[String],
     map: &str,
@@ -80,23 +77,6 @@ pub fn run(
     schema::register(&mut base_app)
         .map_err(|e| format!("Failed to bind the entity schemas: {e}"))?;
 
-    let session = match from_capture {
-        Some(path) => {
-            let session = CapturedSession::load(path, base_app.dispatch())
-                .map_err(|e| format!("Failed to extract the session from {}: {e}", path.display()))?;
-            info!("Serving from capture {}: {} requests", path.display(), session.requests.len());
-            for request in &session.requests {
-                let answers: Vec<String> = request.answers.iter().map(|answer| match answer {
-                    Answer::Call { method, .. } => method.to_string(),
-                    Answer::Resource { data, .. } => format!("resource ({} bytes)", data.len()),
-                }).collect();
-                debug!("  {} {:?} -> {}", request.method, request.args.get(..2), answers.join(", "));
-            }
-            Some(session)
-        }
-        None => None,
-    };
-    let session = session.map(Arc::new);
 
     // The battles' map, with its terrain for vehicles to rest on.
     let start = Instant::now();
@@ -145,7 +125,6 @@ pub fn run(
     let base_thread = BaseThread {
         app: base_app,
         shared,
-        session,
         account,
         shop,
         required_version,
@@ -183,8 +162,6 @@ struct LoginThread {
 struct BaseThread {
     app: base::App,
     shared: Arc<Shared>,
-    /// What to serve, when running from a capture.
-    session: Option<Arc<CapturedSession>>,
     /// Every player's account, until accounts are stored.
     account: AccountData,
     shop: Shop,
@@ -509,44 +486,6 @@ impl BaseThread {
 
     }
 
-    /// Answer a client request with what the captured server answered to the closest
-    /// captured request, with the new request's id in place of the captured one.
-    fn answer(&mut self, client: ClientKey, method: &str, args: &[Value]) -> io::Result<()> {
-
-        let player = self.accounts.get(&client).map(|account| account.any())
-            .or_else(|| self.battle_clients.get(&client)?.avatar.map(|avatar| avatar.any()));
-        let (Some(session), Some(player)) = (&self.session, player) else { return Ok(()) };
-        let Some(request_id) = args.first().and_then(Value::as_i64) else { return Ok(()) };
-
-        let Some(captured) = session.find_request(method, args) else {
-            warn!(%client, "No captured answer to {method} {args:?}");
-            return Ok(());
-        };
-
-        for answer in &captured.answers {
-            match answer {
-                Answer::Call { method, args } => {
-                    // Only an answer carrying the captured request's id gets the new
-                    // one: an id-less answer's first argument is something else, the
-                    // queue type of `onEnqueued` say.
-                    let mut args = args.clone();
-                    if let Some(first) = args.first_mut().filter(|first| Some(&**first) == captured.args.first()) {
-                        *first = with_int(first, request_id);
-                    }
-                    info!(%client, "Answering with {method} {}", format!("{args:?}").chars().take(200).collect::<String>());
-                    self.app.call_method(player, method, args)?;
-                }
-                Answer::Resource { description, data } => {
-                    info!(%client, "Answering with resource {request_id}, {} bytes", data.len());
-                    self.app.push_resource(client, request_id as u16, description.clone(), data)?;
-                }
-            }
-        }
-
-        Ok(())
-
-    }
-
     /// Tell a client just logged in the update frequency, right after the login reply, as
     /// the captured server did.
     fn send_update_frequency(&mut self, client: ClientKey) {
@@ -556,17 +495,9 @@ impl BaseThread {
         }
     }
 
-    /// A request of the client's account, answered as captured.
-    fn request(&mut self, client: ClientKey, name: &str, args: &[Value]) {
-        if let Err(e) = self.answer(client, name, args) {
-            warn!(%client, "Failed to answer {name}: {e}");
-        }
-    }
-
-    /// A request of the client's account that we answer ourselves, others are answered
-    /// as captured. The arena is ready as soon as the client first asks how the queue is
-    /// going.
-    fn account_request(&mut self, client: ClientKey, account: EntityKey<Account>, request: AccountBase, name: &str, args: &[Value]) -> io::Result<()> {
+    /// A request of the client's account, those we don't know being left unanswered. The
+    /// arena is ready as soon as the client first asks how the queue is going.
+    fn account_request(&mut self, client: ClientKey, account: EntityKey<Account>, request: AccountBase, name: &str) -> io::Result<()> {
         match request {
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_SERVER_STATS, .. } => {
                 let online = self.players.len() as u32;
@@ -635,7 +566,12 @@ impl BaseThread {
             AccountBase::ChatCommandFromClient { action, .. } => {
                 debug!(%client, "Ignoring chat action {action}");
             }
-            _ => self.request(client, name, args),
+            // Accepted without effect, as nothing depends on them yet.
+            AccountBase::DoCmdInt2 { request_id, cmd: CMD_SET_ACTIVE_VEH_SEASON, .. }
+            | AccountBase::DoCmdStr { request_id, cmd: CMD_RESET_SESSION_STAT, .. } => {
+                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+            }
+            _ => warn!(%client, "Unanswered request {name}"),
         }
         Ok(())
     }
@@ -772,11 +708,11 @@ impl BaseThread {
                         }
                         None => match self.app.decode::<AccountBase>(event.entity, &event.call) {
                             Some((account, request)) => {
-                                if let Err(e) = self.account_request(event.client, account, request, name, args) {
+                                if let Err(e) = self.account_request(event.client, account, request, name) {
                                     warn!(client = %event.client, "Failed to answer {name}: {e}");
                                 }
                             }
-                            None => self.request(event.client, name, args),
+                            None => warn!(client = %event.client, "Unanswered request {name}"),
                         }
                     }
                 }
@@ -1096,19 +1032,3 @@ const GROUND_EFFECT_MATERIAL: u8 = 0;
 /// extinguisher), by integer descriptor, which every vehicle gets until accounts have
 /// their own.
 const CONSUMABLES: [i64; 3] = [1531, 1019, 507];
-
-/// The same integer value type as `value`, holding `n`: a request id or an entity id
-/// must keep the type its method or property declares.
-fn with_int(value: &Value, n: i64) -> Value {
-    match value {
-        Value::Int8(_) => Value::Int8(n as i8),
-        Value::Int16(_) => Value::Int16(n as i16),
-        Value::Int32(_) => Value::Int32(n as i32),
-        Value::Int64(_) => Value::Int64(n),
-        Value::UInt8(_) => Value::UInt8(n as u8),
-        Value::UInt16(_) => Value::UInt16(n as u16),
-        Value::UInt32(_) => Value::UInt32(n as u32),
-        Value::UInt64(_) => Value::UInt64(n as u64),
-        other => other.clone(),
-    }
-}

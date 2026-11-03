@@ -111,8 +111,7 @@ pub fn cmd_wot(args: WotArgs) -> CliResult<()> {
             args.capture.as_deref())
 
     } else {
-        emulator::run(args.login_app, args.base_app, encryption_key, script, args.from_capture.as_deref(),
-            &args.dir, &args.give_vehicle, &args.map, &args.name)
+        emulator::run(args.login_app, args.base_app, encryption_key, script, &args.dir, &args.give_vehicle, &args.map, &args.name)
     }
 
 }

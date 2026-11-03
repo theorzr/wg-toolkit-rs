@@ -227,10 +227,6 @@ pub struct WotArgs {
     /// which have no encoder yet.
     #[arg(long, requires = "replay")]
     pub round_trip: bool,
-    /// In emulator mode, serve the account and the answers to the client's requests
-    /// from this capture, recorded with `--capture`.
-    #[arg(long, conflicts_with_all = ["replay", "real_login_app"])]
-    pub from_capture: Option<PathBuf>,
     /// In emulator mode, give the account this vehicle, as `<nation>:<name>`
     /// (`uk:GB98_T95_FV4201_Chieftain`, names as in the game's
     /// `scripts/item_defs/vehicles/<nation>/list.xml`). Can be repeated.
