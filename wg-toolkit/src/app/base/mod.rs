@@ -91,11 +91,14 @@ pub struct App {
     entities: Slots<EntityState>,
     entity_keys: HashMap<u32, EntityKey<AnyEntity>>,
     /// The next id for entities, this is wrapping around and we ensure that the same id
-    /// isn't used twice!
+    /// isn't used twice! Ids are positive signed integers, negative ones being the
+    /// client's own entities.
     entities_next_id: Wrapping<u32>,
     /// The spaces, and the key of each by its id.
     spaces: Slots<SpaceState>,
     space_keys: HashMap<u32, SpaceKey>,
+    /// The next id for spaces, never 0, wrapping around as for entities.
+    spaces_next_id: Wrapping<u32>,
 }
 
 impl App {
@@ -118,6 +121,7 @@ impl App {
             entities_next_id: Wrapping(OsRng.next_u32()),
             spaces: Slots::default(),
             space_keys: HashMap::new(),
+            spaces_next_id: Wrapping(1),
         })
     }
 
@@ -871,9 +875,9 @@ impl App {
     /// A new unique entity id.
     fn new_entity_id(&mut self) -> u32 {
         loop {
-            let id = self.entities_next_id.0;
+            let id = self.entities_next_id.0 & i32::MAX as u32;
             self.entities_next_id += 1;
-            if !self.entity_keys.contains_key(&id) {
+            if id != 0 && !self.entity_keys.contains_key(&id) {
                 break id;
             }
         }
@@ -1020,18 +1024,21 @@ fn visible_properties(state: &EntityState, dispatch: &EntityDispatch, own: bool,
 
 impl App {
 
-    /// Create a space of the given id, which the protocol carries: one from a capture,
-    /// whose space properties name it, say.
-    pub fn create_space(&mut self, id: u32) -> io::Result<SpaceKey> {
+    /// Create a space, of a new id.
+    pub fn create_space(&mut self) -> SpaceKey {
 
-        if self.space_keys.contains_key(&id) {
-            return Err(io_invalid_data(format_args!("space {id} already exists")));
-        }
+        let id = loop {
+            let id = self.spaces_next_id.0;
+            self.spaces_next_id += 1;
+            if id != 0 && !self.space_keys.contains_key(&id) {
+                break id;
+            }
+        };
 
         let slot = self.spaces.insert(SpaceState::default());
         let key = SpaceKey { slot, id };
         self.space_keys.insert(id, key);
-        Ok(key)
+        key
 
     }
 

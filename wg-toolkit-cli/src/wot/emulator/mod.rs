@@ -25,18 +25,17 @@ use rsa::RsaPrivateKey;
 
 use wgtk::app::client::element::{NrlBody, NrlChild, NrlMessage, NrlNode};
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle, ScriptType};
-use wgtk::app::base::{CellPlayerInit, ClientKey};
 use wgtk::util::io::serde_pickle_ser_options;
 use wgtk::app::dispatch::MethodCall;
 use wgtk::script::{Script, Value};
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
+use wgtk::app::base::ClientKey;
 use wgtk::app::{login, base};
 
 use crate::wot::schema::{
-    self, Account, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarComponentsData, AvatarData,
-    BattleChatRestriction, GunReloadTime, PlayLimits, RemoteCamera, TargetingInfo, VehicleAmmo, VehicleHealthInfo,
-    VehicleSetting,
+    self, Account, AmmoViews, Avatar, AvatarBase, AvatarCellData, AvatarData, BattleChatRestriction, GunReloadTime,
+    PlayLimits, RemoteCamera, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
 };
 use crate::wot::account_commands::{CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_REQ_QUEUE_INFO, CMD_SYNC_DATA};
 use crate::wot::items::{item_type, TankmanDescr, VehicleDescr};
@@ -48,7 +47,7 @@ use crate::CliResult;
 use capture::{Answer, CapturedSession};
 use physics::MotionLimits;
 use account::AccountData;
-use battle::{Battle, PLAYER_TEAM};
+use battle::Battle;
 
 
 pub fn run(
@@ -481,13 +480,8 @@ impl BaseThread {
         // comes through this base app. No arena updates either, which the client
         // defaults to, see the capture.
 
-        // Then its cell side, in a space of its own with the map, with the player's
-        // vehicle, captured until battles place their own.
-        let Some(cell) = self.session.as_ref().and_then(|s| s.battle.as_ref()?.cell_player.as_ref()) else {
-            warn!(%client, "The capture has no cell player");
-            return Ok(());
-        };
-        let space = self.app.create_space(cell.space_id)?;
+        // Then its cell side, in a space of its own with the map, see [`Self::enter_space`].
+        let space = self.app.create_space();
         for data in space_properties(space.id()) {
             self.app.set_space_property(space, data)?;
         }
@@ -496,16 +490,6 @@ impl BaseThread {
         };
         self.app.add_space_geometry_mapping(space, entry_id, &map.geometry)?;
         info!(%client, "Entering space {space} with {}", map.geometry);
-
-        self.app.create_cell_player(avatar, space, CellPlayerInit {
-            vehicle_id: cell.vehicle_id,
-            position: cell.position,
-            direction: cell.direction,
-            packed_xz_scale: cell.packed_xz_scale,
-            data: avatar_cell_data(PLAYER_TEAM, EntityId(cell.vehicle_id)),
-            components_count: AVATAR_COMPONENTS_COUNT,
-            components_data: AvatarComponentsData::default(),
-        })?;
         self.enter_space(client, avatar, space)
 
     }
