@@ -122,14 +122,14 @@
 //! `ClientPlace` and `ClientHost`.
 
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, Shutdown};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::io::{self, Read, Write};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::thread;
 
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use tracing::{debug, info, warn};
 
 use wgtk::util::io::{WgReadExt, WgWriteExt};
@@ -164,11 +164,22 @@ pub enum Message {
     ClientHosted { request_id: u32, base_app: Option<SocketAddrV4> },
 }
 
-/// The stream of every link of a link listener, to send to it.
-type SharedLinks = Arc<Mutex<HashMap<LinkId, TcpStream>>>;
+/// What a link listener shares with its threads and its local link streams.
+#[derive(Debug)]
+struct ListenerShared {
+    next_id: AtomicU64,
+    /// Where to send to every link.
+    links: Mutex<HashMap<LinkId, ListenerLink>>,
+    sender: Sender<LinkEvent<LinkId>>,
+}
 
-/// The stream of a link stream, while linked.
-type SharedStream = Arc<Mutex<Option<TcpStream>>>;
+/// Where a link listener sends to a link.
+#[derive(Debug)]
+enum ListenerLink {
+    Tcp(TcpStream),
+    /// A link stream of this process, given its events directly.
+    Local(Sender<LinkEvent>),
+}
 
 /// The id of a link accepted by a [`LinkListener`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,41 +197,58 @@ pub enum LinkEvent<L = ()> {
 /// Listening for the links of the apps below.
 #[derive(Debug)]
 pub struct LinkListener {
-    addr: SocketAddr,
-    /// The stream of every link, to send to it.
-    links: SharedLinks,
+    /// The address it listens at, none for the link streams of this process only.
+    addr: Option<SocketAddr>,
+    shared: Arc<ListenerShared>,
     events: Receiver<LinkEvent<LinkId>>,
 }
 
 impl LinkListener {
 
-    /// Listen at this address for the apps below to link with.
+    /// Listen at this address for the apps below to link with, those of this process
+    /// can also link with [`LinkStream::connect_local`].
     pub fn bind(addr: SocketAddr) -> io::Result<Self> {
 
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
-        let links = Arc::new(Mutex::new(HashMap::new()));
-        let (sender, events) = mpsc::channel();
+        let mut link_listener = Self::local();
+        link_listener.addr = Some(addr);
         info!("Listening for links on: {addr}");
 
-        let thread_links = Arc::clone(&links);
+        let shared = Arc::clone(&link_listener.shared);
         thread::Builder::new()
             .name(format!("link {addr}"))
-            .spawn(move || listener_thread(listener, thread_links, sender))?;
+            .spawn(move || listener_thread(listener, shared))?;
 
-        Ok(Self { addr, links, events })
+        Ok(link_listener)
 
     }
 
-    /// The address the apps below link to.
-    pub fn addr(&self) -> SocketAddr {
+    /// Listen for the apps below of this process only, see
+    /// [`LinkStream::connect_local`].
+    pub fn local() -> Self {
+        let (sender, events) = crossbeam_channel::unbounded();
+        let shared = Arc::new(ListenerShared {
+            next_id: AtomicU64::new(0),
+            links: Mutex::new(HashMap::new()),
+            sender,
+        });
+        Self { addr: None, shared, events }
+    }
+
+    /// The address the apps below link to, none for those of this process only.
+    pub fn addr(&self) -> Option<SocketAddr> {
         self.addr
     }
 
     /// Send a message on this link.
     pub fn send(&self, link: LinkId, message: &Message) -> io::Result<()> {
-        match self.links.lock().unwrap().get_mut(&link) {
-            Some(stream) => stream.write_all(&message.encode()),
+        match self.shared.links.lock().unwrap().get_mut(&link) {
+            Some(ListenerLink::Tcp(stream)) => 
+                stream.write_all(&message.encode()),
+            Some(ListenerLink::Local(sender)) => 
+                sender.send(LinkEvent::Message((), message.clone()))
+                    .map_err(|_| io::ErrorKind::NotConnected.into()),
             None => Err(io::ErrorKind::NotConnected.into()),
         }
     }
@@ -241,12 +269,8 @@ impl LinkListener {
 }
 
 /// The thread of a link listener, accepting links and starting a thread for each.
-fn listener_thread(
-    listener: TcpListener,
-    links: SharedLinks,
-    sender: Sender<LinkEvent<LinkId>>,
-) {
-    for (id, stream) in listener.incoming().enumerate() {
+fn listener_thread(listener: TcpListener, shared: Arc<ListenerShared>) {
+    for stream in listener.incoming() {
 
         let stream = match stream {
             Ok(stream) => stream,
@@ -256,17 +280,16 @@ fn listener_thread(
             }
         };
 
-        let id = LinkId(id as u64);
+        let id = LinkId(shared.next_id.fetch_add(1, Ordering::Relaxed));
         let name = match stream.peer_addr() {
             Ok(addr) => format!("link from {addr}"),
             Err(_) => "link from ?".to_string(),
         };
 
-        let links = Arc::clone(&links);
-        let sender = sender.clone();
+        let shared = Arc::clone(&shared);
         let res = thread::Builder::new()
             .name(name)
-            .spawn(move || listener_link_thread(stream, id, links, sender));
+            .spawn(move || listener_link_thread(stream, id, shared));
 
         if let Err(e) = res {
             warn!("Failed to start a link: {e}");
@@ -276,37 +299,42 @@ fn listener_thread(
 }
 
 /// The thread of a link accepted by a link listener, until it closes.
-fn listener_link_thread(
-    mut stream: TcpStream,
-    id: LinkId,
-    links: SharedLinks,
-    sender: Sender<LinkEvent<LinkId>>,
-) {
+fn listener_link_thread(mut stream: TcpStream, id: LinkId, shared: Arc<ListenerShared>) {
 
     let Some(addr) = hello(&mut stream) else { return };
     let Ok(write_stream) = stream.try_clone() else { return };
 
-    links.lock().unwrap().insert(id, write_stream);
+    shared.links.lock().unwrap().insert(id, ListenerLink::Tcp(write_stream));
     info!(%addr, ?id, "Linked with an app below");
 
     // Events fail to send once the link listener is dropped.
-    let _ = sender.send(LinkEvent::Linked(id));
+    let _ = shared.sender.send(LinkEvent::Linked(id));
     receive(&mut stream, addr, |message| {
-        sender.send(LinkEvent::Message(id, message)).is_ok()
+        shared.sender.send(LinkEvent::Message(id, message)).is_ok()
     });
-    let _ = sender.send(LinkEvent::Unlinked(id));
+    let _ = shared.sender.send(LinkEvent::Unlinked(id));
 
-    links.lock().unwrap().remove(&id);
+    shared.links.lock().unwrap().remove(&id);
     let _ = stream.shutdown(Shutdown::Both);
     info!(%addr, ?id, "Unlinked from an app below");
 
 }
 
+/// Where a link stream sends to its link listener, while linked.
+#[derive(Debug)]
+enum StreamLink {
+    Tcp(TcpStream),
+    /// A link listener of this process, given its events directly.
+    Local { id: LinkId, listener: Arc<ListenerShared> },
+}
+
+type SharedStream = Arc<Mutex<Option<StreamLink>>>;
+
 /// The link to the app above, linking again whenever unlinked, until dropped.
 #[derive(Debug)]
 pub struct LinkStream {
     stopped: Arc<AtomicBool>,
-    /// The stream of the link, while linked.
+    /// Where to send to the link listener, while linked.
     stream: SharedStream,
     events: Receiver<LinkEvent>,
 }
@@ -314,26 +342,49 @@ pub struct LinkStream {
 impl LinkStream {
 
     /// Link with the app above listening at this address, in the background.
-    pub fn connect(up: SocketAddr) -> io::Result<Self> {
+    pub fn connect(up_link: SocketAddr) -> io::Result<Self> {
 
         let stopped = Arc::new(AtomicBool::new(false));
         let stream = Arc::new(Mutex::new(None));
-        let (sender, events) = mpsc::channel();
+        let (sender, events) = crossbeam_channel::unbounded();
 
         let thread_stopped = Arc::clone(&stopped);
         let thread_stream = Arc::clone(&stream);
         thread::Builder::new()
-            .name(format!("link to {up}"))
-            .spawn(move || link_thread(up, thread_stopped, thread_stream, sender))?;
+            .name(format!("link to {up_link}"))
+            .spawn(move || link_thread(up_link, thread_stopped, thread_stream, sender))?;
 
         Ok(Self { stopped, stream, events })
+
+    }
+
+    /// Link with this link listener of this process, through channels: linked right
+    /// away, never linking again.
+    pub fn connect_local(listener: &LinkListener) -> Self {
+
+        let shared = &listener.shared;
+        let id = LinkId(shared.next_id.fetch_add(1, Ordering::Relaxed));
+        let (sender, events) = crossbeam_channel::unbounded();
+
+        shared.links.lock().unwrap().insert(id, ListenerLink::Local(sender.clone()));
+        let _ = sender.send(LinkEvent::Linked(()));
+        let _ = shared.sender.send(LinkEvent::Linked(id));
+
+        let stream = StreamLink::Local { id, listener: Arc::clone(shared) };
+        Self {
+            stopped: Arc::new(AtomicBool::new(true)),
+            stream: Arc::new(Mutex::new(Some(stream))),
+            events,
+        }
 
     }
 
     /// Send a message on the link, failing if unlinked.
     pub fn send(&self, message: &Message) -> io::Result<()> {
         match self.stream.lock().unwrap().as_mut() {
-            Some(stream) => stream.write_all(&message.encode()),
+            Some(StreamLink::Tcp(stream)) => stream.write_all(&message.encode()),
+            Some(StreamLink::Local { id, listener }) => listener.sender.send(LinkEvent::Message(*id, message.clone()))
+                .map_err(|_| io::ErrorKind::NotConnected.into()),
             None => Err(io::ErrorKind::NotConnected.into()),
         }
     }
@@ -353,8 +404,15 @@ impl LinkStream {
 impl Drop for LinkStream {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
-        if let Some(stream) = self.stream.lock().unwrap().take() {
-            let _ = stream.shutdown(Shutdown::Both);
+        match self.stream.lock().unwrap().take() {
+            Some(StreamLink::Tcp(stream)) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Some(StreamLink::Local { id, listener }) => {
+                listener.links.lock().unwrap().remove(&id);
+                let _ = listener.sender.send(LinkEvent::Unlinked(id));
+            }
+            None => {}
         }
     }
 }
@@ -362,7 +420,7 @@ impl Drop for LinkStream {
 /// The thread of a link stream, linking with the app above and again whenever
 /// unlinked, until stopped.
 fn link_thread(
-    up: SocketAddr,
+    up_link: SocketAddr,
     stopped: Arc<AtomicBool>,
     shared: SharedStream,
     sender: Sender<LinkEvent>,
@@ -371,10 +429,10 @@ fn link_thread(
 
         'link: {
 
-            let mut stream = match TcpStream::connect(up) {
+            let mut stream = match TcpStream::connect(up_link) {
                 Ok(stream) => stream,
                 Err(e) => {
-                    debug!(%up, "Failed to link with the app above: {e}");
+                    debug!(%up_link, "Failed to link with the app above: {e}");
                     break 'link;
                 }
             };
@@ -382,18 +440,18 @@ fn link_thread(
             let Some(_) = hello(&mut stream) else { break 'link };
             let Ok(write_stream) = stream.try_clone() else { break 'link };
 
-            *shared.lock().unwrap() = Some(write_stream);
-            info!(%up, "Linked with the app above");
+            *shared.lock().unwrap() = Some(StreamLink::Tcp(write_stream));
+            info!(%up_link, "Linked with the app above");
 
             // Events fail to send once the link stream is dropped, then stopped.
             let _ = sender.send(LinkEvent::Linked(()));
-            receive(&mut stream, up, |message| {
+            receive(&mut stream, up_link, |message| {
                 sender.send(LinkEvent::Message((), message)).is_ok()
             });
             let _ = sender.send(LinkEvent::Unlinked(()));
 
             shared.lock().unwrap().take();
-            info!(%up, "Unlinked from the app above");
+            info!(%up_link, "Unlinked from the app above");
 
         }
 
@@ -574,11 +632,23 @@ mod tests {
     }
 
     #[test]
-    fn events() {
+    fn tcp_events() {
+        let listener = LinkListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let stream = LinkStream::connect(listener.addr().unwrap()).unwrap();
+        events(listener, stream);
+    }
+
+    #[test]
+    fn local_events() {
+        let listener = LinkListener::local();
+        let stream = LinkStream::connect_local(&listener);
+        events(listener, stream);
+    }
+
+    /// Both sides get the events of the link and the messages of the other.
+    fn events(listener: LinkListener, stream: LinkStream) {
 
         const WAIT: Duration = Duration::from_secs(5);
-        let listener = LinkListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let stream = LinkStream::connect(listener.addr()).unwrap();
 
         let Some(LinkEvent::Linked(id)) = listener.event_timeout(WAIT) else { panic!("not linked") };
         assert_eq!(stream.event(), Some(LinkEvent::Linked(())));

@@ -4,10 +4,9 @@ use std::path::Path;
 use std::thread;
 
 use crate::{init_tracing, load_script, CliResult, ServerArgs};
+use crate::link::{LinkListener, LinkStream};
 use crate::login::LoginThread;
 use crate::base::BaseThread;
-
-use super::local_link_listener;
 
 
 pub fn run(args: ServerArgs, game_dir: &Path) -> CliResult<()> {
@@ -17,8 +16,9 @@ pub fn run(args: ServerArgs, game_dir: &Path) -> CliResult<()> {
     let script = load_script(game_dir)?;
     let encryption_key = args.login.encryption_key()?;
 
-    let link_listener = local_link_listener()?;
-    let base = BaseThread::new(args.apps.bind_base_app, script, game_dir, &args.base.give_vehicle, &args.base.map, link_listener.addr())?;
+    let link_listener = LinkListener::local();
+    let link = LinkStream::connect_local(&link_listener);
+    let base = BaseThread::new(args.apps.bind_base_app, script, game_dir, &args.base.give_vehicle, &args.base.map, link)?;
     let login = LoginThread::new(args.apps.bind_login_app, encryption_key, link_listener, &args.name)?;
 
     thread::scope(move |scope| {

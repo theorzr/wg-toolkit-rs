@@ -16,6 +16,7 @@ wg-toolkit.workspace = true
 glam.workspace = true
 rand.workspace = true
 tracing.workspace = true
+crossbeam-channel.workspace = true
 
 blowfish.workspace = true
 rsa.workspace = true

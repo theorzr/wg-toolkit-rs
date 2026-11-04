@@ -37,7 +37,9 @@ pub fn run(args: AppProxyArgs, game_dir: &Path) -> CliResult<()> {
     init_tracing("proxy-trace.jsonl")?;
 
     let script = load_script(game_dir)?;
-    BaseProxy::new(args.bind, args.real_login_app, script, args.capture.capture.as_deref(), args.login_link)?.run();
+    let link = LinkStream::connect(args.login_link)
+        .map_err(|e| format!("Failed to link with the login proxy: {e}"))?;
+    BaseProxy::new(args.bind, args.real_login_app, script, args.capture.capture.as_deref(), link)?.run();
 
     Ok(())
 
@@ -227,14 +229,14 @@ pub struct BaseProxy {
 
 impl BaseProxy {
 
-    /// The base proxy at this address, taking the clients of the login proxy linked at
-    /// `login`. The real login app only serves to check `SwitchBaseApp` addresses.
+    /// The base proxy at this address, taking the clients of the login proxy it is
+    /// linked with. The real login app only serves to check `SwitchBaseApp` addresses.
     pub fn new(
         addr: SocketAddrV4,
         real_login_app: SocketAddrV4,
         script: Script,
         capture_path: Option<&Path>,
-        login: SocketAddr,
+        link: LinkStream,
     ) -> CliResult<Self> {
 
         let mut app = proxy::App::new(addr.into())
@@ -253,8 +255,6 @@ impl BaseProxy {
             dispatch: ScriptDispatch::new(script),
         });
 
-        let link = LinkStream::connect(login)
-            .map_err(|e| format!("Failed to link with the login proxy: {e}"))?;
         let pending_clients = Arc::clone(&handler.pending_clients);
         thread::Builder::new().name("base link".to_string()).spawn(move || serve_link(link, addr, &pending_clients))
             .map_err(|e| format!("Failed to start the link with the login proxy: {e}"))?;

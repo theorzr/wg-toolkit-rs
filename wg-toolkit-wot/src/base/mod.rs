@@ -59,7 +59,9 @@ pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
     init_tracing("base-trace.jsonl")?;
 
     let script = load_script(game_dir)?;
-    BaseThread::new(args.bind, script, game_dir, &args.base.give_vehicle, &args.base.map, args.login_link)?.run();
+    let link = LinkStream::connect(args.login_link)
+        .map_err(|e| format!("Failed to link with the login app: {e}"))?;
+    BaseThread::new(args.bind, script, game_dir, &args.base.give_vehicle, &args.base.map, link)?.run();
 
     Ok(())
 
@@ -68,15 +70,15 @@ pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
 
 impl BaseThread {
 
-    /// The base app, at this address, taking the clients of the login app linked at
-    /// `login`.
+    /// The base app, at this address, taking the clients of the login app it is
+    /// linked with.
     pub fn new(
         addr: SocketAddrV4,
         script: Script,
         game_dir: &Path,
         give_vehicles: &[String],
         map: &str,
-        login: SocketAddr,
+        link: LinkStream,
     ) -> CliResult<Self> {
 
         let mut app = base::App::new(addr.into(), script)
@@ -115,9 +117,6 @@ impl BaseThread {
             .map_err(|e| format!("Failed to read the item prices: {e}"))?;
         info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
         let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
-
-        let link = LinkStream::connect(login)
-            .map_err(|e| format!("Failed to link with the login app: {e}"))?;
 
         Ok(Self {
             app,
