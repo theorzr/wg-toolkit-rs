@@ -6,7 +6,7 @@
 //! property table and its client, cell and base method tables, in exposed-id order, with
 //! the element id each slot travels with and its length style.
 //!
-//! Usage: cargo run -p wg-toolkit-cli --example dump_entity -- <game-dir> [name|type-id]
+//! Usage: cargo run -p wg-toolkit-wot --example dump_entity -- <game-dir> [name|type-id]
 
 use std::path::Path;
 use std::env;

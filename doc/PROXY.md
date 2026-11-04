@@ -1,6 +1,6 @@
 # The MITM proxy: architecture and safety lessons
 
-`wg-toolkit-cli`'s `wot` subcommand (`wg-toolkit-cli/src/wot/proxy/`, built on
+`wg-toolkit-wot`'s `wot proxy` command (`wg-toolkit-wot/src/proxy/`, built on
 `wg-toolkit`'s generic `app/proxy/`) sits between a real WoT client and the real
 game servers, decoding traffic for observation/logging while forwarding it. This
 document covers the parts of that design that matter for *safety* — what happens when
@@ -57,7 +57,7 @@ not trusted blindly: `read_blob(unread_len)` can return `UnexpectedEof` for an e
 that is not fully recognized (e.g. an entity method whose exposed id is outside the known
 tables), and that error is propagated with `?`, using the same rollback-and-return-`Err`
 pattern as the rest of the function. A panic there would end the `base` app's forwarding
-thread for good, since nothing in `wg-toolkit-cli/src/main.rs` restarts it, and all
+thread for good, since nothing in `wg-toolkit-wot/src/main.rs` restarts it, and all
 base-app traffic would stop for the rest of the process.
 
 ## Capturing a session and replaying it
@@ -71,11 +71,19 @@ and flagged as such. The login app is not captured: its traffic is only the RSA 
 exchange.
 
 ```sh
-wgtk wot <game-dir> --real-login-app <addr> --real-pub-key-path <key> --capture session.wgcap
-wgtk wot <game-dir> --replay session.wgcap
+wot --game-dir <game-dir> proxy --real-login-app <addr> --real-pub-key-path <key> --capture session.wgcap
+wot --game-dir <game-dir> replay session.wgcap
 ```
 
-`--replay` feeds the capture through `app::proxy::replay` to the same `BaseHandler` the
+The login proxy and the base proxy can also run as separate processes, the login proxy
+handing each client over to the base proxy's peer address:
+
+```sh
+wot --game-dir <game-dir> app proxy --real-login-app <addr> --capture session.wgcap
+wot app login --real-login-app <addr> --real-pub-key-path <key>
+```
+
+`wot replay` feeds the capture through `app::proxy::replay` to the same `BaseHandler` the
 live proxy uses, so it logs the same lines, to the console and to `replay-trace.jsonl`.
 Changing a codec and replaying a capture shows the effect of the change on a whole
 session, without going back in game. Nothing is sent during a replay. Timings

@@ -1,4 +1,4 @@
-//! The battles of the emulator: each in a space of its own, with the player's vehicle,
+//! The battles of the server: each in a space of its own, with the player's vehicle,
 //! which the client drives, and an enemy vehicle in front of it to shoot at.
 
 use std::time::Instant;

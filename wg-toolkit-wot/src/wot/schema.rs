@@ -1,4 +1,4 @@
-//! The members of WoT's entities that the emulator uses, bound against the loaded
+//! The members of WoT's entities that the server uses, bound against the loaded
 //! script when it starts, see [`wgtk::app::entity`].
 
 use glam::Vec3;

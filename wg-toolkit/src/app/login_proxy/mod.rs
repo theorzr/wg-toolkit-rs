@@ -85,7 +85,7 @@ struct PeerLastRequest {
 #[derive(Debug)]
 enum PeerLastRequestKind {
     Ping {},
-    Login { blowfish: Arc<Blowfish>, },
+    Login { blowfish: Arc<Blowfish>, blowfish_key: Vec<u8> },
 }
 
 /// Type of return value for our socket poll. 
@@ -326,7 +326,7 @@ impl Inner {
         peer.last_request = Some(PeerLastRequest {
             request_id,
             time: Instant::now(),
-            kind: PeerLastRequestKind::Login { blowfish },
+            kind: PeerLastRequestKind::Login { blowfish, blowfish_key: login.element.blowfish_key.clone() },
         });
 
         if let Some(encryption_key) = self.real_encryption_key.as_deref() {
@@ -406,7 +406,7 @@ impl Inner {
                 self.bundle.element_writer().write_simple_reply(ping, request_id)?;
                 
             }
-            PeerLastRequestKind::Login { blowfish } => {
+            PeerLastRequestKind::Login { blowfish, blowfish_key } => {
 
                 let mut login = elt.read::<LoginResponse, _>(&*blowfish)?;
                 
@@ -415,7 +415,7 @@ impl Inner {
                     *inherit_prefix = true;
                     success.addr = handler.receive_login_success(
                         peer.addr, 
-                        Arc::clone(&blowfish), 
+                        &blowfish_key, 
                         success.addr, 
                         success.login_key, 
                         success.server_message.clone(),
@@ -473,12 +473,12 @@ pub trait Handler {
     /// The default implementation returns the base app address given in parameter.
     fn receive_login_success(&mut self,
         addr: SocketAddr,
-        blowfish: Arc<Blowfish>,
+        blowfish_key: &[u8],
         base_app_addr: WgSocketAddrV4,
         login_key: u32,
         server_message: String,
     ) -> Result<WgSocketAddrV4, Self::Error> {
-        let _ = (addr, blowfish, login_key, server_message);
+        let _ = (addr, blowfish_key, login_key, server_message);
         Ok(base_app_addr)
     }
 

@@ -2,11 +2,8 @@
 
 mod pxml;
 mod res;
-#[cfg(feature = "wot")]
-mod wot;
 
 use std::io::{self, IsTerminal};
-use std::net::SocketAddrV4;
 use std::process::ExitCode;
 use std::path::PathBuf;
 
@@ -44,8 +41,6 @@ pub enum Command {
     #[command(name = "pxml")]
     PackedXml(PackedXmlArgs),
     Res(ResArgs),
-    #[cfg(feature = "wot")]
-    Wot(WotArgs),
 }
 
 /// Packed XML read and write utilities.
@@ -174,74 +169,6 @@ pub struct ResFuseArgs {
     pub mount_path: String,
 }
 
-/// Run a simple WoT server.
-/// 
-/// This command starts a simple WoT server, composed of one login application and one
-/// base application, this is used as a proof of concept server implementation. 
-/// The client should be modified to register this server into `res/scripts_config.xml`
-/// with this server's public key, the private key should be specified to point to
-/// the private key file.
-/// 
-/// Use the following Packed XML filter to register the server into the file:
-/// 
-///   $ cargo run -- pxml -f D:\Games\WoT\res\scripts_config.xml.bak0000 --raw '$tmp=login/host;$n=str(WGTK);$u=str(localhost:20016);$tmp/name=$n;$tmp/short_name=$n;$tmp/url=$u;$tmp/url_token=$u;$tmp/public_key_path=str(loginapp_wgtk.pubkey);$tmp/periphery_id=int(205);login/host[^]=$tmp' > D:\Games\WoT\res\scripts_config.xml
-/// 
-#[derive(Debug, Args)]
-pub struct WotArgs {
-    /// Path to the game's directory, used to load its script model (entities,
-    /// interfaces, aliases) dynamically at startup -- see `wgtk::script::load`.
-    pub dir: PathBuf,
-    /// The address where the login app should be bound.
-    #[arg(long, default_value = "127.0.0.1:20016")]
-    pub login_app: SocketAddrV4,
-    /// The address where the base app should be bound.
-    #[arg(long, default_value = "127.0.0.1:20017")]
-    pub base_app: SocketAddrV4,
-    /// The path to the private key, used for login app encryption.
-    /// Encryption is disabled if not provided.
-    #[arg(long)]
-    pub priv_key_path: Option<PathBuf>,
-    /// Enable proxy mode for the WoT applications.
-    ///
-    /// The login application will forward request to the real login application by
-    /// emulating a virtual client from the point of view of the real login application
-    /// given the socket address. Once the login process has been completed, the proxy
-    /// will keep this virtual client socket and the blowfish key and transfer it to the
-    /// base app proxy, so that it will be able to continue spying on the communication
-    /// without altering packets.
-    #[arg(long)]
-    pub real_login_app: Option<SocketAddrV4>,
-    #[arg(long, requires = "real_login_app")]
-    pub real_pub_key_path: Option<PathBuf>,
-    /// In proxy mode, record every base app packet to this file, as a gzip-compressed
-    /// capture of the decrypted packets, for later analysis with `--replay`.
-    #[arg(long, requires = "real_login_app", conflicts_with = "replay")]
-    pub capture: Option<PathBuf>,
-    /// Decode a capture recorded with `--capture` instead of running a server, logging
-    /// exactly what the proxy logged live. Give `--real-login-app` too if the capture's
-    /// first packet does not come from the same network as the real login app.
-    #[arg(long)]
-    pub replay: Option<PathBuf>,
-    /// With `--replay`, also encode every decoded element again and compare it with the
-    /// captured bytes, then print which element types round-trip, which differ and
-    /// which have no encoder yet.
-    #[arg(long, requires = "replay")]
-    pub round_trip: bool,
-    /// In emulator mode, give the account this vehicle, as `<nation>:<name>`
-    /// (`uk:GB98_T95_FV4201_Chieftain`, names as in the game's
-    /// `scripts/item_defs/vehicles/<nation>/list.xml`). Can be repeated.
-    #[arg(long)]
-    pub give_vehicle: Vec<String>,
-    /// In emulator mode, the map battles are on, by its name in the game's
-    /// `scripts/arena_defs/_list_.xml`.
-    #[arg(long, default_value = "02_malinovka")]
-    pub map: String,
-    /// In emulator mode, the name of every player, until accounts are stored: a client
-    /// logging in with a token doesn't give one.
-    #[arg(long, default_value = "Player")]
-    pub name: String,
-}
-
 /// Type alias for a result that simply returns a string on error, this will be output
 /// on stderr and process returns a failed exit code. This allows easier error handling
 /// by just mapping the error type to an explanatory text.
@@ -258,8 +185,6 @@ fn main() -> ExitCode {
     let res = match args.cmd {
         Command::PackedXml(args) => pxml::cmd_pxml(args),
         Command::Res(args) => res::cmd_res(opts, args),
-        #[cfg(feature = "wot")]
-        Command::Wot(args) => wot::cmd_wot(args),
     };
 
     if let Err(message) = res {

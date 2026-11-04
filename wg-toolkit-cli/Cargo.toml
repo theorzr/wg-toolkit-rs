@@ -13,21 +13,7 @@ readme.workspace = true
 [dependencies]
 wg-toolkit.workspace = true
 
-thiserror.workspace = true
-indexmap.workspace = true
-glam.workspace = true
-rand.workspace = true
-tracing.workspace = true
-
-blowfish.workspace = true
-rsa.workspace = true
-crc32fast.workspace = true
-
-flate2.workspace = true
-
-
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [target.'cfg(windows)'.dependencies]
 dokan = { version = "0.3.1", optional = true }
@@ -39,8 +25,7 @@ widestring = { version = "0.4.3", optional = true }
 fuser = { version = "0.18.0", optional = true }
 
 [features]
-default = ["wot", "dokan", "fuse"]
-wot = []
+default = ["dokan", "fuse"]
 dokan = ["dep:dokan", "dep:dokan-sys", "dep:winapi", "dep:widestring"]
 fuse = ["dep:fuser"]
 

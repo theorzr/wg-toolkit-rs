@@ -1,5 +1,5 @@
-//! The emulator implementation of the login + base applications, we are trying to
-//! reproduce the official server implementation. Its battles are in [`battle`].
+//! The server's base app, we are trying to reproduce the official server
+//! implementation. Its battles are in [`battle`].
 
 mod account;
 mod battle;
@@ -10,18 +10,17 @@ mod shop;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::io;
-use std::thread;
 
 use tracing::{debug, info, instrument, warn};
 use rsa::rand_core::{OsRng, RngCore};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use blowfish::cipher::KeyInit;
 use blowfish::Blowfish;
-use rsa::RsaPrivateKey;
 
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::pickle::{self, Value as PickleValue};
@@ -30,7 +29,7 @@ use wgtk::script::Script;
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
-use wgtk::app::{login, base};
+use wgtk::app::base;
 use wgtk::pxml;
 
 use crate::wot::schema::{
@@ -41,12 +40,13 @@ use crate::wot::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
     CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::wot::items::TankmanDescr;
 use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
+use crate::{init_tracing, load_script, AppBaseArgs, CliResult};
+use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
+use crate::wot::collision::VehicleCollision;
 use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::item_prices::ItemPrices;
-use crate::wot::collision::VehicleCollision;
-use crate::CliResult;
+use crate::wot::items::TankmanDescr;
 
 use physics::MotionLimits;
 use account::AccountData;
@@ -54,114 +54,104 @@ use battle::Battle;
 use shop::Shop;
 
 
-pub fn run(
-    login_app_addr: SocketAddrV4,
-    base_app_addr: SocketAddrV4,
-    encryption_key: Option<Arc<RsaPrivateKey>>,
-    script: Script,
-    game_dir: &Path,
-    give_vehicles: &[String],
-    map: &str,
-    name: &str,
-) -> CliResult<()> {
+pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
 
-    let mut login_app = login::App::new(login_app_addr.into())
-        .map_err(|e| format!("Failed to bind login app: {e}"))?;
+    init_tracing("base-trace.jsonl")?;
 
-    if let Some(encryption_key) = encryption_key {
-        login_app.set_encryption(encryption_key);
-    }
-
-    let mut base_app = base::App::new(base_app_addr.into(), script)
-        .map_err(|e| format!("Failed to bind base app: {e}"))?;
-    schema::register(&mut base_app)
-        .map_err(|e| format!("Failed to bind the entity schemas: {e}"))?;
-
-
-    // The battles' map, with its terrain for vehicles to rest on.
-    let start = Instant::now();
-    let fs = ResFilesystem::new(game_dir.join("res"))
-        .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
-    let map = ArenaTypeDef::load(&fs, map)
-        .map_err(|e| format!("Failed to load the map {map}: {e}"))?;
-    let terrain = Terrain::load(&fs, &map.geometry)
-        .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
-    info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
-
-    let mut vehicles = Vec::new();
-    for vehicle in give_vehicles {
-        let (nation, name) = vehicle.split_once(':')
-            .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
-        vehicles.push(VehicleDef::load(&fs, nation, name)
-            .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
-    }
-    let account = AccountData::new(&fs, &vehicles)
-        .map_err(|e| format!("Failed to create the account: {e}"))?;
-    for vehicle in &vehicles {
-        info!("Account vehicle {}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
-    }
-
-    let required_version = required_version(&fs)
-        .map_err(|e| format!("Failed to read the required client version: {e}"))?;
-
-    let start = Instant::now();
-    let prices = ItemPrices::load(&fs)
-        .map_err(|e| format!("Failed to read the item prices: {e}"))?;
-    info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
-    let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
-
-    let shared = Arc::new(Shared {
-        login_clients: Mutex::new(HashMap::new()),
-    });
-
-    let login_thread = LoginThread {
-        app: login_app,
-        shared: Arc::clone(&shared),
-        base_app_addr,
-        login_challenges: HashMap::new(),
-        name: name.to_string(),
-    };
-
-    let base_thread = BaseThread {
-        app: base_app,
-        shared,
-        account,
-        shop,
-        required_version,
-        game_dir: game_dir.to_path_buf(),
-        map,
-        terrain,
-        players: HashMap::new(),
-        accounts: HashMap::new(),
-        enqueued: HashMap::new(),
-        pending_switches: HashMap::new(),
-        pending_returns: HashMap::new(),
-        battle_clients: HashMap::new(),
-    };
-
-    thread::scope(move |scope| {
-        scope.spawn(move || login_thread.run());
-        scope.spawn(move || base_thread.run());
-    });
+    let script = load_script(game_dir)?;
+    BaseThread::new(args.bind, script, game_dir, &args.base.give_vehicle, &args.base.map, args.login_link)?.run();
 
     Ok(())
 
 }
 
-#[derive(Debug)]
-struct LoginThread {
-    app: login::App,
-    shared: Arc<Shared>,
-    base_app_addr: SocketAddrV4,
-    login_challenges: HashMap<SocketAddr, bool>,
-    /// The name of every player, until accounts are stored.
-    name: String,
+
+impl BaseThread {
+
+    /// The base app, at this address, taking the clients of the login app linked at
+    /// `login`.
+    pub fn new(
+        addr: SocketAddrV4,
+        script: Script,
+        game_dir: &Path,
+        give_vehicles: &[String],
+        map: &str,
+        login: SocketAddr,
+    ) -> CliResult<Self> {
+
+        let mut app = base::App::new(addr.into(), script)
+            .map_err(|e| format!("Failed to bind base app: {e}"))?;
+        schema::register(&mut app)
+            .map_err(|e| format!("Failed to bind the entity schemas: {e}"))?;
+
+        // The battles' map, with its terrain for vehicles to rest on.
+        let start = Instant::now();
+        let fs = ResFilesystem::new(game_dir.join("res"))
+            .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
+        let map = ArenaTypeDef::load(&fs, map)
+            .map_err(|e| format!("Failed to load the map {map}: {e}"))?;
+        let terrain = Terrain::load(&fs, &map.geometry)
+            .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
+        info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
+
+        let mut vehicles = Vec::new();
+        for vehicle in give_vehicles {
+            let (nation, name) = vehicle.split_once(':')
+                .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
+            vehicles.push(VehicleDef::load(&fs, nation, name)
+                .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
+        }
+        let account = AccountData::new(&fs, &vehicles)
+            .map_err(|e| format!("Failed to create the account: {e}"))?;
+        for vehicle in &vehicles {
+            info!("Account vehicle {}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
+        }
+
+        let required_version = required_version(&fs)
+            .map_err(|e| format!("Failed to read the required client version: {e}"))?;
+
+        let start = Instant::now();
+        let prices = ItemPrices::load(&fs)
+            .map_err(|e| format!("Failed to read the item prices: {e}"))?;
+        info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
+        let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
+
+        let link = LinkStream::connect(login)
+            .map_err(|e| format!("Failed to link with the login app: {e}"))?;
+
+        Ok(Self {
+            app,
+            addr,
+            link,
+            load: None,
+            login_clients: HashMap::new(),
+            account,
+            shop,
+            required_version,
+            game_dir: game_dir.to_path_buf(),
+            map,
+            terrain,
+            players: HashMap::new(),
+            accounts: HashMap::new(),
+            enqueued: HashMap::new(),
+            pending_switches: HashMap::new(),
+            pending_returns: HashMap::new(),
+            battle_clients: HashMap::new(),
+        })
+
+    }
+
 }
 
 #[derive(Debug)]
-struct BaseThread {
+pub struct BaseThread {
     app: base::App,
-    shared: Arc<Shared>,
+    addr: SocketAddrV4,
+    link: LinkStream,
+    /// The load last told to the login app, none when it should be told again.
+    load: Option<u32>,
+    /// Clients the login app handed over, by the login key they will log in with.
+    login_clients: HashMap<u32, LoginClient>,
     /// Every player's account, until accounts are stored.
     account: AccountData,
     shop: Shop,
@@ -230,11 +220,6 @@ const PLAYER_ACCOUNT_DBID: u64 = 1;
 /// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
 const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
 
-#[derive(Debug)]
-struct Shared {
-    login_clients: Mutex<HashMap<u32, LoginClient>>,
-}
-
 /// How often battles tick, 10 Hz as captured: the client times what it hears by the
 /// tick it comes with.
 const TICK: Duration = Duration::from_millis(100);
@@ -246,6 +231,21 @@ struct LoginClient {
     player: Player,
 }
 
+/// The client the login app handed over, if valid.
+fn login_client(client: &ClientHost) -> Option<LoginClient> {
+    match Blowfish::new_from_slice(&client.blowfish_key) {
+        Ok(blowfish) => Some(LoginClient {
+            addr: client.addr,
+            blowfish: Arc::new(blowfish),
+            player: Player { name: client.name.clone(), revision: 1 },
+        }),
+        Err(_) => {
+            warn!(addr = %client.addr, "Invalid blowfish key handed over: {:?}", client.blowfish_key);
+            None
+        }
+    }
+}
+
 /// A client's player, standing in for its stored account.
 #[derive(Debug, Clone)]
 struct Player {
@@ -254,76 +254,40 @@ struct Player {
     revision: i64,
 }
 
-impl LoginThread {
+impl BaseThread {
 
-    #[instrument(name = "login", skip_all)]
-    fn run(mut self) {
+    /// The client the login app handed over with this login key.
+    fn login_client(&mut self, login_key: u32) -> Option<LoginClient> {
+        self.login_clients.remove(&login_key)
+    }
 
-        use login::Event;
+    /// Handle the events of the link with the login app, and tell it the load if it
+    /// changed, returning false once stopped.
+    fn link_events(&mut self) -> bool {
 
-        info!("Running on: {}", self.app.addr().unwrap());
-
-        if self.app.has_encryption() {
-            info!("Encryption enabled");
-        }
-
-        loop {
-            match self.app.poll() {
-                Event::IoError(error) => {
-                    if let Some(addr) = error.addr {
-                        warn!(%addr, "Error: {}", error.error);
-                    } else {
-                        warn!("Error: {}", error.error);
+        while let Some(event) = self.link.try_event() {
+            match event {
+                LinkEvent::Linked(()) | LinkEvent::Unlinked(()) => self.load = None,
+                LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
+                    let hosted = login_client(&client).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
+                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(self.addr) };
+                    if let Err(e) = self.link.send(&message) {
+                        warn!(addr = %client.addr, "Failed to answer the login app: {e}");
                     }
                 }
-                Event::Ping(ping) => {
-                    info!(addr = %ping.addr, "Ping-Pong: {:?}", ping.latency);
-                }
-                Event::Login(login) => {
-
-                    if !*self.login_challenges.entry(login.addr).or_default() {
-                        info!(addr = %login.addr, "Login pending, sending challenge");
-                        self.app.answer_login_challenge(login.addr);
-                    } else {
-
-                        info!(addr = %login.addr, "Login success, as {}", self.name);
-
-                        let mut clients = self.shared.login_clients.lock().unwrap();
-                        let (login_key, slot) = loop {
-                            let login_key = OsRng.next_u32();
-                            match clients.entry(login_key) {
-                                hash_map::Entry::Occupied(_) => continue,
-                                hash_map::Entry::Vacant(v) => break (login_key, v),
-                            }
-                        };
-
-                        let blowfish = self.app.answer_login_success(login.addr, self.base_app_addr, login_key, String::new()).unwrap();
-
-                        slot.insert(LoginClient {
-                            addr: login.addr,
-                            blowfish,
-                            player: Player { name: self.name.clone(), revision: 1 },
-                        });
-
-                        // app.answer_login_error(login.addr, LoginError::Banned, "{\"bans\":\"{\\\"expiryTime\\\":1726435530,\\\"reason\\\":\\\"It's the reason\\\"}\"}".to_string());
-                        
-                    }
-                
-                }
-                Event::Challenge(challenge) => {
-                    info!(addr = %challenge.addr, "Challenge successful...");
-                    if let Some(completed) = self.login_challenges.get_mut(&challenge.addr) {
-                        *completed = true;
-                    }
-                }
+                LinkEvent::Message((), Message::BaseStop) => return false,
+                LinkEvent::Message((), message) => warn!("Unexpected message from the login app: {message:?}"),
             }
         }
 
+        let load = self.players.len() as u32;
+        if self.load != Some(load) && self.link.send(&Message::BaseStatus { load }).is_ok() {
+            self.load = Some(load);
+        }
+
+        true
+
     }
-
-}
-
-impl BaseThread {
 
     /// Bring a client that enabled entities to its account, as the captured server did:
     /// the `Account` entity, then `showGUI`.
@@ -366,14 +330,14 @@ impl BaseThread {
 
         self.app.entity(account)?.onArenaCreated()?;
 
-        let SocketAddr::V4(base_addr) = self.app.addr()? else {
+        let SocketAddr::V4(base_app) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
         self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config));
-        self.app.switch_base_app(client, base_addr, true)?;
+        self.app.switch_base_app(client, base_app, true)?;
         self.accounts.remove(&client);
         self.players.remove(&client);
-        info!(%client, "Arena created, switching to {base_addr}");
+        info!(%client, "Arena created, switching to {base_app}");
 
         Ok(())
 
@@ -442,15 +406,15 @@ impl BaseThread {
         let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
             return Ok(());
         };
-        let SocketAddr::V4(base_addr) = self.app.addr()? else {
+        let SocketAddr::V4(base_app) = self.app.addr()? else {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
         self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
         if let Some(battle) = self.battle_clients.remove(&client).and_then(|c| c.battle) {
             self.app.destroy_space(battle.space());
         }
-        self.app.switch_base_app(client, base_addr, true)?;
-        info!(%client, "Leaving the battle, switching to {base_addr}");
+        self.app.switch_base_app(client, base_app, true)?;
+        info!(%client, "Leaving the battle, switching to {base_app}");
         Ok(())
     }
 
@@ -593,13 +557,18 @@ impl BaseThread {
     }
 
     #[instrument(name = "base", skip_all)]
-    fn run(mut self) {
+    pub fn run(mut self) {
 
         info!("Running on: {}", self.app.addr().unwrap());
 
         let mut next_tick = Instant::now() + TICK;
 
         loop {
+
+            if !self.link_events() {
+                info!("Stopped by the login app");
+                return;
+            }
 
             // Every tick due, late ones included, so that no tick number is skipped.
             while Instant::now() >= next_tick {
@@ -656,13 +625,9 @@ impl BaseThread {
                         continue;
                     }
 
-                    let mut clients = self.shared.login_clients.lock().unwrap();
-                    let client = match clients.remove(&login.login_key) {
-                        Some(client) => client,
-                        None => {
-                            info!(addr = %login.addr, "Login #{}... Invalid key", login.attempt_num);
-                            continue;
-                        }
+                    let Some(client) = self.login_client(login.login_key) else {
+                        info!(addr = %login.addr, "Login #{}... Invalid key", login.attempt_num);
+                        continue;
                     };
 
                     if client.addr != login.addr {
@@ -672,7 +637,6 @@ impl BaseThread {
                     
                     info!(addr = %login.addr, "Login #{}... Success", login.attempt_num);
                     let LoginClient { blowfish, player, .. } = client;
-                    drop(clients);
                     if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                         self.send_update_frequency(client);
                         self.players.insert(client, player);

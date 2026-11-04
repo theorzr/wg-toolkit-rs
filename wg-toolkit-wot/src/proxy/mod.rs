@@ -2,39 +2,50 @@
 
 mod python;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::cell::RefCell;
-use std::{io, thread};
 use std::path::Path;
-use std::rc::Rc;
+use std::thread;
+use std::io;
 
 use tracing::{debug, error, info, warn, info_span, trace, trace_span};
-use rsa::{RsaPrivateKey, RsaPublicKey};
 use flate2::read::ZlibDecoder;
+use blowfish::cipher::KeyInit;
 use blowfish::Blowfish;
 use glam::Vec3;
 
 use wgtk::net::element::{DebugElementUndefined, DebugElementVariable16, DebugElementVariable32, SimpleElement, REPLY_ID};
-use wgtk::net::bundle::{self, Bundle, NextElementReader, ElementReader, RoundTrip};
+use wgtk::net::bundle::{Bundle, NextElementReader, ElementReader};
 use wgtk::app::dispatch::{ScriptDispatch, MethodCall, MethodDef, PropertyDef};
 use wgtk::app::math::{PackedXyz, PackedXz, calculate_reference_position};
 use wgtk::app::base::element::{CellMethodTables, BaseAppLoginReply};
-use wgtk::app::proxy::capture::{CaptureReader, CaptureWriter};
-use wgtk::app::{proxy, login_proxy, base, client};
+use wgtk::app::proxy::capture::CaptureWriter;
+use wgtk::app::{proxy, base, client};
 use wgtk::pickle;
 use wgtk::net::codec::WgSocketAddrV4;
 use wgtk::script::{Script, Value};
 use wgtk::net::packet::Packet;
 use wgtk::app::nrl::NrlTree;
 
-use crate::CliResult;
+use crate::{init_tracing, load_script, AppProxyArgs, CliResult};
+use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
+
+
+pub fn run(args: AppProxyArgs, game_dir: &Path) -> CliResult<()> {
+
+    init_tracing("proxy-trace.jsonl")?;
+
+    let script = load_script(game_dir)?;
+    BaseProxy::new(args.bind, args.real_login_app, script, args.capture.capture.as_deref(), args.login_link)?.run();
+
+    Ok(())
+
+}
 
 /// Tracing target for the Python-level descriptions (see [`python`]), so they can be
-/// filtered on their own: `RUST_LOG=wgtk::wot::python=info`.
-const PYTHON_TARGET: &str = "wgtk::wot::python";
+/// filtered on their own: `RUST_LOG=wot::python=info`.
+const PYTHON_TARGET: &str = "wot::python";
 
 
 /// Sentinel `id_alias` value meaning "no alias assigned" -- confirmed against the leaked
@@ -90,7 +101,7 @@ fn resolve_path<'v>(
 
 /// Hex-encode bytes for embedding in a log line (used for raw payloads that failed to
 /// decode into anything more structured, so they still end up in the protocol trace).
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -104,7 +115,7 @@ fn hex(bytes: &[u8]) -> String {
 /// them, whatever their body decodes to.
 ///
 /// Like every other event here, the same call feeds both the console (filtered by
-/// `RUST_LOG`) and the always-on `proxy-trace.jsonl` file (see `cmd_wot`), so there is no
+/// `RUST_LOG`) and the always-on `proxy-trace.jsonl` file (see `init_tracing`), so there is no
 /// separate dump path to keep in sync.
 macro_rules! trace_dbg {
     ($elt:expr, $addr:expr, $ty:ty) => {{
@@ -206,292 +217,59 @@ macro_rules! trace_dbg_alias {
 }
 
 
-pub fn run(
-    login_app_addr: SocketAddrV4,
-    real_login_app_addr: SocketAddrV4,
-    base_app_addr: SocketAddrV4,
-    encryption_key: Option<Arc<RsaPrivateKey>>,
-    real_encryption_key: Option<Arc<RsaPublicKey>>,
-    script: Script,
-    capture_path: Option<&Path>,
-) -> CliResult<()> {
-
-    let mut login_app = login_proxy::App::new(login_app_addr.into(), real_login_app_addr.into(), real_encryption_key)
-        .map_err(|e| format!("Failed to bind login app: {e}"))?;
-
-    if let Some(encryption_key) = encryption_key {
-        login_app.set_encryption(encryption_key);
-    }
-
-    let mut base_app = proxy::App::new(base_app_addr.into())
-        .map_err(|e| format!("Failed to bind base app: {e}"))?;
-
-    if let Some(capture_path) = capture_path {
-        let capture = CaptureWriter::create(capture_path)
-            .map_err(|e| format!("Failed to create packet capture at {}: {e}", capture_path.display()))?;
-        base_app.set_capture(capture);
-        info!("Capturing base app packets to {}", capture_path.display());
-    }
-
-    let shared = Arc::new(Shared {
-        base_app_addr,
-        login_app_addr,
-        real_login_app_addr,
-        dispatch: ScriptDispatch::new(script),
-        pending_clients: Mutex::new(HashMap::new()),
-        pending_switches: Mutex::new(HashMap::new()),
-    });
-
-    let login_handler = LoginHandler {
-        shared: Arc::clone(&shared),
-    };
-
-    let base_handler = BaseHandler::new(shared);
-
-    thread::scope(move |scope| {
-
-        scope.spawn(move || {
-            let _span = info_span!("login").entered();
-            if let Err(e) = login_app.run(login_handler) {
-                error!("Unexpected hard error: ({}) {e}", e.kind());
-            }
-        });
-
-        scope.spawn(move || {
-            let _span = info_span!("base").entered();
-            if let Err(e) = base_app.run(base_handler) {
-                error!("Unexpected hard error: ({}) {e}", e.kind());
-            }
-        });
-
-    });
-
-    Ok(())
-
-}
-
-/// Decode a packet capture written by [`run`] offline, through the same handler, so it
-/// logs exactly what the live proxy would have.
-///
-/// The real login app address only serves the sanity check on `SwitchBaseApp`
-/// addresses; when not given, the real address of the first captured packet stands in
-/// for it, being a base app of the same network.
-pub fn replay(
-    capture_path: &Path,
-    real_login_app_addr: Option<SocketAddrV4>,
-    script: Script,
-    round_trip: bool,
-) -> CliResult<()> {
-
-    let open = || CaptureReader::open(capture_path)
-        .map_err(|e| format!("Failed to open packet capture at {}: {e}", capture_path.display()));
-
-    let real_login_app_addr = match real_login_app_addr {
-        Some(addr) => addr,
-        None => match open()?.next() {
-            Some(Ok(record)) => match record.real_addr {
-                SocketAddr::V4(addr) => addr,
-                SocketAddr::V6(addr) => return Err(format!("Unexpected IPv6 real address {addr}, give the real login app address")),
-            },
-            Some(Err(e)) => return Err(format!("Failed to read packet capture: {e}")),
-            None => return Err(format!("The packet capture is empty")),
-        },
-    };
-
-    let capture = open()?;
-    info!("Replaying packet capture {}, recorded at Unix time {}s",
-        capture_path.display(), capture.start_unix().as_secs());
-
-    let unspecified = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
-    let mut handler = BaseHandler::new(Arc::new(Shared {
-        base_app_addr: unspecified,
-        login_app_addr: unspecified,
-        real_login_app_addr,
-        dispatch: ScriptDispatch::new(script),
-        pending_clients: Mutex::new(HashMap::new()),
-        pending_switches: Mutex::new(HashMap::new()),
-    }));
-
-    let round_trips = round_trip.then(start_round_trip_check);
-
-    let _span = info_span!("base").entered();
-    let truncated = proxy::replay(capture, &mut handler)
-        .map_err(|e| format!("Failed to replay packet capture: {e}"))?;
-
-    if let Some(round_trips) = round_trips {
-        bundle::set_round_trip_check(None);
-        let _ = std::panic::take_hook();
-        print_round_trips(&round_trips.borrow());
-    }
-
-    if truncated {
-        warn!("The packet capture ends on an incomplete record, it was not finished properly");
-    }
-    handler.log_census();
-    info!("Replay complete");
-
-    Ok(())
-
-}
-
-
-/// Round-trip outcomes of one element type, see [`start_round_trip_check`].
-#[derive(Default)]
-struct RoundTripStats {
-    ids: BTreeSet<u8>,
-    same: u32,
-    /// Different bytes, but only in how pickles are laid out: every pickle unpickles to
-    /// the same value, Python 2 `str` and `unicode` kept apart, and every byte around
-    /// them matches except the pickles' own lengths.
-    pickle_equal: u32,
-    different: u32,
-    failed: u32,
-    not_encodable: u32,
-    /// The first difference or failure, to show.
-    example: Option<String>,
-}
-
-/// Enable the bundle round-trip check, collecting outcomes per element type.
-fn start_round_trip_check() -> Rc<RefCell<BTreeMap<&'static str, RoundTripStats>>> {
-
-    // An element without an encoder panics in `write`, which the check catches; only
-    // those panics are silenced, every other one still reports.
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let message = info.payload().downcast_ref::<String>().map(String::as_str)
-            .or_else(|| info.payload().downcast_ref::<&str>().copied())
-            .unwrap_or("");
-        if !message.contains("read-only") {
-            previous(info);
-        }
-    }));
-
-    let stats = Rc::new(RefCell::new(BTreeMap::<&'static str, RoundTripStats>::new()));
-    let collected = Rc::clone(&stats);
-    bundle::set_round_trip_check(Some(Box::new(move |id, type_name, outcome| {
-        let mut stats = collected.borrow_mut();
-        let entry = stats.entry(type_name).or_default();
-        entry.ids.insert(id);
-        match outcome {
-            RoundTrip::Same => entry.same += 1,
-            RoundTrip::NotEncodable => entry.not_encodable += 1,
-            RoundTrip::Failed(e) => {
-                entry.failed += 1;
-                entry.example.get_or_insert_with(|| format!("id 0x{id:02X}: {e}"));
-            }
-            RoundTrip::Different { reason: "body", original, encoded } if pickle_equal(&original, &encoded) => {
-                entry.pickle_equal += 1
-            }
-            RoundTrip::Different { reason, original, encoded } => {
-                entry.different += 1;
-                entry.example.get_or_insert_with(|| format!("id 0x{id:02X}, {reason}: read {} encoded {}\n    {}",
-                    hex(&original[..original.len().min(48)]), hex(&encoded[..encoded.len().min(48)]),
-                    describe_difference(&original, &encoded)));
-            }
-        }
-    })));
-
-    stats
-
-}
-
-/// A body split into its pickles (protocol 2, starting `80 02`), decoded without
-/// running anything, and the bytes around them. A pickle's own packed length, when it
-/// directly precedes it, is left out of those bytes: it follows from the pickle.
-fn split_pickles(data: &[u8]) -> (Vec<&[u8]>, Vec<pickle::Value>) {
-    let mut around = Vec::new();
-    let mut values = Vec::new();
-    let (mut at, mut search) = (0, 0);
-    while let Some(start) = data[search..].windows(2).position(|w| w == [0x80, 0x02]).map(|i| search + i) {
-        let Ok((value, len)) = pickle::from_bytes_prefix(&data[start..]) else {
-            search = start + 1;
-            continue;
-        };
-        let mut before = &data[at..start];
-        if before.last() == Some(&(len as u8)) && len < 0xFF {
-            before = &before[..before.len() - 1];
-        } else if before.len() >= 4 && before[before.len() - 4] == 0xFF
-            && before[before.len() - 3..] == (len as u32).to_le_bytes()[..3] {
-            before = &before[..before.len() - 4];
-        }
-        around.push(before);
-        values.push(value);
-        at = start + len;
-        search = at;
-    }
-    around.push(&data[at..]);
-    (around, values)
-}
-
-/// Where two bodies differ, in terms of their pickles, for a round-trip report.
-fn describe_difference(original: &[u8], encoded: &[u8]) -> String {
-    let ((around_a, values_a), (around_b, values_b)) = (split_pickles(original), split_pickles(encoded));
-    if values_a.len() != values_b.len() {
-        return format!("{} pickles read, {} encoded", values_a.len(), values_b.len());
-    }
-    if let Some(i) = around_a.iter().zip(&around_b).position(|(a, b)| a != b) {
-        let (a, b) = (around_a[i], around_b[i]);
-        let at = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-        return format!("bytes around the pickles, part {i}, from offset {at}: read {} encoded {}",
-            hex(&a[at..a.len().min(at + 24)]), hex(&b[at..b.len().min(at + 24)]));
-    }
-    let Some(i) = values_a.iter().zip(&values_b).position(|(a, b)| a != b) else {
-        return "no difference found".to_string();
-    };
-    match (&values_a[i], &values_b[i]) {
-        (pickle::Value::Dict(a), pickle::Value::Dict(b)) => {
-            let differing: Vec<String> = a.keys().chain(b.keys()).collect::<BTreeSet<_>>().into_iter()
-                .filter(|key| a.get(key) != b.get(key))
-                .take(4)
-                .map(|key| format!("{key:?}: read {} encoded {}",
-                    preview(a.get(key)), preview(b.get(key))))
-                .collect();
-            format!("pickle {i}, keys {}", differing.join("; "))
-        }
-        (a, b) => format!("pickle {i}: read {} encoded {}", preview(Some(a)), preview(Some(b))),
-    }
-}
-
-fn preview(value: Option<&pickle::Value>) -> String {
-    let text = format!("{value:?}");
-    if text.len() > 160 { format!("{}…", &text[..text.floor_char_boundary(160)]) } else { text }
-}
-
-/// Whether two bodies only differ in how their pickles are laid out, see
-/// [`RoundTripStats::pickle_equal`].
-fn pickle_equal(original: &[u8], encoded: &[u8]) -> bool {
-    let (a, b) = (split_pickles(original), split_pickles(encoded));
-    !a.1.is_empty() && a == b
-}
-
-fn print_round_trips(stats: &BTreeMap<&'static str, RoundTripStats>) {
-    // Drop module paths, including inside generics (`Reply<…u8::MAX>>` stays readable):
-    // each `::` replaces the identifier before it with the part after it.
-    let short = |name: &str| {
-        let mut out = String::new();
-        for part in name.split("::") {
-            let ident = out.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').count();
-            out.truncate(out.len() - ident);
-            out.push_str(part);
-        }
-        out
-    };
-    println!("{:<48} {:>8} {:>8} {:>8} {:>8} {:>8}  ids", "element", "same", "pickle=", "differ", "failed", "no enc");
-    let mut rows: Vec<_> = stats.iter().collect();
-    rows.sort_by_key(|(_, s)| (s.same > 0 && s.different == 0 && s.failed == 0 && s.not_encodable == 0, std::cmp::Reverse(s.different + s.failed + s.not_encodable)));
-    for (name, s) in rows {
-        let ids: Vec<String> = s.ids.iter().map(|id| format!("{id:02X}")).collect();
-        let ids = if ids.len() > 6 { format!("{} ids", ids.len()) } else { ids.join(" ") };
-        println!("{:<48} {:>8} {:>8} {:>8} {:>8} {:>8}  {ids}", short(name), s.same, s.pickle_equal, s.different, s.failed, s.not_encodable);
-        if let Some(example) = &s.example {
-            println!("    {example}");
-        }
-    }
-}
-
+/// The base app of the proxy, forwarding the clients of the login proxy to their real
+/// base app.
 #[derive(Debug)]
-struct LoginHandler {
-    shared: Arc<Shared>,
+pub struct BaseProxy {
+    app: proxy::App,
+    handler: BaseHandler,
+}
+
+impl BaseProxy {
+
+    /// The base proxy at this address, taking the clients of the login proxy linked at
+    /// `login`. The real login app only serves to check `SwitchBaseApp` addresses.
+    pub fn new(
+        addr: SocketAddrV4,
+        real_login_app: SocketAddrV4,
+        script: Script,
+        capture_path: Option<&Path>,
+        login: SocketAddr,
+    ) -> CliResult<Self> {
+
+        let mut app = proxy::App::new(addr.into())
+            .map_err(|e| format!("Failed to bind base app: {e}"))?;
+
+        if let Some(capture_path) = capture_path {
+            let capture = CaptureWriter::create(capture_path)
+                .map_err(|e| format!("Failed to create packet capture at {}: {e}", capture_path.display()))?;
+            app.set_capture(capture);
+            info!("Capturing base app packets to {}", capture_path.display());
+        }
+
+        let handler = BaseHandler::new(Shared {
+            base_app: addr,
+            real_login_app,
+            dispatch: ScriptDispatch::new(script),
+        });
+
+        let link = LinkStream::connect(login)
+            .map_err(|e| format!("Failed to link with the login proxy: {e}"))?;
+        let pending_clients = Arc::clone(&handler.pending_clients);
+        thread::Builder::new().name("base link".to_string()).spawn(move || serve_link(link, addr, &pending_clients))
+            .map_err(|e| format!("Failed to start the link with the login proxy: {e}"))?;
+
+        Ok(Self { app, handler })
+
+    }
+
+    pub fn run(mut self) {
+        let _span = info_span!("base").entered();
+        if let Err(e) = self.app.run(self.handler) {
+            error!("Unexpected hard error: ({}) {e}", e.kind());
+        }
+    }
+
 }
 
 /// A volatile position resolved into world space.
@@ -679,8 +457,16 @@ impl PositionTracker {
 }
 
 #[derive(Debug)]
-struct BaseHandler {
-    shared: Arc<Shared>,
+pub struct BaseHandler {
+    shared: Shared,
+    /// Clients the login proxy handed over, by their address.
+    pending_clients: Arc<Mutex<HashMap<SocketAddr, PendingClient>>>,
+    /// Same idea as `pending_clients`, but keyed by IP only: after a SwitchBaseApp, the
+    /// client tears down its whole connection and reconnects with a fresh, unpredictable
+    /// local port (the real BigWorld client's disconnect + reconnect behaviour on this
+    /// message), so we can't know the exact address to expect in advance the way a
+    /// normal post-login connection lets us.
+    pending_switches: HashMap<IpAddr, PendingClient>,
     next_tick: Option<u8>,
     /// Every entity created so far, keyed by its id, holding its wire type id and its
     /// actual decoded data -- this is what lets a base/client method call be decoded
@@ -772,29 +558,65 @@ struct BaseHandler {
 }
 
 #[derive(Debug)]
-struct Shared {
-    base_app_addr: SocketAddrV4,
-    #[allow(unused)]
-    login_app_addr: SocketAddrV4,
+pub struct Shared {
+    pub base_app: SocketAddrV4,
     /// The real login app this proxy forwards to. Used to sanity-check a `SwitchBaseApp`
     /// address against the operator's own network -- see that element's handling.
-    real_login_app_addr: SocketAddrV4,
+    pub real_login_app: SocketAddrV4,
     /// The script model's dynamic dispatch tables, resolved once at startup -- see
     /// `wgtk::app::script::ScriptDispatch`.
-    dispatch: ScriptDispatch,
-    pending_clients: Mutex<HashMap<SocketAddr, PendingClient>>,
-    /// Same idea as `pending_clients`, but keyed by IP only: after a SwitchBaseApp, the
-    /// client tears down its whole connection and reconnects with a fresh, unpredictable
-    /// local port (the real BigWorld client's disconnect + reconnect behaviour on this
-    /// message), so we can't know the exact address to expect in advance the way a
-    /// normal post-login connection lets us.
-    pending_switches: Mutex<HashMap<IpAddr, PendingClient>>,
+    pub dispatch: ScriptDispatch,
 }
 
 #[derive(Debug)]
 struct PendingClient {
-    base_app_addr: SocketAddrV4,
+    base_app: SocketAddrV4,
     blowfish: Arc<Blowfish>,
+}
+
+/// Handle the events of the link with the login proxy, keeping the clients it hands
+/// over until they connect. The proxy is not event-based yet, so this runs on its own
+/// thread.
+fn serve_link(link: LinkStream, addr: SocketAddrV4, pending_clients: &Mutex<HashMap<SocketAddr, PendingClient>>) {
+    while let Some(event) = link.event() {
+        match event {
+            LinkEvent::Linked(()) => {
+                if let Err(e) = link.send(&Message::BaseStatus { load: 0 }) {
+                    warn!("Failed to register with the login proxy: {e}");
+                }
+            }
+            LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
+                let hosted = pending_client(&client).map(|pending_client| pending_clients.lock().unwrap().insert(client.addr, pending_client)).is_some();
+                if let Err(e) = link.send(&Message::ClientHosted { request_id, base_app: hosted.then_some(addr) }) {
+                    warn!(addr = %client.addr, "Failed to answer the login proxy: {e}");
+                }
+            }
+            LinkEvent::Message((), Message::BaseStop) => {
+                info!("Stopped by the login proxy, no longer taking clients");
+                return;
+            }
+            LinkEvent::Message((), message) => warn!("Unexpected message from the login proxy: {message:?}"),
+            LinkEvent::Unlinked(()) => {}
+        }
+    }
+}
+
+/// The client of the login proxy to forward to its real base app, if valid.
+fn pending_client(client: &ClientHost) -> Option<PendingClient> {
+    let Some(real_base_app) = client.real_base_app else {
+        warn!(addr = %client.addr, "Handed a client without its real base app");
+        return None;
+    };
+    match Blowfish::new_from_slice(&client.blowfish_key) {
+        Ok(blowfish) => Some(PendingClient {
+            base_app: real_base_app,
+            blowfish: Arc::new(blowfish),
+        }),
+        Err(_) => {
+            warn!(addr = %client.addr, "Invalid blowfish key handed over: {:?}", client.blowfish_key);
+            None
+        }
+    }
 }
 
 /// Describe a partial resource being download, a header must have been sent.
@@ -811,50 +633,6 @@ struct PartialResource {
     last_sequence_num: Option<u8>,
 }
 
-impl login_proxy::Handler for LoginHandler {
-
-    type Error = io::Error;
-
-    fn receive_ping(&mut self,
-        addr: SocketAddr,
-        latency: Duration,
-    ) -> Result<(), Self::Error> {
-        info!(%addr, "Ping-Pong: {:?}", latency);
-        Ok(())
-    }
-
-    fn receive_login_success(&mut self,
-        addr: SocketAddr,
-        blowfish: Arc<Blowfish>,
-        base_app_addr: WgSocketAddrV4,
-        _login_key: u32,
-        _server_message: String,
-    ) -> Result<WgSocketAddrV4, Self::Error> {
-
-        info!(%addr, %base_app_addr, "Login success");
-        self.shared.pending_clients.lock().unwrap().insert(addr, PendingClient {
-            base_app_addr: base_app_addr.addr,
-            blowfish,
-        });
-
-        // Return the proxy base app address instead of the expected one!
-        Ok(self.shared.base_app_addr.into())
-
-    }
-
-    fn receive_login_error(&mut self,
-        addr: SocketAddr,
-        error: login_proxy::element::LoginError,
-        data: String,
-    ) -> Result<(), Self::Error> {
-        info!(%addr, "Login error: {:?} ({data:?})", error);
-        Ok(())
-    }
-
-
-
-}
-
 impl proxy::Handler for BaseHandler {
 
     type Error = io::Error;
@@ -863,10 +641,10 @@ impl proxy::Handler for BaseHandler {
         addr: SocketAddr,
     ) -> Result<Option<proxy::PeerConfig>, Self::Error> {
 
-        if let Some(pending_client) = self.shared.pending_clients.lock().unwrap().remove(&addr) {
-            info!(%addr, "Forwarding new peer to {}", pending_client.base_app_addr);
+        if let Some(pending_client) = self.pending_client(addr) {
+            info!(%addr, "Forwarding new peer to {}", pending_client.base_app);
             return Ok(Some(proxy::PeerConfig {
-                real_addr: SocketAddr::V4(pending_client.base_app_addr),
+                real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
             }));
         }
@@ -875,10 +653,10 @@ impl proxy::Handler for BaseHandler {
         // after a SwitchBaseApp, so we can't know the exact address to
         // expect in advance -- only match by IP, keyed at switch time (see the
         // SwitchBaseApp element handling below).
-        if let Some(pending_client) = self.shared.pending_switches.lock().unwrap().remove(&addr.ip()) {
-            info!(%addr, "Forwarding reconnected peer (post-switch) to {}", pending_client.base_app_addr);
+        if let Some(pending_client) = self.pending_switches.remove(&addr.ip()) {
+            info!(%addr, "Forwarding reconnected peer (post-switch) to {}", pending_client.base_app);
             return Ok(Some(proxy::PeerConfig {
-                real_addr: SocketAddr::V4(pending_client.base_app_addr),
+                real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
             }));
         }
@@ -947,9 +725,11 @@ impl proxy::Handler for BaseHandler {
 
 impl BaseHandler {
 
-    fn new(shared: Arc<Shared>) -> Self {
+    pub fn new(shared: Shared) -> Self {
         Self {
             shared,
+            pending_clients: Arc::default(),
+            pending_switches: HashMap::new(),
             next_tick: None,
             entities: HashMap::new(),
             created_entity_types: HashMap::new(),
@@ -970,6 +750,11 @@ impl BaseHandler {
             sample_counts: HashMap::new(),
             nrl: HashMap::new(),
         }
+    }
+
+    /// The client the login proxy handed over from this address.
+    fn pending_client(&mut self, addr: SocketAddr) -> Option<PendingClient> {
+        self.pending_clients.lock().unwrap().remove(&addr)
     }
 
     /// Whether this element id still has room to have a body logged at INFO.
@@ -1003,7 +788,7 @@ impl BaseHandler {
 
     }
 
-    fn log_census(&self) {
+    pub fn log_census(&self) {
         let fmt = |census: &HashMap<u8, u32>| {
             let mut counts: Vec<(u32, u8)> =
                 census.iter().map(|(&id, &n)| (n, id)).collect();
@@ -1159,7 +944,7 @@ impl BaseHandler {
     fn read_out_bundle(&mut self, mut peer: proxy::Peer, bundle: Bundle) -> io::Result<()> {
 
         // Every event traced underneath this span (down to the trace file too, see
-        // `cmd_wot`) is tagged with `out` for free, alongside the `base` span already
+        // `init_tracing`) is tagged with `out` for free, alongside the `base` span already
         // entered around this whole handler's thread in `run()`.
         let _span = trace_span!("out").entered();
 
@@ -1602,7 +1387,7 @@ impl BaseHandler {
                 // stays inside the operator's network, so require the same /16 as the real
                 // login app -- the tightest bound derivable from this proxy's own config
                 // without hardcoding an IP range.
-                let real_login_octets = self.shared.real_login_app_addr.ip().octets();
+                let real_login_octets = self.shared.real_login_app.ip().octets();
                 let new_octets = sba.element.base_addr.addr.ip().octets();
                 let same_network = new_octets[..2] == real_login_octets[..2];
 
@@ -1610,7 +1395,7 @@ impl BaseHandler {
                     error!(%addr, id = SwitchBaseApp::ID, request_id = ?sba.request_id,
                         "<- Switch base app: address {:?} is outside the real login app's network ({}), \
                          likely bundle desync upstream -- ignoring",
-                        sba.element.base_addr, self.shared.real_login_app_addr.ip());
+                        sba.element.base_addr, self.shared.real_login_app.ip());
                     return Ok(true);
                 }
 
@@ -1637,8 +1422,8 @@ impl BaseHandler {
                 // this, from an unpredictable new local port, so pre-register the session
                 // by IP alone for `accept_peer` to pick up.
                 if let Some(blowfish) = peer.blowfish_arc() {
-                    self.shared.pending_switches.lock().unwrap().insert(addr.ip(), PendingClient {
-                        base_app_addr: sba.element.base_addr.addr,
+                    self.pending_switches.insert(addr.ip(), PendingClient {
+                        base_app: sba.element.base_addr.addr,
                         blowfish,
                     });
                 } else {
@@ -1653,7 +1438,7 @@ impl BaseHandler {
                 // how we represent this address everywhere else (e.g. the login-time
                 // hand-off), rather than reusing whatever the real message carried --
                 // see `WgSocketAddrV4`'s doc comment for why that's correct here.
-                let our_addr = WgSocketAddrV4::from(self.shared.base_app_addr);
+                let our_addr = WgSocketAddrV4::from(self.shared.base_app);
                 if !peer.patch_raw(&sba.element.base_addr.to_bytes(), &our_addr.to_bytes()) {
                     warn!(%addr, "<- Switch base app: could not locate the address bytes to patch in the raw packet");
                 }

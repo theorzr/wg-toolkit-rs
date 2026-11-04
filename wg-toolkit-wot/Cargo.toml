@@ -1,0 +1,31 @@
+[package]
+name = "wg-toolkit-wot"
+description = "World of Tanks server emulator and proxy built on wg-toolkit"
+categories = ["games", "command-line-utilities"]
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+wg-toolkit.workspace = true
+
+glam.workspace = true
+rand.workspace = true
+tracing.workspace = true
+
+blowfish.workspace = true
+rsa.workspace = true
+crc32fast.workspace = true
+
+flate2.workspace = true
+
+clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[[bin]]
+name = "wot"
+path = "src/main.rs"

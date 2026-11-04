@@ -76,12 +76,12 @@ impl Bot {
 mod tests {
 
     use super::*;
-    use crate::wot::emulator::physics::MotionLimits;
+    use crate::base::physics::MotionLimits;
 
     #[test]
     fn drives_to_its_waypoints() {
         let limits = MotionLimits { speed_forward: 10.0, speed_backward: 5.0, rotation_speed: 1.0 };
-        let aiming = crate::wot::emulator::physics::tests::chieftain_aiming();
+        let aiming = crate::base::physics::tests::chieftain_aiming();
         let vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, limits, aiming.clone());
         let mut bot = Bot::new(vehicle, Gun::new(Vec::new(), 10.0), Vec3::ZERO);
         let first = bot.waypoints[0];
