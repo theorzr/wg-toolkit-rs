@@ -92,7 +92,7 @@ impl login_proxy::Handler for LoginHandler {
         };
 
         // Return the base proxy's address instead of the real one!
-        self.link_listener.host_client(client)
+        self.link_listener.host_client_wait(client)
             .map(Into::into)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no base proxy to hand the client to"))
 

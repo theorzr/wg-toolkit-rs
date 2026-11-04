@@ -93,8 +93,20 @@ impl App {
         self.encryption_key.is_some()
     }
 
-    /// Poll for the next event of this login app, blocking.
+    /// Poll for the next event of this login app, blocking until one comes.
+    ///
+    /// The answers given since the last poll are sent first.
     pub fn poll(&mut self) -> Event {
+        self.poll_inner(None)
+    }
+
+    /// Same as [`Self::poll`], but returns [`Event::Timeout`] once the deadline passes
+    /// with no event, so the caller gets a chance to handle its other events.
+    pub fn poll_until(&mut self, deadline: Instant) -> Event {
+        self.poll_inner(Some(deadline))
+    }
+
+    fn poll_inner(&mut self, deadline: Option<Instant>) -> Event {
         loop {
 
             // Empty the events before.
@@ -110,8 +122,18 @@ impl App {
                 }
             }
 
+            let timeout = deadline.map(|deadline| deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1)));
+            if let Err(error) = self.socket.set_recv_timeout(timeout) {
+                return Event::IoError(IoErrorEvent { error, addr: None });
+            }
+
             let (packet, addr) = match self.socket.recv() {
                 Ok(ret) => ret,
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    return Event::Timeout;
+                }
                 Err(error) => return Event::IoError(IoErrorEvent { error, addr: None }),
             };
             
@@ -378,6 +400,8 @@ struct PendingChallenge {
 /// An event that happened in the login app regarding the login process.
 #[derive(Debug)]
 pub enum Event {
+    /// The deadline given to [`App::poll_until`] passed with no event.
+    Timeout,
     IoError(IoErrorEvent),
     Ping(PingEvent),
     Login(LoginEvent),

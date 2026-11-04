@@ -1,6 +1,7 @@
 //! The server's login app, logging every client in.
 
 use std::net::{SocketAddr, SocketAddrV4};
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,6 +17,9 @@ use crate::CliResult;
 
 use super::link::LoginLinkListener;
 
+
+/// How often the login app looks at its links, which don't wake its socket up.
+const LINK_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Debug)]
 pub struct LoginThread {
@@ -64,7 +68,23 @@ impl LoginThread {
         }
 
         loop {
-            match self.app.poll() {
+
+            while let Some(hosted) = self.link_listener.poll() {
+                let addr = hosted.client.addr;
+                match hosted.base_app {
+                    Some(base_app) => {
+                        info!(%addr, %base_app, "Login success, as {}", hosted.client.name);
+                        self.app.answer_login_success(addr, base_app, hosted.client.login_key, String::new());
+                    }
+                    None => {
+                        warn!(%addr, "No base app to hand the client to");
+                        self.app.answer_login_error(addr, LoginError::NoBaseApp, String::new());
+                    }
+                }
+            }
+
+            match self.app.poll_until(Instant::now() + LINK_POLL) {
+                Event::Timeout => {}
                 Event::IoError(error) => {
                     if let Some(addr) = error.addr {
                         warn!(%addr, "Error: {}", error.error);
@@ -82,24 +102,16 @@ impl LoginThread {
                         self.app.answer_login_challenge(login.addr);
                     } else {
 
-                        info!(addr = %login.addr, "Login success, as {}", self.name);
-
-                        // The base app knows of the client before the client knows of it.
-                        let login_key = OsRng.next_u32();
-                        let client = ClientHost {
-                            login_key,
+                        // Answered once a base app hosts the client: it knows of the
+                        // client before the client knows of it.
+                        info!(addr = %login.addr, "Login accepted, handing the client to a base app");
+                        self.link_listener.host_client(ClientHost {
+                            login_key: OsRng.next_u32(),
                             addr: login.addr,
                             blowfish_key: login.request.blowfish_key.clone(),
                             name: self.name.clone(),
                             real_base_app: None,
-                        };
-                        let Some(base_app) = self.link_listener.host_client(client) else {
-                            warn!(addr = %login.addr, "No base app to hand the client to");
-                            self.app.answer_login_error(login.addr, LoginError::NoBaseApp, String::new());
-                            continue;
-                        };
-
-                        self.app.answer_login_success(login.addr, base_app, login_key, String::new());
+                        });
 
                         // app.answer_login_error(login.addr, LoginError::Banned, "{\"bans\":\"{\\\"expiryTime\\\":1726435530,\\\"reason\\\":\\\"It's the reason\\\"}\"}".to_string());
                         
@@ -113,6 +125,7 @@ impl LoginThread {
                     }
                 }
             }
+
         }
 
     }
