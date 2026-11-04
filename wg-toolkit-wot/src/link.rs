@@ -211,9 +211,9 @@ impl LinkListener {
 
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
-        let mut link_listener = Self::local();
+        let mut link_listener = Self::new();
         link_listener.addr = Some(addr);
-        info!("Listening for links on: {addr}");
+        info!("Linked on: {addr}");
 
         let shared = Arc::clone(&link_listener.shared);
         thread::Builder::new()
@@ -227,6 +227,11 @@ impl LinkListener {
     /// Listen for the apps below of this process only, see
     /// [`LinkStream::connect_local`].
     pub fn local() -> Self {
+        info!("Linked on: process");
+        Self::new()
+    }
+
+    fn new() -> Self {
         let (sender, events) = crossbeam_channel::unbounded();
         let shared = Arc::new(ListenerShared {
             next_id: AtomicU64::new(0),
@@ -347,6 +352,7 @@ impl LinkStream {
         let stopped = Arc::new(AtomicBool::new(false));
         let stream = Arc::new(Mutex::new(None));
         let (sender, events) = crossbeam_channel::unbounded();
+        info!("Linked to: {up_link}");
 
         let thread_stopped = Arc::clone(&stopped);
         let thread_stream = Arc::clone(&stream);
@@ -365,6 +371,7 @@ impl LinkStream {
         let shared = &listener.shared;
         let id = LinkId(shared.next_id.fetch_add(1, Ordering::Relaxed));
         let (sender, events) = crossbeam_channel::unbounded();
+        info!(?id, "Linked to: process");
 
         shared.links.lock().unwrap().insert(id, ListenerLink::Local(sender.clone()));
         let _ = sender.send(LinkEvent::Linked(()));
