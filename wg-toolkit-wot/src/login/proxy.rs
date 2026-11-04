@@ -1,20 +1,19 @@
 //! The login proxy, forwarding every client to the real login app.
 
-use std::net::{SocketAddr, SocketAddrV4};
-use std::time::Duration;
+use std::net::SocketAddrV4;
+use std::time::Instant;
 use std::sync::Arc;
-use std::io;
 
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use tracing::{error, info, info_span};
+use tracing::{info, instrument, warn};
 
-use wgtk::net::codec::WgSocketAddrV4;
+use wgtk::app::login_proxy::element::LoginError;
 use wgtk::app::login_proxy;
 
 use crate::link::{ClientHost, LinkListener};
 use crate::CliResult;
 
-use super::link::LoginLinkListener;
+use super::link::{LoginLinkListener, LINK_POLL};
 
 
 /// The login app of the proxy, forwarding to the real login app and sending its
@@ -22,7 +21,7 @@ use super::link::LoginLinkListener;
 #[derive(Debug)]
 pub struct LoginProxy {
     app: login_proxy::App,
-    handler: LoginHandler,
+    link_listener: LoginLinkListener,
 }
 
 impl LoginProxy {
@@ -44,69 +43,63 @@ impl LoginProxy {
             app.set_encryption(encryption_key);
         }
 
-        Ok(Self { app, handler: LoginHandler { link_listener: LoginLinkListener::new(link_listener) } })
+        Ok(Self { app, link_listener: LoginLinkListener::new(link_listener) })
 
     }
 
+    #[instrument(name = "login", skip_all)]
     pub fn run(mut self) {
-        let _span = info_span!("login").entered();
-        if let Err(e) = self.app.run(self.handler) {
-            error!("Unexpected hard error: ({}) {e}", e.kind());
+
+        use login_proxy::Event;
+
+        info!("Running on: {}", self.app.addr().unwrap());
+
+        loop {
+
+            while let Some(hosted) = self.link_listener.poll() {
+                let addr = hosted.client.addr;
+                match hosted.base_app {
+                    // Return the base proxy's address instead of the real one!
+                    Some(base_app) => {
+                        info!(%addr, %base_app, "Login success, handed to the base proxy");
+                        self.app.answer_login_success(addr, base_app);
+                    }
+                    None => {
+                        warn!(%addr, "No base proxy to hand the client to");
+                        self.app.answer_login_error(addr, LoginError::NoBaseApp, String::new());
+                    }
+                }
+            }
+
+            match self.app.poll_until(Instant::now() + LINK_POLL) {
+                Event::Timeout => {}
+                Event::IoError(error) => {
+                    if let Some(addr) = error.addr {
+                        warn!(%addr, "Error: {}", error.error);
+                    } else {
+                        warn!("Error: {}", error.error);
+                    }
+                }
+                Event::Ping(ping) => {
+                    info!(addr = %ping.addr, "Ping-Pong: {:?}", ping.latency);
+                }
+                Event::LoginSuccess(success) => {
+                    info!(addr = %success.addr, base_app = %success.base_app, "Login success, handing the client to a base proxy");
+                    self.link_listener.host_client(ClientHost {
+                        login_key: success.login_key,
+                        addr: success.addr,
+                        blowfish_key: success.blowfish_key,
+                        name: String::new(),
+                        real_base_app: Some(success.base_app),
+                    });
+                }
+                Event::LoginError(error) => {
+                    info!(addr = %error.addr, "Login error: {:?} ({:?})", error.error, error.data);
+                }
+            }
+
         }
-    }
-
-}
-
-#[derive(Debug)]
-struct LoginHandler {
-    link_listener: LoginLinkListener,
-}
-
-impl login_proxy::Handler for LoginHandler {
-
-    type Error = io::Error;
-
-    fn receive_ping(&mut self,
-        addr: SocketAddr,
-        latency: Duration,
-    ) -> Result<(), Self::Error> {
-        info!(%addr, "Ping-Pong: {:?}", latency);
-        Ok(())
-    }
-
-    fn receive_login_success(&mut self,
-        addr: SocketAddr,
-        blowfish_key: &[u8],
-        base_app: WgSocketAddrV4,
-        login_key: u32,
-        _server_message: String,
-    ) -> Result<WgSocketAddrV4, Self::Error> {
-
-        info!(%addr, %base_app, "Login success");
-        let client = ClientHost {
-            login_key,
-            addr,
-            blowfish_key: blowfish_key.to_vec(),
-            name: String::new(),
-            real_base_app: Some(base_app.addr),
-        };
-
-        // Return the base proxy's address instead of the real one!
-        self.link_listener.host_client_wait(client)
-            .map(Into::into)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no base proxy to hand the client to"))
 
     }
-
-    fn receive_login_error(&mut self,
-        addr: SocketAddr,
-        error: login_proxy::element::LoginError,
-        data: String,
-    ) -> Result<(), Self::Error> {
-        info!(%addr, "Login error: {:?} ({data:?})", error);
-        Ok(())
-    }
-
-
 
 }

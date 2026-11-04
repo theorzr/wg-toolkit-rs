@@ -14,6 +14,9 @@ use crate::link::{ClientHost, LinkEvent, LinkId, LinkListener, Message};
 /// another.
 const REPLY_WAIT: Duration = Duration::from_secs(2);
 
+/// How often a login app looks at its links, which don't wake its socket up.
+pub const LINK_POLL: Duration = Duration::from_millis(20);
+
 /// The links of a login app with the base apps, registered once they tell their status.
 #[derive(Debug)]
 pub struct LoginLinkListener {
@@ -88,34 +91,6 @@ impl LoginLinkListener {
         }
 
         self.events.pop_front()
-
-    }
-
-    /// Have a base app host this client, waiting for the result: the login proxy is
-    /// not event-based yet.
-    pub fn host_client_wait(&mut self, client: ClientHost) -> Option<SocketAddrV4> {
-
-        let addr = client.addr;
-        self.host_client(client);
-
-        loop {
-
-            if let Some(hosted) = self.poll() {
-                if hosted.client.addr == addr {
-                    return hosted.base_app;
-                }
-                continue;
-            }
-
-            let deadline = self.hostings.values()
-                .find(|hosting| hosting.client.addr == addr)
-                .map(|hosting| hosting.deadline)?;
-
-            if let Some(event) = self.link_listener.event_timeout(deadline.saturating_duration_since(Instant::now())) {
-                self.handle(event);
-            }
-
-        }
 
     }
 

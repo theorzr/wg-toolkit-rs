@@ -1,8 +1,8 @@
 //! The server's login app, logging every client in.
 
 use std::net::{SocketAddr, SocketAddrV4};
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::time::Instant;
 use std::sync::Arc;
 
 use tracing::{info, instrument, warn};
@@ -15,11 +15,7 @@ use wgtk::app::login;
 use crate::link::{ClientHost, LinkListener};
 use crate::CliResult;
 
-use super::link::LoginLinkListener;
-
-
-/// How often the login app looks at its links, which don't wake its socket up.
-const LINK_POLL: Duration = Duration::from_millis(20);
+use super::link::{LoginLinkListener, LINK_POLL};
 
 #[derive(Debug)]
 pub struct LoginThread {

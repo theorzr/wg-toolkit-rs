@@ -1,6 +1,7 @@
 //! Thread polling utilities.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use std::sync::Arc;
 use std::thread;
 
@@ -89,6 +90,11 @@ impl<T: Send + 'static> ThreadPoll<T> {
     pub fn poll(&self) -> T {
         // Unwrap because we own both ends so it should not disconnect.
         self.rx.recv().unwrap()
+    }
+
+    /// Block until a new value is available or the deadline passes.
+    pub fn poll_until(&self, deadline: Instant) -> Option<T> {
+        self.rx.recv_deadline(deadline).ok()
     }
 
     /// Non-blocking poll.

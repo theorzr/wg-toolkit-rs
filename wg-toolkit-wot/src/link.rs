@@ -129,7 +129,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::thread;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use tracing::{debug, info, warn};
 
 use wgtk::util::io::{WgReadExt, WgWriteExt};
@@ -197,8 +197,6 @@ pub enum LinkEvent<L = ()> {
 /// Listening for the links of the apps below.
 #[derive(Debug)]
 pub struct LinkListener {
-    /// The address it listens at, none for the link streams of this process only.
-    addr: Option<SocketAddr>,
     shared: Arc<ListenerShared>,
     events: Receiver<LinkEvent<LinkId>>,
 }
@@ -211,8 +209,7 @@ impl LinkListener {
 
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
-        let mut link_listener = Self::new();
-        link_listener.addr = Some(addr);
+        let link_listener = Self::new();
         info!("Linked on: {addr}");
 
         let shared = Arc::clone(&link_listener.shared);
@@ -238,12 +235,7 @@ impl LinkListener {
             links: Mutex::new(HashMap::new()),
             sender,
         });
-        Self { addr: None, shared, events }
-    }
-
-    /// The address the apps below link to, none for those of this process only.
-    pub fn addr(&self) -> Option<SocketAddr> {
-        self.addr
+        Self { shared, events }
     }
 
     /// Send a message on this link.
@@ -264,10 +256,11 @@ impl LinkListener {
     }
 
     /// The next event, waiting for it no longer than this.
+    #[cfg(test)]
     pub fn event_timeout(&self, timeout: Duration) -> Option<LinkEvent<LinkId>> {
         match self.events.recv_timeout(timeout) {
             Ok(event) => Some(event),
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
+            Err(_) => None,
         }
     }
 
@@ -640,8 +633,10 @@ mod tests {
 
     #[test]
     fn tcp_events() {
-        let listener = LinkListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let stream = LinkStream::connect(listener.addr().unwrap()).unwrap();
+        // A free port, the listener doesn't tell the one it is given.
+        let addr = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let listener = LinkListener::bind(addr).unwrap();
+        let stream = LinkStream::connect(addr).unwrap();
         events(listener, stream);
     }
 
