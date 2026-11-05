@@ -18,7 +18,7 @@ pub fn run(args: ServerArgs, game_dir: &Path) -> CliResult<()> {
 
     let link_listener = LinkListener::local();
     let link = LinkStream::connect_local(&link_listener);
-    let base = BaseThread::new(args.apps.bind_base_app, script, game_dir, &args.base.give_vehicle, &args.base.map, link)?;
+    let base = BaseThread::new(args.apps.bind_base_app, script, game_dir, &args.base, link)?;
     let login = LoginThread::new(args.apps.bind_login_app, encryption_key, link_listener, &args.name)?;
 
     thread::scope(move |scope| {

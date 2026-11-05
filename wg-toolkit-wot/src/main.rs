@@ -232,6 +232,26 @@ pub struct BaseArgs {
     /// The map battles are on, by its name in the game's `scripts/arena_defs/_list_.xml`.
     #[arg(long, default_value = "02_malinovka")]
     pub map: String,
+    /// Bots on the player's side, the player aside.
+    #[arg(long, default_value_t = 0)]
+    pub allies: u32,
+    /// Bots on the other side.
+    #[arg(long, default_value_t = 1)]
+    pub enemies: u32,
+    /// A vehicle bots drive, as `--give-vehicle` takes it: each bot drives the next,
+    /// round, else the player's own. Can be repeated.
+    #[arg(long)]
+    pub bot_vehicle: Vec<String>,
+    /// Whether bots fire on their enemies.
+    #[arg(long)]
+    pub bots_fire: bool,
+    /// Whether bots drive toward their enemies, else they stay where they start.
+    #[arg(long)]
+    pub bots_drive: bool,
+    /// Start the enemies this many metres in front of the player instead of at their
+    /// spawn, facing the player.
+    #[arg(long)]
+    pub enemy_distance: Option<f32>,
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output

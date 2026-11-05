@@ -42,7 +42,7 @@ use crate::wot::account_commands::{
     CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::item_defs::{self, AimingDef, MagazineDef, ShotDef, VehicleDef};
-use crate::{init_tracing, load_script, AppBaseArgs, CliResult};
+use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
 use crate::wot::collision::VehicleCollision;
 use crate::wot::arena_defs::ArenaTypeDef;
@@ -52,7 +52,7 @@ use crate::wot::items::TankmanDescr;
 use physics::MotionLimits;
 use gun::Gun;
 use account::AccountData;
-use battle::Battle;
+use battle::{Battle, BattleOptions};
 use shop::Shop;
 
 
@@ -63,7 +63,7 @@ pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
     let script = load_script(game_dir)?;
     let link = LinkStream::connect(args.login_link)
         .map_err(|e| format!("Failed to link with the login app: {e}"))?;
-    BaseThread::new(args.bind, script, game_dir, &args.base.give_vehicle, &args.base.map, link)?.run();
+    BaseThread::new(args.bind, script, game_dir, &args.base, link)?.run();
 
     Ok(())
 
@@ -78,8 +78,7 @@ impl BaseThread {
         addr: SocketAddrV4,
         script: Script,
         game_dir: &Path,
-        give_vehicles: &[String],
-        map: &str,
+        args: &BaseArgs,
         link: LinkStream,
     ) -> CliResult<Self> {
 
@@ -92,19 +91,28 @@ impl BaseThread {
         let start = Instant::now();
         let fs = ResFilesystem::new(game_dir.join("res"))
             .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
-        let map = ArenaTypeDef::load(&fs, map)
-            .map_err(|e| format!("Failed to load the map {map}: {e}"))?;
+        let map = ArenaTypeDef::load(&fs, &args.map)
+            .map_err(|e| format!("Failed to load the map {}: {e}", args.map))?;
         let terrain = Terrain::load(&fs, &map.geometry)
             .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
         info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
 
-        let mut vehicles = Vec::new();
-        for vehicle in give_vehicles {
+        let load_vehicle = |vehicle: &String| {
             let (nation, name) = vehicle.split_once(':')
                 .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
-            vehicles.push(VehicleDef::load(&fs, nation, name)
-                .map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))?);
-        }
+            VehicleDef::load(&fs, nation, name).map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))
+        };
+        let vehicles = args.give_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?;
+        let battle_options = BattleOptions {
+            allies: args.allies,
+            enemies: args.enemies,
+            bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
+            bots_fire: args.bots_fire,
+            bots_drive: args.bots_drive,
+            enemy_distance: args.enemy_distance,
+        };
+        info!(allies = args.allies, enemies = args.enemies, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
+            bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, "Set up the battles");
         let account = AccountData::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
@@ -132,6 +140,7 @@ impl BaseThread {
             game_dir: game_dir.to_path_buf(),
             map,
             terrain,
+            battle_options,
             players: HashMap::new(),
             accounts: HashMap::new(),
             enqueued: HashMap::new(),
@@ -163,6 +172,8 @@ pub struct BaseThread {
     /// The battles' map, and its terrain.
     map: ArenaTypeDef,
     terrain: Terrain,
+    /// Who the battles have besides the player.
+    battle_options: BattleOptions,
     /// Each logged in client's player.
     players: HashMap<ClientKey, Player>,
     /// Each client's account, outside of battles.
@@ -355,6 +366,9 @@ impl BaseThread {
             _ => BATTLE_LENGTH,
         };
         battle.next_period = (period == ARENA_PERIOD_PREBATTLE).then(|| (Instant::now() + length, ARENA_PERIOD_BATTLE));
+        if let (ARENA_PERIOD_BATTLE, Some(battle)) = (period, battle.battle.as_mut()) {
+            battle.start();
+        }
         // The client's game time is the ticks it got.
         let game_time = f64::from(self.app.ticks(client).unwrap_or(0)) * TICK.as_secs_f64();
         let end = game_time + length.as_secs_f64();
