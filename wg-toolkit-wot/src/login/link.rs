@@ -14,9 +14,6 @@ use crate::link::{ClientHost, LinkEvent, LinkId, LinkListener, Message};
 /// another.
 const REPLY_WAIT: Duration = Duration::from_secs(2);
 
-/// How often a login app looks at its links, which don't wake its socket up.
-pub const LINK_POLL: Duration = Duration::from_millis(20);
-
 /// The links of a login app with the base apps, registered once they tell their status.
 #[derive(Debug)]
 pub struct LoginLinkListener {

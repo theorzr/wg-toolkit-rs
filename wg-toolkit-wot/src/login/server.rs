@@ -12,10 +12,10 @@ use rsa::RsaPrivateKey;
 use wgtk::app::login::element::LoginError;
 use wgtk::app::login;
 
-use crate::link::{ClientHost, LinkListener};
+use crate::link::{ClientHost, LinkListener, LINK_POLL};
 use crate::CliResult;
 
-use super::link::{LoginLinkListener, LINK_POLL};
+use super::link::LoginLinkListener;
 
 #[derive(Debug)]
 pub struct LoginThread {

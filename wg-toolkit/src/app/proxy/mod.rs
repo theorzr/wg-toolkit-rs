@@ -4,10 +4,10 @@
 
 pub mod capture;
 
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::collections::{hash_map, HashMap};
-use std::io::{self, BufWriter};
-use std::time::Duration;
+use std::io::{self, BufReader, BufWriter};
+use std::time::{Duration, Instant};
 use std::num::NonZero;
 use std::sync::Arc;
 use std::fs::File;
@@ -34,8 +34,12 @@ pub(super) const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The generic proxy application.
 ///
+/// Polling it gives the events of the packets it forwards. A packet is held while its
+/// events are being polled, and forwarded once they all are, at the next poll: in the
+/// meantime [`Self::peer`] gives access to its peer, to change how it is forwarded.
+///
 /// Every packet it forwards can be recorded to a compressed capture (see
-/// [`Self::set_capture`]), which [`replay`] later feeds to the same [`Handler`] offline.
+/// [`Self::set_capture`]), which [`Self::replay`] later gives the same events of.
 #[derive(Debug)]
 pub struct App {
     /// Inner state.
@@ -44,19 +48,36 @@ pub struct App {
     peers: HashMap<SocketAddr, PeerInner>,
     /// Where every received packet is recorded, if enabled.
     capture: Option<CaptureWriter<BufWriter<File>>>,
+    /// Where the packets come from.
+    source: Source,
+    /// Events waiting to be polled.
+    events: VecDeque<Event>,
+    /// The packet whose events are being polled.
+    held: Option<Held>,
+    /// The packet of an unknown peer, see [`Event::UnknownPeer`].
+    unknown: Option<(Packet, SocketAddr)>,
 }
 
 /// Inner application structure to split from peer.
 #[derive(Debug)]
 struct AppInner {
-    /// Thread poll for socket result.
-    socket_poll: ThreadPoll<SocketPollRet>,
     /// The main socket receiving peer packets, none when replaying a capture.
     socket: Option<PacketSocket>,
     /// Channel tracker for out packets.
     out_protocol: Protocol,
     /// Channel tracker for in packets.
     in_protocol: Protocol,
+}
+
+/// Where the packets of the app come from.
+#[derive(Debug)]
+enum Source {
+    /// The sockets, of the app and of each peer.
+    Live(ThreadPoll<SocketPollRet>),
+    /// A capture being replayed.
+    Capture(CaptureReader<BufReader<File>>),
+    /// A capture replayed to its end.
+    Ended,
 }
 
 /// A registered peer that can forward and receive packets from the real application.
@@ -83,9 +104,16 @@ struct SocketPollRet {
     peer: Option<SocketAddr>,
 }
 
-/// What the handler decided to do with the packet it was given.
+/// A packet held while its events are being polled, and what to forward of it.
 #[derive(Debug)]
-struct Outcome {
+struct Held {
+    /// The peer it's from or to.
+    addr: SocketAddr,
+    direction: PacketDirection,
+    /// The packet as received, encrypted if the peer is.
+    cipher: Packet,
+    /// The decrypted packet, for [`Peer::patch_raw`] to read from.
+    plain: Packet,
     /// Forward the packet as received, see [`Peer::suppress_forward`].
     forward_raw: bool,
     /// Forward this modified packet instead, see [`Peer::patch_raw`].
@@ -109,17 +137,34 @@ impl App {
             peer: None,
         }));
 
-        Ok(Self {
+        Ok(Self::with_source(Some(socket), Source::Live(socket_poll)))
+
+    }
+
+    /// Replay a capture recorded by [`Self::set_capture`], offline, giving the same
+    /// events in the same order as during the live session, with these differences:
+    /// no [`Event::UnknownPeer`], peers are created as recorded; nothing is forwarded,
+    /// so [`Peer::suppress_forward`] and [`Peer::patch_raw`] have no effect and
+    /// [`Peer::send_bundle`] sends nothing; and packets are already decrypted, so peers
+    /// have no blowfish key unless one is set. [`Event::CaptureEnd`] comes last.
+    pub fn replay(capture: CaptureReader<BufReader<File>>) -> Self {
+        Self::with_source(None, Source::Capture(capture))
+    }
+
+    fn with_source(socket: Option<PacketSocket>, source: Source) -> Self {
+        Self {
             inner: AppInner {
-                socket_poll,
-                socket: Some(socket),
+                socket,
                 out_protocol: Protocol::new_forwarding(),
                 in_protocol: Protocol::new_forwarding(),
             },
             peers: HashMap::new(),
             capture: None,
-        })
-
+            source,
+            events: VecDeque::new(),
+            held: None,
+            unknown: None,
+        }
     }
 
     /// Get the address this app is bound to.
@@ -128,83 +173,169 @@ impl App {
     }
 
     /// Record every packet received from now on, in both directions, to the given
-    /// capture. Packets are recorded decrypted, before the handler sees them, so the
-    /// capture holds exactly what [`replay`] needs to reproduce this session.
+    /// capture. Packets are recorded decrypted, before their events, so the capture
+    /// holds exactly what [`Self::replay`] needs to reproduce this session.
     pub fn set_capture(&mut self, capture: CaptureWriter<BufWriter<File>>) {
         self.capture = Some(capture);
     }
 
-    /// Blocking poll of this application with the given handler.
-    pub fn poll<H: Handler>(&mut self, handler: &mut H) -> Result<(), H::Error> {
+    /// Accept the unknown peer of an [`Event::UnknownPeer`], before the next poll.
+    pub fn accept_peer(&mut self, addr: SocketAddr, config: PeerConfig) -> io::Result<()> {
 
-        let socket_poll_ret = self.inner.socket_poll.poll();
-        let (cipher_packet, addr) = match socket_poll_ret.res {
-            Ok(ret) => ret,
-            Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
-                // Nothing received for a while: a good time to make the capture's tail
-                // readable, since it is otherwise only flushed as packets arrive.
-                if let Some(Err(e)) = self.capture.as_mut().map(CaptureWriter::flush) {
-                    error!("Packet capture stopped, failed to write it: {e}");
-                    self.capture = None;
-                }
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
+        let Source::Live(socket_poll) = &self.source else {
+            return Ok(());
         };
 
-        let peer;
-        let direction;
+        let socket = PacketSocket::bind(UNSPECIFIED_ADDR)?;
+        socket.set_recv_timeout(Some(RECV_TIMEOUT))?;
 
-        if let Some(peer_addr) = &socket_poll_ret.peer {
+        let thread_socket = socket.clone();
+        let socket_worker = socket_poll.spawn_with_handle(move || Some(SocketPollRet {
+            res: thread_socket.recv_without_encryption(),
+            peer: Some(addr),
+        }));
 
-            // The packet has been received from the real application and should be
-            // forwarded to the peer.
-            peer = match self.peers.get_mut(peer_addr) {
-                Some(peer) => peer,
-                None => return Ok(()),  // Receiving event from a no longer existing peer.
-            };
-            direction = PacketDirection::In;
+        self.peers.insert(addr, PeerInner {
+            _socket_worker: Some(socket_worker),
+            socket: Some(socket),
+            addr,
+            real_addr: config.real_addr,
+            blowfish: config.blowfish,
+        });
 
-        } else {
+        Ok(())
 
-            // The packet has been received from the peer and should be forwarded to the
-            // real login application.
-            peer = match self.peers.entry(addr) {
-                hash_map::Entry::Occupied(o) => o.into_mut(),
-                hash_map::Entry::Vacant(v) => {
+    }
 
-                    // If we have no peer for this, we ask the handler the initial
-                    // configuration for this peer. If the handle don't accept the peer
-                    // then we just return and ignore the packet.
-                    let Some(peer_config) = handler.accept_peer(addr)? else {
-                        return Ok(());
+    /// The peer at this address, if any, to change how it and the packet held, if
+    /// it's its, are forwarded.
+    pub fn peer(&mut self, addr: SocketAddr) -> Option<Peer<'_>> {
+        let peer = self.peers.get_mut(&addr)?;
+        Some(Peer {
+            app: &mut self.inner,
+            peer,
+            held: self.held.as_mut().filter(|held| held.addr == addr),
+        })
+    }
+
+    /// Poll for the next event of this app, blocking until one comes.
+    pub fn poll(&mut self) -> Event {
+        self.poll_inner(None)
+    }
+
+    /// Same as [`Self::poll`], but returns [`Event::Timeout`] once the deadline passes
+    /// with no event, so the caller gets a chance to handle its other events.
+    pub fn poll_until(&mut self, deadline: Instant) -> Event {
+        self.poll_inner(Some(deadline))
+    }
+
+    fn poll_inner(&mut self, deadline: Option<Instant>) -> Event {
+        loop {
+
+            if let Some(event) = self.events.pop_front() {
+                return event;
+            }
+
+            // Every event of the held packet polled.
+            if let Some(held) = self.held.take() {
+                self.forward(held);
+                continue;
+            }
+
+            // The unknown peer accepted, or not.
+            if let Some((cipher_packet, addr)) = self.unknown.take() {
+                if self.peers.contains_key(&addr) {
+                    self.receive(cipher_packet, addr, PacketDirection::Out);
+                }
+                continue;
+            }
+
+            match &mut self.source {
+                Source::Live(socket_poll) => {
+
+                    let socket_poll_ret = match deadline {
+                        Some(deadline) => match socket_poll.poll_until(deadline) {
+                            Some(ret) => ret,
+                            None => {
+                                self.flush_capture();
+                                return Event::Timeout;
+                            }
+                        },
+                        None => socket_poll.poll(),
                     };
 
-                    let socket = PacketSocket::bind(UNSPECIFIED_ADDR)?;
-                    socket.set_recv_timeout(Some(RECV_TIMEOUT))?;
+                    let (cipher_packet, addr) = match socket_poll_ret.res {
+                        Ok(ret) => ret,
+                        Err(e) if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
+                            self.flush_capture();
+                            continue;
+                        }
+                        Err(error) => return Event::IoError(IoErrorEvent { error, addr: socket_poll_ret.peer }),
+                    };
 
-                    let thread_socket = socket.clone();
-                    let socket_worker = self.inner.socket_poll.spawn_with_handle(move || Some(SocketPollRet {
-                        res: thread_socket.recv_without_encryption(),
-                        peer: Some(addr),
-                    }));
-
-                    v.insert(PeerInner {
-                        _socket_worker: Some(socket_worker),
-                        socket: Some(socket),
-                        addr,
-                        real_addr: peer_config.real_addr,
-                        blowfish: peer_config.blowfish,
-                    })
+                    match socket_poll_ret.peer {
+                        // The packet has been received from the real application and
+                        // should be forwarded to the peer, if still existing.
+                        Some(peer_addr) => {
+                            if self.peers.contains_key(&peer_addr) {
+                                self.receive(cipher_packet, peer_addr, PacketDirection::In);
+                            }
+                        }
+                        // The packet has been received from the peer and should be
+                        // forwarded to the real application, once accepted if unknown.
+                        None => {
+                            if self.peers.contains_key(&addr) {
+                                self.receive(cipher_packet, addr, PacketDirection::Out);
+                            } else {
+                                self.unknown = Some((cipher_packet, addr));
+                                return Event::UnknownPeer(UnknownPeerEvent { addr });
+                            }
+                        }
+                    }
 
                 }
-            };
-            direction = PacketDirection::Out;
+                Source::Capture(capture) => {
+
+                    let record = match capture.next() {
+                        Some(Ok(record)) => record,
+                        Some(Err(error)) => return Event::IoError(IoErrorEvent { error, addr: None }),
+                        None => {
+                            let truncated = capture.truncated();
+                            self.source = Source::Ended;
+                            return Event::CaptureEnd(CaptureEndEvent { truncated });
+                        }
+                    };
+
+                    let peer = self.peers.entry(record.peer_addr).or_insert_with(|| PeerInner {
+                        _socket_worker: None,
+                        socket: None,
+                        addr: record.peer_addr,
+                        real_addr: record.real_addr,
+                        blowfish: None,
+                    });
+
+                    // It may have been changed already, but the record is what was live.
+                    peer.real_addr = record.real_addr;
+
+                    let packet = if record.undecryptable { Err(record.packet) } else { Ok(record.packet) };
+                    self.handle(record.peer_addr, packet.clone().unwrap_or_else(|p| p), packet, record.direction);
+
+                }
+                Source::Ended => {
+                    return Event::CaptureEnd(CaptureEndEvent { truncated: false });
+                }
+            }
 
         }
+    }
+
+    /// A packet received live from or to this peer.
+    fn receive(&mut self, cipher_packet: Packet, addr: SocketAddr, direction: PacketDirection) {
+
+        let peer = self.peers.get(&addr).expect("receiving for a known peer");
 
         // Now decrypt packet if the peer has symmetric encryption, otherwise use as-is.
-        // A packet that fails to decrypt is still forwarded as received below.
+        // A packet that fails to decrypt is still forwarded as received.
         let packet = match peer.blowfish.as_deref() {
             Some(blowfish) => decrypt_packet(cipher_packet.clone(), blowfish),
             None => Ok(cipher_packet.clone()),
@@ -223,22 +354,121 @@ impl App {
             }
         }
 
-        let outcome = handle_packet(&mut self.inner, peer, handler, packet, direction)?;
+        self.handle(addr, cipher_packet, packet, direction);
 
-        let to_send = match outcome.patch {
+    }
+
+    /// Hold a received packet, giving the events of its bundles: the decrypted packet
+    /// goes through the protocol and each bundle it completes is an event, or, if it
+    /// could not be decrypted, the packet as received is an event.
+    fn handle(&mut self,
+        addr: SocketAddr,
+        cipher_packet: Packet,
+        packet: Result<Packet, Packet>,
+        direction: PacketDirection,
+    ) {
+
+        let plain = match &packet {
+            Ok(packet) => packet.clone(),
+            Err(packet) => packet.clone(),
+        };
+
+        self.held = Some(Held {
+            addr,
+            direction,
+            cipher: cipher_packet,
+            plain,
+            forward_raw: true,
+            patch: None,
+        });
+
+        let packet = match packet {
+            Ok(packet) => packet,
+            Err(packet) => {
+                self.events.push_back(Event::InvalidPacketEncryption(InvalidPacketEncryptionEvent {
+                    addr,
+                    packet,
+                    direction,
+                }));
+                return;
+            }
+        };
+
+        let peer = self.peers.get(&addr).expect("handling for a known peer");
+        let app = &mut self.inner;
+
+        let (
+            accept_protocol,
+            accept_protocol_span,
+            accept_out_protocol,
+            accept_out_protocol_span,
+        ) = match direction {
+            PacketDirection::Out => (
+                &mut app.out_protocol, trace_span!("out"),
+                &mut app.in_protocol, trace_span!("in"),
+            ),
+            PacketDirection::In => (
+                &mut app.in_protocol, trace_span!("in"),
+                &mut app.out_protocol, trace_span!("out"),
+            ),
+        };
+
+        {
+            let _span = accept_protocol_span.enter();
+            trace!(real_addr = %peer.real_addr, "{:width$?}", packet, width = 0);
+        }
+
+        let accept_out_ok = {
+            let _span = accept_out_protocol_span.enter();
+            accept_out_protocol.accept_out(&packet, peer.addr)
+        };
+
+        if !accept_out_ok {
+            return;
+        }
+
+        let _span = accept_protocol_span.enter();
+
+        let (bundles, channel) = match accept_protocol.accept(packet, peer.addr) {
+            Ok(mut channel) => {
+                let packet_channel = channel.is_on().then(|| PacketChannel {
+                    index: channel.index(),
+                });
+                (channel.pop_bundles(), packet_channel)
+            }
+            Err(_) => return,
+        };
+
+        for bundle in bundles {
+            self.events.push_back(Event::Bundle(BundleEvent {
+                addr,
+                bundle,
+                direction,
+                channel: channel.clone(),
+            }));
+        }
+
+    }
+
+    /// Forward the held packet whose events were all polled.
+    fn forward(&mut self, held: Held) {
+
+        // Nothing is forwarded when replaying.
+        let Some(peer) = self.peers.get(&held.addr) else { return };
+        let (Some(socket), Some(peer_socket)) = (&self.inner.socket, &peer.socket) else { return };
+
+        let to_send = match held.patch {
             Some(patched) => match peer.blowfish.as_deref() {
                 Some(blowfish) => encrypt_packet(patched, blowfish),
                 None => patched,
             },
-            None if outcome.forward_raw => cipher_packet,
-            None => return Ok(()),
+            None if held.forward_raw => held.cipher,
+            None => return,
         };
 
-        let res = match direction {
-            PacketDirection::Out => peer.socket.as_ref().expect("live peer has a socket")
-                .send_without_encryption(&to_send, peer.real_addr),
-            PacketDirection::In => self.inner.socket.as_ref().expect("live proxy has a socket")
-                .send_without_encryption(&to_send, peer.addr),
+        let res = match held.direction {
+            PacketDirection::Out => peer_socket.send_without_encryption(&to_send, peer.real_addr),
+            PacketDirection::In => socket.send_without_encryption(&to_send, peer.addr),
         };
 
         match res {
@@ -246,231 +476,90 @@ impl App {
             Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
                 // When forwarding to a local peer, this means that the local client no
                 // longer has a listening socket to send to! Ignore this peer.
-                trace!("Dropped peer due to connection reset: {addr}");
-                // Unwrap because we have this peer and it exists.
-                self.peers.remove(&addr).unwrap();
+                trace!("Dropped peer due to connection reset: {}", held.addr);
+                self.peers.remove(&held.addr);
             }
-            // A handler-supplied `real_addr` that the OS rejects outright (e.g. port
-            // 0, from an address patched in off a desynced upstream element) must not
-            // propagate. Unlike `ConnectionReset` it does not resolve by dropping the
-            // peer's socket, and the peer is unsalvageable either way, but letting it
-            // bubble out of `poll` ends `run`'s loop for every other connected peer
-            // too. Drop just this peer and keep serving everyone else.
+            // A `real_addr` that the OS rejects outright (e.g. port 0, from an address
+            // patched in off a desynced upstream element) does not resolve by dropping
+            // the peer's socket either, and the peer is unsalvageable: drop just this
+            // peer and keep serving everyone else.
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                warn!("Dropped peer due to an invalid destination address ({:?}): {addr}", match direction {
+                warn!("Dropped peer due to an invalid destination address ({:?}): {}", match held.direction {
                     PacketDirection::Out => peer.real_addr,
                     PacketDirection::In => peer.addr,
-                });
-                self.peers.remove(&addr).unwrap();
+                }, held.addr);
+                self.peers.remove(&held.addr);
             }
-            Err(e) => {
-                return Err(e.into());
+            Err(error) => {
+                self.events.push_back(Event::IoError(IoErrorEvent { error, addr: Some(held.addr) }));
             }
         }
 
-        Ok(())
-
     }
 
-    /// Same as [`Self::loop`] but indefinitely looping until an error is returned.
-    pub fn run<H: Handler>(&mut self, mut handler: H) -> Result<(), H::Error> {
-        loop {
-            self.poll(&mut handler)?;
+    /// Make the capture's tail readable, since it is otherwise only flushed as packets
+    /// arrive: done when nothing is received for a while.
+    fn flush_capture(&mut self) {
+        if let Some(Err(e)) = self.capture.as_mut().map(CaptureWriter::flush) {
+            error!("Packet capture stopped, failed to write it: {e}");
+            self.capture = None;
         }
     }
 
 }
 
-/// Feed a capture recorded by [`App::set_capture`] to the given handler, offline, as
-/// if the proxy were receiving it again.
-///
-/// The handler sees the same calls in the same order as during the live session, with
-/// these differences: [`Handler::accept_peer`] is not called, peers are created as
-/// recorded; nothing is forwarded, so [`Peer::suppress_forward`] and
-/// [`Peer::patch_raw`] have no effect and [`Peer::send_bundle`] sends nothing; and
-/// packets are already decrypted, so peers have no blowfish key unless the handler
-/// sets one.
-///
-/// Returns whether the capture was truncated, see [`CaptureReader::truncated`].
-pub fn replay<H, R>(mut capture: CaptureReader<R>, handler: &mut H) -> Result<bool, H::Error>
-where
-    H: Handler,
-    R: io::Read,
-{
-
-    let mut app = AppInner {
-        socket_poll: ThreadPoll::new(),
-        socket: None,
-        out_protocol: Protocol::new_forwarding(),
-        in_protocol: Protocol::new_forwarding(),
-    };
-
-    let mut peers = HashMap::new();
-
-    for record in &mut capture {
-
-        let record = record?;
-
-        let peer = peers.entry(record.peer_addr).or_insert_with(|| PeerInner {
-            _socket_worker: None,
-            socket: None,
-            addr: record.peer_addr,
-            real_addr: record.real_addr,
-            blowfish: None,
-        });
-
-        // The handler may have changed it already, but the record is what was live.
-        peer.real_addr = record.real_addr;
-
-        let packet = if record.undecryptable { Err(record.packet) } else { Ok(record.packet) };
-        handle_packet(&mut app, peer, handler, packet, record.direction)?;
-
-    }
-
-    Ok(capture.truncated())
-
+/// An event of the proxy app.
+#[derive(Debug)]
+pub enum Event {
+    /// The deadline given to [`App::poll_until`] passed with no event.
+    Timeout,
+    IoError(IoErrorEvent),
+    UnknownPeer(UnknownPeerEvent),
+    InvalidPacketEncryption(InvalidPacketEncryptionEvent),
+    Bundle(BundleEvent),
+    CaptureEnd(CaptureEndEvent),
 }
 
-/// Give one received packet to the handler: the decrypted packet goes through the
-/// protocol and each bundle it completes is handed over, or, if it could not be
-/// decrypted, the packet as received is reported as such.
-fn handle_packet<H: Handler>(
-    app: &mut AppInner,
-    peer: &mut PeerInner,
-    handler: &mut H,
-    packet: Result<Packet, Packet>,
-    direction: PacketDirection,
-) -> Result<Outcome, H::Error> {
-
-    let mut outcome = Outcome { forward_raw: true, patch: None };
-
-    let packet = match packet {
-        Ok(packet) => packet,
-        Err(cipher_packet) => {
-            let peer_ref = Peer {
-                app,
-                peer,
-                forward_raw: &mut outcome.forward_raw,
-                plain: &cipher_packet,
-                patch: &mut outcome.patch,
-            };
-            handler.receive_invalid_packet_encryption(peer_ref, cipher_packet.clone(), direction)?;
-            return Ok(outcome);
-        }
-    };
-
-    // Keep a copy of the decrypted content around for `Peer::patch_raw` to read
-    // from, since `packet` itself is about to be consumed by `accept` below.
-    let packet_plain = packet.clone();
-
-    let (
-        accept_protocol,
-        accept_protocol_span,
-        accept_out_protocol,
-        accept_out_protocol_span,
-    ) = match direction {
-        PacketDirection::Out => (
-            &mut app.out_protocol, trace_span!("out"),
-            &mut app.in_protocol, trace_span!("in"),
-        ),
-        PacketDirection::In => (
-            &mut app.in_protocol, trace_span!("in"),
-            &mut app.out_protocol, trace_span!("out"),
-        ),
-    };
-
-    {
-        let _span = accept_protocol_span.enter();
-        trace!(real_addr = %peer.real_addr, "{:width$?}", packet, width = 0);
-    }
-
-    let accept_out_ok = {
-        let _span = accept_out_protocol_span.enter();
-        accept_out_protocol.accept_out(&packet, peer.addr)
-    };
-
-    if !accept_out_ok {
-        return Ok(outcome);
-    }
-
-    let _span = accept_protocol_span.enter();
-
-    let (bundles, packet_channel) = match accept_protocol.accept(packet, peer.addr) {
-        Ok(mut channel) => {
-            let packet_channel = channel.is_on().then(|| PacketChannel {
-                index: channel.index(),
-            });
-            (channel.pop_bundles(), packet_channel)
-        }
-        Err(_) => return Ok(outcome),
-    };
-
-    for bundle in bundles {
-        let peer_ref = Peer {
-            app: &mut *app,
-            peer: &mut *peer,
-            forward_raw: &mut outcome.forward_raw,
-            plain: &packet_plain,
-            patch: &mut outcome.patch,
-        };
-        handler.receive_bundle(peer_ref, bundle, direction, packet_channel.clone())?;
-    }
-
-    Ok(outcome)
-
+/// Some IO error happened internally and optionally related to a peer.
+#[derive(Debug)]
+pub struct IoErrorEvent {
+    pub error: io::Error,
+    pub addr: Option<SocketAddr>,
 }
 
-/// A handler for events when polling the application.
-pub trait Handler {
-
-    /// The error type that should be able to be constructed from I/O error.
-    type Error: From<io::Error>;
-
-    /// The given peer is currently unknown and should be configured. This handler should
-    /// return none to ignore that new peer.
-    /// 
-    /// The default implementation reject all peers.
-    fn accept_peer(&mut self, 
-        addr: SocketAddr,
-    ) -> Result<Option<PeerConfig>, Self::Error> {
-        let _ = (addr,);
-        Ok(None)
-    }
-
-    /// The given peer has received or sent a packet with invalid encryption, and so it
-    /// cannot be handled by protocol to be made into a bundle.
-    /// 
-    /// The default implementation does nothing.
-    fn receive_invalid_packet_encryption(&mut self,
-        peer: Peer,
-        packet: Packet,
-        direction: PacketDirection, 
-    ) -> Result<(), Self::Error> {
-        let _ = (peer, packet, direction);
-        Ok(())
-    }
-
-    /// A bundle of elements has been transferred to or from the given peer.
-    /// 
-    /// The default implementation does nothing.
-    fn receive_bundle(&mut self, 
-        peer: Peer, 
-        bundle: Bundle, 
-        direction: PacketDirection, 
-        channel: Option<PacketChannel>,
-    ) -> Result<(), Self::Error> {
-        let _ = (peer, bundle, direction, channel);
-        Ok(())
-    }
-
+/// A packet came from an unknown peer: it is forwarded if the peer is accepted with
+/// [`App::accept_peer`] before the next poll, dropped otherwise.
+#[derive(Debug)]
+pub struct UnknownPeerEvent {
+    pub addr: SocketAddr,
 }
 
-/// Blanket impl.
-impl Handler for () {
-    type Error = io::Error;
+/// The given peer has received or sent a packet with invalid encryption, and so it
+/// cannot be handled by protocol to be made into a bundle.
+#[derive(Debug)]
+pub struct InvalidPacketEncryptionEvent {
+    pub addr: SocketAddr,
+    pub packet: Packet,
+    pub direction: PacketDirection,
 }
 
-/// The type returned for new peers when accepted by the handler.
+/// A bundle of elements has been transferred to or from the given peer.
+#[derive(Debug)]
+pub struct BundleEvent {
+    pub addr: SocketAddr,
+    pub bundle: Bundle,
+    pub direction: PacketDirection,
+    pub channel: Option<PacketChannel>,
+}
+
+/// The capture replayed ended, see [`App::replay`], truncated if it ends on an
+/// incomplete record, see [`CaptureReader::truncated`].
+#[derive(Debug)]
+pub struct CaptureEndEvent {
+    pub truncated: bool,
+}
+
+/// The configuration of an accepted peer, see [`App::accept_peer`].
 #[derive(Debug)]
 pub struct PeerConfig {
     /// The real server address to forward the packets to after being received by proxy.
@@ -480,23 +569,15 @@ pub struct PeerConfig {
     pub blowfish: Option<Arc<Blowfish>>,
 }
 
-/// A reference to an internal peer that allows its owner to enable or disable the 
-/// encryption, modify the real address and send bundles.
+/// A reference to an internal peer that allows its owner to enable or disable the
+/// encryption, modify the real address and send bundles, and to change how the packet
+/// held is forwarded, if it's its.
 #[derive(Debug)]
 pub struct Peer<'a> {
     app: &'a mut AppInner,
     peer: &'a mut PeerInner,
-    /// Cleared by `suppress_forward` to prevent the packet currently being processed
-    /// from being forwarded verbatim to its destination once handling completes.
-    forward_raw: &'a mut bool,
-    /// The decrypted content of the packet currently being processed (or the raw
-    /// packet as-is if this peer has no encryption), for [`Self::patch_raw`] to read
-    /// from when building a modified copy to forward instead.
-    plain: &'a Packet,
-    /// Set by [`Self::patch_raw`] to a modified copy of `plain` that should be
-    /// forwarded (re-encrypted if applicable) in place of the original raw packet,
-    /// keeping the same framing (prefix, flags, sequence number, channel).
-    patch: &'a mut Option<Packet>,
+    /// The packet held, if it's this peer's.
+    held: Option<&'a mut Held>,
 }
 
 impl<'a> Peer<'a> {
@@ -525,7 +606,9 @@ impl<'a> Peer<'a> {
     /// client stays pointed at the proxy instead of the real address it names).
     #[inline]
     pub fn suppress_forward(&mut self) {
-        *self.forward_raw = false;
+        if let Some(held) = self.held.as_deref_mut() {
+            held.forward_raw = false;
+        }
     }
 
     /// Replace the first occurrence of `find` with `replace` (which must be the same
@@ -540,17 +623,21 @@ impl<'a> Peer<'a> {
     /// before the local peer sees it.
     ///
     /// Returns `false` (leaving any previous patch untouched) if `find` could not be
-    /// located in the packet's content.
+    /// located in the packet's content, or if no packet of this peer is held.
     pub fn patch_raw(&mut self, find: &[u8], replace: &[u8]) -> bool {
 
         assert_eq!(find.len(), replace.len(), "patch_raw: find and replace must have the same length");
 
-        let mut patched = self.plain.clone();
+        let Some(held) = self.held.as_deref_mut() else {
+            return false;
+        };
+
+        let mut patched = held.plain.clone();
         let slice = patched.slice_mut();
 
         if let Some(pos) = slice.windows(find.len().max(1)).position(|w| w == find) {
             slice[pos..pos + find.len()].copy_from_slice(replace);
-            *self.patch = Some(patched);
+            held.patch = Some(patched);
             true
         } else {
             false

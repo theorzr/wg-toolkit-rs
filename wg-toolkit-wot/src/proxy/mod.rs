@@ -4,9 +4,9 @@ mod python;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::path::Path;
-use std::thread;
+use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, error, info, warn, info_span, trace, trace_span};
@@ -25,11 +25,10 @@ use wgtk::app::{proxy, base, client};
 use wgtk::pickle;
 use wgtk::net::codec::WgSocketAddrV4;
 use wgtk::script::{Script, Value};
-use wgtk::net::packet::Packet;
 use wgtk::app::nrl::NrlTree;
 
 use crate::{init_tracing, load_script, AppProxyArgs, CliResult};
-use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
+use crate::link::{ClientHost, LinkEvent, LinkStream, Message, LINK_POLL};
 
 
 pub fn run(args: AppProxyArgs, game_dir: &Path) -> CliResult<()> {
@@ -225,6 +224,9 @@ macro_rules! trace_dbg_alias {
 pub struct BaseProxy {
     app: proxy::App,
     handler: BaseHandler,
+    addr: SocketAddrV4,
+    /// The link with the login proxy, none once stopped by it.
+    link: Option<LinkStream>,
 }
 
 impl BaseProxy {
@@ -255,19 +257,55 @@ impl BaseProxy {
             dispatch: ScriptDispatch::new(script),
         });
 
-        let pending_clients = Arc::clone(&handler.pending_clients);
-        thread::Builder::new().name("base link".to_string()).spawn(move || serve_link(link, addr, &pending_clients))
-            .map_err(|e| format!("Failed to start the link with the login proxy: {e}"))?;
-
-        Ok(Self { app, handler })
+        Ok(Self { app, handler, addr, link: Some(link) })
 
     }
 
     pub fn run(mut self) {
+
         let _span = info_span!("base").entered();
-        if let Err(e) = self.app.run(self.handler) {
-            error!("Unexpected hard error: ({}) {e}", e.kind());
+        info!("Running on: {}", self.addr);
+
+        loop {
+            self.link_events();
+            let event = self.app.poll_until(Instant::now() + LINK_POLL);
+            self.handler.handle_event(&mut self.app, event);
         }
+
+    }
+
+    /// Handle the events of the link with the login proxy, keeping the clients it hands
+    /// over until they connect.
+    fn link_events(&mut self) {
+
+        let Some(link) = &self.link else { return };
+
+        while let Some(event) = link.try_event() {
+            match event {
+                LinkEvent::Linked(()) => {
+                    if let Err(e) = link.send(&Message::BaseStatus { load: 0 }) {
+                        warn!("Failed to register with the login proxy: {e}");
+                    }
+                }
+                LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
+                    let hosted = pending_client(&client)
+                        .map(|pending_client| self.handler.pending_clients.insert(client.addr, pending_client))
+                        .is_some();
+                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(self.addr) };
+                    if let Err(e) = link.send(&message) {
+                        warn!(addr = %client.addr, "Failed to answer the login proxy: {e}");
+                    }
+                }
+                LinkEvent::Message((), Message::BaseStop) => {
+                    info!("Stopped by the login proxy, no longer taking clients");
+                    self.link = None;
+                    return;
+                }
+                LinkEvent::Message((), message) => warn!("Unexpected message from the login proxy: {message:?}"),
+                LinkEvent::Unlinked(()) => {}
+            }
+        }
+
     }
 
 }
@@ -460,7 +498,7 @@ impl PositionTracker {
 pub struct BaseHandler {
     shared: Shared,
     /// Clients the login proxy handed over, by their address.
-    pending_clients: Arc<Mutex<HashMap<SocketAddr, PendingClient>>>,
+    pending_clients: HashMap<SocketAddr, PendingClient>,
     /// Same idea as `pending_clients`, but keyed by IP only: after a SwitchBaseApp, the
     /// client tears down its whole connection and reconnects with a fresh, unpredictable
     /// local port (the real BigWorld client's disconnect + reconnect behaviour on this
@@ -574,33 +612,6 @@ struct PendingClient {
     blowfish: Arc<Blowfish>,
 }
 
-/// Handle the events of the link with the login proxy, keeping the clients it hands
-/// over until they connect. The proxy is not event-based yet, so this runs on its own
-/// thread.
-fn serve_link(link: LinkStream, addr: SocketAddrV4, pending_clients: &Mutex<HashMap<SocketAddr, PendingClient>>) {
-    while let Some(event) = link.event() {
-        match event {
-            LinkEvent::Linked(()) => {
-                if let Err(e) = link.send(&Message::BaseStatus { load: 0 }) {
-                    warn!("Failed to register with the login proxy: {e}");
-                }
-            }
-            LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
-                let hosted = pending_client(&client).map(|pending_client| pending_clients.lock().unwrap().insert(client.addr, pending_client)).is_some();
-                if let Err(e) = link.send(&Message::ClientHosted { request_id, base_app: hosted.then_some(addr) }) {
-                    warn!(addr = %client.addr, "Failed to answer the login proxy: {e}");
-                }
-            }
-            LinkEvent::Message((), Message::BaseStop) => {
-                info!("Stopped by the login proxy, no longer taking clients");
-                return;
-            }
-            LinkEvent::Message((), message) => warn!("Unexpected message from the login proxy: {message:?}"),
-            LinkEvent::Unlinked(()) => {}
-        }
-    }
-}
-
 /// The client of the login proxy to forward to its real base app, if valid.
 fn pending_client(client: &ClientHost) -> Option<PendingClient> {
     let Some(real_base_app) = client.real_base_app else {
@@ -633,20 +644,48 @@ struct PartialResource {
     last_sequence_num: Option<u8>,
 }
 
-impl proxy::Handler for BaseHandler {
+impl BaseHandler {
 
-    type Error = io::Error;
+    /// Handle an event of the proxy app, live or replayed.
+    pub fn handle_event(&mut self, app: &mut proxy::App, event: proxy::Event) {
+        match event {
+            proxy::Event::Timeout | 
+            proxy::Event::CaptureEnd(_) => {}
+            proxy::Event::IoError(error) => {
+                if let Some(addr) = error.addr {
+                    warn!(%addr, "Error: {}", error.error);
+                } else {
+                    warn!("Error: {}", error.error);
+                }
+            }
+            proxy::Event::UnknownPeer(unknown) => {
+                if let Some(config) = self.accept_peer(unknown.addr) {
+                    if let Err(e) = app.accept_peer(unknown.addr, config) {
+                        warn!(addr = %unknown.addr, "Failed to accept a peer: {e}");
+                    }
+                }
+            }
+            proxy::Event::InvalidPacketEncryption(invalid) => {
+                if let Some(peer) = app.peer(invalid.addr) {
+                    self.receive_invalid_packet_encryption(peer, invalid.direction);
+                }
+            }
+            proxy::Event::Bundle(bundle) => {
+                if let Some(peer) = app.peer(bundle.addr) {
+                    self.receive_bundle(peer, bundle.bundle, bundle.direction);
+                }
+            }
+        }
+    }
 
-    fn accept_peer(&mut self,
-        addr: SocketAddr,
-    ) -> Result<Option<proxy::PeerConfig>, Self::Error> {
+    fn accept_peer(&mut self, addr: SocketAddr) -> Option<proxy::PeerConfig> {
 
-        if let Some(pending_client) = self.pending_client(addr) {
+        if let Some(pending_client) = self.pending_clients.remove(&addr) {
             info!(%addr, "Forwarding new peer to {}", pending_client.base_app);
-            return Ok(Some(proxy::PeerConfig {
+            return Some(proxy::PeerConfig {
                 real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
-            }));
+            });
         }
 
         // The client tears down and reconnects from a fresh, unpredictable local port
@@ -655,22 +694,18 @@ impl proxy::Handler for BaseHandler {
         // SwitchBaseApp element handling below).
         if let Some(pending_client) = self.pending_switches.remove(&addr.ip()) {
             info!(%addr, "Forwarding reconnected peer (post-switch) to {}", pending_client.base_app);
-            return Ok(Some(proxy::PeerConfig {
+            return Some(proxy::PeerConfig {
                 real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
-            }));
+            });
         }
 
         warn!(%addr, "Rejected an unknown peer");
-        Ok(None)
+        None
 
     }
 
-    fn receive_invalid_packet_encryption(&mut self,
-        peer: proxy::Peer,
-        _packet: Packet,
-        direction: proxy::PacketDirection,
-    ) -> Result<(), Self::Error> {
+    fn receive_invalid_packet_encryption(&mut self, peer: proxy::Peer, direction: proxy::PacketDirection) {
         // One outbound packet per BaseApp connection is expected to fail here: the
         // client's `baseAppLogin` request, which the client sends unencrypted before it
         // enables Blowfish on the channel (`BaseAppLoginRequestProtocol::sendRequest`).
@@ -686,15 +721,9 @@ impl proxy::Handler for BaseHandler {
             debug!(%addr, "Could not decrypt the pre-login packet ({direction:?}): \
                 expected, baseAppLogin is sent unencrypted");
         }
-        Ok(())
     }
 
-    fn receive_bundle(&mut self,
-        peer: proxy::Peer,
-        bundle: Bundle,
-        direction: proxy::PacketDirection,
-        _channel: Option<proxy::PacketChannel>,
-    ) -> Result<(), Self::Error> {
+    fn receive_bundle(&mut self, peer: proxy::Peer, bundle: Bundle, direction: proxy::PacketDirection) {
 
         let addr = peer.addr();
 
@@ -717,8 +746,6 @@ impl proxy::Handler for BaseHandler {
             }
         }
 
-        Ok(())
-
     }
 
 }
@@ -728,7 +755,7 @@ impl BaseHandler {
     pub fn new(shared: Shared) -> Self {
         Self {
             shared,
-            pending_clients: Arc::default(),
+            pending_clients: HashMap::new(),
             pending_switches: HashMap::new(),
             next_tick: None,
             entities: HashMap::new(),
@@ -750,11 +777,6 @@ impl BaseHandler {
             sample_counts: HashMap::new(),
             nrl: HashMap::new(),
         }
-    }
-
-    /// The client the login proxy handed over from this address.
-    fn pending_client(&mut self, addr: SocketAddr) -> Option<PendingClient> {
-        self.pending_clients.lock().unwrap().remove(&addr)
     }
 
     /// Whether this element id still has room to have a body logged at INFO.

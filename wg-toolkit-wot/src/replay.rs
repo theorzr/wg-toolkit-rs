@@ -70,8 +70,14 @@ pub fn replay(
     let round_trips = round_trip.then(start_round_trip_check);
 
     let _span = info_span!("base").entered();
-    let truncated = proxy::replay(capture, &mut handler)
-        .map_err(|e| format!("Failed to replay packet capture: {e}"))?;
+    let mut app = proxy::App::replay(capture);
+    let truncated = loop {
+        match app.poll() {
+            proxy::Event::CaptureEnd(end) => break end.truncated,
+            proxy::Event::IoError(error) => return Err(format!("Failed to replay packet capture: {}", error.error)),
+            event => handler.handle_event(&mut app, event),
+        }
+    };
 
     if let Some(round_trips) = round_trips {
         bundle::set_round_trip_check(None);

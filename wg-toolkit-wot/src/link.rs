@@ -138,6 +138,9 @@ use wgtk::util::io::{WgReadExt, WgWriteExt};
 /// The version of the protocol, links of other versions are refused.
 const VERSION: u8 = 1;
 
+/// How often an app looks at its links when its socket doesn't wake it up.
+pub const LINK_POLL: Duration = Duration::from_millis(20);
+
 /// How long a link stream waits before linking again after failing to, or after
 /// being unlinked.
 const RELINK_DELAY: Duration = Duration::from_secs(1);
@@ -395,6 +398,7 @@ impl LinkStream {
     }
 
     /// The next event, waiting for it.
+    #[cfg(test)]
     pub fn event(&self) -> Option<LinkEvent> {
         self.events.recv().ok()
     }

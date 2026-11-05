@@ -10,10 +10,10 @@ use tracing::{info, instrument, warn};
 use wgtk::app::login_proxy::element::LoginError;
 use wgtk::app::login_proxy;
 
-use crate::link::{ClientHost, LinkListener};
+use crate::link::{ClientHost, LinkListener, LINK_POLL};
 use crate::CliResult;
 
-use super::link::{LoginLinkListener, LINK_POLL};
+use super::link::LoginLinkListener;
 
 
 /// The login app of the proxy, forwarding to the real login app and sending its
