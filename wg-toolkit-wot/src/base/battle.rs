@@ -611,8 +611,11 @@ impl BaseThread {
         if let Some(shot) = gun.fire_burst(now, position, velocity, dispersion, Some(&*terrain), &targets) {
             info!(%client, shot = shot.id, "Fired a shell of the burst from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
             shots.push((now + f64::from(shot.flight_time), entity.id(), shot.clone()));
+            // Its reload started with the burst, see `Gun::fire`.
             if let Some(own) = *own_vehicle {
-                show_gun(app, own, entity.id(), gun, now)?;
+                let mut own = app.component(own)?;
+                own.set_vehicleAmmoList(gun_ammo_list(gun))?;
+                own.set_vehicleSettings(vehicle_settings(entity.id(), gun))?;
             }
             show_shot(app, avatar_key, *entity, &shot)?;
         }
@@ -953,7 +956,7 @@ fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<
 }
 
 /// Give the client its gun as it is: its shells and how many are left, in its magazine
-/// too, the shells it loads, and its reload, unless firing a burst.
+/// too, the shells it loads, and its reload if any.
 fn show_gun(app: &mut base::App, own: ComponentKey<OwnVehicle>, entity_id: EntityId, gun: &Gun, now: f64) -> io::Result<()> {
     let mut own = app.component(own)?;
     own.set_vehicleAmmoList(gun_ammo_list(gun))?;

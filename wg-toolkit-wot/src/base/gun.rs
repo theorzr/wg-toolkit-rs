@@ -154,7 +154,8 @@ impl Gun {
     /// left: the first of a burst, which [`Self::fire_burst`] fires the rest of. Once
     /// they are fired, the gun waits for its magazine's interval while it has some left,
     /// else reloads whole with its next shell, or another one once there is none of it
-    /// left.
+    /// left. That reload starts now, the burst's other shells in it, for the client to
+    /// know when it can fire again as soon as it fires.
     pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         self.settle(now);
@@ -166,7 +167,10 @@ impl Gun {
         let mut shot = self.shoot(start, direction, dispersion, terrain, vehicles)?;
         shot.burst = Some(burst);
         if burst > 1 {
+            let burst_time = (burst - 1) as f32 * self.magazine.burst_interval;
+            let wait = if self.magazine_shells > burst - 1 { self.magazine.interval } else { self.reload_time };
             self.burst_shells = Some((burst - 1, now + f64::from(self.magazine.burst_interval)));
+            self.start_reload(now, burst_time + wait);
         } else {
             self.after_shots(now);
         }
@@ -175,8 +179,8 @@ impl Gun {
     }
 
     /// Fire the next shell of the burst going on, if it is due by game time `now`, as
-    /// [`Self::fire`] does. Once the burst is over, the gun waits or reloads as after
-    /// a single shot.
+    /// [`Self::fire`] does, whose reload goes on. Once the burst empties the magazine,
+    /// the gun loads its next shell.
     pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         let (left, at) = self.burst_shells.filter(|&(_, at)| now >= at)?;
@@ -190,7 +194,9 @@ impl Gun {
             self.burst_shells = Some((left - 1, at + f64::from(self.magazine.burst_interval)));
         } else {
             self.burst_shells = None;
-            self.after_shots(now);
+            if self.magazine_shells == 0 {
+                self.load_next();
+            }
         }
         Some(shot)
 
@@ -550,20 +556,21 @@ mod tests {
         let mut gun = Gun::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(6, 3));
         let first = fire(&mut gun, 0.0).unwrap();
         assert_eq!(first.burst, Some(3));
-        assert_eq!(gun.reload(), None);
+        // The burst's other shells, then the magazine's interval.
+        assert_eq!(gun.reload(), Some(Reload { base_time: 3.0, end: 3.0 }));
         assert!(fire(&mut gun, 0.1).is_none());
         assert!(gun.fire_burst(0.4, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
         let second = gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert_eq!((second.burst, second.id), (None, first.id + 1));
         gun.fire_burst(1.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert!(gun.fire_burst(1.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
-        assert_eq!(gun.reload(), Some(Reload { base_time: 2.0, end: 3.0 }));
+        assert_eq!(gun.reload(), Some(Reload { base_time: 3.0, end: 3.0 }));
         assert_eq!(magazine_shells(&gun), [3]);
         // The second burst empties the magazine.
         fire(&mut gun, 3.0).unwrap();
         gun.fire_burst(3.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         gun.fire_burst(4.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
-        assert_eq!(gun.reload(), Some(Reload { base_time: 10.0, end: 14.0 }));
+        assert_eq!(gun.reload(), Some(Reload { base_time: 11.0, end: 14.0 }));
     }
 
     #[test]
@@ -572,7 +579,7 @@ mod tests {
         assert_eq!(magazine_shells(&gun), [2]);
         assert_eq!(fire(&mut gun, 0.0).unwrap().burst, Some(2));
         gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
-        assert_eq!(gun.reload(), Some(Reload { base_time: 10.0, end: 10.5 }));
+        assert_eq!(gun.reload(), Some(Reload { base_time: 10.5, end: 10.5 }));
     }
 
     #[test]
