@@ -168,6 +168,9 @@ pub struct AimingDef {
     pub dispersion_after_shot: f32,
     pub dispersion_movement: f32,
     pub dispersion_rotation: f32,
+    /// The turret's yaw limits relative to the hull, in radians, positive rightward:
+    /// None when it turns all around, as `turretYawLimits` has it within ±179°.
+    pub yaw_limits: Option<(f32, f32)>,
     /// The gun's pitch limits, in radians, positive downward: the highest elevation
     /// and the deepest depression for each turret yaw.
     pub min_pitch: PitchCurve,
@@ -437,6 +440,15 @@ impl VehicleDef {
             .find_map(|gun| gun.get_child_element("pitchLimits")?.get_child_string(limit))
             .and_then(PitchCurve::parse)
             .ok_or_else(|| invalid(format!("no valid {limit} for gun {gun_name}")));
+        // As `_readGunLocals` reads them, in degrees.
+        let yaw_limits = [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| gun.get_child_string("turretYawLimits"))
+            .map(|limits| match limits.split_whitespace().map(str::parse::<f32>).collect::<Result<Vec<_>, _>>().as_deref() {
+                Ok(&[min, max]) if min <= max => Ok((min > -179.0 || max < 179.0).then(|| (min.to_radians(), max.to_radians()))),
+                _ => Err(invalid(format!("invalid turretYawLimits for gun {gun_name}: {limits}"))),
+            })
+            .transpose()?
+            .flatten();
         // The first shell's flight, scaled as every shell is, see `gun_readers.readShot`.
         let first_shot = gun_def.get_child_element("shots")
             .and_then(|shots| shots.iter_children_all().next())
@@ -455,6 +467,7 @@ impl VehicleDef {
             dispersion_after_shot: gun_float(&["shotDispersionFactors", "afterShot"])?,
             dispersion_movement: chassis_float(&["shotDispersionFactors", "vehicleMovement"])? * 3.6,
             dispersion_rotation: chassis_float(&["shotDispersionFactors", "vehicleRotation"])?.to_degrees(),
+            yaw_limits,
             min_pitch: pitch_curve("minPitch")?,
             max_pitch: pitch_curve("maxPitch")?,
             dispersion_angle: (gun_float(&["shotDispersionRadius"])? / 100.0).atan(),
@@ -599,4 +612,29 @@ pub(crate) fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element
 
 pub(crate) fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: a turret turning all around,
+    /// and a casemate's few degrees either way.
+    #[test]
+    fn real_turret_yaw_limits() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let chieftain = VehicleDef::load(&fs, "uk", "GB98_T95_FV4201_Chieftain").unwrap();
+        assert_eq!(chieftain.aiming.yaw_limits, None);
+        let jagdtiger = VehicleDef::load(&fs, "germany", "G44_JagdTiger").unwrap();
+        let (min, max) = jagdtiger.aiming.yaw_limits.unwrap();
+        assert!(min < 0.0 && max > 0.0 && max - min < 30f32.to_radians(), "{:?}", (min.to_degrees(), max.to_degrees()));
+        // A turret, but not all around.
+        let fv4005 = VehicleDef::load(&fs, "uk", "GB83_FV4005").unwrap();
+        let (min, max) = fv4005.aiming.yaw_limits.unwrap();
+        assert!((min.to_degrees() + 90.0).abs() < 1e-3 && (max.to_degrees() - 90.0).abs() < 1e-3, "{:?}", (min, max));
+    }
+
 }

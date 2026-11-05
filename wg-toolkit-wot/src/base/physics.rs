@@ -298,8 +298,12 @@ impl Turret {
             }
             Aim::Angles(yaw, pitch) => (yaw, pitch),
         };
+        // Within its limits it only turns inside them, never round the back.
         let max_yaw_step = self.aiming.turret_rotation_speed * dt;
-        let yaw_step = wrap_angle(yaw - self.yaw).clamp(-max_yaw_step, max_yaw_step);
+        let yaw_step = match self.aiming.yaw_limits {
+            Some((min, max)) => wrap_angle(yaw).clamp(min, max) - self.yaw,
+            None => wrap_angle(yaw - self.yaw),
+        }.clamp(-max_yaw_step, max_yaw_step);
         self.yaw = wrap_angle(self.yaw + yaw_step);
         self.yaw_rate = yaw_step.abs() / dt;
         let pitch = pitch.clamp(self.aiming.min_pitch.at(self.yaw), self.aiming.max_pitch.at(self.yaw));
@@ -455,6 +459,7 @@ pub(super) mod tests {
             dispersion_after_shot: 4.0,
             dispersion_movement: 0.14 * 3.6,
             dispersion_rotation: 0.14f32.to_degrees(),
+            yaw_limits: None,
             min_pitch: curve(&[(0.0, -20.0), (1.0, -20.0)]),
             // 10° of depression at the front, -1° over the engine deck at the back.
             max_pitch: curve(&[(0.0, 10.0), (0.4, 10.0), (0.45, -1.0), (0.55, -1.0), (0.6, 10.0), (1.0, 10.0)]),
@@ -567,6 +572,30 @@ pub(super) mod tests {
         assert_eq!(position, Vec3::new(0.0, GUN_HEIGHT, 0.0));
         assert!((velocity - Vec3::new(0.0, 0.0, 716.0)).length() < 1e-3);
         assert!((angle - 0.0035 * turret.dispersion_factor).abs() < 1e-6);
+    }
+
+    #[test]
+    fn turret_stays_within_its_yaw_limits() {
+        let hull = chieftain();
+        let mut turret = Turret::new(AimingDef { yaw_limits: Some((-10f32.to_radians(), 12f32.to_radians())), ..chieftain_aiming() });
+        // Behind on the right: as far right as it goes.
+        turret.track(Vec3::new(10.0, GUN_HEIGHT, -100.0));
+        for _ in 0..10 {
+            turret.step(1.0, &hull);
+        }
+        assert!((turret.yaw - 12f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
+        // Behind on the left: back across the front, not round the back.
+        turret.track(Vec3::new(-10.0, GUN_HEIGHT, -100.0));
+        turret.step(0.5, &hull);
+        assert!((turret.yaw - (12.0 - 15.0f32).to_radians()).abs() < 1e-5, "{}", turret.yaw);
+        for _ in 0..10 {
+            turret.step(1.0, &hull);
+        }
+        assert!((turret.yaw + 10f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
+        // The client's angles too.
+        turret.hold(1.0, 0.0);
+        turret.step(1.0, &hull);
+        assert!((turret.yaw - 12f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
     }
 
     #[test]
