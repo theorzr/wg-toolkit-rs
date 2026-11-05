@@ -40,7 +40,7 @@ use crate::wot::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
     CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::wot::item_defs::{self, AimingDef, ShotDef, VehicleDef};
+use crate::wot::item_defs::{self, AimingDef, MagazineDef, ShotDef, VehicleDef};
 use crate::{init_tracing, load_script, AppBaseArgs, CliResult};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
 use crate::wot::collision::VehicleCollision;
@@ -107,7 +107,7 @@ impl BaseThread {
         let account = AccountData::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
-            info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), "Gave the account a vehicle: {}", vehicle.name);
+            info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, "Gave the account a vehicle: {}", vehicle.name);
         }
 
         let required_version = required_version(&fs)
@@ -396,6 +396,7 @@ impl BaseThread {
             ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
             shots: def.shots,
             aiming: def.aiming,
+            magazine: def.magazine,
             collision: def.collision,
         })
     }
@@ -708,6 +709,7 @@ struct VehicleConfig {
     setup_indexes: pickle::Value,
     limits: MotionLimits,
     aiming: AimingDef,
+    magazine: MagazineDef,
     /// Its shells, by integer descriptor, and how many of each.
     ammo: Vec<(i64, u32)>,
     /// How its gun fires each of its shells, in the order of `ammo`.
@@ -933,11 +935,14 @@ fn targeting_info(config: &VehicleConfig) -> TargetingInfo {
     }
 }
 
-/// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, and whether the hull
-/// turns with the turret in sniper mode.
+/// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, whether the hull
+/// turns with the turret in sniper mode, reloading a magazine that is not full, and
+/// emptying a full one for the mechanics that do.
 const SETTING_CURRENT_SHELLS: u8 = 0;
 const SETTING_NEXT_SHELLS: u8 = 1;
 const SETTING_AUTOROTATION: u8 = 2;
+const SETTING_RELOAD_PARTIAL_CLIP: u8 = 17;
+const SETTING_RESET_FULL_CLIP: u8 = 18;
 
 /// The `vehicleSettings` of a vehicle with this gun: its shell loaded, then the next one.
 fn vehicle_settings(entity_id: EntityId, gun: &Gun) -> Vec<VehicleSetting> {
@@ -959,9 +964,9 @@ fn vehicle_health_info(entity_id: EntityId, health: i64) -> VehicleHealthInfo {
     }
 }
 
-/// The `vehicleAmmoList` of a vehicle with these shells, by integer descriptor and
-/// count, and the standard consumables.
-fn ammo_list(shells: impl Iterator<Item = (i64, u32)>) -> Vec<VehicleAmmo> {
+/// The `vehicleAmmoList` of a vehicle with these shells, by integer descriptor, count
+/// and count in the magazine, and the standard consumables.
+fn ammo_list(shells: impl Iterator<Item = (i64, u32, u32)>) -> Vec<VehicleAmmo> {
     let ammo = |compact_descr: i64, quantity: u16, in_clip: u16, stage: u16, total_time: i16| VehicleAmmo {
         compactDescr: compact_descr as i32,
         endTime: 0.0,
@@ -972,7 +977,7 @@ fn ammo_list(shells: impl Iterator<Item = (i64, u32)>) -> Vec<VehicleAmmo> {
         totalTime: total_time,
     };
     shells
-        .map(|(cd, count)| ammo(cd, count as u16, 0, 0, 0))
+        .map(|(cd, count, in_magazine)| ammo(cd, count as u16, in_magazine as u16, 0, 0))
         .chain(CONSUMABLES.iter().map(|&cd| ammo(cd, u16::MAX, 3, 3, 60)))
         .collect()
 }

@@ -29,7 +29,8 @@ use crate::wot::items::VehicleDescr;
 use super::{
     ammo_list, avatar_cell_data, gun_reload_time, invalid_data, targeting_info, vehicle_health_info,
     vehicle_settings, BaseThread, VehicleConfig, PLAYER_ACCOUNT_DBID, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
-    NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, TICK,
+    NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
+    SETTING_RESET_FULL_CLIP, TICK,
 };
 use super::gun::{Gun, HitTarget, Landing, Shot};
 use super::physics::{MotionLimits, Vehicle};
@@ -245,6 +246,7 @@ impl BaseThread {
             engine_gear: None,
             collision: config.collision.clone(),
             gun: Gun::new(config.shots.iter().cloned().zip(config.ammo.iter().map(|&(_, count)| count)).collect(), config.aiming.reload_time)
+                .with_magazine(config.magazine)
                 .with_quick_change_factor(QUICK_SHELL_CHANGER_FACTOR),
             shots: Vec::new(),
             health: config.max_health.into(),
@@ -260,7 +262,7 @@ impl BaseThread {
         own.set_targetingInfo(Some(targeting_info(config)))?;
         // What the real server sends right after, as updates: the ammunition, the
         // shells loaded, the reload and the health.
-        own.set_vehicleAmmoList(ammo_list(config.ammo.iter().copied()))?;
+        own.set_vehicleAmmoList(gun_ammo_list(&driven.gun))?;
         own.set_vehicleSettings(vehicle_settings(entity_id, &driven.gun))?;
         own.set_vehicleGunReloadTime(gun_reload_time(config.aiming.reload_time, 0.0, 0.0))?;
         own.set_vehicleHealthInfo(vehicle_health_info(entity_id, config.max_health.into()))?;
@@ -293,7 +295,7 @@ impl BaseThread {
         let def = VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?;
         let limits = MotionLimits { speed_forward: def.speed_forward, speed_backward: def.speed_backward, rotation_speed: def.rotation_speed };
         let ammo = def.shots.iter().cloned().zip(def.default_ammo().into_iter().map(|(_, count)| count)).collect();
-        let gun = Gun::new(ammo, def.aiming.reload_time).with_shot_ids_from(TARGET_FIRST_SHOT_ID);
+        let gun = Gun::new(ammo, def.aiming.reload_time).with_magazine(def.magazine).with_shot_ids_from(TARGET_FIRST_SHOT_ID);
         let driven = Vehicle::new(position, direction, limits, def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
 
@@ -327,31 +329,26 @@ impl BaseThread {
 
     }
 
-    /// Fire the client's gun, if loaded: the shell's tracer and the gun's effects, then
-    /// one shell fewer, the shell it loads next and the reload. Where the shell lands
+    /// Fire the client's gun, if loaded: the shell's tracer and the gun's effects, of its
+    /// whole burst, then one shell fewer, the shell it loads next and the reload, once
+    /// the burst's other shells are fired too, see [`Self::step`]. Where the shell lands
     /// follows with [`Self::land_shot`].
     fn shoot(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let now = battle.game_time();
-        let vehicles: Vec<_> = battle.target.iter()
-            .filter(|target| target.health > 0)
-            .filter_map(|target| Some(hit_target(target.entity_id, &target.bot.as_ref()?.vehicle, target.collision.as_ref()?)))
-            .collect();
+        let vehicles = hit_targets(&battle.target);
         let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
         let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, Some(&self.terrain), &vehicles) else {
             debug!(%client, "Refused a shot: not loaded, or out of shells");
             return Ok(());
         };
-        info!(%client, shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+        info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
         driven.shots.push((now + f64::from(shot.flight_time), driven.entity.id(), shot.clone()));
 
         if let Some(own) = driven.own_vehicle {
-            let mut own = self.app.component(own)?;
-            own.set_vehicleAmmoList(ammo_list(driven.gun.ammo.iter().map(|(def, count)| (def.compact_descr.to_int(), *count))))?;
-            own.set_vehicleSettings(vehicle_settings(driven.entity.id(), &driven.gun))?;
-            own.set_vehicleGunReloadTime(reload_time(&driven.gun))?;
+            show_gun(&mut self.app, own, driven.entity.id(), &driven.gun, now)?;
         }
         let vehicle = driven.entity;
 
@@ -484,8 +481,8 @@ impl BaseThread {
 
     /// The client changes one of its vehicle's settings, by `VEHICLE_SETTING` code: the
     /// shell its gun loads next, or the one it is loaded with, which the gun then
-    /// reloads. The client predicts the change, so it is given the settings back even
-    /// when they don't change, to undo what it predicted then.
+    /// reloads, or it reloads its magazine. The client predicts the change, so it is
+    /// given the gun back even when it doesn't change, to undo what it predicted then.
     fn change_setting(&mut self, client: ClientKey, code: u8, value: i32) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
@@ -508,8 +505,14 @@ impl BaseThread {
                 info!(%client, reloads, "Changed the loaded shell: {value}");
                 reloads
             }
-            // Only the client turns the hull in sniper mode here.
-            SETTING_AUTOROTATION => return Ok(()),
+            SETTING_RELOAD_PARTIAL_CLIP => {
+                let reloads = gun.reload_magazine(now);
+                info!(%client, reloads, "Reloaded the magazine");
+                reloads
+            }
+            // Only the client turns the hull in sniper mode here, and no gun empties its
+            // full magazine on demand.
+            SETTING_AUTOROTATION | SETTING_RESET_FULL_CLIP => return Ok(()),
             _ => {
                 debug!(%client, "Ignored a setting: {code} = {value}");
                 return Ok(());
@@ -517,17 +520,17 @@ impl BaseThread {
         };
 
         let Some(own) = driven.own_vehicle else { return Ok(()) };
-        let mut own = self.app.component(own)?;
-        own.set_vehicleSettings(vehicle_settings(driven.entity.id(), &driven.gun))?;
         if reloads {
-            own.set_vehicleGunReloadTime(reload_time(&driven.gun))?;
+            show_gun(&mut self.app, own, driven.entity.id(), &driven.gun, now)
+        } else {
+            self.app.component(own)?.set_vehicleSettings(vehicle_settings(driven.entity.id(), &driven.gun))
         }
-        Ok(())
 
     }
 
     /// A cell method of its avatar the client called.
     fn avatar_cell_call(&mut self, client: ClientKey, call: AvatarCell) {
+        
         match call {
             AvatarCell::VehicleShoot {} => {
                 if let Err(e) = self.shoot(client) {
@@ -543,26 +546,32 @@ impl BaseThread {
             }
             _ => {}
         }
+
         let Some(driven) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()).and_then(|battle| battle.driven.as_mut()) else {
             warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
             return;
         };
+
         match call {
-            AvatarCell::VehicleShoot {} | AvatarCell::VehicleChangeSetting { .. } => unreachable!(),
+            AvatarCell::VehicleShoot {} | 
+            AvatarCell::VehicleChangeSetting { .. } => unreachable!(),
             AvatarCell::VehicleMoveWith { flags } => {
                 info!(%client, "Changed the movement flags: {flags:#04x}");
                 driven.vehicle.hull.flags = flags;
             }
             AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
+
     }
 
     /// A cell method of its vehicle the client called.
     fn vehicle_cell_call(&mut self, client: ClientKey, call: VehicleCell) {
+        
         let Some(driven) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()).and_then(|battle| battle.driven.as_mut()) else {
             warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
             return;
         };
+
         match call {
             VehicleCell::TrackRelativePointWithGun { point } => {
                 let Vehicle { hull, turret } = &mut driven.vehicle;
@@ -571,27 +580,43 @@ impl BaseThread {
             }
             VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
+        
     }
 
     /// Step a battle by a tick: its vehicles move, the player's on the client's controls
-    /// and the target on its own, which aims at the player and may fire on them.
+    /// and fires the rest of its bursts, and the target on its own, which aims at the
+    /// player and may fire on them.
     fn step(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Self { app, battle_clients, terrain, .. } = self;
         let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let now = battle.game_time();
+        let targets = hit_targets(&battle.target);
         let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let avatar_key = battle.avatar;
 
-        let DrivenVehicle { entity, vehicle, own_vehicle, gun_marker, engine_mode, engine_gear, gun, .. } = driven;
+        let DrivenVehicle { entity, vehicle, own_vehicle, gun_marker, engine_mode, engine_gear, gun, shots, .. } = driven;
         vehicle.step(TICK.as_secs_f32(), Some(&*terrain));
         let Vehicle { hull, turret } = vehicle;
 
+        // Its magazine full again, and loaded: the shells first, as the client expects.
         if let (Some(own), true) = (*own_vehicle, gun.take_loaded(now)) {
-            app.component(own)?.set_vehicleGunReloadTime(gun_reload_time(gun.reload_time(), 0.0, 0.0))?;
+            let mut own = app.component(own)?;
+            if gun.has_magazine() {
+                own.set_vehicleAmmoList(gun_ammo_list(gun))?;
+            }
+            own.set_vehicleGunReloadTime(reload_time(gun, now))?;
+        }
+        let (position, velocity, dispersion) = turret.gun_marker(hull);
+        if let Some(shot) = gun.fire_burst(now, position, velocity, dispersion, Some(&*terrain), &targets) {
+            info!(%client, shot = shot.id, "Fired a shell of the burst from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+            shots.push((now + f64::from(shot.flight_time), entity.id(), shot.clone()));
+            if let Some(own) = *own_vehicle {
+                show_gun(app, own, entity.id(), gun, now)?;
+            }
+            show_shot(app, avatar_key, *entity, &shot)?;
         }
         if let Some(marker) = *gun_marker {
-            let (position, velocity, dispersion) = turret.gun_marker(hull);
             app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion }))?;
         }
 
@@ -650,9 +675,12 @@ impl BaseThread {
         let enemy_hull = enemy.transforms[VehiclePart::Hull as usize].translation.into();
         let on_target = bot.step(TICK.as_secs_f32(), Some(&*terrain), enemy_hull, TARGET_DRIVES);
         let mut bot_shot = None;
-        if TARGET_FIRES && on_target && driven.health > 0 {
+        if TARGET_FIRES && driven.health > 0 {
             let (position, velocity, dispersion) = bot.vehicle.turret.gun_marker(&bot.vehicle.hull);
-            if let Some(shot) = bot.gun.fire(now, position, velocity, dispersion, Some(&*terrain), &[enemy]) {
+            let targets = [enemy];
+            let shot = bot.gun.fire_burst(now, position, velocity, dispersion, Some(&*terrain), &targets)
+                .or_else(|| on_target.then(|| bot.gun.fire(now, position, velocity, dispersion, Some(&*terrain), &targets)).flatten());
+            if let Some(shot) = shot {
                 info!(%client, shot = shot.id, "Fired a shell from the target, landing at {:?} in {:.2} s", shot.end, shot.flight_time);
                 driven.shots.push((now + f64::from(shot.flight_time), target_entity.id(), shot.clone()));
                 bot_shot = Some(shot);
@@ -917,8 +945,28 @@ fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<
         0,
         0,
     )?;
-    // One shell from the only gun.
-    app.entity(shooter)?.showShooting(1, 0, def.kind_index)
+    // Its whole burst from the only gun, on its first shell.
+    match shot.burst {
+        Some(burst) => app.entity(shooter)?.showShooting(burst.min(u8::MAX.into()) as u8, 0, def.kind_index),
+        None => Ok(()),
+    }
+}
+
+/// Give the client its gun as it is: its shells and how many are left, in its magazine
+/// too, the shells it loads, and its reload, unless firing a burst.
+fn show_gun(app: &mut base::App, own: ComponentKey<OwnVehicle>, entity_id: EntityId, gun: &Gun, now: f64) -> io::Result<()> {
+    let mut own = app.component(own)?;
+    own.set_vehicleAmmoList(gun_ammo_list(gun))?;
+    own.set_vehicleSettings(vehicle_settings(entity_id, gun))?;
+    if gun.reload().is_some() {
+        own.set_vehicleGunReloadTime(reload_time(gun, now))?;
+    }
+    Ok(())
+}
+
+/// The `vehicleAmmoList` of a gun.
+fn gun_ammo_list(gun: &Gun) -> Vec<schema::VehicleAmmo> {
+    ammo_list(gun.ammo_state().map(|(def, count, in_magazine)| (def.compact_descr.to_int(), count, in_magazine)))
 }
 
 /// Stop the gun where our turret is rather than at the client's angles, which its own
@@ -929,14 +977,23 @@ fn hold_gun(client: ClientKey, driven: &mut DrivenVehicle, yaw: f32, pitch: f32)
     turret.hold(turret.yaw, turret.pitch);
 }
 
-/// The `vehicleGunReloadTime` of a gun: the reload going on, else its whole reload's
-/// length once loaded. The real server gives a quick shell change as a whole reload
-/// first, then as its share, and back on loaded; the share alone is enough here.
-fn reload_time(gun: &Gun) -> schema::GunReloadTime {
+/// The `vehicleGunReloadTime` of a gun at game time `now`: the reload going on, else
+/// its whole reload's length once loaded. The real server gives a quick shell change as
+/// a whole reload first, then as its share, and back on loaded; the share alone is
+/// enough here.
+fn reload_time(gun: &Gun, now: f64) -> schema::GunReloadTime {
     match gun.reload() {
-        Some((time, end)) => gun_reload_time(time, end as f32, time),
+        Some(reload) => gun_reload_time(reload.base_time, reload.end as f32, (reload.end - now).max(0.0) as f32),
         None => gun_reload_time(gun.reload_time(), 0.0, 0.0),
     }
+}
+
+/// The vehicles a battle's shells can hit, besides the player's: its target, alive.
+fn hit_targets(target: &Option<Target>) -> Vec<HitTarget> {
+    target.iter()
+        .filter(|target| target.health > 0)
+        .filter_map(|target| Some(hit_target(target.entity_id, &target.bot.as_ref()?.vehicle, target.collision.as_ref()?)))
+        .collect()
 }
 
 /// A vehicle as shells hit it: its collision models where its parts are.

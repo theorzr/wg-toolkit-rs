@@ -47,6 +47,7 @@ pub struct VehicleDef {
     /// How fast the default chassis turns the vehicle, in rad/s.
     pub rotation_speed: f32,
     pub aiming: AimingDef,
+    pub magazine: MagazineDef,
     /// The default modules' collision models.
     pub collision: Arc<VehicleCollision>,
 }
@@ -111,6 +112,28 @@ pub struct AimingDef {
     pub turret_position: Vec3,
     /// Where the gun pitches, from the turret's pivot, turning with it.
     pub gun_position: Vec3,
+}
+
+/// How the default gun's shells come, beyond one per reload: from a magazine (`clip` to
+/// the game), in bursts, as `_readGunClip` and `_readGunBurst` read them, its own section for the vehicle if
+/// it has one, else the shared gun's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MagazineDef {
+    /// The shells in a full magazine, 1 without one: the gun reloads it whole once
+    /// empty, in its reload time.
+    pub size: u32,
+    /// Seconds between two shots of the magazine, from its `rate` per minute.
+    pub interval: f32,
+    /// The shells the gun fires each time it is fired, 1 without bursts.
+    pub burst_size: u32,
+    /// Seconds between two shells of a burst, from its `rate` per minute.
+    pub burst_interval: f32,
+}
+
+impl Default for MagazineDef {
+    fn default() -> Self {
+        Self { size: 1, interval: 0.0, burst_size: 1, burst_interval: 0.0 }
+    }
 }
 
 impl AimingDef {
@@ -393,7 +416,21 @@ impl VehicleDef {
             extra: Vec::new(),
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming, collision })
+        // A count of 1, the default, has no interval.
+        let section = |name: &str| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| gun.get_child_element(name))
+            .map(|section| -> io::Result<(u32, f32)> {
+                let count = section.get_child_integer("count").unwrap_or(1).max(1) as u32;
+                let rate = section.get_child_float("rate").filter(|&rate| rate > 0.0)
+                    .ok_or_else(|| invalid(format!("gun {gun_name} has no positive {name}/rate")))?;
+                Ok((count, if count > 1 { 60.0 / rate } else { 0.0 }))
+            })
+            .transpose();
+        let (size, interval) = section("clip")?.unwrap_or((1, 0.0));
+        let (burst_size, burst_interval) = section("burst")?.unwrap_or((1, 0.0));
+        let magazine = MagazineDef { size, interval, burst_size, burst_interval };
+
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming, magazine, collision })
 
     }
 
