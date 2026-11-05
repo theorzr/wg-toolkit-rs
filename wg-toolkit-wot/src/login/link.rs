@@ -60,7 +60,7 @@ impl LoginLinkListener {
     /// coming as an event, see [`Self::poll`].
     pub fn host_client(&mut self, client: ClientHost) {
         if self.hostings.values().any(|hosting| hosting.client.addr == client.addr) {
-            debug!(addr = %client.addr, "The client is already being hosted");
+            debug!(addr = %client.addr, "Ignored a client already being hosted");
             return;
         }
         let mut links = self.loads.keys().copied().collect::<Vec<_>>();
@@ -83,7 +83,7 @@ impl LoginLinkListener {
 
         for request_id in expired {
             let hosting = self.hostings.remove(&request_id).unwrap();
-            debug!(link = ?hosting.link, "A base app did not answer in time");
+            debug!(link = ?hosting.link, addr = %hosting.client.addr, "Failed to host a client: no answer in time");
             self.ask_next(hosting.client, hosting.links);
         }
 
@@ -102,7 +102,7 @@ impl LoginLinkListener {
 
             let message = Message::ClientHost { request_id, client: client.clone() };
             if let Err(e) = self.link_listener.send(link, &message) {
-                debug!(?link, "Failed to send to a base app: {e}");
+                debug!(?link, "Failed to ask a base app to host a client: {e}");
                 continue;
             }
 
@@ -121,7 +121,7 @@ impl LoginLinkListener {
             LinkEvent::Linked(_) => {}
             LinkEvent::Message(link, Message::BaseStatus { load }) => {
                 if self.loads.insert(link, load).is_none() {
-                    info!(?link, load, "Base app registered");
+                    info!(?link, load, "Registered a base app");
                 }
             }
             LinkEvent::Message(link, Message::BaseStop) | LinkEvent::Unlinked(link) => {
@@ -136,7 +136,7 @@ impl LoginLinkListener {
                 }
             }
             LinkEvent::Message(link, message) => {
-                warn!(?link, "Unexpected message from a base app: {message:?}");
+                warn!(?link, "Received an unexpected message from a base app: {message:?}");
             }
         }
     }
@@ -146,7 +146,7 @@ impl LoginLinkListener {
     fn unregister(&mut self, link: LinkId) {
 
         if self.loads.remove(&link).is_some() {
-            info!(?link, "Base app unregistered");
+            info!(?link, "Unregistered a base app");
         }
 
         let request_ids = self.hostings.iter()

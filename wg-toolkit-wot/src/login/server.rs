@@ -60,7 +60,7 @@ impl LoginThread {
         info!("Running on: {}", self.app.addr().unwrap());
 
         if self.app.has_encryption() {
-            info!("Encryption enabled");
+            info!("Enabled encryption");
         }
 
         loop {
@@ -69,11 +69,11 @@ impl LoginThread {
                 let addr = hosted.client.addr;
                 match hosted.base_app {
                     Some(base_app) => {
-                        info!(%addr, %base_app, "Login success, as {}", hosted.client.name);
+                        info!(%addr, %base_app, name = %hosted.client.name, "Logged in, handed to a base app");
                         self.app.answer_login_success(addr, base_app, hosted.client.login_key, String::new());
                     }
                     None => {
-                        warn!(%addr, "No base app to hand the client to");
+                        warn!(%addr, "Refused a login: no base app to hand the client to");
                         self.app.answer_login_error(addr, LoginError::NoBaseApp, String::new());
                     }
                 }
@@ -83,24 +83,24 @@ impl LoginThread {
                 Event::Timeout => {}
                 Event::IoError(error) => {
                     if let Some(addr) = error.addr {
-                        warn!(%addr, "Error: {}", error.error);
+                        warn!(%addr, "Failed to talk with a client: {}", error.error);
                     } else {
-                        warn!("Error: {}", error.error);
+                        warn!("Failed to use the socket: {}", error.error);
                     }
                 }
                 Event::Ping(ping) => {
-                    info!(addr = %ping.addr, "Ping-Pong: {:?}", ping.latency);
+                    info!(addr = %ping.addr, latency = ?ping.latency, "Answered a ping");
                 }
                 Event::Login(login) => {
 
                     if !*self.login_challenges.entry(login.addr).or_default() {
-                        info!(addr = %login.addr, "Login pending, sending challenge");
+                        info!(addr = %login.addr, "Sent a login challenge");
                         self.app.answer_login_challenge(login.addr);
                     } else {
 
                         // Answered once a base app hosts the client: it knows of the
                         // client before the client knows of it.
-                        info!(addr = %login.addr, "Login accepted, handing the client to a base app");
+                        info!(addr = %login.addr, "Accepted a login, handing the client to a base app");
                         self.link_listener.host_client(ClientHost {
                             login_key: OsRng.next_u32(),
                             addr: login.addr,
@@ -115,7 +115,7 @@ impl LoginThread {
                 
                 }
                 Event::Challenge(challenge) => {
-                    info!(addr = %challenge.addr, "Challenge successful...");
+                    info!(addr = %challenge.addr, "Completed a login challenge");
                     if let Some(completed) = self.login_challenges.get_mut(&challenge.addr) {
                         *completed = true;
                     }

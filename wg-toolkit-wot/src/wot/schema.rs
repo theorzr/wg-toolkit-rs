@@ -107,6 +107,8 @@ entity_schema! {
             fn vehicle_shoot();
             fn vehicle_moveWith(flags: u8);
             fn vehicle_stopTrackingWithGun(yaw: f32, pitch: f32);
+            /// Change one of the vehicle's settings, by `VEHICLE_SETTING` code.
+            fn vehicle_changeSetting(code: u8, value: i32);
             // What the client aims from, so it must turn with the hull, and the engine's
             // RPM.
             ownVehicleAuxPhysicsData: u64,

@@ -61,11 +61,11 @@ impl LoginProxy {
                 match hosted.base_app {
                     // Return the base proxy's address instead of the real one!
                     Some(base_app) => {
-                        info!(%addr, %base_app, "Login success, handed to the base proxy");
+                        info!(%addr, %base_app, "Logged in, handed to a base proxy");
                         self.app.answer_login_success(addr, base_app);
                     }
                     None => {
-                        warn!(%addr, "No base proxy to hand the client to");
+                        warn!(%addr, "Refused a login: no base proxy to hand the client to");
                         self.app.answer_login_error(addr, LoginError::NoBaseApp, String::new());
                     }
                 }
@@ -75,16 +75,16 @@ impl LoginProxy {
                 Event::Timeout => {}
                 Event::IoError(error) => {
                     if let Some(addr) = error.addr {
-                        warn!(%addr, "Error: {}", error.error);
+                        warn!(%addr, "Failed to talk with a client: {}", error.error);
                     } else {
-                        warn!("Error: {}", error.error);
+                        warn!("Failed to use the socket: {}", error.error);
                     }
                 }
                 Event::Ping(ping) => {
-                    info!(addr = %ping.addr, "Ping-Pong: {:?}", ping.latency);
+                    info!(addr = %ping.addr, latency = ?ping.latency, "Answered a ping");
                 }
                 Event::LoginSuccess(success) => {
-                    info!(addr = %success.addr, base_app = %success.base_app, "Login success, handing the client to a base proxy");
+                    info!(addr = %success.addr, real_base_app = %success.base_app, "Logged in on the real login app, handing the client to a base proxy");
                     self.link_listener.host_client(ClientHost {
                         login_key: success.login_key,
                         addr: success.addr,
@@ -94,7 +94,7 @@ impl LoginProxy {
                     });
                 }
                 Event::LoginError(error) => {
-                    info!(addr = %error.addr, "Login error: {:?} ({:?})", error.error, error.data);
+                    warn!(addr = %error.addr, data = ?error.data, "Failed to log in on the real login app: {:?}", error.error);
                 }
             }
 

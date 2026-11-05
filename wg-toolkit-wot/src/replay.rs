@@ -58,8 +58,8 @@ pub fn replay(
     };
 
     let capture = open()?;
-    info!("Replaying packet capture {}, recorded at Unix time {}s",
-        capture_path.display(), capture.start_unix().as_secs());
+    info!(unix_time = capture.start_unix().as_secs(), "Replaying: {}",
+        capture_path.display());
 
     let mut handler = BaseHandler::new(Shared {
         base_app: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
@@ -86,10 +86,10 @@ pub fn replay(
     }
 
     if truncated {
-        warn!("The packet capture ends on an incomplete record, it was not finished properly");
+        warn!("Replayed a capture ending on an incomplete record: it was not finished properly");
     }
     handler.log_census();
-    info!("Replay complete");
+    info!("Replayed the capture");
 
     Ok(())
 

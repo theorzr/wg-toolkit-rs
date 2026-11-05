@@ -248,7 +248,7 @@ impl BaseProxy {
             let capture = CaptureWriter::create(capture_path)
                 .map_err(|e| format!("Failed to create packet capture at {}: {e}", capture_path.display()))?;
             app.set_capture(capture);
-            info!("Capturing base app packets to {}", capture_path.display());
+            info!("Capturing to: {}", capture_path.display());
         }
 
         let handler = BaseHandler::new(Shared {
@@ -301,7 +301,7 @@ impl BaseProxy {
                     self.link = None;
                     return;
                 }
-                LinkEvent::Message((), message) => warn!("Unexpected message from the login proxy: {message:?}"),
+                LinkEvent::Message((), message) => warn!("Received an unexpected message from the login proxy: {message:?}"),
                 LinkEvent::Unlinked(()) => {}
             }
         }
@@ -615,7 +615,7 @@ struct PendingClient {
 /// The client of the login proxy to forward to its real base app, if valid.
 fn pending_client(client: &ClientHost) -> Option<PendingClient> {
     let Some(real_base_app) = client.real_base_app else {
-        warn!(addr = %client.addr, "Handed a client without its real base app");
+        warn!(addr = %client.addr, "Refused a client handed without its real base app");
         return None;
     };
     match Blowfish::new_from_slice(&client.blowfish_key) {
@@ -624,7 +624,7 @@ fn pending_client(client: &ClientHost) -> Option<PendingClient> {
             blowfish: Arc::new(blowfish),
         }),
         Err(_) => {
-            warn!(addr = %client.addr, "Invalid blowfish key handed over: {:?}", client.blowfish_key);
+            warn!(addr = %client.addr, "Refused a client with an invalid blowfish key: {:?}", client.blowfish_key);
             None
         }
     }
@@ -653,9 +653,9 @@ impl BaseHandler {
             proxy::Event::CaptureEnd(_) => {}
             proxy::Event::IoError(error) => {
                 if let Some(addr) = error.addr {
-                    warn!(%addr, "Error: {}", error.error);
+                    warn!(%addr, "Failed to talk with a peer: {}", error.error);
                 } else {
-                    warn!("Error: {}", error.error);
+                    warn!("Failed to use the socket: {}", error.error);
                 }
             }
             proxy::Event::UnknownPeer(unknown) => {
@@ -681,7 +681,7 @@ impl BaseHandler {
     fn accept_peer(&mut self, addr: SocketAddr) -> Option<proxy::PeerConfig> {
 
         if let Some(pending_client) = self.pending_clients.remove(&addr) {
-            info!(%addr, "Forwarding new peer to {}", pending_client.base_app);
+            info!(%addr, real_base_app = %pending_client.base_app, "Forwarding a new peer");
             return Some(proxy::PeerConfig {
                 real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
@@ -693,14 +693,14 @@ impl BaseHandler {
         // expect in advance -- only match by IP, keyed at switch time (see the
         // SwitchBaseApp element handling below).
         if let Some(pending_client) = self.pending_switches.remove(&addr.ip()) {
-            info!(%addr, "Forwarding reconnected peer (post-switch) to {}", pending_client.base_app);
+            info!(%addr, real_base_app = %pending_client.base_app, "Forwarding a peer reconnected after a switch");
             return Some(proxy::PeerConfig {
                 real_addr: SocketAddr::V4(pending_client.base_app),
                 blowfish: Some(pending_client.blowfish),
             });
         }
 
-        warn!(%addr, "Rejected an unknown peer");
+        warn!(%addr, "Refused an unknown peer");
         None
 
     }

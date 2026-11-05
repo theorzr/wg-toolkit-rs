@@ -20,15 +20,17 @@ const FLIGHT_STEP: f32 = 0.005;
 
 #[derive(Debug, Clone)]
 pub struct Gun {
-    /// Each shell the gun fires, and how many are left.
+    /// Each shell the gun fires, and how many are left, the one loaded among them.
     pub ammo: Vec<(ShotDef, u32)>,
-    /// The index in `ammo` of the shell loaded.
-    pub loaded: usize,
+    /// The indices in `ammo` of the shell loaded, and of the shell it loads after.
+    loaded: usize,
+    next: usize,
     reload_time: f32,
-    /// The game time the gun is loaded at.
-    pub ready_at: f64,
-    /// Whether it is reloading, until [`Self::take_loaded`] tells it is done.
-    reloading: bool,
+    /// How long changing the shell of a loaded gun takes, as a share of the reload; it
+    /// takes a whole reload unless within 0 and 1.
+    quick_change_factor: f32,
+    /// The reload going on: how long it takes, and the game time it ends at.
+    reload: Option<(f32, f64)>,
     next_shot_id: i32,
 }
 
@@ -68,25 +70,43 @@ pub struct HitTarget {
 
 impl Gun {
 
-    /// A gun with these shells, loaded with the first one there is, ready to fire.
+    /// A gun with these shells, loaded with the first one there is, then loading it
+    /// again, ready to fire.
     pub fn new(ammo: Vec<(ShotDef, u32)>, reload_time: f32) -> Self {
-        let loaded = ammo.iter().position(|&(_, count)| count > 0).unwrap_or(0);
-        Self { ammo, loaded, reload_time, ready_at: 0.0, reloading: false, next_shot_id: 1 }
+        let loaded = first_left(&ammo).unwrap_or(0);
+        Self { ammo, loaded, next: loaded, reload_time, quick_change_factor: 1.0, reload: None, next_shot_id: 1 }
+    }
+
+    /// The same gun numbering its shots from `first`: the client tells shots apart by
+    /// their id alone, whoever fires them.
+    pub fn with_shot_ids_from(mut self, first: i32) -> Self {
+        self.next_shot_id = first;
+        self
+    }
+
+    /// The same gun changing the shell it is loaded with in this share of its reload,
+    /// see [`Self::change_loaded`].
+    pub fn with_quick_change_factor(mut self, factor: f32) -> Self {
+        self.quick_change_factor = factor;
+        self
     }
 
     /// Fire the loaded shell at game time `now` from `start` toward `direction`, off by a
     /// random angle within `dispersion` radians, if the gun is loaded and has a shell
-    /// left. It then reloads.
+    /// left. It then loads its next shell, or another one once there is none of it left.
     pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
 
-        if now < self.ready_at {
+        if !self.is_loaded(now) {
             return None;
         }
         let (def, count) = self.ammo.get_mut(self.loaded).filter(|(_, count)| *count > 0)?;
         *count -= 1;
         let def = def.clone();
-        self.ready_at = now + f64::from(self.reload_time);
-        self.reloading = true;
+        self.start_reload(now, self.reload_time);
+        if !self.has_left(self.next) {
+            self.next = first_left(&self.ammo).unwrap_or(self.next);
+        }
+        self.loaded = self.next;
 
         let id = self.next_shot_id;
         self.next_shot_id += 1;
@@ -97,27 +117,74 @@ impl Gun {
 
     }
 
-    /// The same gun numbering its shots from `first`: the client tells shots apart by
-    /// their id alone, whoever fires them.
-    pub fn with_shot_ids_from(mut self, first: i32) -> Self {
-        self.next_shot_id = first;
-        self
+    /// Load the shell of this integer descriptor once the gun fires, if it has some
+    /// left: `VEHICLE_SETTING.NEXT_SHELLS`. Whether it does.
+    pub fn select_next(&mut self, compact_descr: i64) -> bool {
+        let Some(index) = self.shell_left(compact_descr) else { return false };
+        self.next = index;
+        true
+    }
+
+    /// Load the shell of this integer descriptor instead of the one loaded, and after it
+    /// too, if it has some left: `VEHICLE_SETTING.CURRENT_SHELLS`. The gun then reloads,
+    /// in its quick change factor of a reload if it was loaded, as captured. Whether it
+    /// reloads.
+    pub fn change_loaded(&mut self, now: f64, compact_descr: i64) -> bool {
+        let Some(index) = self.shell_left(compact_descr) else { return false };
+        self.next = index;
+        if index == self.loaded {
+            return false;
+        }
+        self.loaded = index;
+        let quick = self.is_loaded(now) && self.quick_change_factor > 0.0 && self.quick_change_factor < 1.0;
+        let time = if quick { self.reload_time * self.quick_change_factor } else { self.reload_time };
+        self.start_reload(now, time);
+        true
+    }
+
+    /// The shell loaded, and the shell it loads after.
+    pub fn shells(&self) -> (Option<&ShotDef>, Option<&ShotDef>) {
+        (self.ammo.get(self.loaded).map(|(def, _)| def), self.ammo.get(self.next).map(|(def, _)| def))
+    }
+
+    /// Whether the gun is loaded by game time `now`.
+    pub fn is_loaded(&self, now: f64) -> bool {
+        self.reload.is_none_or(|(_, end)| now >= end)
     }
 
     /// Whether the gun got loaded by game time `now` since last asked.
     pub fn take_loaded(&mut self, now: f64) -> bool {
-        let loaded = self.reloading && now >= self.ready_at;
-        if loaded {
-            self.reloading = false;
-        }
-        loaded
+        self.reload.take_if(|&mut (_, end)| now >= end).is_some()
     }
 
-    /// The reload's length, in seconds.
+    /// The reload going on: how long it takes, and the game time it ends at.
+    pub fn reload(&self) -> Option<(f32, f64)> {
+        self.reload
+    }
+
+    /// The length of a whole reload, in seconds.
     pub fn reload_time(&self) -> f32 {
         self.reload_time
     }
 
+    fn start_reload(&mut self, now: f64, time: f32) {
+        self.reload = Some((time, now + f64::from(time)));
+    }
+
+    fn has_left(&self, index: usize) -> bool {
+        self.ammo.get(index).is_some_and(|&(_, count)| count > 0)
+    }
+
+    /// The index of the shell of this integer descriptor, if the gun has some left.
+    fn shell_left(&self, compact_descr: i64) -> Option<usize> {
+        self.ammo.iter().position(|&(ref def, count)| def.compact_descr.to_int() == compact_descr && count > 0)
+    }
+
+}
+
+/// The index of the first shell there is some left of.
+fn first_left(ammo: &[(ShotDef, u32)]) -> Option<usize> {
+    ammo.iter().position(|&(_, count)| count > 0)
 }
 
 /// A direction off `direction` by an angle within `angle`, uniformly over the cone's
@@ -197,6 +264,51 @@ mod tests {
         assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_some());
         // Out of shells.
         assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+    }
+
+    fn shell_of(id: u16) -> ShotDef {
+        ShotDef { compact_descr: IntCompactDescr { item_type: item_type::SHELL, nation: 5, id }, ..shell() }
+    }
+
+    fn loaded_ids(gun: &Gun) -> (u16, u16) {
+        let (loaded, next) = gun.shells();
+        (loaded.unwrap().compact_descr.id, next.unwrap().compact_descr.id)
+    }
+
+    #[test]
+    fn loads_the_next_shell_after_firing() {
+        let mut gun = Gun::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
+        assert!(gun.select_next(shell_of(2).compact_descr.to_int()));
+        assert_eq!(loaded_ids(&gun), (1, 2));
+        assert_eq!(gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap().def.compact_descr.id, 1);
+        assert_eq!(loaded_ids(&gun), (2, 2));
+        // None of the first left to select.
+        assert!(!gun.select_next(shell_of(1).compact_descr.to_int()));
+        assert_eq!(loaded_ids(&gun), (2, 2));
+    }
+
+    #[test]
+    fn next_shell_falls_back_once_out() {
+        let mut gun = Gun::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
+        gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        assert_eq!(loaded_ids(&gun), (2, 2));
+    }
+
+    #[test]
+    fn changes_the_loaded_shell_quickly_once_loaded() {
+        let mut gun = Gun::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_quick_change_factor(0.25);
+        let second = shell_of(2).compact_descr.to_int();
+        assert!(gun.change_loaded(0.0, second));
+        assert_eq!(loaded_ids(&gun), (2, 2));
+        assert_eq!(gun.reload(), Some((2.5, 2.5)));
+        // Again while reloading: a whole reload.
+        assert!(gun.change_loaded(1.0, shell_of(1).compact_descr.to_int()));
+        assert_eq!(gun.reload(), Some((10.0, 11.0)));
+        assert!(!gun.is_loaded(10.0));
+        assert!(gun.take_loaded(11.0));
+        // Already loaded with it.
+        assert!(!gun.change_loaded(12.0, shell_of(1).compact_descr.to_int()));
+        assert_eq!(gun.reload(), None);
     }
 
     #[test]

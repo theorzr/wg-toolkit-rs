@@ -49,6 +49,7 @@ use crate::wot::item_prices::ItemPrices;
 use crate::wot::items::TankmanDescr;
 
 use physics::MotionLimits;
+use gun::Gun;
 use account::AccountData;
 use battle::Battle;
 use shop::Shop;
@@ -106,7 +107,7 @@ impl BaseThread {
         let account = AccountData::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
-            info!("Account vehicle {}: {:?}, ammunition {:?}", vehicle.name, vehicle.descr, vehicle.default_ammo());
+            info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), "Gave the account a vehicle: {}", vehicle.name);
         }
 
         let required_version = required_version(&fs)
@@ -239,7 +240,7 @@ fn login_client(client: &ClientHost) -> Option<LoginClient> {
             player: Player { name: client.name.clone(), revision: 1 },
         }),
         Err(_) => {
-            warn!(addr = %client.addr, "Invalid blowfish key handed over: {:?}", client.blowfish_key);
+            warn!(addr = %client.addr, "Refused a client with an invalid blowfish key: {:?}", client.blowfish_key);
             None
         }
     }
@@ -275,7 +276,7 @@ impl BaseThread {
                     }
                 }
                 LinkEvent::Message((), Message::BaseStop) => return false,
-                LinkEvent::Message((), message) => warn!("Unexpected message from the login app: {message:?}"),
+                LinkEvent::Message((), message) => warn!("Received an unexpected message from the login app: {message:?}"),
             }
         }
 
@@ -302,7 +303,7 @@ impl BaseThread {
         };
         let account = self.app.create_base_player::<Account>(client, data)?;
         self.accounts.insert(client, account);
-        info!(%client, "Created account {account}");
+        info!(%client, %account, "Created the account");
 
         self.app.entity(account)?.showGUI(show_gui_ctx())?;
 
@@ -322,7 +323,7 @@ impl BaseThread {
         let config = match self.vehicle_config(vehicle_id) {
             Ok(config) => config,
             Err(e) => {
-                warn!(%client, "Failed to read vehicle {vehicle_id}: {e}");
+                warn!(%client, vehicle_id, "Failed to read the vehicle: {e}");
                 return Ok(());
             }
         };
@@ -336,7 +337,7 @@ impl BaseThread {
         self.app.switch_base_app(client, base_app, true)?;
         self.accounts.remove(&client);
         self.players.remove(&client);
-        info!(%client, "Arena created, switching to {base_app}");
+        info!(%client, %base_app, "Created the arena, switching base app");
 
         Ok(())
 
@@ -368,7 +369,7 @@ impl BaseThread {
         let data = encoder.finish()?;
 
         self.app.entity(avatar)?.updateArena(ARENA_UPDATE_PERIOD, Bytes(data))?;
-        info!(%client, "Arena period {period} until {end:.1}");
+        info!(%client, "Changed the arena period: {period}, until {end:.1}");
 
         Ok(())
 
@@ -380,7 +381,7 @@ impl BaseThread {
         let vehicle = self.account.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
         let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
-        info!("Battle vehicle {vehicle_id}: {}, {} health", def.name, def.max_health);
+        info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
         Ok(VehicleConfig {
             descr: vehicle.descr.encode(),
             max_health: def.max_health,
@@ -413,7 +414,7 @@ impl BaseThread {
             self.app.destroy_space(battle.space());
         }
         self.app.switch_base_app(client, base_app, true)?;
-        info!(%client, "Leaving the battle, switching to {base_app}");
+        info!(%client, %base_app, "Left the battle, switching base app");
         Ok(())
     }
 
@@ -427,7 +428,7 @@ impl BaseThread {
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
         }
-        info!(%client, "Created avatar {avatar}");
+        info!(%client, %avatar, "Created the avatar");
 
         // No `SetCellAppExtAddress`, which the captured server sends: given one, the
         // client opens a direct connection to the cell app and waits for a cell login we
@@ -444,7 +445,7 @@ impl BaseThread {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
         };
         self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
-        info!(%client, "Entering space {space} with {}", self.map.geometry);
+        info!(%client, %space, "Entered the space: {}", self.map.geometry);
         self.enter_space(client, avatar, space, name)
 
     }
@@ -527,14 +528,14 @@ impl BaseThread {
             }
             // No chat yet, and the captured server answered nothing.
             AccountBase::ChatCommandFromClient { action, .. } => {
-                debug!(%client, "Ignoring chat action {action}");
+                debug!(%client, "Ignored a chat action: {action}");
             }
             // Accepted without effect, as nothing depends on them yet.
             AccountBase::DoCmdInt2 { request_id, cmd: CMD_SET_ACTIVE_VEH_SEASON, .. }
             | AccountBase::DoCmdStr { request_id, cmd: CMD_RESET_SESSION_STAT, .. } => {
                 self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
             }
-            _ => warn!(%client, "Unanswered request {name}"),
+            _ => warn!(%client, "Left a request unanswered: {name}"),
         }
         Ok(())
     }
@@ -587,9 +588,9 @@ impl BaseThread {
             match self.app.poll_until(next_tick) {
                 base::Event::IoError(error) => {
                     if let Some(addr) = error.addr {
-                        warn!(%addr, "Error: {}", error.error);
+                        warn!(%addr, "Failed to talk with a client: {}", error.error);
                     } else {
-                        warn!("Error: {}", error.error);
+                        warn!("Failed to use the socket: {}", error.error);
                     }
                 }
                 base::Event::Login(login) => {
@@ -598,10 +599,10 @@ impl BaseThread {
                     // account again once it enables its entities.
                     if let Some((ip, blowfish, player)) = self.pending_returns.remove(&login.login_key) {
                         if ip != login.addr.ip() {
-                            info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
+                            warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid address after the switch");
                             continue;
                         }
-                        info!(addr = %login.addr, "Login #{}... Success, back from the battle", login.attempt_num);
+                        info!(addr = %login.addr, attempt = login.attempt_num, "Logged in, back from the battle");
                         if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                             self.send_update_frequency(client);
                             self.players.insert(client, player);
@@ -612,10 +613,10 @@ impl BaseThread {
                     // A client coming back for its battle, see `start_battle`.
                     if let Some((ip, blowfish, player, config)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
-                            info!(addr = %login.addr, "Login #{}... Invalid address after switch", login.attempt_num);
+                            warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid address after the switch");
                             continue;
                         }
-                        info!(addr = %login.addr, "Login #{}... Success, for the battle", login.attempt_num);
+                        info!(addr = %login.addr, attempt = login.attempt_num, "Logged in for the battle");
                         if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                             self.send_update_frequency(client);
                             self.players.insert(client, player);
@@ -625,16 +626,16 @@ impl BaseThread {
                     }
 
                     let Some(client) = self.login_client(login.login_key) else {
-                        info!(addr = %login.addr, "Login #{}... Invalid key", login.attempt_num);
+                        warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid key");
                         continue;
                     };
 
                     if client.addr != login.addr {
-                        info!(addr = %login.addr, "Login #{}... Invalid address", login.attempt_num);
+                        warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid address");
                         continue;
                     }
                     
-                    info!(addr = %login.addr, "Login #{}... Success", login.attempt_num);
+                    info!(addr = %login.addr, attempt = login.attempt_num, "Logged in");
                     let LoginClient { blowfish, player, .. } = client;
                     if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                         self.send_update_frequency(client);
@@ -643,7 +644,7 @@ impl BaseThread {
 
                 }
                 base::Event::EnableEntities(event) => {
-                    info!(client = %event.client, "Entities enabled");
+                    info!(client = %event.client, "Enabled entities");
                     if self.battle_clients.contains_key(&event.client) {
                         if let Err(e) = self.enter_battle(event.client) {
                             warn!(client = %event.client, "Failed to create the avatar: {e}");
@@ -654,10 +655,10 @@ impl BaseThread {
                 }
                 base::Event::BaseMethod(event) => {
                     let MethodCall::Known { name, args, .. } = &event.call else {
-                        warn!(client = %event.client, "Base method call on entity {}: {:?}", event.entity, event.call);
+                        warn!(client = %event.client, entity = %event.entity, "Received an unknown base method call: {:?}", event.call);
                         continue;
                     };
-                    info!(client = %event.client, "Base method call on entity {}: {name} {args:?}", event.entity);
+                    info!(client = %event.client, entity = %event.entity, "Received a base method call: {name} {args:?}");
                     match self.app.decode::<AvatarBase>(event.entity, &event.call) {
                         Some((_, AvatarBase::SetClientReady {})) => {
                             if let Err(e) = self.arena_period(event.client, ARENA_PERIOD_PREBATTLE) {
@@ -675,14 +676,14 @@ impl BaseThread {
                                     warn!(client = %event.client, "Failed to answer {name}: {e}");
                                 }
                             }
-                            None => warn!(client = %event.client, "Unanswered request {name}"),
+                            None => warn!(client = %event.client, "Left a request unanswered: {name}"),
                         }
                     }
                 }
                 base::Event::CellMethod(event) => self.cell_method(event.client, event.entity, &event.call),
                 base::Event::Entered(event) => self.entity_entered(event.client, event.entity),
                 base::Event::AvatarUpdate(event) => {
-                    debug!(client = %event.client, "Avatar update on {:?}: {:?}, direction {:?}", event.vehicle_id, event.position, event.direction);
+                    debug!(client = %event.client, vehicle_id = ?event.vehicle_id, "Received an avatar update: {:?}, direction {:?}", event.position, event.direction);
                 }
                 base::Event::Timeout => {}
 
@@ -932,13 +933,17 @@ fn targeting_info(config: &VehicleConfig) -> TargetingInfo {
     }
 }
 
-/// The `vehicleSettings` of a vehicle just entering the battle: its first shell, loaded
-/// and next.
-fn vehicle_settings(entity_id: EntityId, config: &VehicleConfig) -> Vec<VehicleSetting> {
-    let shell = config.ammo.first().map_or(0, |&(cd, _)| cd as i32);
-    // `VEHICLE_SETTING`: the current shell, then the next one.
-    [0, 1].into_iter()
-        .map(|code| VehicleSetting { code, value: shell, vehicleID: entity_id })
+/// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, and whether the hull
+/// turns with the turret in sniper mode.
+const SETTING_CURRENT_SHELLS: u8 = 0;
+const SETTING_NEXT_SHELLS: u8 = 1;
+const SETTING_AUTOROTATION: u8 = 2;
+
+/// The `vehicleSettings` of a vehicle with this gun: its shell loaded, then the next one.
+fn vehicle_settings(entity_id: EntityId, gun: &Gun) -> Vec<VehicleSetting> {
+    let (loaded, next) = gun.shells();
+    [(SETTING_CURRENT_SHELLS, loaded), (SETTING_NEXT_SHELLS, next)].into_iter()
+        .map(|(code, shell)| VehicleSetting { code, value: shell.map_or(0, |def| def.compact_descr.to_int() as i32), vehicleID: entity_id })
         .collect()
 }
 
