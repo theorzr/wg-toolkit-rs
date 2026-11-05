@@ -59,8 +59,10 @@ pub struct Gun {
 /// A reload going on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Reload {
-    /// The reload the client shows it as part of: a whole reload, between two shots of
-    /// a magazine too, which the client shortens itself to the magazine's interval.
+    /// Its length, in seconds: the magazine's interval between two of its shots. The
+    /// client takes it as `baseTime`, and only takes the reload as just started, and
+    /// lets the player fire again once it ends, when its time left is the same: else it
+    /// holds the next shot for 2 seconds, see `__gunReloadCommandWaitEndTime`.
     pub base_time: f32,
     /// The game time it ends at.
     pub end: f64,
@@ -231,7 +233,7 @@ impl Gun {
 
         self.loaded_shell = index;
         self.magazine_shells = 0;
-        self.start_reload(now, time, time);
+        self.start_reload(now, time);
         true
 
     }
@@ -252,7 +254,7 @@ impl Gun {
 
         self.magazine_shells = 0;
         self.load_next();
-        self.start_reload(now, self.reload_time, self.reload_time);
+        self.start_reload(now, self.reload_time);
         true
 
     }
@@ -342,10 +344,10 @@ impl Gun {
     /// else reload whole with the next shell.
     fn after_shots(&mut self, now: f64) {
         if self.magazine_shells > 0 {
-            self.start_reload(now, self.reload_time, self.magazine.interval);
+            self.start_reload(now, self.magazine.interval);
         } else {
             self.load_next();
-            self.start_reload(now, self.reload_time, self.reload_time);
+            self.start_reload(now, self.reload_time);
         }
     }
 
@@ -357,8 +359,8 @@ impl Gun {
         self.loaded_shell = self.next_shell;
     }
 
-    fn start_reload(&mut self, now: f64, base_time: f32, time: f32) {
-        self.reload = Some(Reload { base_time, end: now + f64::from(time) });
+    fn start_reload(&mut self, now: f64, time: f32) {
+        self.reload = Some(Reload { base_time: time, end: now + f64::from(time) });
     }
 
     fn has_left(&self, index: usize) -> bool {
@@ -518,8 +520,8 @@ mod tests {
         let mut gun = Gun::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_magazine(magazine(3, 1));
         assert_eq!(magazine_shells(&gun), [3, 0]);
         assert_eq!(fire(&mut gun, 0.0).unwrap().burst, Some(1));
-        // The magazine's interval, shown as part of the whole reload.
-        assert_eq!(gun.reload(), Some(Reload { base_time: 10.0, end: 2.0 }));
+        // The magazine's interval, as a reload of its own for the client to fire again.
+        assert_eq!(gun.reload(), Some(Reload { base_time: 2.0, end: 2.0 }));
         assert!(fire(&mut gun, 1.0).is_none());
         assert!(gun.take_loaded(2.0));
         fire(&mut gun, 2.0).unwrap();
@@ -555,7 +557,7 @@ mod tests {
         assert_eq!((second.burst, second.id), (None, first.id + 1));
         gun.fire_burst(1.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert!(gun.fire_burst(1.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
-        assert_eq!(gun.reload(), Some(Reload { base_time: 10.0, end: 3.0 }));
+        assert_eq!(gun.reload(), Some(Reload { base_time: 2.0, end: 3.0 }));
         assert_eq!(magazine_shells(&gun), [3]);
         // The second burst empties the magazine.
         fire(&mut gun, 3.0).unwrap();

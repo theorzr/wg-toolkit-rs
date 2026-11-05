@@ -983,7 +983,12 @@ fn hold_gun(client: ClientKey, driven: &mut DrivenVehicle, yaw: f32, pitch: f32)
 /// enough here.
 fn reload_time(gun: &Gun, now: f64) -> schema::GunReloadTime {
     match gun.reload() {
-        Some(reload) => gun_reload_time(reload.base_time, reload.end as f32, (reload.end - now).max(0.0) as f32),
+        Some(reload) => {
+            // Just started, exactly its length, as the client checks it.
+            let left = (reload.end - now).max(0.0) as f32;
+            let left = if (reload.base_time - left).abs() < 1e-3 { reload.base_time } else { left };
+            gun_reload_time(reload.base_time, reload.end as f32, left)
+        }
         None => gun_reload_time(gun.reload_time(), 0.0, 0.0),
     }
 }
