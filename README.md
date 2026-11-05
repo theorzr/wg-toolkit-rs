@@ -4,8 +4,9 @@ These codecs are part of the Core engine *(previously known as BigWorld)* notabl
 World of Tanks. This crate also provides an implementation of the network protocol.
 
 ## Library
-- [Crate page](https://crates.io/crates/wg-toolkit)
-- [Crate documentation](https://docs.rs/wg-toolkit)
+[![Crates.io](https://img.shields.io/crates/v/wg-toolkit?label=wg-toolkit)](https://crates.io/crates/wg-toolkit)
+[![docs.rs](https://img.shields.io/docsrs/wg-toolkit)](https://docs.rs/wg-toolkit)
+
 - Packed XML codec
   - Deserialization
   - Serialization
@@ -45,7 +46,8 @@ World of Tanks. This crate also provides an implementation of the network protoc
       cipher
 
 ## CLI
-- [Crate page](https://crates.io/crates/wg-toolkit-cli)
+[![Crates.io](https://img.shields.io/crates/v/wg-toolkit-cli?label=wg-toolkit-cli)](https://crates.io/crates/wg-toolkit-cli)
+
 - Packed XML
   - Deserialization and display
   - Value editing (string, integer, boolean, float)
@@ -54,12 +56,25 @@ World of Tanks. This crate also provides an implementation of the network protoc
   - Read directory content with possible configured recursion
   - Mount as a real filesystem via Dokan (Windows, `dokan` feature) or FUSE
     (Unix, `fuse` feature)
-- World of Tanks server (`wot` feature)
-  - Login and base application server, with its script model (entities,
-    interfaces, aliases) loaded dynamically from the game's own resources at
-    startup
-  - Proxy mode, forwarding and decoding traffic to/from a real login and base
-    application for debugging and protocol analysis
+
+## World of Tanks
+[![Crates.io](https://img.shields.io/crates/v/wg-toolkit-wot?label=wg-toolkit-wot)](https://crates.io/crates/wg-toolkit-wot)
+
+Server emulator and proxy for World of Tanks, installed as the `wot` binary. The
+script model (entities, interfaces, aliases) is loaded dynamically from the game's
+own resources at startup.
+- `server`: a proof of concept server, running a login app and a base app
+  - Hangar with configurable vehicles (`--give-vehicle`)
+  - Battles against bots on a configurable map (`--map`)
+- `proxy`: a proxy of the real server, running a login proxy and a base proxy that
+  forward and decode the traffic to/from the real login and base apps, for
+  debugging and protocol analysis
+  - Optional recording of every decrypted base app packet (`--capture`)
+- `replay`: decode a recorded capture offline, logging exactly what the base proxy
+  logged live, optionally checking that every decoded element encodes back to the
+  captured bytes
+- `app login|base|proxy`: run each app on its own, base apps (or base proxies)
+  linking to a login app which hands its clients over to them
 
 ## Contributing guidelines
 When contributing to the code base, some rules should be followed:
