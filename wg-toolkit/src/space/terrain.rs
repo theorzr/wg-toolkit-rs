@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::{self, Cursor, Read};
 
 use byteorder::{LittleEndian as LE, ReadBytesExt};
+use glam::Vec3;
 
 use crate::res::fs::ResFilesystem;
 use crate::res::package::PackageReader;
@@ -25,6 +26,9 @@ const QUANTISATION_LEVEL: f32 = 0.001;
 const VISIBLE_OFFSET: usize = 2;
 /// The chunk size when the space's settings don't give one.
 const DEFAULT_CHUNK_SIZE: f32 = 100.0;
+/// How far either way the terrain's slope is measured for its normal, in metres: well
+/// under its samples' spacing.
+const NORMAL_STEP: f32 = 0.05;
 
 
 /// A chunk's height map.
@@ -168,6 +172,17 @@ impl Terrain {
         Some(chunk.height_at(x - cx * self.chunk_size, z - cz * self.chunk_size, self.chunk_size))
     }
 
+    /// The terrain's normal at a world position, upward, if it has a chunk there: its
+    /// slope over [`NORMAL_STEP`] either way, which is its triangle's away from their
+    /// edges.
+    pub fn normal_at(&self, x: f32, z: f32) -> Option<Vec3> {
+        let height = |x, z| self.height_at(x, z);
+        let center = height(x, z)?;
+        let (east, west) = (height(x + NORMAL_STEP, z).unwrap_or(center), height(x - NORMAL_STEP, z).unwrap_or(center));
+        let (north, south) = (height(x, z + NORMAL_STEP).unwrap_or(center), height(x, z - NORMAL_STEP).unwrap_or(center));
+        Some(Vec3::new(west - east, 2.0 * NORMAL_STEP, south - north).normalize())
+    }
+
 }
 
 
@@ -192,6 +207,17 @@ mod tests {
         assert_eq!(map.height_at(0.0, 0.0, 100.0), VISIBLE_OFFSET as f32);
         assert!((map.height_at(spacing * 1.5, spacing * 0.25, 100.0) - (VISIBLE_OFFSET as f32 + 1.5)).abs() < 1e-4);
         assert!((map.height_at(100.0, 50.0, 100.0) - (VISIBLE_OFFSET as f32 + 64.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn normal_leans_against_the_slope() {
+        // Rising 1 m per sample along x, as above: a 1 in 1.5625 slope.
+        let size = 64 + VISIBLE_OFFSET * 2 + 1;
+        let heights = (0..size * size).map(|i| (i % size) as f32).collect();
+        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), HeightMap { width: size, height: size, heights })]) };
+        let normal = terrain.normal_at(30.3, 40.7).unwrap();
+        let expected = Vec3::new(-1.0, 100.0 / 64.0, 0.0).normalize();
+        assert!(normal.distance(expected) < 1e-3, "{normal}");
     }
 
 }

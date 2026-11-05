@@ -1,8 +1,7 @@
 //! A vehicle's gun as the server runs it: its ammunition, the shell loaded, its magazine
 //! and bursts, the reload, and each shot's flight until it hits a vehicle, the terrain,
-//! or runs out of range.
-//! Vehicles are hit on their collision models, without armour yet; destructibles are
-//! not hit yet.
+//! or runs out of range, and on off what it ricochets off. Vehicles are hit on their
+//! collision models; destructibles are not hit yet.
 
 use std::sync::Arc;
 
@@ -17,6 +16,12 @@ use crate::wot::item_defs::{MagazineDef, ShotDef};
 
 /// The flight is followed in steps of this many seconds.
 const FLIGHT_STEP: f32 = 0.005;
+
+/// The ricochets a shell goes on after, at most.
+const MAX_RICOCHETS: u32 = 3;
+/// How far before the point it ricochets off a shell goes on from, in metres, as the
+/// server shows ricochets: for it not to meet what it ricochets off again.
+const RICOCHET_STANDOFF: f32 = 0.001;
 
 
 #[derive(Debug, Clone)]
@@ -68,13 +73,24 @@ pub struct Reload {
     pub end: f64,
 }
 
-/// A shell fired, flying from `start` to `end`.
+/// A shell fired, flying from `start` to `end`: from its gun, or off what it last
+/// ricocheted off, see [`Self::ricochet`].
 #[derive(Debug, Clone)]
 pub struct Shot {
     pub id: i32,
     pub def: ShotDef,
     pub start: Vec3,
     pub velocity: Vec3,
+    /// How far it flew before `start`, in metres: 0 unless it ricocheted.
+    pub flown: f32,
+    /// How far from `start` it flies at most: its shell's maximum distance, less what it
+    /// flew, and less again with each ricochet's lost speed.
+    pub range: f32,
+    /// The times it ricocheted.
+    pub ricochets: u32,
+    /// The share of its speed it kept off its ricochets, 1 until it ricochets: of its
+    /// penetration and damage too, see [`armor::hit`](super::armor::hit).
+    pub speed: f32,
     pub end: Vec3,
     /// The velocity at `end`.
     pub end_velocity: Vec3,
@@ -342,7 +358,8 @@ impl Gun {
 
         let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
         let (end, end_velocity, flight_time, landing) = fly(start, velocity, def.gravity, def.max_distance, terrain, vehicles);
-        Some(Shot { id, def, start, velocity, end, end_velocity, flight_time, landing, burst: None })
+        let range = def.max_distance;
+        Some(Shot { id, def, start, velocity, flown: 0.0, range, ricochets: 0, speed: 1.0, end, end_velocity, flight_time, landing, burst: None })
 
     }
 
@@ -376,6 +393,47 @@ impl Gun {
     /// The index of the shell of this integer descriptor, if the gun has some left.
     fn shell_left(&self, compact_descr: i64) -> Option<usize> {
         self.ammo.iter().position(|&(ref def, count)| def.compact_descr.to_int() == compact_descr && count > 0)
+    }
+
+}
+
+impl Shot {
+
+    /// How far it flew from its gun to `end`, in metres.
+    pub fn distance(&self) -> f32 {
+        self.flown + self.start.distance(self.end)
+    }
+
+    /// The shell going on off what it hit at `end`, ricocheting along `direction`,
+    /// keeping `speed` of its speed, and of what was left of its range as its speed
+    /// squared does, the range of a ballistic flight. None once it ricocheted
+    /// [`MAX_RICOCHETS`] times, or out of range.
+    pub fn ricochet(&self, direction: Vec3, speed: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+        if self.ricochets >= MAX_RICOCHETS {
+            return None;
+        }
+        let range = (self.range - self.start.distance(self.end)) * speed * speed;
+        if range <= 0.0 {
+            return None;
+        }
+        let start = self.end - self.end_velocity.normalize_or_zero() * RICOCHET_STANDOFF;
+        let velocity = direction.normalize() * self.end_velocity.length() * speed;
+        let (end, end_velocity, flight_time, landing) = fly(start, velocity, self.def.gravity, range, terrain, vehicles);
+        Some(Shot {
+            id: self.id,
+            def: self.def.clone(),
+            start,
+            velocity,
+            flown: self.distance(),
+            range,
+            ricochets: self.ricochets + 1,
+            speed: self.speed * speed,
+            end,
+            end_velocity,
+            flight_time,
+            landing,
+            burst: None,
+        })
     }
 
 }
@@ -471,6 +529,30 @@ mod tests {
         assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_some());
         // Out of shells.
         assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+    }
+
+    #[test]
+    fn ricochets_slower_shorter_and_weaker() {
+        let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
+        let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        // As if it hit something 100 m on.
+        (shot.end, shot.end_velocity) = (Vec3::Z * 100.0, Vec3::Z * 800.0);
+        let off = shot.ricochet(Vec3::X, 0.8, None, &[]).unwrap();
+        assert_eq!((off.id, off.ricochets, off.flown), (shot.id, 1, 100.0));
+        assert!(off.start.distance(shot.end) < 0.01 && off.start.z < 100.0, "{}", off.start);
+        assert!((off.velocity - Vec3::X * 640.0).length() < 1e-3, "{}", off.velocity);
+        assert!((off.range - 620.0 * 0.64).abs() < 0.1, "{}", off.range);
+        assert!((off.speed - 0.8).abs() < 1e-6, "{}", off.speed);
+        assert_eq!(off.landing, Landing::Range);
+        // Out of range where it ends, else at most `MAX_RICOCHETS` times.
+        assert!(off.ricochet(-Vec3::X, 1.0, None, &[]).is_none());
+        let mut last = off;
+        loop {
+            last.end = last.start + Vec3::X;
+            let Some(next) = last.ricochet(-Vec3::X, 1.0, None, &[]) else { break };
+            last = next;
+        }
+        assert_eq!(last.ricochets, MAX_RICOCHETS);
     }
 
     fn shell_of(id: u16) -> ShotDef {

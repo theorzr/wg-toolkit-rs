@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::Vec3;
+use glam::{Affine3A, Vec3};
 
 use wgtk::app::entity::{
     AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle,
@@ -357,10 +357,11 @@ impl BaseThread {
 
     }
 
-    /// A shell gets to its end: what it does to the vehicle it hits, by its armour, see
-    /// [`armor::hit`], or it explodes on the ground, where an HE shell damages the
-    /// vehicles in its explosion's reach, see [`armor::explosion`].
-    fn land_shot(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+    /// A shell gets to its end, at game time `at`: what it does to the vehicle it hits,
+    /// by its armour, see [`armor::hit`], or it explodes on the ground, where an HE shell
+    /// damages the vehicles in its explosion's reach, see [`armor::explosion`]. A shell
+    /// ricocheting off either goes on, see [`Self::ricochet`].
+    fn land_shot(&mut self, client: ClientKey, at: f64, shooter: EntityId, shot: &Shot) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get(&client).and_then(|c| c.battle.as_ref()) else { return Ok(()) };
         let avatar_key = battle.avatar;
@@ -377,8 +378,7 @@ impl BaseThread {
                     battle.target.as_ref().filter(|target| target.entity_id == entity_id).and_then(|target| target.collision.clone())
                 };
                 let Some(collision) = collision else { return Ok(()) };
-                let flown = shot.start.distance(shot.end);
-                let Some(impact) = armor::hit(def, flown, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
+                let Some(impact) = armor::hit(def, shot.distance(), shot.speed, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
                     debug!(%client, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
                     return Ok(());
                 };
@@ -387,10 +387,15 @@ impl BaseThread {
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 let shell_hit = ShellHit::of_impact(&impact);
                 if player {
-                    self.damage_player(client, shooter, shot, &shell_hit)
+                    self.damage_player(client, shooter, shot, &shell_hit)?;
                 } else {
-                    self.damage_target(client, entity_id, shot, &shell_hit)
+                    self.damage_target(client, entity_id, shot, &shell_hit)?;
                 }
+                if impact.outcome == Outcome::Ricochet {
+                    let direction = armor::reflect(shot.end_velocity, impact.hit.normal);
+                    self.ricochet(client, at, shooter, shot, direction, armor::ARMOR_RICOCHET_SPEED, Some((entity_id, transforms)))?;
+                }
+                Ok(())
             }
             Landing::Terrain => {
                 // EXPERIMENT: the explosion comes for a shot the client does not know, so
@@ -408,13 +413,55 @@ impl BaseThread {
                     shot.end_velocity.length(),
                     Vec::new(),
                 )?;
-                if def.kind() == ShellKind::HighExplosive {
+                let normal = self.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
+                if armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND) {
+                    let direction = armor::reflect(shot.end_velocity, normal);
+                    self.ricochet(client, at, shooter, shot, direction, armor::GROUND.ricochet_speed, None)?;
+                } else if def.kind() == ShellKind::HighExplosive {
                     self.splash(client, shooter, shot)?;
                 }
                 Ok(())
             }
             Landing::Range => Ok(()),
         }
+
+    }
+
+    /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
+    /// keeping `speed` of its speed, see [`Shot::ricochet`]: the player sees it go on, as
+    /// the server shows it, with a tracer of the same shot. `landed` is the vehicle it
+    /// ricochets off, placed as it hit it, which it leaves from.
+    fn ricochet(
+        &mut self,
+        client: ClientKey,
+        at: f64,
+        shooter: EntityId,
+        shot: &Shot,
+        direction: Vec3,
+        speed: f32,
+        landed: Option<(u32, [Affine3A; 4])>,
+    ) -> io::Result<()> {
+
+        let Self { app, battle_clients, terrain, .. } = self;
+        let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
+        let mut vehicles = shell_targets(battle, shooter);
+        if let Some((entity_id, transforms)) = landed {
+            for vehicle in vehicles.iter_mut().filter(|vehicle| vehicle.entity_id == entity_id) {
+                vehicle.transforms = transforms;
+            }
+        }
+        let Some(next) = shot.ricochet(direction, speed, Some(&*terrain), &vehicles) else {
+            debug!(%client, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
+            return Ok(());
+        };
+        info!(%client, shot = next.id, ricochets = next.ricochets,
+            "Ricocheted a shell off {} at {:.0} m/s, {:.0}% of its speed left, landing at {:?} in {:.2} s",
+            if landed.is_some() { "a vehicle" } else { "the ground" }, next.velocity.length(), next.speed * 100.0, next.end, next.flight_time);
+        show_tracer(app, battle.avatar, shooter, &next, true)?;
+        if let Some(driven) = battle.driven.as_mut() {
+            driven.shots.push((at + f64::from(next.flight_time), shooter, next));
+        }
+        Ok(())
 
     }
 
@@ -779,8 +826,8 @@ impl BaseThread {
             let Some(driven) = battle.driven.as_mut() else { continue };
             let (landed, flying): (Vec<_>, _) = std::mem::take(&mut driven.shots).into_iter().partition(|&(at, _, _)| at <= now);
             driven.shots = flying;
-            for (_, shooter, shot) in landed {
-                if let Err(e) = self.land_shot(client, shooter, &shot) {
+            for (at, shooter, shot) in landed {
+                if let Err(e) = self.land_shot(client, at, shooter, &shot) {
                     warn!(%client, shot = shot.id, "Failed to land a shot: {e}");
                 }
             }
@@ -998,11 +1045,22 @@ fn init_vehicle(entity: &mut Entity<'_, schema::Vehicle>, avatar: EntityId, publ
 
 /// Show a shot to the player: its tracer, and the gun firing on the shooter.
 fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<schema::Vehicle>, shot: &Shot) -> io::Result<()> {
+    show_tracer(app, avatar, shooter.id(), shot, false)?;
+    // Its whole burst from the only gun, on its first shell.
+    match shot.burst {
+        Some(burst) => app.entity(shooter)?.showShooting(burst.min(u8::MAX.into()) as u8, 0, shot.def.kind_index),
+        None => Ok(()),
+    }
+}
+
+/// Show a shell's tracer to the player, flying from its start, off what it ricocheted
+/// off for a ricochet: the client then shows it from there, not from the gun.
+fn show_tracer(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityId, shot: &Shot, ricochet: bool) -> io::Result<()> {
     let def = &shot.def;
     app.entity(avatar)?.showTracer(
-        shooter.id(),
+        shooter,
         shot.id,
-        0,
+        ricochet.into(),
         def.effects_index,
         def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
         def.kind_index,
@@ -1010,15 +1068,10 @@ fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<
         shot.start,
         shot.velocity,
         def.gravity,
-        def.max_distance,
+        shot.range,
         0,
         0,
-    )?;
-    // Its whole burst from the only gun, on its first shell.
-    match shot.burst {
-        Some(burst) => app.entity(shooter)?.showShooting(burst.min(u8::MAX.into()) as u8, 0, def.kind_index),
-        None => Ok(()),
-    }
+    )
 }
 
 /// Give the client its gun as it is: its shells and how many are left, in its magazine
@@ -1068,6 +1121,16 @@ fn hit_targets(target: &Option<Target>) -> Vec<HitTarget> {
         .filter(|target| target.health > 0)
         .filter_map(|target| Some(hit_target(target.entity_id, &target.bot.as_ref()?.vehicle, target.collision.as_ref()?)))
         .collect()
+}
+
+/// The vehicles the shells of `shooter` can hit: the player's and the target, alive,
+/// but its own.
+fn shell_targets(battle: &Battle, shooter: EntityId) -> Vec<HitTarget> {
+    let player = battle.driven.iter()
+        .filter(|driven| driven.health > 0 && driven.entity.id() != shooter)
+        .map(|driven| hit_target(driven.entity.id().0, &driven.vehicle, &driven.collision));
+    let target = hit_targets(&battle.target).into_iter().filter(|target| EntityId(target.entity_id) != shooter);
+    player.chain(target).collect()
 }
 
 /// A vehicle as shells hit it: its collision models where its parts are.
