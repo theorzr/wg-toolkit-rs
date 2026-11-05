@@ -90,8 +90,8 @@ pub struct Shot {
 /// What a shell ends its flight on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Landing {
-    /// The vehicle of this entity id, there.
-    Vehicle(u32, VehicleHit),
+    /// A vehicle, placed by `transforms` as it was then, see [`HitTarget`].
+    Vehicle { entity_id: u32, hit: VehicleHit, transforms: [Affine3A; 4] },
     Terrain,
     /// Nothing, at its maximum distance.
     Range,
@@ -403,11 +403,12 @@ fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Op
         let next = position + velocity * FLIGHT_STEP;
         let next_velocity = velocity - Vec3::Y * gravity * FLIGHT_STEP;
         let hit = vehicles.iter()
-            .filter_map(|vehicle| Some((vehicle.entity_id, vehicle.collision.first_hit(&vehicle.transforms, position, next)?)))
+            .filter_map(|vehicle| Some((vehicle, vehicle.collision.first_hit(&vehicle.transforms, position, next)?)))
             .min_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction));
-        if let Some((entity_id, hit)) = hit {
+        if let Some((vehicle, hit)) = hit {
             let t = hit.fraction;
-            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Vehicle(entity_id, hit));
+            let landing = Landing::Vehicle { entity_id: vehicle.entity_id, hit, transforms: vehicle.transforms };
+            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, landing);
         }
         if let Some(ground) = terrain.and_then(|terrain| terrain.height_at(next.x, next.z)) {
             if next.y <= ground {
@@ -444,7 +445,15 @@ mod tests {
             speed: 800.0,
             gravity: 9.81,
             max_distance: 720.0,
-            damage: 400.0,
+            damage_near: 400.0,
+            damage_far: 400.0,
+            pen_near: 250.0,
+            pen_far: 240.0,
+            pen_randomization: 0.25,
+            normalization_angle: 5f32.to_radians(),
+            ricochet_angle_cos: Some(70f32.to_radians().cos()),
+            jet_pen_loss: 0.0,
+            explosion_radius: 120.0 * 120.0 / 5555.0,
         }
     }
 
@@ -621,7 +630,7 @@ mod tests {
     fn hits_a_vehicle_in_its_way() {
         let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
         // A plate 3 m in front of the hull's origin, the hull 100 m ahead.
-        let plate = |triangles| CollisionModel { groups: vec![ArmorGroup { name: "armor_1".into(), material_kind: 1, triangles }], radius: 5.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
+        let plate = |triangles| CollisionModel { groups: vec![ArmorGroup { name: "armor_1".into(), material_kind: 1, material: None, triangles }], radius: 5.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
         let (a, b, c, d) = (Vec3::new(-2.0, -1.0, -3.0), Vec3::new(2.0, -1.0, -3.0), Vec3::new(2.0, 1.0, -3.0), Vec3::new(-2.0, 1.0, -3.0));
         let collision = VehicleCollision {
             parts: [plate(vec![]), plate(vec![[a, b, c], [a, c, d]]), plate(vec![]), plate(vec![])],
@@ -630,7 +639,7 @@ mod tests {
         let hull = Affine3A::from_translation(Vec3::new(0.0, 0.0, 100.0));
         let target = HitTarget { entity_id: 7, collision: Arc::new(collision), transforms: [hull; 4] };
         let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[target]).unwrap();
-        let Landing::Vehicle(7, hit) = shot.landing else { panic!("missed: {:?}", shot.landing) };
+        let Landing::Vehicle { entity_id: 7, hit, .. } = shot.landing else { panic!("missed: {:?}", shot.landing) };
         assert_eq!(hit.part, VehiclePart::Hull);
         assert_eq!(hit.material_kind, 1);
         assert_eq!(hit.normal, -Vec3::Z);

@@ -4,14 +4,16 @@
 //! modules' definitions (in a `shared` section), guns with their shells. `components/shells.xml` gives each
 //! shell's id.
 
-use glam::Vec3;
-use std::io;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::io;
+
+use glam::Vec3;
 
 use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
 
-use super::collision::{CollisionModel, VehicleCollision};
+use super::collision::{CollisionModel, Material, VehicleCollision};
 use super::items::{item_type, IntCompactDescr, VehicleDescr};
 
 
@@ -74,9 +76,80 @@ pub struct ShotDef {
     pub gravity: f32,
     /// In metres.
     pub max_distance: f32,
-    /// The damage it deals to a vehicle it pierces, on average.
-    pub damage: f32,
+    /// The damage it deals to a vehicle it pierces, on average, within 50 m.
+    pub damage_near: f32,
+    /// The same at 500 m and beyond, see [`Self::damage_at`].
+    pub damage_far: f32,
+    /// The armour it pierces within 50 m, in millimetres, as the gun fires it.
+    pub pen_near: f32,
+    /// The same at 500 m and beyond, see [`Self::pen_at`].
+    pub pen_far: f32,
+    /// How much its penetration varies, either way, as a share of it.
+    pub pen_randomization: f32,
+    /// How much it turns toward an armour's normal as it hits it, in radians: AP kinds
+    /// only.
+    pub normalization_angle: f32,
+    /// The cosine of the angle from an armour's normal past which it ricochets off it:
+    /// none for the kinds that never do.
+    pub ricochet_angle_cos: Option<f32>,
+    /// The share of its penetration a HEAT jet loses per metre once through a screen.
+    pub jet_pen_loss: f32,
+    /// How far an HE shell's explosion damages, in metres, as the legacy HE mechanics
+    /// had it: `caliber² / 5555`.
+    pub explosion_radius: f32,
 }
+
+/// `SHELL_TYPES`, by their index in `SHELL_TYPES_LIST`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    HollowCharge = 0,
+    HighExplosive = 1,
+    ArmorPiercing = 2,
+    ArmorPiercingHe = 3,
+    ArmorPiercingCr = 4,
+    Smoke = 5,
+}
+
+impl ShotDef {
+
+    pub fn kind(&self) -> ShellKind {
+        match self.kind_index {
+            0 => ShellKind::HollowCharge,
+            1 => ShellKind::HighExplosive,
+            2 => ShellKind::ArmorPiercing,
+            3 => ShellKind::ArmorPiercingHe,
+            4 => ShellKind::ArmorPiercingCr,
+            _ => ShellKind::Smoke,
+        }
+    }
+
+    /// Its penetration after flying this many metres: linear from 50 m to 500 m, as
+    /// `computePiercingPowerAtDist` interpolates it.
+    pub fn pen_at(&self, distance: f32) -> f32 {
+        interpolate_by_distance([self.pen_near, self.pen_far], distance)
+    }
+
+    /// Its average damage after flying this many metres, as `computeDamageAtDist`
+    /// interpolates it.
+    pub fn damage_at(&self, distance: f32) -> f32 {
+        interpolate_by_distance([self.damage_near, self.damage_far], distance)
+    }
+
+}
+
+/// `PIERCING_POWER_INTERPOLATION_DIST_FIRST` and `_LAST`, the same as for damage.
+const INTERPOLATION_DISTANCES: [f32; 2] = [50.0, 500.0];
+
+/// A value at a distance between its values at [`INTERPOLATION_DISTANCES`], held before
+/// the first, carried on past the last, never below zero.
+fn interpolate_by_distance([near, far]: [f32; 2], distance: f32) -> f32 {
+    let [first, last] = INTERPOLATION_DISTANCES;
+    let t = (distance.max(first) - first) / (last - first);
+    (near + (far - near) * t).max(0.0)
+}
+
+/// `DEFAULT_PIERCING_POWER_RANDOMIZATION`.
+const DEFAULT_PEN_RANDOMIZATION: f32 = 0.25;
 
 /// `SHELL_TYPES_LIST`: a shell kind's index is its position.
 const SHELL_KINDS: &[&str] = &[
@@ -255,6 +328,8 @@ impl VehicleDef {
         let shells_components = component_ids("shells")?;
         // Shells are scaled as `gun_readers.readShot` does.
         let common = read_xml(fs, "scripts/item_defs/vehicles/common/vehicle.xml")?;
+        let materials = common.get_child_element("materials")
+            .ok_or_else(|| invalid("no common materials".to_string()))?;
         let projectile_speed_factor = common
             .get_child_value_at(&["miscParams", "projectileSpeedFactor"]).and_then(pxml::Value::as_float)
             .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
@@ -292,12 +367,27 @@ impl VehicleDef {
             shells.push((cd, portion));
             let shot_float = |name: &str| shot.get_child_float(name)
                 .ok_or_else(|| invalid(format!("shell {shell_name} has no {name}")));
+            let kind = shell.get_child_string("kind").and_then(|kind| SHELL_KINDS.iter().position(|&k| k == kind))
+                .ok_or_else(|| invalid(format!("shell {shell_name} has no known kind")))? as u8;
+            let caliber = shell.get_child_float("caliber")
+                .ok_or_else(|| invalid(format!("shell {shell_name} has no caliber")))?;
+            let damage = shell.get_child_value_at(&["damage", "armor"]).and_then(float_pair)
+                .ok_or_else(|| invalid(format!("shell {shell_name} has no damage")))?;
+            let pen = shot.get_child_value("piercingPower").and_then(float_pair)
+                .ok_or_else(|| invalid(format!("shell {shell_name} has no penetration")))?;
+            // As `_readShell` reads each kind's own parameters, `_SHELL_EXTRA_DATA` the
+            // ones the kind uses.
+            let ricochet_angle_cos = shell.get_child_float("ricochetAngle")
+                .filter(|_| matches!(SHELL_KINDS[kind as usize], "ARMOR_PIERCING" | "ARMOR_PIERCING_CR" | "HOLLOW_CHARGE"))
+                .map(|angle| angle.to_radians().cos());
+            let normalization_angle = shell.get_child_float("normalizationAngle")
+                .filter(|_| SHELL_KINDS[kind as usize].starts_with("ARMOR_PIERCING"))
+                .unwrap_or(0.0)
+                .to_radians();
             shots.push(ShotDef {
                 compact_descr: cd,
-                kind_index: shell.get_child_string("kind").and_then(|kind| SHELL_KINDS.iter().position(|&k| k == kind))
-                    .ok_or_else(|| invalid(format!("shell {shell_name} has no known kind")))? as u8,
-                caliber: shell.get_child_float("caliber")
-                    .ok_or_else(|| invalid(format!("shell {shell_name} has no caliber")))?,
+                kind_index: kind,
+                caliber,
                 effects_index: shell.get_child_string("effects").and_then(|effects| effects_index(&effects))
                     .ok_or_else(|| invalid(format!("shell {shell_name} has no known effects")))? as u8,
                 pierced_sticker: shell.get_child_string("effects").and_then(|effects| pierced_sticker(effects)),
@@ -305,8 +395,16 @@ impl VehicleDef {
                 speed: shot_float("speed")? * projectile_speed_factor,
                 gravity: shot_float("gravity")? * projectile_speed_factor * projectile_speed_factor,
                 max_distance: shot_float("maxDistance")?,
-                damage: shell.get_child_value_at(&["damage", "armor"]).and_then(pxml::Value::as_float)
-                    .ok_or_else(|| invalid(format!("shell {shell_name} has no damage")))?,
+                damage_near: damage[0],
+                damage_far: damage[1],
+                pen_near: pen[0],
+                pen_far: pen[1],
+                pen_randomization: shell.get_child_float("piercingPowerRandomization")
+                    .unwrap_or(DEFAULT_PEN_RANDOMIZATION),
+                normalization_angle,
+                ricochet_angle_cos,
+                jet_pen_loss: 10.0 * shell.get_child_float("piercingPowerLossFactorByDistance").unwrap_or(0.0),
+                explosion_radius: caliber * caliber / 5555.0,
             });
         }
 
@@ -382,13 +480,23 @@ impl VehicleDef {
         let gun = [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
             .find(|gun| gun.get_child_element("hitTester").is_some());
         let parts = [("chassis", chassis), ("hull", vehicle.get_child_element("hull")), ("turret", Some(turret)), ("gun", gun)];
+        // Each part's armour: the gun's is the vehicle's own for it, or the shared gun's.
+        let gun_armor = [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
+            .find_map(|gun| gun.get_child_element("armor"));
+        let armors = [chassis.and_then(|chassis| chassis.get_child_element("armor")), vehicle.get_child_element("hull")
+            .and_then(|hull| hull.get_child_element("armor")), turret.get_child_element("armor"), gun_armor];
         let mut models = Vec::new();
-        for (part, module) in parts {
+        for ((part, module), armor) in parts.into_iter().zip(armors) {
             let path = module.and_then(|module| module.get_child_element("hitTester")?.get_child_string("collisionModelClient"))
                 .ok_or_else(|| invalid(format!("{name} has no {part} collision model")))?;
             // The definitions name a `.model`, the game ships it as a `.havok`.
             let path = path.strip_suffix(".model").map_or_else(|| path.to_string(), |stem| format!("{stem}.havok"));
-            models.push(CollisionModel::load(fs, &path)?);
+            let mut model = CollisionModel::load(fs, &path)?;
+            let armor = armor.map(|armor| read_armor(materials, armor)).unwrap_or_default();
+            for group in &mut model.groups {
+                group.material = armor.get(&group.name).copied();
+            }
+            models.push(model);
         }
         let collision = Arc::new(VehicleCollision {
             parts: models.try_into().unwrap(),
@@ -447,6 +555,41 @@ impl VehicleDef {
         ammo
     }
 
+}
+
+/// A part's armour section, by material name, each over the game's default for it, as
+/// `_readArmor` reads it: a thickness, with the material's parameters it overrides as
+/// children. A material without a default isn't one a vehicle uses.
+fn read_armor(materials: &Element, armor: &Element) -> HashMap<String, Material> {
+    armor.iter_children_all()
+        .filter_map(|(name, value)| {
+            let default = materials.get_child_element(name)?;
+            let (thickness, overrides) = match value {
+                pxml::Value::Element(element) => (element.value.as_float()?, Some(&**element)),
+                value => (value.as_float()?, None),
+            };
+            let flag = |param: &str| overrides.and_then(|o| o.get_child_boolean(param))
+                .or_else(|| default.get_child_boolean(param))
+                .unwrap_or(false);
+            let material = Material {
+                armor: thickness,
+                vehicle_damage_factor: overrides.and_then(|o| o.get_child_float("vehicleDamageFactor"))
+                    .or_else(|| default.get_child_float("vehicleDamageFactor"))
+                    .unwrap_or(0.0),
+                use_hit_angle: flag("useHitAngle"),
+                may_ricochet: flag("mayRicochet"),
+                check_caliber_for_ricochet: flag("checkCaliberForRicochet"),
+                check_caliber_for_hit_angle_norm: flag("checkCaliberForHitAngleNorm"),
+                collide_once_only: flag("collideOnceOnly"),
+            };
+            Some((name.clone(), material))
+        })
+        .collect()
+}
+
+/// A pair of floats, `readFloatPair`'s: two space-separated, or one for both.
+fn float_pair(value: &pxml::Value) -> Option<[f32; 2]> {
+    value.as_vec2().map(|pair| pair.to_array()).or_else(|| value.as_float().map(|value| [value; 2]))
 }
 
 pub(crate) fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element>> {

@@ -23,7 +23,7 @@ use crate::wot::schema::{
 };
 use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
 use crate::wot::arena_defs::{ArenaTypeDef, Spawn};
-use crate::wot::item_defs::VehicleDef;
+use crate::wot::item_defs::{ShellKind, VehicleDef};
 use crate::wot::items::VehicleDescr;
 
 use super::{
@@ -32,6 +32,7 @@ use super::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP, TICK,
 };
+use super::armor::{self, Explosion, Impact, Outcome};
 use super::gun::{Gun, HitTarget, Landing, Shot};
 use super::physics::{MotionLimits, Vehicle};
 use super::bot::Bot;
@@ -356,67 +357,116 @@ impl BaseThread {
 
     }
 
-    /// A shell gets to its end: it damages the vehicle it hits, explodes on the
-    /// terrain, or its tracer stops at its maximum distance.
+    /// A shell gets to its end: what it does to the vehicle it hits, by its armour, see
+    /// [`armor::hit`], or it explodes on the ground, where an HE shell damages the
+    /// vehicles in its explosion's reach, see [`armor::explosion`].
     fn land_shot(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+
         let Some(battle) = self.battle_clients.get(&client).and_then(|c| c.battle.as_ref()) else { return Ok(()) };
         let avatar_key = battle.avatar;
         let def = &shot.def;
+        let player_vehicle = battle.driven.as_ref().map(|driven| driven.entity.id());
         self.app.entity(avatar_key)?.stopTracer(shot.id, shot.end)?;
+
         match shot.landing {
-            Landing::Vehicle(entity_id, hit) => {
-                info!(%client, shot = shot.id, entity_id, "Hit a vehicle: {:?}, material {}, at {:?}", hit.part, hit.material_kind, hit.local_point);
-                let player_vehicle = battle.driven.as_ref().map(|driven| driven.entity.id());
-                if Some(EntityId(entity_id)) == player_vehicle {
-                    self.damage_player(client, shooter, shot, &hit)
+            Landing::Vehicle { entity_id, hit, transforms } => {
+                let player = Some(EntityId(entity_id)) == player_vehicle;
+                let collision = if player {
+                    battle.driven.as_ref().map(|driven| driven.collision.clone())
                 } else {
-                    self.damage_target(client, entity_id, shot, &hit)
+                    battle.target.as_ref().filter(|target| target.entity_id == entity_id).and_then(|target| target.collision.clone())
+                };
+                let Some(collision) = collision else { return Ok(()) };
+                let flown = shot.start.distance(shot.end);
+                let Some(impact) = armor::hit(def, flown, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
+                    debug!(%client, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
+                    return Ok(());
+                };
+                info!(%client, shot = shot.id, entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
+                    impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
+                    impact.damage, if impact.exploded { ", exploded" } else { "" });
+                let shell_hit = ShellHit::of_impact(&impact);
+                if player {
+                    self.damage_player(client, shooter, shot, &shell_hit)
+                } else {
+                    self.damage_target(client, entity_id, shot, &shell_hit)
                 }
             }
-            // EXPERIMENT: the explosion comes for a shot the client does not know, so that
-            // it shows it from these arguments alone.
-            Landing::Terrain => self.app.entity(avatar_key)?.explodeProjectile(
-                shot.id | 0x4000_0000,
-                def.effects_index,
-                def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
-                GROUND_EFFECT_MATERIAL,
-                def.kind_index,
-                def.caliber,
-                shot.end,
-                // Its last step: the client projects the crater along it, both ways.
-                shot.end_velocity * EXPLOSION_STEP,
-                shot.end_velocity.length(),
-                Vec::new(),
-            ),
+            Landing::Terrain => {
+                // EXPERIMENT: the explosion comes for a shot the client does not know, so
+                // that it shows it from these arguments alone.
+                self.app.entity(avatar_key)?.explodeProjectile(
+                    shot.id | 0x4000_0000,
+                    def.effects_index,
+                    def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
+                    GROUND_EFFECT_MATERIAL,
+                    def.kind_index,
+                    def.caliber,
+                    shot.end,
+                    // Its last step: the client projects the crater along it, both ways.
+                    shot.end_velocity * EXPLOSION_STEP,
+                    shot.end_velocity.length(),
+                    Vec::new(),
+                )?;
+                if def.kind() == ShellKind::HighExplosive {
+                    self.splash(client, shooter, shot)?;
+                }
+                Ok(())
+            }
             Landing::Range => Ok(()),
         }
+
+    }
+
+    /// An HE shell explodes on the ground: the vehicles in its reach take its damage.
+    fn splash(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+
+        let Some(battle) = self.battle_clients.get(&client).and_then(|c| c.battle.as_ref()) else { return Ok(()) };
+        let player = battle.driven.as_ref()
+            .filter(|driven| driven.health > 0)
+            .and_then(|driven| armor::explosion(&shot.def, shot.end, &driven.collision, &driven.vehicle.part_transforms(driven.collision.hull_position)));
+        let target = hit_targets(&battle.target).into_iter()
+            .filter_map(|target| Some((target.entity_id, armor::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?)))
+            .next();
+
+        if let Some(explosion) = player {
+            info!(%client, shot = shot.id, "Exploded beside the player: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
+            self.damage_player(client, shooter, shot, &ShellHit::of_explosion(&explosion))?;
+        }
+        if let Some((entity_id, explosion)) = target {
+            info!(%client, shot = shot.id, entity_id, "Exploded beside the target: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
+            self.damage_target(client, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
+        }
+        Ok(())
+
     }
 
     /// The player's vehicle takes a shell's damage, as the target does: its health
     /// drops, in its `OwnVehicle` too.
-    fn damage_player(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
+    fn damage_player(&mut self, client: ClientKey, shooter: EntityId, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let Some(driven) = battle.driven.as_mut().filter(|driven| driven.health > 0) else { return Ok(()) };
-        let amount = spread_damage(shot.def.damage);
+        let amount = spread_damage(shell_hit.damage);
         let old_health = driven.health;
         driven.health = (old_health - amount).max(0);
         let new_health = driven.health;
-        let bounds = driven.collision.parts[hit.part as usize].bounds;
-        info!(%client, "Damaged the player: {amount}, {old_health} -> {new_health}{}", if new_health == 0 { ", destroyed" } else { "" });
-
-        if let Some(own) = driven.own_vehicle {
-            self.app.component(own)?.set_vehicleHealthInfo(vehicle_health_info(driven.entity.id(), new_health))?;
+        let bounds = driven.collision.parts[shell_hit.hit.part as usize].bounds;
+        if amount > 0 {
+            info!(%client, "Damaged the player: {amount}, {old_health} -> {new_health}{}", if new_health == 0 { ", destroyed" } else { "" });
+            if let Some(own) = driven.own_vehicle {
+                self.app.component(own)?.set_vehicleHealthInfo(vehicle_health_info(driven.entity.id(), new_health))?;
+            }
         }
-        let stickers = add_sticker(&mut driven.damage_stickers, shot, hit, bounds);
+        let stickers = shell_hit.pierced().then(|| add_sticker(&mut driven.damage_stickers, shot, &shell_hit.hit, bounds)).flatten();
         let damage = Damage { shooter, amount, max_health: driven.max_health, old_health, new_health };
-        show_damage(&mut self.app.entity(driven.entity)?, shot, hit, bounds, &damage, stickers)
+        show_damage(&mut self.app.entity(driven.entity)?, shot, shell_hit, bounds, &damage, stickers)
 
     }
 
     /// The target takes a shell's damage, varied by up to [`DAMAGE_SPREAD`] either way:
     /// its health drops, and the player sees the hit, as the captured server shows one.
-    fn damage_target(&mut self, client: ClientKey, entity_id: u32, shot: &Shot, hit: &VehicleHit) -> io::Result<()> {
+    fn damage_target(&mut self, client: ClientKey, entity_id: u32, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
 
         let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let now = battle.game_time();
@@ -426,24 +476,27 @@ impl BaseThread {
             return Ok(());
         };
         let Some(vehicle) = target.entity else { return Ok(()) };
-        let amount = spread_damage(shot.def.damage);
+        let amount = spread_damage(shell_hit.damage);
         let old_health = target.health;
         target.health = (old_health - amount).max(0);
         let new_health = target.health;
         let killed = new_health == 0;
-        let bounds = target.collision.as_ref().map_or([Vec3::ZERO; 2], |collision| collision.parts[hit.part as usize].bounds);
+        let bounds = target.collision.as_ref().map_or([Vec3::ZERO; 2], |collision| collision.parts[shell_hit.hit.part as usize].bounds);
         let max_health = target.info.maxHealth.into();
-        info!(%client, entity_id, "Damaged the target: {amount}, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
+        if amount > 0 {
+            info!(%client, entity_id, "Damaged the target: {amount}, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
+        }
 
-        let stickers = add_sticker(&mut target.damage_stickers, shot, hit, bounds);
+        let stickers = shell_hit.pierced().then(|| add_sticker(&mut target.damage_stickers, shot, &shell_hit.hit, bounds)).flatten();
         let damage = Damage { shooter, amount, max_health, old_health, new_health };
-        show_damage(&mut self.app.entity(vehicle)?, shot, hit, bounds, &damage, stickers)?;
+        show_damage(&mut self.app.entity(vehicle)?, shot, shell_hit, bounds, &damage, stickers)?;
 
-        // A hit sets it on fire, which a kill puts out.
+        // A damaging hit sets it on fire, which a kill puts out.
         match (target.fire.take(), killed) {
             (Some((fire, _)), true) => self.app.remove_component(fire)?,
             (Some((fire, _)), false) => target.fire = Some((fire, now + TARGET_FIRE_DURATION)),
             (None, true) => {}
+            (None, false) if amount == 0 => {}
             (None, false) => {
                 let mut entity = self.app.entity(vehicle)?;
                 let mut fire = entity.add_component::<Fire>(Audience::AllClients)?;
@@ -467,7 +520,7 @@ impl BaseThread {
             vehicles_info.set_vehiclesInfo_at(at("__generation"), target.info.__generation)?;
         }
 
-        let mut flags = HIT_FLAGS_PIERCED;
+        let mut flags = shell_hit.flags;
         if killed {
             flags |= HIT_FLAG_VEHICLE_KILLED;
         }
@@ -818,8 +871,21 @@ const DAMAGE_SPREAD: f32 = 0.25;
 
 /// `VEHICLE_HIT_FLAGS` of a shell piercing a vehicle, as captured: a direct projectile,
 /// through armour and a module.
-const HIT_FLAGS_PIERCED: u32 = 0x100000 | 0x100 | 0x10;
-/// `VEHICLE_HIT_EFFECT.ARMOR_PIERCED`.
+const HIT_FLAGS_PIERCED: u32 = HIT_FLAG_DIRECT | 0x100 | 0x10;
+/// `VEHICLE_HIT_FLAGS`: a direct projectile, an explosion beside the vehicle, a
+/// ricochet, armour of the vehicle's own, then a screen, not pierced, a screen pierced,
+/// and the vehicle's own armour pierced by an explosion.
+const HIT_FLAG_DIRECT: u32 = 0x100000;
+const HIT_FLAG_EXTERNAL_EXPLOSION: u32 = 0x200000;
+const HIT_FLAG_RICOCHET: u32 = 0x8;
+const HIT_FLAG_ARMOR_NOT_PIERCED: u32 = 0x20;
+const HIT_FLAG_SCREEN_NOT_PIERCED: u32 = 0x80;
+const HIT_FLAG_SCREEN_PIERCED: u32 = 0x40;
+const HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION: u32 = 0x2000;
+/// `VEHICLE_HIT_EFFECT`.
+const HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE: u8 = 0;
+const HIT_EFFECT_FINAL_RICOCHET: u8 = 2;
+const HIT_EFFECT_ARMOR_NOT_PIERCED: u8 = 3;
 const HIT_EFFECT_ARMOR_PIERCED: u8 = 4;
 
 /// `ATTACK_REASON.SHOT`'s index.
@@ -1012,7 +1078,60 @@ fn hit_target(entity_id: u32, vehicle: &Vehicle, collision: &Arc<VehicleCollisio
 /// A shell's damage, varied by up to [`DAMAGE_SPREAD`] either way.
 fn spread_damage(damage: f32) -> i64 {
     use rand::Rng;
+    if damage <= 0.0 {
+        return 0;
+    }
     (damage * rand::thread_rng().gen_range(1.0 - DAMAGE_SPREAD..=1.0 + DAMAGE_SPREAD)).round() as i64
+}
+
+/// What a shell does to a vehicle, as the vehicle shows it and the shooter learns it.
+struct ShellHit {
+    /// Where it hits: where it pierces, stops or ricochets, or where its explosion beside
+    /// the vehicle reaches its armour.
+    hit: VehicleHit,
+    /// Whether it exploded beside the vehicle, not on it.
+    beside: bool,
+    /// The `VEHICLE_HIT_EFFECT` of the point it hits.
+    effect: u8,
+    /// Its `VEHICLE_HIT_FLAGS` for the shooter, the kill aside.
+    flags: u32,
+    /// Its damage, before its spread.
+    damage: f32,
+}
+
+impl ShellHit {
+
+    fn of_impact(impact: &Impact) -> Self {
+        let main = impact.hit.material.is_some_and(|material| material.is_main_armor());
+        let (effect, flags) = match impact.outcome {
+            Outcome::Pierced => (HIT_EFFECT_ARMOR_PIERCED, HIT_FLAGS_PIERCED),
+            Outcome::Ricochet => (HIT_EFFECT_FINAL_RICOCHET, HIT_FLAG_DIRECT | HIT_FLAG_RICOCHET),
+            Outcome::Screens => (HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE, HIT_FLAG_DIRECT | HIT_FLAG_SCREEN_PIERCED),
+            Outcome::NotPierced => {
+                let stopped = if main { HIT_FLAG_ARMOR_NOT_PIERCED } else { HIT_FLAG_SCREEN_NOT_PIERCED };
+                let exploded = if impact.damage > 0.0 { HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION } else { 0 };
+                (HIT_EFFECT_ARMOR_NOT_PIERCED, HIT_FLAG_DIRECT | stopped | exploded)
+            }
+        };
+        Self { hit: impact.hit, beside: false, effect, flags, damage: impact.damage }
+    }
+
+    fn of_explosion(explosion: &Explosion) -> Self {
+        let exploded = if explosion.damage > 0.0 { HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION } else { 0 };
+        Self {
+            hit: explosion.hit,
+            beside: true,
+            effect: HIT_EFFECT_ARMOR_NOT_PIERCED,
+            flags: HIT_FLAG_EXTERNAL_EXPLOSION | exploded,
+            damage: explosion.damage,
+        }
+    }
+
+    /// Whether it pierced the vehicle's armour, leaving a sticker.
+    fn pierced(&self) -> bool {
+        self.effect == HIT_EFFECT_ARMOR_PIERCED
+    }
+
 }
 
 /// A shell's damage to a vehicle.
@@ -1024,31 +1143,39 @@ struct Damage {
     new_health: i64,
 }
 
-/// Show a vehicle taking a shell's damage, pierced at `hit`: one hit point, its segment
+/// Show a vehicle taking a shell's damage: from a shot, one hit point, its segment
 /// encoded over the hit part's `bounds`, its params as `HitParamsEncoder` encodes them,
-/// and the damage, also as a fraction of its maximum health out of 255. Then its new
-/// health and its stickers, given when the shell added one, see [`add_sticker`].
+/// or from an explosion beside it, its center; and the damage, also as a fraction of
+/// its maximum health out of 255. Then, when it took some, its new health, and its
+/// stickers, given when the shell added one, see [`add_sticker`].
 fn show_damage(
     vehicle: &mut Entity<'_, schema::Vehicle>,
     shot: &Shot,
-    hit: &VehicleHit,
+    shell_hit: &ShellHit,
     bounds: [Vec3; 2],
     damage: &Damage,
     stickers: Option<Vec<HitPoint>>,
 ) -> io::Result<()> {
     let def = &shot.def;
     let damage_factor = (damage.amount * 255 / damage.max_health.max(1)).clamp(0, 255) as u8;
-    vehicle.showDamageFromShot(
-        damage.shooter,
-        vec![hit_point(shot, hit, bounds, HIT_EFFECT_ARMOR_PIERCED)],
-        def.effects_index,
-        def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
-        damage.amount as i32,
-        damage_factor,
-        0, // The last material is not a shield.
-        shot.end_velocity.length(),
-        0,
-    )?;
+    if shell_hit.beside {
+        vehicle.showDamageFromExplosion(damage.shooter, shot.end, def.effects_index, damage.amount as i32, damage_factor, 0)?;
+    } else {
+        vehicle.showDamageFromShot(
+            damage.shooter,
+            vec![hit_point(shot, &shell_hit.hit, bounds, shell_hit.effect, shell_hit.effect)],
+            def.effects_index,
+            def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
+            damage.amount as i32,
+            damage_factor,
+            0, // The last material is not a shield.
+            shot.end_velocity.length(),
+            0,
+        )?;
+    }
+    if damage.amount == 0 {
+        return Ok(());
+    }
     vehicle.set_health(damage.new_health as i16)?;
     if let Some(stickers) = stickers {
         vehicle.set_damageStickers(stickers)?;
@@ -1057,12 +1184,12 @@ fn show_damage(
     vehicle.onHealthChanged(damage.new_health as i16, damage.old_health as i16, damage.shooter, ATTACK_REASON_SHOT as u8, -1)
 }
 
-/// A `VEHICLE_HIT_POINT` for a shell piercing at `hit`, its segment encoded over the hit
-/// part's `bounds` with `context`: a `VEHICLE_HIT_EFFECT` for `showDamageFromShot`, a
-/// sticker id for `damageStickers`. Its params are as `HitParamsEncoder` encodes them.
-fn hit_point(shot: &Shot, hit: &VehicleHit, bounds: [Vec3; 2], context: u8) -> HitPoint {
+/// A `VEHICLE_HIT_POINT` for a shell at `hit` with this `VEHICLE_HIT_EFFECT`, its
+/// segment encoded over the hit part's `bounds` with `context`: the effect for
+/// `showDamageFromShot`, a sticker id for `damageStickers`. Its params are as
+/// `HitParamsEncoder` encodes them.
+fn hit_point(shot: &Shot, hit: &VehicleHit, bounds: [Vec3; 2], effect: u8, context: u8) -> HitPoint {
     let def = &shot.def;
-    let effect = HIT_EFFECT_ARMOR_PIERCED;
     let params = ((def.caliber * 10.0) as u32 & 0xFFFF) << 8 | u32::from(def.kind_index & 15) << 4 | u32::from(effect);
     HitPoint { networkID: 0, segment: hit.encode_segment(bounds, context), params }
 }
@@ -1072,6 +1199,6 @@ fn hit_point(shot: &Shot, hit: &VehicleHit, bounds: [Vec3; 2], context: u8) -> H
 /// stickers to send when it did.
 fn add_sticker(stickers: &mut Vec<HitPoint>, shot: &Shot, hit: &VehicleHit, bounds: [Vec3; 2]) -> Option<Vec<HitPoint>> {
     let sticker = shot.def.pierced_sticker?;
-    stickers.push(hit_point(shot, hit, bounds, sticker & 0x7F));
+    stickers.push(hit_point(shot, hit, bounds, HIT_EFFECT_ARMOR_PIERCED, sticker & 0x7F));
     Some(stickers.clone())
 }

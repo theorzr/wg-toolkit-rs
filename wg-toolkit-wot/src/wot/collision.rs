@@ -13,9 +13,13 @@ use wgtk::havok::tagfile::Tagfile;
 use wgtk::res::fs::ResFilesystem;
 
 
+/// How close two crossings of the same group are the same one, in metres: through an
+/// edge or a vertex its triangles share.
+const SAME_HIT: f32 = 0.001;
+
 /// The parts of a vehicle, each with its own model, in the order of
 /// `TankPartIndexes`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VehiclePart {
     Chassis = 0,
     Hull = 1,
@@ -48,7 +52,39 @@ pub struct ArmorGroup {
     pub name: String,
     /// Its material kind: the armour index, 1 for `armor_1`, or a device's kind.
     pub material_kind: u32,
+    /// What it is made of, as the vehicle's definitions give it, see
+    /// [`super::item_defs::VehicleDef::load`]: none for a group they don't armour.
+    pub material: Option<Material>,
     pub triangles: Vec<[Vec3; 3]>,
+}
+
+/// What an armour group is made of: a material of the game's common `materials`, as
+/// the vehicle's part sets it, see `_readArmor`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Material {
+    /// Its thickness, in millimetres.
+    pub armor: f32,
+    /// The share of a piercing shell's damage the vehicle takes behind it: 0 for
+    /// screens, tracks and the gun, which only stop shells.
+    pub vehicle_damage_factor: f32,
+    /// Whether a shell meets it at its angle, else as if square on.
+    pub use_hit_angle: bool,
+    pub may_ricochet: bool,
+    /// Whether a caliber of 3 times its thickness or more never ricochets off it.
+    pub check_caliber_for_ricochet: bool,
+    /// Whether a caliber of more than twice its thickness turns more toward its normal.
+    pub check_caliber_for_hit_angle_norm: bool,
+    /// Whether a shell only meets it once, whichever of its faces it crosses.
+    pub collide_once_only: bool,
+}
+
+impl Material {
+
+    /// Whether the vehicle takes damage behind it: its main armour, not a screen.
+    pub fn is_main_armor(&self) -> bool {
+        self.vehicle_damage_factor > 0.0
+    }
+
 }
 
 /// Where a segment first hits a model.
@@ -62,12 +98,17 @@ pub struct ModelHit {
     pub normal: Vec3,
 }
 
-/// Where a segment first hits a vehicle.
+/// Where a segment hits a vehicle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VehicleHit {
     pub fraction: f32,
+    /// How far along the segment, in metres.
+    pub distance: f32,
     pub part: VehiclePart,
+    /// The index of the group hit in its part's model.
+    pub group: usize,
     pub material_kind: u32,
+    pub material: Option<Material>,
     /// Where it hits, in the part's frame.
     pub local_point: Vec3,
     /// The way the segment goes, in the part's frame.
@@ -119,7 +160,7 @@ impl CollisionModel {
                 _ => continue,
             };
             let material_kind = material_kinds.iter().find(|(n, _)| *n == name).map_or(0, |&(_, kind)| kind);
-            groups.push(ArmorGroup { name: name.to_string(), material_kind, triangles });
+            groups.push(ArmorGroup { name: name.to_string(), material_kind, material: None, triangles });
         }
 
         let radius = groups.iter()
@@ -130,24 +171,31 @@ impl CollisionModel {
 
     }
 
-    /// Where a segment, in the model's frame, first hits it.
-    pub fn first_hit(&self, from: Vec3, to: Vec3) -> Option<ModelHit> {
+    /// Everywhere a segment, in the model's frame, crosses one of its triangles, in no
+    /// order.
+    pub fn hits(&self, from: Vec3, to: Vec3) -> impl Iterator<Item = ModelHit> + '_ {
         let delta = to - from;
         // Whether the segment passes the bounding sphere at all.
         let closest = from + delta * (-from.dot(delta) / delta.length_squared()).clamp(0.0, 1.0);
-        if closest.length() > self.radius {
-            return None;
-        }
-        let mut first: Option<ModelHit> = None;
-        for (index, group) in self.groups.iter().enumerate() {
-            for triangle in &group.triangles {
-                let Some((fraction, normal)) = segment_triangle(from, delta, triangle) else { continue };
-                if first.is_none_or(|first| fraction < first.fraction) {
-                    first = Some(ModelHit { fraction, group: index, normal });
-                }
-            }
-        }
-        first
+        let near = closest.length() <= self.radius;
+        self.groups.iter().enumerate()
+            .filter(move |_| near)
+            .flat_map(move |(index, group)| group.triangles.iter()
+                .filter_map(move |triangle| segment_triangle(from, delta, triangle))
+                .map(move |(fraction, normal)| ModelHit { fraction, group: index, normal }))
+    }
+
+    /// The point of its groups that `filter` keeps closest to `point`, in the model's
+    /// frame, and its distance.
+    pub fn closest_point(&self, point: Vec3, filter: impl Fn(&ArmorGroup) -> bool) -> Option<(Vec3, f32)> {
+        self.groups.iter()
+            .filter(|group| filter(group))
+            .flat_map(|group| group.triangles.iter())
+            .map(|triangle| {
+                let closest = closest_on_triangle(point, triangle);
+                (closest, closest.distance(point))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
 }
@@ -157,24 +205,64 @@ impl VehicleCollision {
     /// Where a segment first hits the vehicle, its parts placed in the world by
     /// `transforms`, in [`VehiclePart`] order.
     pub fn first_hit(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Option<VehicleHit> {
+        self.unordered_hits(transforms, from, to).min_by(|a, b| a.fraction.total_cmp(&b.fraction))
+    }
+
+    /// Everywhere a segment crosses the vehicle, nearest first, as [`Self::first_hit`]
+    /// finds the first: what a shell meets on its way through. A crossing through the
+    /// edge two triangles of a group share is one, see [`SAME_HIT`].
+    pub fn hits(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Vec<VehicleHit> {
+        let mut hits: Vec<_> = self.unordered_hits(transforms, from, to).collect();
+        hits.sort_by(|a, b| a.fraction.total_cmp(&b.fraction));
+        let mut unique: Vec<VehicleHit> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let same = unique.iter().rev()
+                .take_while(|seen| hit.distance - seen.distance < SAME_HIT)
+                .any(|seen| (seen.part, seen.group) == (hit.part, hit.group));
+            if !same {
+                unique.push(hit);
+            }
+        }
+        unique
+    }
+
+    /// The point of the vehicle's groups that `filter` keeps closest to `point`, both in
+    /// the world, and its distance.
+    pub fn closest_point(&self, transforms: &[Affine3A; 4], point: Vec3, filter: impl Fn(&ArmorGroup) -> bool) -> Option<(Vec3, f32)> {
+        self.parts.iter()
+            .zip(transforms)
+            .filter_map(|(model, transform)| {
+                let (local, _) = model.closest_point(transform.inverse().transform_point3(point), &filter)?;
+                let world = transform.transform_point3(local);
+                Some((world, world.distance(point)))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    fn unordered_hits<'a>(&'a self, transforms: &'a [Affine3A; 4], from: Vec3, to: Vec3) -> impl Iterator<Item = VehicleHit> + 'a {
         const PARTS: [VehiclePart; 4] = [VehiclePart::Chassis, VehiclePart::Hull, VehiclePart::Turret, VehiclePart::Gun];
+        let length = from.distance(to);
         PARTS.into_iter()
             .zip(&self.parts)
             .zip(transforms)
-            .filter_map(|((part, model), transform)| {
+            .flat_map(move |((part, model), transform)| {
                 let inverse = transform.inverse();
                 let (local_from, local_to) = (inverse.transform_point3(from), inverse.transform_point3(to));
-                let hit = model.first_hit(local_from, local_to)?;
-                Some(VehicleHit {
-                    fraction: hit.fraction,
-                    part,
-                    material_kind: model.groups[hit.group].material_kind,
-                    local_point: local_from.lerp(local_to, hit.fraction),
-                    local_direction: (local_to - local_from).normalize(),
-                    normal: transform.transform_vector3(hit.normal).normalize(),
+                model.hits(local_from, local_to).map(move |hit| {
+                    let group = &model.groups[hit.group];
+                    VehicleHit {
+                        fraction: hit.fraction,
+                        distance: hit.fraction * length,
+                        part,
+                        group: hit.group,
+                        material_kind: group.material_kind,
+                        material: group.material,
+                        local_point: local_from.lerp(local_to, hit.fraction),
+                        local_direction: (local_to - local_from).normalize(),
+                        normal: transform.transform_vector3(hit.normal).normalize(),
+                    }
                 })
             })
-            .min_by(|a, b| a.fraction.total_cmp(&b.fraction))
     }
 
 }
@@ -230,6 +318,39 @@ impl fmt::Debug for CollisionModel {
     }
 }
 
+/// The point of a triangle closest to `point` (Ericson, Real-Time Collision Detection).
+fn closest_on_triangle(point: Vec3, &[a, b, c]: &[Vec3; 3]) -> Vec3 {
+    let (ab, ac, ap) = (b - a, c - a, point - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = point - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return a + ab * (d1 / (d1 - d3));
+    }
+    let cp = point - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return a + ac * (d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    a + ab * (vb * denom) + ac * (vc * denom)
+}
+
 /// Where a segment from `from` along `delta` crosses a triangle, either face, as a
 /// fraction of it, with the triangle's normal facing `from` (Möller–Trumbore).
 fn segment_triangle(from: Vec3, delta: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<(f32, Vec3)> {
@@ -268,8 +389,11 @@ mod tests {
     fn encodes_a_hit_as_the_client_decodes_it() {
         let hit = VehicleHit {
             fraction: 0.5,
+            distance: 1.0,
             part: VehiclePart::Hull,
+            group: 0,
             material_kind: 1,
+            material: None,
             local_point: Vec3::new(0.0, 0.0, 1.0),
             local_direction: -Vec3::Z,
             normal: Vec3::Z,
@@ -295,6 +419,15 @@ mod tests {
         assert!(segment_triangle(Vec3::X * 2.0, Vec3::Z * 10.0, &triangle).is_none());
     }
 
+    #[test]
+    fn finds_the_closest_point_of_a_triangle() {
+        let triangle = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        // Over its face, past an edge, past a vertex.
+        assert_eq!(closest_on_triangle(Vec3::new(0.5, 0.5, 3.0), &triangle), Vec3::new(0.5, 0.5, 0.0));
+        assert_eq!(closest_on_triangle(Vec3::new(1.0, -1.0, 0.0), &triangle), Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(closest_on_triangle(Vec3::new(-1.0, -1.0, 1.0), &triangle), Vec3::ZERO);
+    }
+
     /// With the game's `res` directory in `WGT_RES_PATH`: the Chieftain's models, hit
     /// from the front and from above.
     #[test]
@@ -313,7 +446,18 @@ mod tests {
         let collision = &def.collision;
         for model in &collision.parts {
             assert!(model.groups.iter().any(|group| !group.triangles.is_empty()), "{model:?}");
+            // Every armour group has its thickness: only modules, the surveying device
+            // say, may have none, which a shell only damages.
+            let bare: Vec<_> = model.groups.iter()
+                .filter(|group| group.material.is_none() && group.name.starts_with("armor_"))
+                .map(|group| &group.name)
+                .collect();
+            assert!(bare.is_empty(), "{bare:?}");
         }
+        // Its upper front plate is its thickest, the gun mantlet aside.
+        let hull = &collision.parts[VehiclePart::Hull as usize];
+        let thickest = hull.groups.iter().filter_map(|group| group.material).map(|material| material.armor).fold(0.0, f32::max);
+        assert!(thickest >= 100.0, "{thickest}");
         // The upper front plate, 1.2 m up, from 50 m ahead.
         let front = collision.first_hit(&transforms, Vec3::new(0.0, 1.2, 50.0), Vec3::new(0.0, 1.2, 0.0)).unwrap();
         assert_eq!(front.part, VehiclePart::Hull, "{front:?}");

@@ -133,6 +133,8 @@ entity_schema! {
                 speed: f32,
                 unknown: u8,
             );
+            // An explosion beside the vehicle, its damage as `showDamageFromShot`'s.
+            fn showDamageFromExplosion(attacker: EntityId, center: Vec3, effects_index: u8, damage: i32, damage_factor: u8, gun_index: u8);
             fn onHealthChanged(new_health: i16, old_health: i16, attacker: EntityId, attack_reason: u8, extended_reason: i8);
         }
         cell {

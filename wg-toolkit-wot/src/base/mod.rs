@@ -2,6 +2,7 @@
 //! implementation. Its battles are in [`battle`].
 
 mod account;
+mod armor;
 mod battle;
 mod bot;
 mod gun;
