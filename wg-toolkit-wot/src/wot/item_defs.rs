@@ -100,7 +100,7 @@ pub struct ShotDef {
 }
 
 /// `SHELL_TYPES`, by their index in `SHELL_TYPES_LIST`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShellKind {
     HollowCharge = 0,
     HighExplosive = 1,
@@ -619,6 +619,28 @@ pub(crate) fn invalid(message: String) -> io::Error {
 mod tests {
 
     use super::*;
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: AP and APCR shells ricochet
+    /// past 70° from the armour's normal, HEAT past 85°, HE never.
+    #[test]
+    fn real_ricochet_angles() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let mut kinds = std::collections::HashSet::new();
+        for (nation, name) in [("uk", "GB98_T95_FV4201_Chieftain"), ("uk", "GB83_FV4005"), ("germany", "G44_JagdTiger"), ("france", "F75_Char_de_25t")] {
+            for shot in VehicleDef::load(&fs, nation, name).unwrap().shots {
+                let angle = shot.ricochet_angle_cos.map(|cos| cos.acos().to_degrees().round());
+                let expected = match shot.kind() {
+                    ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr => Some(70.0),
+                    ShellKind::HollowCharge => Some(85.0),
+                    _ => None,
+                };
+                assert_eq!(angle, expected, "{name}: {:?}", shot.kind());
+                kinds.insert(shot.kind());
+            }
+        }
+        assert!(kinds.contains(&ShellKind::HollowCharge) && kinds.contains(&ShellKind::ArmorPiercingCr), "{kinds:?}");
+    }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: a turret turning all around,
     /// and a casemate's few degrees either way.

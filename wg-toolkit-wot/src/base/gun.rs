@@ -84,13 +84,13 @@ pub struct Shot {
     /// How far it flew before `start`, in metres: 0 unless it ricocheted.
     pub flown: f32,
     /// How far from `start` it flies at most: its shell's maximum distance, less what it
-    /// flew, and less again with each ricochet's lost speed.
+    /// flew.
     pub range: f32,
     /// The times it ricocheted.
     pub ricochets: u32,
-    /// The share of its speed it kept off its ricochets, 1 until it ricochets: of its
-    /// penetration and damage too, see [`armor::hit`](super::armor::hit).
-    pub speed: f32,
+    /// The share of its shell's penetration it kept off its ricochets, 1 until it
+    /// ricochets, see [`armor::ricochet_pen`](super::armor::ricochet_pen).
+    pub pen_factor: f32,
     pub end: Vec3,
     /// The velocity at `end`.
     pub end_velocity: Vec3,
@@ -359,7 +359,7 @@ impl Gun {
         let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
         let (end, end_velocity, flight_time, landing) = fly(start, velocity, def.gravity, def.max_distance, terrain, vehicles);
         let range = def.max_distance;
-        Some(Shot { id, def, start, velocity, flown: 0.0, range, ricochets: 0, speed: 1.0, end, end_velocity, flight_time, landing, burst: None })
+        Some(Shot { id, def, start, velocity, flown: 0.0, range, ricochets: 0, pen_factor: 1.0, end, end_velocity, flight_time, landing, burst: None })
 
     }
 
@@ -404,20 +404,20 @@ impl Shot {
         self.flown + self.start.distance(self.end)
     }
 
-    /// The shell going on off what it hit at `end`, ricocheting along `direction`,
-    /// keeping `speed` of its speed, and of what was left of its range as its speed
-    /// squared does, the range of a ballistic flight. None once it ricocheted
-    /// [`MAX_RICOCHETS`] times, or out of range.
-    pub fn ricochet(&self, direction: Vec3, speed: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+    /// The shell going on off what it hit at `end`, ricocheting along `direction` at the
+    /// same speed, as the server shows ricochets, for the rest of its range, keeping
+    /// `pen_factor` of its penetration. None once it ricocheted [`MAX_RICOCHETS`] times,
+    /// or out of range.
+    pub fn ricochet(&self, direction: Vec3, pen_factor: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
         if self.ricochets >= MAX_RICOCHETS {
             return None;
         }
-        let range = (self.range - self.start.distance(self.end)) * speed * speed;
+        let range = self.range - self.start.distance(self.end);
         if range <= 0.0 {
             return None;
         }
         let start = self.end - self.end_velocity.normalize_or_zero() * RICOCHET_STANDOFF;
-        let velocity = direction.normalize() * self.end_velocity.length() * speed;
+        let velocity = direction.normalize() * self.end_velocity.length();
         let (end, end_velocity, flight_time, landing) = fly(start, velocity, self.def.gravity, range, terrain, vehicles);
         Some(Shot {
             id: self.id,
@@ -427,7 +427,7 @@ impl Shot {
             flown: self.distance(),
             range,
             ricochets: self.ricochets + 1,
-            speed: self.speed * speed,
+            pen_factor: self.pen_factor * pen_factor,
             end,
             end_velocity,
             flight_time,
@@ -532,17 +532,17 @@ mod tests {
     }
 
     #[test]
-    fn ricochets_slower_shorter_and_weaker() {
+    fn ricochets_at_the_same_speed_for_the_rest_of_its_range() {
         let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
         let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         // As if it hit something 100 m on.
         (shot.end, shot.end_velocity) = (Vec3::Z * 100.0, Vec3::Z * 800.0);
-        let off = shot.ricochet(Vec3::X, 0.8, None, &[]).unwrap();
+        let off = shot.ricochet(Vec3::X, 0.75, None, &[]).unwrap();
         assert_eq!((off.id, off.ricochets, off.flown), (shot.id, 1, 100.0));
         assert!(off.start.distance(shot.end) < 0.01 && off.start.z < 100.0, "{}", off.start);
-        assert!((off.velocity - Vec3::X * 640.0).length() < 1e-3, "{}", off.velocity);
-        assert!((off.range - 620.0 * 0.64).abs() < 0.1, "{}", off.range);
-        assert!((off.speed - 0.8).abs() < 1e-6, "{}", off.speed);
+        assert!((off.velocity - Vec3::X * 800.0).length() < 1e-3, "{}", off.velocity);
+        assert!((off.range - 620.0).abs() < 0.1, "{}", off.range);
+        assert_eq!(off.pen_factor, 0.75);
         assert_eq!(off.landing, Landing::Range);
         // Out of range where it ends, else at most `MAX_RICOCHETS` times.
         assert!(off.ricochet(-Vec3::X, 1.0, None, &[]).is_none());

@@ -33,19 +33,9 @@ const EXPLOSION_DAMAGE_ABSORPTION_FACTOR: f32 = 1.3;
 /// explosion to go through that armour.
 const EXPLOSION_STANDOFF: f32 = 0.01;
 
-/// A shell's penetration goes as its speed to this power, as de Marre's formula has it,
-/// and its damage as its speed squared, as its kinetic energy: what it keeps of them off
-/// its ricochets.
-const PEN_SPEED_EXPONENT: f32 = 1.43;
-const DAMAGE_SPEED_EXPONENT: f32 = 2.0;
-
-/// The share of its speed a shell keeps off armour it ricochets off.
-pub const ARMOR_RICOCHET_SPEED: f32 = 0.8;
-
 /// The ground, every terrain alike until their materials are read.
 pub const GROUND: GroundMaterial = GroundMaterial {
     ricochet_angle: 8.0 * std::f32::consts::PI / 180.0,
-    ricochet_speed: 0.6,
 };
 
 
@@ -55,8 +45,6 @@ pub const GROUND: GroundMaterial = GroundMaterial {
 pub struct GroundMaterial {
     /// The largest angle between a shell's path and the surface it ricochets off at.
     pub ricochet_angle: f32,
-    /// The share of its speed a shell keeps off it.
-    pub ricochet_speed: f32,
 }
 
 
@@ -98,12 +86,11 @@ pub struct Explosion {
 
 /// What a shell does to a vehicle, placed in the world by `transforms`, which it first
 /// hits at `point`, flying along `direction`, after flying `distance` metres, with this
-/// share of its speed left off its ricochets, see [`Shot::speed`](super::gun::Shot::speed):
-/// less penetration and damage, by [`PEN_SPEED_EXPONENT`] and [`DAMAGE_SPEED_EXPONENT`].
+/// share of its penetration left off its ricochets, see [`ricochet_pen`].
 pub fn hit(
     shot: &ShotDef,
     distance: f32,
-    speed: f32,
+    pen_factor: f32,
     point: Vec3,
     direction: Vec3,
     collision: &VehicleCollision,
@@ -114,15 +101,12 @@ pub fn hit(
     let direction = direction.normalize();
     let from = point - direction * TRACE_BACKWARD;
     let hits = collision.hits(transforms, from, point + direction * TRACE_FORWARD);
-    let pen = randomize(shot.pen_at(distance) * speed.powf(PEN_SPEED_EXPONENT), shot.pen_randomization, rng);
+    let pen = randomize(shot.pen_at(distance) * pen_factor, shot.pen_randomization, rng);
     let (outcome, index) = penetrate(shot, pen, direction, &hits)?;
     let hit = hits[index];
 
     let damage = match outcome {
-        Outcome::Pierced => {
-            let factor = hit.material.map_or(1.0, |material| material.vehicle_damage_factor);
-            shot.damage_at(distance) * speed.powf(DAMAGE_SPEED_EXPONENT) * factor
-        }
+        Outcome::Pierced => shot.damage_at(distance) * hit.material.map_or(1.0, |material| material.vehicle_damage_factor),
         _ => 0.0,
     };
     let impact = Impact { outcome, hit, damage, exploded: false };
@@ -188,6 +172,16 @@ pub fn ricochets_off_ground(shot: &ShotDef, velocity: Vec3, normal: Vec3, ground
     }
     let grazing = (-velocity.normalize_or_zero().dot(normal)).clamp(-1.0, 1.0).asin();
     (0.0..=ground.ricochet_angle).contains(&grazing)
+}
+
+/// The share of its penetration a shell keeps off a ricochet: [`KINETIC_RICOCHET_PEN`]
+/// for AP and APCR, all of it for HEAT. Its speed and damage stay.
+pub fn ricochet_pen_factor(shot: &ShotDef) -> f32 {
+    match shot.kind() {
+        ShellKind::ArmorPiercing | 
+        ShellKind::ArmorPiercingCr => 0.75,
+        _ => 1.0,
+    }
 }
 
 /// A velocity mirrored off a surface of this normal, as a shell ricochets, at the same
@@ -459,16 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn a_slowed_shell_pierces_and_damages_less() {
-        let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
+    fn a_ricocheted_shell_pierces_less_but_damages_as_much() {
+        let ap = shot(ShellKind::ArmorPiercing, 120.0, 180.0);
         let (collision, transforms) = vehicle(vec![plate(1.0, material(150.0, true))]);
-        let fire = |speed| hit(&ap, 100.0, speed, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap();
-        // 0.9 of its speed: 172 mm of penetration, 81% of its damage.
-        let slowed = fire(0.9);
-        assert_eq!(slowed.outcome, Outcome::Pierced);
-        assert!((slowed.damage - 400.0 * 0.81).abs() < 0.1, "{slowed:?}");
-        // 0.7: 120 mm.
-        assert_eq!(fire(0.7).outcome, Outcome::NotPierced);
+        let fire = |pen_factor| hit(&ap, 100.0, pen_factor, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap();
+        assert_eq!((fire(1.0).outcome, fire(1.0).damage), (Outcome::Pierced, 400.0));
+        // Off one ricochet, 135 mm.
+        assert_eq!(ricochet_pen_factor(&ap), 0.75);
+        assert_eq!(fire(ricochet_pen_factor(&ap)).outcome, Outcome::NotPierced);
+        assert_eq!(ricochet_pen_factor(&shot(ShellKind::HollowCharge, 120.0, 180.0)), 1.0);
     }
 
     #[test]

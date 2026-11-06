@@ -425,7 +425,7 @@ impl BaseThread {
                     None => battle.bots.iter().find(|bot| bot.entity_id == entity_id).map(|bot| bot.collision.clone()),
                 };
                 let Some(collision) = collision else { return Ok(()) };
-                let Some(impact) = armor::hit(def, shot.distance(), shot.speed, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
+                let Some(impact) = armor::hit(def, shot.distance(), shot.pen_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
                     debug!(%client, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
                     return Ok(());
                 };
@@ -435,7 +435,7 @@ impl BaseThread {
                 self.damage(client, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
                 if impact.outcome == Outcome::Ricochet {
                     let direction = armor::reflect(shot.end_velocity, impact.hit.normal);
-                    self.ricochet(client, at, shooter, shot, direction, armor::ARMOR_RICOCHET_SPEED, Some((entity_id, transforms)))?;
+                    self.ricochet(client, at, shooter, shot, direction, Some((entity_id, transforms)))?;
                 }
                 Ok(())
             }
@@ -458,7 +458,7 @@ impl BaseThread {
                 let normal = self.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
                 if armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND) {
                     let direction = armor::reflect(shot.end_velocity, normal);
-                    self.ricochet(client, at, shooter, shot, direction, armor::GROUND.ricochet_speed, None)?;
+                    self.ricochet(client, at, shooter, shot, direction, None)?;
                 } else if def.kind() == ShellKind::HighExplosive {
                     self.splash(client, shooter, shot)?;
                 }
@@ -470,10 +470,10 @@ impl BaseThread {
     }
 
     /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
-    /// keeping `speed` of its speed, see [`Shot::ricochet`]: the player sees it go on, as
-    /// the server shows it, with a tracer of the same shot. `landed` is the vehicle it
-    /// ricochets off, placed as it hit it, which it leaves from.
-    #[allow(clippy::too_many_arguments)]
+    /// losing penetration as [`armor::ricochet_pen`] says, see [`Shot::ricochet`]: the
+    /// player sees it go on, as the server shows it, with a tracer of the same shot.
+    /// `landed` is the vehicle it ricochets off, placed as it hit it, which it leaves
+    /// from.
     fn ricochet(
         &mut self,
         client: ClientKey,
@@ -481,7 +481,6 @@ impl BaseThread {
         shooter: EntityId,
         shot: &Shot,
         direction: Vec3,
-        speed: f32,
         landed: Option<(u32, [Affine3A; 4])>,
     ) -> io::Result<()> {
 
@@ -493,13 +492,13 @@ impl BaseThread {
                 vehicle.transforms = transforms;
             }
         }
-        let Some(next) = shot.ricochet(direction, speed, Some(&*terrain), &vehicles) else {
+        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(&*terrain), &vehicles) else {
             debug!(%client, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
         info!(%client, shot = next.id, ricochets = next.ricochets,
-            "Ricocheted a shell off {} at {:.0} m/s, {:.0}% of its speed left, landing at {:?} in {:.2} s",
-            if landed.is_some() { "a vehicle" } else { "the ground" }, next.velocity.length(), next.speed * 100.0, next.end, next.flight_time);
+            "Ricocheted a shell off {}, {:.0}% of its penetration left, landing at {:?} in {:.2} s",
+            if landed.is_some() { "a vehicle" } else { "the ground" }, next.pen_factor * 100.0, next.end, next.flight_time);
         show_tracer(app, battle.avatar, shooter, &next, true)?;
         battle.shots.push((at + f64::from(next.flight_time), shooter, next));
         Ok(())
