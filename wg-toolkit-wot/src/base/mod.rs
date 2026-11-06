@@ -5,6 +5,8 @@ mod account;
 mod armor;
 mod battle;
 mod bot;
+#[cfg(test)]
+mod drive_replay;
 mod gun;
 mod physics;
 mod shop;
@@ -41,7 +43,7 @@ use crate::wot::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
     CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::wot::item_defs::{self, AimingDef, MagazineDef, ShotDef, VehicleDef};
+use crate::wot::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, VehicleDef};
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
 use crate::wot::collision::VehicleCollision;
@@ -49,7 +51,6 @@ use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::item_prices::ItemPrices;
 use crate::wot::items::TankmanDescr;
 
-use physics::MotionLimits;
 use gun::Gun;
 use account::AccountData;
 use battle::{Battle, BattleOptions};
@@ -403,11 +404,7 @@ impl BaseThread {
             crew: vehicle.crew.iter().map(TankmanDescr::encode).collect(),
             setups: vehicle.setups(),
             setup_indexes: wgtk::pickle!({}),
-            limits: MotionLimits {
-                speed_forward: def.speed_forward,
-                speed_backward: def.speed_backward,
-                rotation_speed: def.rotation_speed,
-            },
+            mobility: def.mobility,
             ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
             shots: def.shots,
             aiming: def.aiming,
@@ -722,7 +719,7 @@ struct VehicleConfig {
     /// Its loadouts and the selected ones, see `account::Vehicle::setups`.
     setups: pickle::Value,
     setup_indexes: pickle::Value,
-    limits: MotionLimits,
+    mobility: MobilityDef,
     aiming: AimingDef,
     magazine: MagazineDef,
     /// Its shells, by integer descriptor, and how many of each.

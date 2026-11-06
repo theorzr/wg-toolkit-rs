@@ -34,7 +34,7 @@ use super::{
 };
 use super::armor::{self, Explosion, Impact, Outcome};
 use super::gun::{Gun, HitTarget, Landing, Shot};
-use super::physics::{MotionLimits, Vehicle};
+use super::physics::Vehicle;
 use super::bot::Bot;
 
 
@@ -257,7 +257,7 @@ impl BaseThread {
         info!(%avatar, entity_id = %vehicle.id(), "Created the vehicle, at {:?}", start.position);
 
         // Its turret at rest, as it is once driven.
-        let gun_angles = Vehicle::new(start.position, start.direction, config.limits, config.aiming.clone())
+        let gun_angles = Vehicle::new(start.position, start.direction, config.mobility, config.aiming.clone())
             .turret.gun_angles_packed();
         let mut entity = self.app.entity(vehicle)?;
         init_vehicle(&mut entity, avatar.id(), public.clone(), gun_angles)?;
@@ -291,7 +291,7 @@ impl BaseThread {
         let config = &battle.config;
         let mut driven = DrivenVehicle {
             entity: vehicle,
-            vehicle: Vehicle::new(start.position, start.direction, config.limits, config.aiming.clone()),
+            vehicle: Vehicle::new(start.position, start.direction, config.mobility, config.aiming.clone()),
             own_vehicle: None,
             gun_marker: None,
             engine_mode: None,
@@ -344,10 +344,9 @@ impl BaseThread {
     ) -> io::Result<BotVehicle> {
 
         let Start { position, direction } = start;
-        let limits = MotionLimits { speed_forward: def.speed_forward, speed_backward: def.speed_backward, rotation_speed: def.rotation_speed };
         let ammo = def.shots.iter().cloned().zip(def.default_ammo().into_iter().map(|(_, count)| count)).collect();
         let gun = Gun::new(ammo, def.aiming.reload_time).with_magazine(def.magazine).with_shot_ids_from(BOT_FIRST_SHOT_ID * (index + 1));
-        let driven = Vehicle::new(position, direction, limits, def.aiming.clone());
+        let driven = Vehicle::new(position, direction, def.mobility, def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
 
         let public = public_info(name, compact_descr, team, def.max_health as u16, def.crew_roles.len());

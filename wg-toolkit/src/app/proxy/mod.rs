@@ -56,6 +56,8 @@ pub struct App {
     held: Option<Held>,
     /// The packet of an unknown peer, see [`Event::UnknownPeer`].
     unknown: Option<(Packet, SocketAddr)>,
+    /// When the packet last read from a replayed capture was recorded.
+    replay_time: Option<Duration>,
 }
 
 /// Inner application structure to split from peer.
@@ -164,7 +166,14 @@ impl App {
             events: VecDeque::new(),
             held: None,
             unknown: None,
+            replay_time: None,
         }
+    }
+
+    /// When the packet whose events are being polled was recorded, since the start of
+    /// the capture, when replaying one.
+    pub fn replay_time(&self) -> Option<Duration> {
+        self.replay_time
     }
 
     /// Get the address this app is bound to.
@@ -316,6 +325,7 @@ impl App {
 
                     // It may have been changed already, but the record is what was live.
                     peer.real_addr = record.real_addr;
+                    self.replay_time = Some(record.time);
 
                     let packet = if record.undecryptable { Err(record.packet) } else { Ok(record.packet) };
                     self.handle(record.peer_addr, packet.clone().unwrap_or_else(|p| p), packet, record.direction);

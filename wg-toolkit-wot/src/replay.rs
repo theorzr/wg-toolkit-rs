@@ -75,7 +75,12 @@ pub fn replay(
         match app.poll() {
             proxy::Event::CaptureEnd(end) => break end.truncated,
             proxy::Event::IoError(error) => return Err(format!("Failed to replay packet capture: {}", error.error)),
-            event => handler.handle_event(&mut app, event),
+            event => {
+                // When it was recorded, for analyses of the trace over time.
+                let t = app.replay_time().unwrap_or_default().as_secs_f64();
+                let _record = info_span!("record", t).entered();
+                handler.handle_event(&mut app, event)
+            }
         }
     };
 

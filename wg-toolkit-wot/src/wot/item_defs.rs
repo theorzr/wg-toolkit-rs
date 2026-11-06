@@ -17,6 +17,9 @@ use super::collision::{CollisionModel, Material, VehicleCollision};
 use super::items::{item_type, IntCompactDescr, VehicleDescr};
 
 
+/// `HP_TO_WATTS`: an engine's power is given in horsepower.
+const HP_TO_WATTS: f32 = 735.5;
+
 /// The nations, `nations.NAMES` order: a nation's id is its index.
 pub const NATIONS: &[&str] = &[
     "ussr", "germany", "usa", "china", "france", "uk", "japan", "czech", "sweden", "poland", "italy",
@@ -43,15 +46,31 @@ pub struct VehicleDef {
     pub max_ammo: u32,
     /// Hull plus default turret, before any battle modifier.
     pub max_health: u32,
-    /// Top speeds forward and backward, in m/s.
-    pub speed_forward: f32,
-    pub speed_backward: f32,
-    /// How fast the default chassis turns the vehicle, in rad/s.
-    pub rotation_speed: f32,
+    pub mobility: MobilityDef,
     pub aiming: AimingDef,
     pub magazine: MagazineDef,
     /// The default modules' collision models.
     pub collision: Arc<VehicleCollision>,
+}
+
+/// How a vehicle moves with its default modules: the values the game derives its
+/// physics from, see `VehicleDescriptor.physics`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobilityDef {
+    /// Top speeds forward and backward, in m/s.
+    pub speed_forward: f32,
+    pub speed_backward: f32,
+    /// How fast the chassis turns the vehicle on the spot, in rad/s.
+    pub rotation_speed: f32,
+    /// The engine's power, in W: the server's physics' own, `smplEnginePower` in the
+    /// vehicle's `physics/detailed` section, else the engine's.
+    pub engine_power: f32,
+    /// The vehicle's weight, in kg: its hull's, chassis', turret's, gun's, engine's,
+    /// fuel tank's and radio's.
+    pub weight: f32,
+    /// The chassis' rolling friction on firm, medium and soft ground, from the same
+    /// physics section: the share of its weight the ground holds it back with.
+    pub rolling_friction: [f32; 3],
 }
 
 /// A shell as the default gun fires it: what the client needs to show its tracer.
@@ -420,13 +439,7 @@ impl VehicleDef {
             .and_then(|limits| limits.get_child_float(direction))
             .map(|kmh| kmh / 3.6)
             .ok_or_else(|| invalid(format!("{name} has no {direction} speed")));
-        let speed_forward = speed_limit("forward")?;
-        let speed_backward = speed_limit("backward")?;
-        let rotation_speed = vehicle.get_child_element("chassis")
-            .and_then(|chassis| chassis.iter_children_all().next())
-            .and_then(|(_, chassis)| chassis.as_element()?.get_child_float("rotationSpeed"))
-            .map(f32::to_radians)
-            .ok_or_else(|| invalid(format!("{name} has no chassis rotation speed")))?;
+        let mobility = mobility(fs, &dir, name, &vehicle, turret, guns.get_child_element(&gun_name), gun_def, speed_limit("forward")?, speed_limit("backward")?)?;
 
         // The vehicle may set its own values for a shared gun.
         let gun_float = |path: &[&str]| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
@@ -551,7 +564,7 @@ impl VehicleDef {
         let (burst_size, burst_interval) = section("burst")?.unwrap_or((1, 0.0));
         let magazine = MagazineDef { size, interval, burst_size, burst_interval };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, speed_forward, speed_backward, rotation_speed, aiming, magazine, collision })
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, mobility, aiming, magazine, collision })
 
     }
 
@@ -605,6 +618,79 @@ fn float_pair(value: &pxml::Value) -> Option<[f32; 2]> {
     value.as_vec2().map(|pair| pair.to_array()).or_else(|| value.as_float().map(|value| [value; 2]))
 }
 
+/// A vehicle's mobility with its default modules, its top speeds given, as
+/// `VehicleDescriptor.physics` has it. The engine, fuel tank and radio are shared
+/// modules, which the vehicle may set its own values for, as it may for its gun.
+#[allow(clippy::too_many_arguments)]
+fn mobility(
+    fs: &ResFilesystem,
+    dir: &str,
+    name: &str,
+    vehicle: &Element,
+    turret: &Element,
+    own_gun: Option<&Element>,
+    gun: &Element,
+    speed_forward: f32,
+    speed_backward: f32,
+) -> io::Result<MobilityDef> {
+
+    let missing = |what: &str| invalid(format!("{name} has no {what}"));
+    let first = |section: &str| vehicle.get_child_element(section)
+        .and_then(|section| section.iter_children_all().next())
+        .ok_or_else(|| missing(section));
+    // A module's own value, else its shared definition's.
+    let module_float = |section: &str, kind: &str, key: &str| -> io::Result<f32> {
+        let (module, own) = first(section)?;
+        if let Some(value) = own.as_element().and_then(|own| own.get_child_float(key)) {
+            return Ok(value);
+        }
+        read_xml(fs, &format!("{dir}/components/{kind}.xml"))?
+            .get_child_element("shared")
+            .and_then(|shared| shared.get_child_element(module))
+            .and_then(|shared| shared.get_child_float(key))
+            .ok_or_else(|| missing(&format!("{key} for {module}")))
+    };
+
+    let (_, chassis) = first("chassis")?;
+    let chassis = chassis.as_element().ok_or_else(|| missing("chassis"))?;
+    let chassis_float = |key: &str| chassis.get_child_float(key).ok_or_else(|| missing(&format!("chassis {key}")));
+
+    // What the client keeps of the server's physics, by module name.
+    let physics = vehicle.get_child_element("physics").and_then(|physics| physics.get_child_element("detailed"));
+    let (engine_name, _) = first("engines")?;
+    let (chassis_name, _) = first("chassis")?;
+    let engine_power = match physics.and_then(|physics| physics.get_child_value_at(&["engines", engine_name.as_str(), "smplEnginePower"])).and_then(pxml::Value::as_float) {
+        Some(power) => power,
+        None => module_float("engines", "engines", "power")?,
+    };
+    let rolling_friction = ["firm", "medium", "soft"].map(|ground| physics
+        .and_then(|physics| physics.get_child_value_at(&["chassis", chassis_name.as_str(), "grounds", ground, "rollingFriction"]))
+        .and_then(pxml::Value::as_float));
+    let [Some(firm), Some(medium), Some(soft)] = rolling_friction else {
+        return Err(missing("rolling friction in its physics section"));
+    };
+
+    let hull_weight = vehicle.get_child_element("hull").and_then(|hull| hull.get_child_float("weight"))
+        .ok_or_else(|| missing("hull weight"))?;
+    let turret_weight = turret.get_child_float("weight").ok_or_else(|| missing("turret weight"))?;
+    let gun_weight = own_gun.and_then(|gun| gun.get_child_float("weight")).or_else(|| gun.get_child_float("weight"))
+        .ok_or_else(|| missing("gun weight"))?;
+    let weight = hull_weight + chassis_float("weight")? + turret_weight + gun_weight
+        + module_float("engines", "engines", "weight")?
+        + module_float("fuelTanks", "fuelTanks", "weight")?
+        + module_float("radios", "radios", "weight")?;
+
+    Ok(MobilityDef {
+        speed_forward,
+        speed_backward,
+        rotation_speed: chassis_float("rotationSpeed")?.to_radians(),
+        engine_power: engine_power * HP_TO_WATTS,
+        weight,
+        rolling_friction: [firm, medium, soft],
+    })
+
+}
+
 pub(crate) fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element>> {
     let file = fs.read(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
     pxml::from_reader(io::BufReader::new(file)).map_err(|e| invalid(format!("{path}: {e}")))
@@ -619,6 +705,44 @@ pub(crate) fn invalid(message: String) -> io::Error {
 mod tests {
 
     use super::*;
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: the T110E4's mobility, as its
+    /// definitions, its physics section and the shared modules give it.
+    #[test]
+    fn real_mobility() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let mobility = VehicleDef::load(&fs, "usa", "A83_T110E4").unwrap().mobility;
+        assert_eq!(mobility.engine_power, 950.0 * HP_TO_WATTS);
+        assert_eq!(mobility.rolling_friction, [0.1127, 0.1288, 0.21735]);
+        assert!((mobility.rotation_speed.to_degrees() - 26.0).abs() < 1e-3);
+        // Hull, chassis, turret, engine, fuel tank and radio, and the gun's few tonnes.
+        assert!((63_000.0..70_000.0).contains(&mobility.weight), "{}", mobility.weight);
+    }
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: every vehicle's physics section
+    /// has what its mobility needs. Slow, loading every vehicle: run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn every_vehicle_has_rolling_friction() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let mut loaded = 0;
+        for nation in NATIONS {
+            let list = read_xml(&fs, &format!("scripts/item_defs/vehicles/{nation}/list.xml")).unwrap();
+            for (name, _) in list.iter_children_all().filter(|(name, _)| !name.starts_with("xmlns")) {
+                // Some listed vehicles miss other parts, which this test isn't about.
+                match VehicleDef::load(&fs, nation, name) {
+                    Ok(def) => {
+                        assert!(def.mobility.rolling_friction.iter().all(|&friction| friction > 0.0), "{nation}:{name}");
+                        loaded += 1;
+                    }
+                    Err(e) => assert!(!e.to_string().contains("rolling friction"), "{nation}:{name}: {e}"),
+                }
+            }
+        }
+        assert!(loaded > 1000, "{loaded}");
+    }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: AP and APCR shells ricochet
     /// past 70° from the armour's normal, HEAT past 85°, HE never.

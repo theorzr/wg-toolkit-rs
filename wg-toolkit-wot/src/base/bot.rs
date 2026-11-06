@@ -72,13 +72,12 @@ impl Bot {
 mod tests {
 
     use super::*;
-    use crate::base::physics::MotionLimits;
 
     #[test]
     fn closes_in_then_faces_its_enemy() {
-        let limits = MotionLimits { speed_forward: 10.0, speed_backward: 5.0, rotation_speed: 1.0 };
+        let mobility = crate::base::physics::tests::chieftain_mobility();
         let aiming = crate::base::physics::tests::chieftain_aiming();
-        let vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, limits, aiming);
+        let vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming);
         let mut bot = Bot::new(vehicle, Gun::new(Vec::new(), 10.0));
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {

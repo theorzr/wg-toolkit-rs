@@ -242,12 +242,18 @@ fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleHit])
 /// Whether a shell ricochets off armour it meets at this angle, as `_shouldRicochet`
 /// decides: AP and APCR never off armour thinner than a third of their caliber.
 fn ricochets(shot: &ShotDef, kind: ShellKind, hit_angle_cos: f32, armor: f32, may_ricochet: bool, check_caliber: bool) -> bool {
-    let Some(ricochet_angle_cos) = shot.ricochet_angle_cos else { return false };
+
+    let Some(ricochet_angle_cos) = shot.ricochet_angle_cos else { 
+        return false 
+    };
+
     if !may_ricochet || armor == 0.0 || hit_angle_cos > ricochet_angle_cos {
         return false;
     }
+
     let kind_checks_caliber = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr);
     !check_caliber || !kind_checks_caliber || armor * 3.0 >= shot.caliber
+    
 }
 
 /// The thickness of armour a shell goes through, meeting it at this angle, as

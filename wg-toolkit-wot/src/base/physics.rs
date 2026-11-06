@@ -1,14 +1,16 @@
 //! A vehicle as the server simulates it: its hull driven by the client's
 //! `vehicle_moveWith` flags, its turret turning toward what the client aims at. The real
-//! server simulates the vehicle's physics and streams the result; this is a stand-in
-//! that moves and turns at the vehicle's limits and rests on the terrain, with no
-//! collision, slope resistance or engine model.
+//! server runs a rigid body on springs (`WGTankPhysics`) with server-only tuning; the
+//! client only shows its results. This one keeps its drive: the engine's power against
+//! the ground's resistance and the slope, up to the top speeds, braking, and turning
+//! with its own acceleration, its constants fitted on drives captured from the real
+//! server. It rests on the terrain, with no collision yet.
 
 use glam::{Affine3A, Quat, Vec3};
 
 use wgtk::space::terrain::Terrain;
 
-use crate::wot::item_defs::AimingDef;
+use crate::wot::item_defs::{AimingDef, MobilityDef};
 
 
 /// The `vehicle_moveWith` flags, `MOVEMENT_FLAGS` in the client's `Avatar.py`.
@@ -21,27 +23,71 @@ pub mod movement_flag {
     pub const CRUISE_CONTROL25: u8 = 32;
 }
 
-/// How quickly the speed reaches what the flags ask for, in m/s².
-const ACCELERATION: f32 = 4.0;
-const BRAKING: f32 = 10.0;
+// Where each constant comes from: the game's sources, the captured drive the hull's
+// drive is fitted on (a T110E4: 950 hp, about 66 t, captured with its setup), or our
+// own choice.
 
-/// Where the hull is sampled to tilt it with the ground: half its length and width, a
-/// typical tank's rather than the vehicle's own.
+/// Gravity, in m/s². From the game: `G` in `physics_shared.py`, which the server's
+/// physics multiplies by the vehicle's `gravityFactor`, 1 when its definitions don't set
+/// it, as the client's never do.
+const GRAVITY: f32 = 9.81;
+/// How many times its engine's power over its weight drives the vehicle, against its
+/// rolling friction: `a = POWER_FACTOR · P / (m · v) - μ · g`. Fitted: on the drive's 571
+/// samples driving straight forward below the top speed, with forward held for 0.3 s
+/// either side, the acceleration plus gravity along the slope, with the drive's setup
+/// divided out, on medium ground. The drive
+/// can't tell power from friction apart (0.37 m/s² rms whatever the split): 1.15 to 1.23
+/// fit, firm or medium ground, the driver's factor 1.04 to 1.09; this is medium ground
+/// with the factor its turning shows. Field modifications aren't divided out.
+const POWER_FACTOR: f32 = 1.23;
+/// The ground the vehicle drives on, an index of `MobilityDef::rolling_friction`: medium,
+/// as the terrain's ground types aren't read yet. Our choice: the drive's own fit, 0.119
+/// of gravity without a power factor, is between the T110E4's firm (0.113) and medium
+/// (0.129) friction.
+const GROUND: usize = 1;
+/// The most the tracks accelerate the vehicle, in m/s²: the engine's power, over the
+/// speed, would be endless from a standstill. Fitted, roughly: the drive's one start
+/// from a standstill goes from 1.1 to 3.3 m/s in 0.5 s.
+const MAX_ACCELERATION: f32 = 4.5;
+/// How fast the vehicle slows down without controls, in m/s². Fitted, roughly: released
+/// at 9.8 m/s, the drive is at 4.6 m/s 0.4 s later, about 13 m/s², though its 17
+/// coasting samples average 9 m/s². A value between the two.
+const COASTING: f32 = 12.0;
+/// How fast the vehicle brakes against its controls, in m/s². Fitted: reversing at
+/// 6.2 m/s forward, the drive is at 0.4 m/s 0.4 s later, about 14.5 m/s².
+const BRAKING: f32 = 14.0;
+/// The share of its turning speed on the spot it turns at while moving. Fitted: the
+/// drive turns at 26.8°/s on the spot and 22.8°/s while moving, medians.
+const ROTATION_ON_MOVE: f32 = 0.85;
+/// The share of its top speed it drives at while turning. Fitted: the drive's 90th
+/// percentile speed is 9.0 m/s while turning, 9.9 m/s straight.
+const SPEED_WHILE_TURNING: f32 = 0.91;
+/// How fast its turning speed grows, in rad/s². Fitted: pressing a turn, the drive goes
+/// from 3.4°/s to 22.8°/s in 0.3 s.
+const ROTATION_ACCELERATION: f32 = 65.0 * std::f32::consts::PI / 180.0;
+/// How fast its turning speed falls, in rad/s². Our choice: released, the drive stops
+/// turning within two ticks, at least 100°/s², too quick to measure better at the
+/// capture's 10 positions a second.
+const ROTATION_BRAKING: f32 = 150.0 * std::f32::consts::PI / 180.0;
+/// Under this speed, in m/s, the vehicle turns as on the spot. Our choice, the split the
+/// fit above uses between turning on the spot and moving.
+const ON_SPOT_SPEED: f32 = 0.5;
+
+/// Where the hull is sampled to tilt it with the ground: half its length and width. Our
+/// choice, a typical tank's rather than the vehicle's own, until its chassis gives them.
 const HULL_HALF_LENGTH: f32 = 3.0;
-/// The engine's relative RPM at idle, and just after shifting up, as captured.
+const HULL_HALF_WIDTH: f32 = 1.7;
+/// The engine's relative RPM at idle, and just after shifting up. Captured: the RPM
+/// byte of `ownVehicleAuxPhysicsData` in the battle capture of 2026-10-31, whose 5th
+/// percentile is 0.20.
 const IDLE_RPM: f32 = 0.2;
 const SHIFT_RPM: f32 = 0.3;
-/// The shares of the top speed the gearbox shifts up at, as captured: 4 gears.
+/// The shares of the top speed the gearbox shifts up at: 4 gears. Captured, roughly: in
+/// the same capture, `ownVehicleGear` shifts up to the 2nd gear at a median 0.31 of the
+/// top speed and to the 4th at 0.82, while the 3rd comes anywhere (median 0.29): the
+/// real gearbox (`fakegearbox`, server-only) shifts on more than the speed. The 3rd's
+/// share is our choice, between the others.
 const GEAR_SHIFTS: [f32; 3] = [0.27, 0.52, 0.8];
-const HULL_HALF_WIDTH: f32 = 1.7;
-
-/// A vehicle's movement limits, see `VehicleDef`.
-#[derive(Debug, Clone, Copy)]
-pub struct MotionLimits {
-    pub speed_forward: f32,
-    pub speed_backward: f32,
-    pub rotation_speed: f32,
-}
 
 /// A live vehicle: its hull and its turret.
 #[derive(Debug, Clone)]
@@ -52,8 +98,8 @@ pub struct Vehicle {
 
 impl Vehicle {
 
-    pub fn new(position: Vec3, direction: Vec3, limits: MotionLimits, aiming: AimingDef) -> Self {
-        Self { hull: Hull::new(position, direction, limits), turret: Turret::new(aiming) }
+    pub fn new(position: Vec3, direction: Vec3, mobility: MobilityDef, aiming: AimingDef) -> Self {
+        Self { hull: Hull::new(position, direction, mobility), turret: Turret::new(aiming) }
     }
 
     /// Advance by `dt` seconds: the hull moves and rests on the terrain, if any, then the
@@ -93,19 +139,21 @@ pub struct Hull {
     pub yaw_rate: f32,
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,
-    pub limits: MotionLimits,
+    pub mobility: MobilityDef,
 }
 
 impl Hull {
 
-    pub fn new(position: Vec3, direction: Vec3, limits: MotionLimits) -> Self {
-        Self { position, direction, speed: 0.0, yaw_rate: 0.0, flags: 0, limits }
+    pub fn new(position: Vec3, direction: Vec3, mobility: MobilityDef) -> Self {
+        Self { position, direction, speed: 0.0, yaw_rate: 0.0, flags: 0, mobility }
     }
 
     /// The speed the flags ask for: the top speed in their direction, reduced by cruise
-    /// control.
+    /// control, and by turning.
     fn target_speed(&self) -> f32 {
+        
         use movement_flag::*;
+        
         let share = if self.flags & CRUISE_CONTROL25 != 0 {
             0.25
         } else if self.flags & CRUISE_CONTROL50 != 0 {
@@ -113,42 +161,76 @@ impl Hull {
         } else {
             1.0
         };
+
+        let share = if self.flags & (ROTATE_LEFT | ROTATE_RIGHT) != 0 { share * SPEED_WHILE_TURNING } else { share };
         if self.flags & FORWARD != 0 {
-            self.limits.speed_forward * share
+            self.mobility.speed_forward * share
         } else if self.flags & BACKWARD != 0 {
-            -self.limits.speed_backward * share
+            -self.mobility.speed_backward * share
         } else {
             0.0
         }
+
     }
 
     /// Advance by `dt` seconds. Returns whether the hull moved or turned.
+    ///
+    /// Driving its way, the engine's power accelerates it, as much as it is slow, up to
+    /// [`MAX_ACCELERATION`], against the ground's resistance and the slope, up to the
+    /// speed the flags ask for. Without controls it stops at [`COASTING`], and against
+    /// them it brakes at [`BRAKING`]. It turns at its turning speed on the spot, less
+    /// while moving, reaching it at [`ROTATION_ACCELERATION`].
     pub fn step(&mut self, dt: f32) -> bool {
 
         use movement_flag::*;
 
         let target = self.target_speed();
-        // Braking applies when slowing down or reversing, accelerating otherwise.
-        let rate = if target.abs() < self.speed.abs() || target * self.speed < 0.0 { BRAKING } else { ACCELERATION };
-        let delta = (target - self.speed).clamp(-rate * dt, rate * dt);
-        self.speed += delta;
+        let way = target.signum();
+
+        self.speed = 
+            if target == 0.0 {
+                approach(self.speed, 0.0, COASTING * dt)
+            } else if self.speed * way < 0.0 {
+                approach(self.speed, 0.0, BRAKING * dt)
+            } else {
+                // Along its way: the drive, less the ground's resistance, and the slope,
+                // pitched positively nose down.
+                let mobility = &self.mobility;
+                let along = self.speed.abs();
+                let power = POWER_FACTOR * mobility.engine_power / mobility.weight;
+                let drive = (power / along.max(1e-3)).min(MAX_ACCELERATION);
+                let resistance = mobility.rolling_friction[GROUND] * GRAVITY;
+                let slope = GRAVITY * self.direction.y.sin() * way;
+                let along = if along > target.abs() {
+                    approach(along, target.abs(), BRAKING * dt)
+                } else {
+                    (along + (drive - resistance + slope) * dt).clamp(0.0, target.abs())
+                };
+                along * way
+            };
 
         let mut turn = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
             ROTATE_LEFT => -1.0,
             ROTATE_RIGHT => 1.0,
             _ => 0.0,
         };
+
         // Backing up steers like a car: left swings the rear to the left.
         if self.flags & BACKWARD != 0 {
             turn = -turn;
         }
-        self.yaw_rate = turn * self.limits.rotation_speed;
+
+        let moving = self.speed.abs() >= ON_SPOT_SPEED || target != 0.0;
+        let rotation = self.mobility.rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 };
+        let goal = turn * rotation;
+        let rate = if goal.abs() > self.yaw_rate.abs() && goal * self.yaw_rate >= 0.0 { ROTATION_ACCELERATION } else { ROTATION_BRAKING };
+        self.yaw_rate = approach(self.yaw_rate, goal, rate * dt);
         self.direction.z = wrap_angle(self.direction.z + self.yaw_rate * dt);
 
         let yaw = self.direction.z;
         self.position += Vec3::new(yaw.sin(), 0.0, yaw.cos()) * self.speed * dt;
 
-        self.speed != 0.0 || turn != 0.0
+        self.speed != 0.0 || self.yaw_rate != 0.0
 
     }
 
@@ -156,6 +238,7 @@ impl Hull {
     /// without flags, accelerating (3) until at the speed the flags ask for, then
     /// cruising (2), and the flags themselves.
     pub fn engine_mode(&self) -> [u8; 2] {
+        
         let mode = if self.flags == 0 {
             1
         } else if (self.target_speed() - self.speed).abs() > 0.01 {
@@ -163,7 +246,9 @@ impl Hull {
         } else {
             2
         };
+
         [mode, self.flags]
+
     }
 
     /// The engine's gear and its RPM relative to its maximum, which the client's engine
@@ -172,20 +257,23 @@ impl Hull {
     /// gears, the RPM going from [`SHIFT_RPM`] to 1 across it; turning in place, the RPM
     /// follows the turn rate in first gear.
     pub fn engine(&self) -> (u8, f32) {
-        let top_speed = if self.speed < 0.0 { self.limits.speed_backward } else { self.limits.speed_forward };
+
+        let top_speed = if self.speed < 0.0 { self.mobility.speed_backward } else { self.mobility.speed_forward };
         let share = (self.speed.abs() / top_speed.max(0.1)).min(1.0);
-        let turn_share = (self.yaw_rate.abs() / self.limits.rotation_speed.max(0.01)).min(1.0);
+        let turn_share = (self.yaw_rate.abs() / self.mobility.rotation_speed.max(0.01)).min(1.0);
         if share < 0.02 {
             if turn_share < 0.02 {
                 return (0, IDLE_RPM);
             }
             return (1, SHIFT_RPM + (1.0 - SHIFT_RPM) * turn_share);
         }
+
         let gear = GEAR_SHIFTS.iter().take_while(|&&shift| share >= shift).count();
         let low = if gear == 0 { 0.0 } else { GEAR_SHIFTS[gear - 1] };
         let high = GEAR_SHIFTS.get(gear).copied().unwrap_or(1.0);
         let in_gear = ((share - low) / (high - low)).clamp(0.0, 1.0);
         (gear as u8 + 1, SHIFT_RPM + (1.0 - SHIFT_RPM) * in_gear)
+        
     }
 
     /// The hull's orientation: yaw about Y, then pitch about X (nose down), then roll
@@ -375,6 +463,11 @@ fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
     hull.position + hull.rotation() * (aiming.turret_position + Quat::from_rotation_y(turret.yaw) * aiming.gun_position)
 }
 
+/// A value moved toward a goal by at most `step`.
+fn approach(value: f32, goal: f32, step: f32) -> f32 {
+    value + (goal - value).clamp(-step, step)
+}
+
 /// A value between bounds on `bits` bits, rounded, as the client's packing does.
 fn pack_range(value: f32, min: f32, max: f32, bits: u32) -> u64 {
     let max_code = (1u64 << bits) - 1;
@@ -405,12 +498,20 @@ pub(super) mod tests {
     /// How high the test gun is above the vehicle's origin.
     const GUN_HEIGHT: f32 = 1.7;
 
-    fn chieftain() -> Hull {
-        Hull::new(Vec3::ZERO, Vec3::ZERO, MotionLimits {
+    /// About a Chieftain's: 750 hp for 55 t, with its physics section's rolling friction.
+    pub(crate) fn chieftain_mobility() -> MobilityDef {
+        MobilityDef {
             speed_forward: 40.0 / 3.6,
             speed_backward: 15.0 / 3.6,
             rotation_speed: 28f32.to_radians(),
-        })
+            engine_power: 750.0 * 735.5,
+            weight: 55_000.0,
+            rolling_friction: [0.0805, 0.10465, 0.20125],
+        }
+    }
+
+    fn chieftain() -> Hull {
+        Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility())
     }
 
     #[test]
@@ -418,11 +519,16 @@ pub(super) mod tests {
         let mut hull = chieftain();
         hull.direction.z = 2.771;
         hull.flags = movement_flag::FORWARD;
-        for _ in 0..100 {
+        // Quickly at first, slower as the engine's power spreads over the speed.
+        hull.step(0.1);
+        let first = hull.speed;
+        let resistance = hull.mobility.rolling_friction[GROUND] * GRAVITY;
+        assert!((first - (MAX_ACCELERATION - resistance) * 0.1).abs() < 1e-4, "{first}");
+        for _ in 0..300 {
             hull.step(0.1);
         }
         // At top speed after accelerating, heading south-east as captured.
-        assert!((hull.speed - 40.0 / 3.6).abs() < 1e-3);
+        assert!((hull.speed - 40.0 / 3.6).abs() < 1e-3, "{}", hull.speed);
         assert!(hull.position.x > 0.0 && hull.position.z < 0.0);
         assert_eq!(hull.position.y, 0.0);
     }
@@ -433,18 +539,28 @@ pub(super) mod tests {
         hull.flags = movement_flag::FORWARD;
         hull.step(1.0);
         hull.flags = movement_flag::ROTATE_RIGHT;
-        for _ in 0..10 {
+        for _ in 0..20 {
             hull.step(0.1);
         }
+        // Stopped, then turning on the spot at full speed.
         assert_eq!(hull.speed, 0.0);
-        assert!((hull.direction.z - 28f32.to_radians()).abs() < 1e-4);
-        // Backing up while steering right turns the hull the other way.
+        assert!((hull.yaw_rate - 28f32.to_radians()).abs() < 1e-4, "{}", hull.yaw_rate);
+        // Slower while driving.
+        hull.flags = movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
+        for _ in 0..20 {
+            hull.step(0.1);
+        }
+        assert!((hull.yaw_rate - 28f32.to_radians() * ROTATION_ON_MOVE).abs() < 1e-4, "{}", hull.yaw_rate);
+        // Backing up while steering right turns the hull the other way, soon.
         hull.flags = movement_flag::BACKWARD | movement_flag::ROTATE_RIGHT;
-        hull.step(0.1);
+        for _ in 0..5 {
+            hull.step(0.1);
+        }
         assert!(hull.yaw_rate < 0.0);
         // Standing still with no input reports no movement.
         hull.flags = 0;
         hull.speed = 0.0;
+        hull.yaw_rate = 0.0;
         assert!(!hull.step(0.1));
     }
 
@@ -527,7 +643,7 @@ pub(super) mod tests {
     fn engine_shifts_up_with_speed() {
         let mut hull = chieftain();
         assert_eq!(hull.engine(), (0, IDLE_RPM));
-        let top = hull.limits.speed_forward;
+        let top = hull.mobility.speed_forward;
         let mut last = (0, 0.0);
         // Below 2% of the top speed, it counts as still.
         for step in 2..=100 {
