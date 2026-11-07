@@ -24,6 +24,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use blowfish::cipher::KeyInit;
 use blowfish::Blowfish;
+use glam::Vec2;
 
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::pickle::{self, Value as PickleValue};
@@ -112,9 +113,10 @@ impl BaseThread {
             bots_fire: args.bots_fire,
             bots_drive: args.bots_drive,
             enemy_distance: args.enemy_distance,
+            spawn: args.spawn.map(|(x, z, yaw)| (Vec2::new(x, z), yaw.to_radians())),
         };
         info!(allies = args.allies, enemies = args.enemies, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
-            bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, "Set up the battles");
+            bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
         let account = AccountData::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {

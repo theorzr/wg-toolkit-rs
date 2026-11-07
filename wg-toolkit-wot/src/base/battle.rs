@@ -76,6 +76,8 @@ pub struct BattleOptions {
     pub bots_drive: bool,
     /// How far in front of the player the enemies start, if not at their spawn.
     pub enemy_distance: Option<f32>,
+    /// Where the player starts, if not at its team's start, and its yaw in radians.
+    pub spawn: Option<(Vec2, f32)>,
 }
 
 /// Where a vehicle starts.
@@ -246,7 +248,10 @@ impl BaseThread {
 
         let public = public_info(name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
 
-        let start = team_start(&self.map, &self.space.terrain, PLAYER_TEAM);
+        let start = match self.battle_options.spawn {
+            Some((at, yaw)) => spawn_start(at, yaw, &self.space.terrain),
+            None => team_start(&self.map, &self.space.terrain, PLAYER_TEAM),
+        };
         let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
             position: start.position,
             direction: start.direction,
@@ -1092,6 +1097,14 @@ fn team_start(map: &ArenaTypeDef, terrain: &Terrain, team: u8) -> Start {
         position: Vec3::new(at.x, height, at.y),
         direction: Vec3::new(0.0, 0.0, forward.x.atan2(forward.y)),
     }
+}
+
+/// A start at the given point and yaw, on the ground.
+fn spawn_start(at: Vec2, yaw: f32, terrain: &Terrain) -> Start {
+    let height = terrain.height_at(at.x, at.y).unwrap_or(0.0);
+    // In [-pi, pi) as angles are packed.
+    let yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    Start { position: Vec3::new(at.x, height, at.y), direction: Vec3::new(0.0, 0.0, yaw) }
 }
 
 /// Where a team's vehicle of this slot starts, from its team's start: the first there,

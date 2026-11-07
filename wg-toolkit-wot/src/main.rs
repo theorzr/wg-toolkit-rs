@@ -252,6 +252,20 @@ pub struct BaseArgs {
     /// spawn, facing the player.
     #[arg(long)]
     pub enemy_distance: Option<f32>,
+    /// Start the player here instead of at its team's spawn, as `<x>,<z>,<yaw>` with the
+    /// yaw in degrees (0 north, 90 east), on the ground: its allies line up behind.
+    #[arg(long, allow_hyphen_values = true, value_parser = parse_spawn)]
+    pub spawn: Option<(f32, f32, f32)>,
+}
+
+/// Parse a `--spawn` value, `<x>,<z>,<yaw>`.
+fn parse_spawn(value: &str) -> Result<(f32, f32, f32), String> {
+    let parts = value.split(',').map(str::trim).map(str::parse::<f32>).collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Expected <x>,<z>,<yaw>: {e}"))?;
+    match parts[..] {
+        [x, z, yaw] => Ok((x, z, yaw)),
+        _ => Err(format!("Expected <x>,<z>,<yaw>, got {value}")),
+    }
 }
 
 /// Type alias for a result that simply returns a string on error, this will be output
