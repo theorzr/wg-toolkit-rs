@@ -294,25 +294,34 @@ impl VehicleDef {
     pub fn load_by_id(fs: &ResFilesystem, nation_id: u8, type_id: u16) -> io::Result<Self> {
         let nation = NATIONS.get(usize::from(nation_id))
             .ok_or_else(|| invalid(format!("unknown nation id {nation_id}")))?;
-        let list = read_xml(fs, &format!("scripts/item_defs/vehicles/{nation}/list.xml"))?;
-        let name = list.iter_children_all()
-            .find(|(_, vehicle)| vehicle.as_element().and_then(|v| v.get_child_integer("id")) == Some(type_id.into()))
-            .map(|(name, _)| name.clone())
-            .ok_or_else(|| invalid(format!("no vehicle {type_id} in {nation}")))?;
-        Self::load(fs, nation, &name)
+        for dir in vehicle_dirs(fs, nation) {
+            let list = read_xml(fs, &format!("{dir}/list.xml"))?;
+            let name = list.iter_children_all()
+                .find(|(_, vehicle)| vehicle.as_element().and_then(|v| v.get_child_integer("id")) == Some(type_id.into()))
+                .map(|(name, _)| name.clone());
+            if let Some(name) = name {
+                return Self::load(fs, nation, &name);
+            }
+        }
+        Err(invalid(format!("no vehicle {type_id} in {nation}")))
     }
 
     /// Load a vehicle by nation and name, `GB98_T95_FV4201_Chieftain` say, with the
-    /// first module of each kind as the default one, as the game does.
+    /// first module of each kind as the default one, as the game does. A vehicle of an
+    /// extension, story mode's `A1035_Pershing_SM_SCC` say, is read from the
+    /// extension's own definitions, see [`vehicle_dirs`].
     pub fn load(fs: &ResFilesystem, nation: &str, name: &str) -> io::Result<Self> {
 
         let nation_id = NATIONS.iter().position(|n| *n == nation)
             .ok_or_else(|| invalid(format!("unknown nation {nation}")))? as u8;
-        let dir = format!("scripts/item_defs/vehicles/{nation}");
 
-        let list = read_xml(fs, &format!("{dir}/list.xml"))?;
-        let type_id = list.get_child_element(name)
-            .and_then(|vehicle| vehicle.get_child_integer("id"))
+        let (dir, type_id) = vehicle_dirs(fs, nation).into_iter()
+            .find_map(|dir| {
+                let id = read_xml(fs, &format!("{dir}/list.xml")).ok()?
+                    .get_child_element(name)?
+                    .get_child_integer("id")?;
+                Some((dir, id))
+            })
             .ok_or_else(|| invalid(format!("no vehicle {name} in {nation}")))?;
 
         let vehicle = read_xml(fs, &format!("{dir}/{name}.xml"))?;
@@ -705,6 +714,26 @@ fn mobility(
 
 }
 
+/// Where a nation's vehicles are defined: the core's directory, then each enabled
+/// extension's that has some, in name order, as `ExtensionsManager` finds them: a
+/// top-level directory with an `extension.xml`. An extension lists its vehicles in its
+/// own `list.xml`, and its components define their modules: story mode's do.
+fn vehicle_dirs(fs: &ResFilesystem, nation: &str) -> Vec<String> {
+    let mut extensions = fs.read_dir("").into_iter().flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.stat().is_dir())
+        .map(|entry| entry.name().to_string())
+        .filter(|extension| read_xml(fs, &format!("{extension}/extension.xml"))
+            .is_ok_and(|extension| extension.get_child_boolean("IsEnabled") == Some(true)))
+        .map(|extension| format!("{extension}/"))
+        .collect::<Vec<_>>();
+    extensions.sort();
+    std::iter::once(String::new()).chain(extensions)
+        .map(|root| format!("{root}scripts/item_defs/vehicles/{nation}"))
+        .filter(|dir| fs.stat(format!("{dir}/list.xml")).is_ok())
+        .collect()
+}
+
 pub(crate) fn read_xml(fs: &ResFilesystem, path: &str) -> io::Result<Box<Element>> {
     let file = fs.read(path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
     pxml::from_reader(io::BufReader::new(file)).map_err(|e| invalid(format!("{path}: {e}")))
@@ -734,6 +763,19 @@ mod tests {
         assert!(degrees.iter().zip([26.0, 22.75, 13.481]).all(|(real, expected)| (real - expected).abs() < 1e-3), "{degrees:?}");
         // Hull, chassis, turret, engine, fuel tank and radio, and the gun's few tonnes.
         assert!((63_000.0..70_000.0).contains(&mobility.weight), "{}", mobility.weight);
+    }
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: story mode's Pershing, from the
+    /// extension's own definitions, by name and by its descriptor's id, with its own
+    /// chassis turning at 38°/s where the core Pershing's turn at 47 and 50.
+    #[test]
+    fn extension_vehicle() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let def = VehicleDef::load(&fs, "usa", "A1035_Pershing_SM_SCC").unwrap();
+        assert_eq!(def.descr.type_id, 409);
+        assert!((def.mobility.rotation_speed[0].to_degrees() - 38.0).abs() < 1e-3);
+        assert_eq!(VehicleDef::load_by_id(&fs, def.descr.nation, 409).unwrap().name, "A1035_Pershing_SM_SCC");
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: every vehicle's chassis and
