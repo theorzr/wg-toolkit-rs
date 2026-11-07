@@ -130,43 +130,65 @@ impl CollisionModel {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: no valid collision data")))
     }
 
+    /// Its groups are those of every named variant: a vehicle's part has one, a
+    /// destructible building one per fragment, `n_wood0_1_5` say, each with its own
+    /// material kind.
     fn from_tagfile(tagfile: &Tagfile) -> Option<Self> {
 
-        let handles: Vec<_> = tagfile.root()?
-            .get("namedVariants")?.elements()?.get(0)?
-            .get("variant")?.deref()?
-            .get("resourceHandles")?.elements()?.into_iter()
-            .filter_map(|handle| handle.deref())
-            .collect();
-        let variant = |name: &str| handles.iter()
-            .find(|handle| handle.get("name").and_then(|n| n.as_str()) == Some(name))
-            .and_then(|handle| handle.get("variant")?.deref());
-
-        let body_flags = variant("HKBodyFlagsData")?;
-        let bound = |name: &str| Some(Vec3::from_slice(&body_flags.get(name)?.as_f32s::<4>()?[..3]));
-        let bounds = [bound("minBounds_")?, bound("maxBounds_")?];
-        let material_kinds: Vec<(&str, u32)> = body_flags
-            .get("flags_")?.elements()?.into_iter()
-            .filter_map(|info| Some((info.get("name")?.as_str()?, info.get("normalMatKind")?.as_int()? as u32)))
-            .collect();
-
         let mut groups = Vec::new();
-        for body in variant("Collision Physics Data")?.get("bodyCinfos")?.elements()? {
-            let name = body.get("name").and_then(|name| name.as_str()).unwrap_or_default();
-            let name = name.strip_prefix("s_").unwrap_or(name);
-            let shape = body.get("shape")?.deref()?;
-            let triangles = match shape.type_name() {
-                "hknpCompressedMeshShape" => compressed_mesh_triangles(shape)?,
-                _ => continue,
-            };
-            let material_kind = material_kinds.iter().find(|(n, _)| *n == name).map_or(0, |&(_, kind)| kind);
-            groups.push(ArmorGroup { name: name.to_string(), material_kind, material: None, triangles });
+        let mut bounds: Option<[Vec3; 2]> = None;
+
+        for named in tagfile.root()?.get("namedVariants")?.elements()? {
+
+            let handles: Vec<_> = named.get("variant")?.deref()?
+                .get("resourceHandles")?.elements()?.into_iter()
+                .filter_map(|handle| handle.deref())
+                .collect();
+
+            let variant = |name: &str| handles.iter()
+                .find(|handle| handle.get("name").and_then(|n| n.as_str()) == Some(name))
+                .and_then(|handle| handle.get("variant")?.deref());
+
+            let body_flags = variant("HKBodyFlagsData")?;
+            let bound = |name: &str| Some(Vec3::from_slice(&body_flags.get(name)?.as_f32s::<4>()?[..3]));
+            let [min, max] = [bound("minBounds_")?, bound("maxBounds_")?];
+            
+            bounds = Some(bounds.map_or([min, max], |[least, most]| [least.min(min), most.max(max)]));
+
+            let material_kinds: Vec<(&str, u32)> = body_flags
+                .get("flags_")?.elements()?.into_iter()
+                .filter_map(|info| Some((info.get("name")?.as_str()?, info.get("normalMatKind")?.as_int()? as u32)))
+                .collect();
+
+            for body in variant("Collision Physics Data")?.get("bodyCinfos")?.elements()? {
+                
+                let name = body.get("name").and_then(|name| name.as_str()).unwrap_or_default();
+                let name = name.strip_prefix("s_").unwrap_or(name);
+                let shape = body.get("shape")?.deref()?;
+
+                let triangles = match shape.type_name() {
+                    "hknpCompressedMeshShape" => compressed_mesh_triangles(shape)?,
+                    _ => continue,
+                };
+
+                groups.push(ArmorGroup { 
+                    name: name.to_string(), 
+                    material_kind: material_kinds.iter().find(|(n, _)| *n == name).map_or(0, |&(_, kind)| kind), 
+                    material: None, 
+                    triangles,
+                });
+
+            }
+
         }
+
+        let bounds = bounds?;
 
         let radius = groups.iter()
             .flat_map(|group| group.triangles.iter().flatten())
             .map(|vertex| vertex.length())
             .fold(0.0, f32::max);
+
         Some(Self { groups, radius, bounds })
 
     }

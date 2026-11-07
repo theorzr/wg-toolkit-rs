@@ -6,15 +6,19 @@ mod bwal;
 mod bwcs;
 mod bwsg;
 mod bwt2;
+mod bsmi;
+mod bsmo;
 
 use std::io::{self, Read, Seek};
 
-pub use bwtb::*;
-pub use bwst::*;
-pub use bwal::*;
-pub use bwcs::*;
-pub use bwsg::*;
-pub use bwt2::*;
+pub use bwtb::{BWTB, SectionMeta};
+pub use bwst::{BWST, get_hash, get_hash_from_str};
+pub use bwal::{BWAL, AssetInfo, AssetType};
+pub use bwcs::BWCS;
+pub use bwsg::{BWSG, ModelInfo, PositionInfo};
+pub use bwt2::{BWT2, TerrainSettings1, TerrainSettings2, TerrainChunk, OutlandCascade};
+pub use bsmi::{BSMI, StaticModelInstance};
+pub use bsmo::{BSMO, StaticModel};
 
 
 /// Alias for 4-bytes array, which is used to identify sections in a compiled space.
