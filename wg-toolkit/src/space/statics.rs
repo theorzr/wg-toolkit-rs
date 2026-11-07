@@ -94,6 +94,24 @@ impl StaticTriangle {
         }
     }
 
+    /// Its height above a point of the ground plane, if it covers it: where a vertical
+    /// line there crosses it. None for a vertical triangle.
+    pub fn height_at(&self, point: Vec2) -> Option<f32> {
+        let [a, b, c] = self.vertices.map(Vec3Swizzles::xz);
+        let area = (b - a).perp_dot(c - a);
+        if area.abs() < 1e-9 {
+            return None;
+        }
+        // Barycentric weights of `b` and `c`, all three within 0 and 1 inside.
+        let u = (point - a).perp_dot(c - a) / area;
+        let v = (b - a).perp_dot(point - a) / area;
+        if u < 0.0 || v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let [a, b, c] = self.vertices.map(|vertex| vertex.y);
+        Some(a + (b - a) * u + (c - a) * v)
+    }
+
 }
 
 impl StaticScene {
@@ -179,6 +197,14 @@ impl StaticScene {
             .map(|(_, triangle)| triangle)
     }
 
+    /// The triangles of a body kind above or below a point of the ground plane, each
+    /// with its height there.
+    pub fn triangles_at(&self, kind: BodyKind, point: Vec2) -> impl Iterator<Item = (&StaticTriangle, f32)> {
+        let (min, max) = (Vec3::new(point.x, f32::MIN, point.y), Vec3::new(point.x, f32::MAX, point.y));
+        self.triangles_in(kind, min, max)
+            .filter_map(move |triangle| Some((triangle, triangle.height_at(point)?)))
+    }
+
 }
 
 
@@ -211,6 +237,11 @@ mod tests {
         assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::new(11.0, 0.0, -20.0), Vec3::new(30.0, 5.0, 20.0)).count(), 0);
         assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::new(-20.0, 6.0, -20.0), Vec3::new(20.0, 9.0, 20.0)).count(), 0);
         assert!((scene.triangles[0].normal.length() - 1.0).abs() < 1e-5);
+        // Its height above points of the ground plane, inside it, and none outside.
+        let heights: Vec<f32> = scene.triangles_at(BodyKind::Solid, Vec2::new(5.0, 0.0)).map(|(_, height)| height).collect();
+        assert_eq!(heights.len(), 1);
+        assert!((heights[0] - 2.5).abs() < 1e-5, "{heights:?}");
+        assert_eq!(scene.triangles_at(BodyKind::Solid, Vec2::new(-5.0, 5.0)).count(), 0);
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: Malinovka's placed collision,

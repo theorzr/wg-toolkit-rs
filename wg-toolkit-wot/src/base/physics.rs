@@ -272,15 +272,16 @@ impl Hull {
             self.keep_within(bounds);
         }
         if moved {
-            self.settle(&space.terrain);
+            self.settle(space);
         }
         moved
     }
 
     /// Push its collision box out of the solid static models it overlaps, on the ground
-    /// plane: their triangles within [`WALL_ANGLE`] of vertical, between [`STEP_HEIGHT`]
-    /// and its top, the deepest overlap first, [`WALL_PASSES`] at most. What of its velocity goes into a wall stops, and
-    /// slows the rest by [`WALL_FRICTION`]. Its pitch and roll are left out.
+    /// plane, see [`Self::overlaps`]: their triangles within [`WALL_ANGLE`] of vertical,
+    /// the others being ground, between [`STEP_HEIGHT`] above its bottom and its top,
+    /// the deepest overlap first, [`WALL_PASSES`] at most. What of its velocity goes into
+    /// a wall stops, and slows the rest by [`WALL_FRICTION`].
     pub fn push_out(&mut self, statics: &StaticScene) {
 
         for _ in 0..WALL_PASSES {
@@ -307,24 +308,25 @@ impl Hull {
     }
 
     /// The solid static triangles its collision box overlaps, see [`Self::push_out`],
-    /// each with how far to push it out of it on the ground plane.
+    /// each with how far to push it out of it on the ground plane. They are tested in its
+    /// own frame, tilted with it: nose up, its front clears higher.
     pub fn overlaps<'a>(&self, statics: &'a StaticScene) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
 
-        let (heading, right) = self.axes();
-        let (heading, right) = (heading.xz(), right.xz());
+        let (position, rotation) = (self.position, self.rotation());
+        let inverse = rotation.inverse();
         let [min, max] = self.mobility.bounds;
         let (center, half) = ((min + max) / 2.0, (max - min) / 2.0);
-        let half = Vec2::new(half.x, half.z);
-        let (low, high) = (self.position.y + STEP_HEIGHT.max(min.y), self.position.y + max.y);
+        let (low, high) = (STEP_HEIGHT.max(min.y), max.y);
 
-        let middle = self.position.xz() + heading * center.z + right * center.x;
-        let reach = half.length();
-        let (least, most) = (Vec3::new(middle.x - reach, low, middle.y - reach), Vec3::new(middle.x + reach, high, middle.y + reach));
-        statics.triangles_in(BodyKind::Solid, least, most)
+        // As far as its box reaches, however it is tilted.
+        let reach = Vec3::splat(min.abs().max(max.abs()).length());
+        statics.triangles_in(BodyKind::Solid, position - reach, position + reach)
             .filter(|triangle| triangle.normal.y.abs() < WALL_ANGLE.sin())
             .filter_map(move |triangle| {
-                let outline = clip_to_heights(&triangle.vertices, low, high)?;
-                Some((triangle, box_push(middle, heading, right, half, &outline)?))
+                let local = triangle.vertices.map(|vertex| inverse * (vertex - position));
+                let outline = clip_to_heights(&local, low, high)?;
+                let push = box_push(center.xz(), Vec2::Y, Vec2::X, half.xz(), &outline)?;
+                Some((triangle, (rotation * Vec3::new(push.x, 0.0, push.y)).xz()))
             })
 
     }
@@ -560,22 +562,26 @@ impl Hull {
 
     }
 
-    /// Rest on the terrain: at its height, rolled and pitched with its slope under the
-    /// corners its tracks rest on, see `MobilityDef::carrying_point`. Off the terrain,
-    /// the hull stays as it is.
-    pub fn settle(&mut self, terrain: &Terrain) {
+    /// Rest on the ground: at its height, rolled and pitched with its slope under the
+    /// corners its tracks rest on, see `MobilityDef::carrying_point`, the ground being
+    /// the terrain or a static model on it, see [`ground_height`]. Off the ground, the
+    /// hull stays as it is.
+    pub fn settle(&mut self, space: &Space) {
 
         let (heading, right) = self.axes();
         let carrying = self.mobility.carrying_point;
-        let height = |along: f32, across: f32| {
-            let at = self.position + heading * along * carrying.y + right * across * carrying.x;
-            terrain.height_at(at.x, at.z)
-        };
+        let top = self.position.y + STEP_HEIGHT;
 
-        let (Some(center), Some(front_right), Some(front_left), Some(back_right), Some(back_left)) =
-            (height(0.0, 0.0), height(1.0, 1.0), height(1.0, -1.0), height(-1.0, 1.0), height(-1.0, -1.0)) else {
-            return;
-        };
+        // Its centre, then its front right, front left, back right and back left corners.
+        let mut heights = [0.0; 5];
+        let corners = [(0.0, 0.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)];
+        for (height, (along, across)) in heights.iter_mut().zip(corners) {
+            let at = self.position + heading * along * carrying.y + right * across * carrying.x;
+            let Some(ground) = ground_height(space, at.xz(), top) else { return };
+            *height = ground;
+        }
+
+        let [center, front_right, front_left, back_right, back_left] = heights;
         let (front, back) = (front_right + front_left, back_right + back_left);
         let (right_side, left_side) = (front_right + back_right, front_left + back_left);
         self.position.y = center;
@@ -723,6 +729,26 @@ fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
 }
 
 /// A value moved toward a goal by at most `step`.
+/// The height of the ground under a point of the ground plane, no higher than `top`:
+/// the terrain's, or a static model's above it, its solid triangles flatter than
+/// [`WALL_ANGLE`] from vertical or its ramps, the deck of a bridge it drives onto say,
+/// not the one it drives under. None with neither.
+fn ground_height(space: &Space, point: Vec2, top: f32) -> Option<f32> {
+    
+    let terrain = space.terrain.height_at(point.x, point.y);
+    let statics = [BodyKind::Solid, BodyKind::Ramp].into_iter()
+        .flat_map(|kind| space.statics.triangles_at(kind, point))
+        .filter(|&(triangle, height)| height <= top && (triangle.kind == BodyKind::Ramp || triangle.normal.y.abs() >= WALL_ANGLE.sin()))
+        .map(|(_, height)| height)
+        .reduce(f32::max);
+    
+    match (terrain, statics) {
+        (Some(terrain), Some(statics)) => Some(terrain.max(statics)),
+        (terrain, statics) => terrain.or(statics),
+    }
+
+}
+
 /// What of a triangle lies between two heights, on the ground plane: its outline's x
 /// and z, none if it lies all above or below.
 fn clip_to_heights(triangle: &[Vec3; 3], low: f32, high: f32) -> Option<Vec<Vec2>> {
@@ -971,6 +997,39 @@ pub(super) mod tests {
             hull.advance(0.1, &space, None);
         }
         assert!(hull.position.z > 12.0, "{}", hull.position.z);
+    }
+
+    /// A flat deck from z = 0 to 20, `height` high, as two triangles.
+    fn deck(height: f32) -> Space {
+        let (near_left, near_right) = (Vec3::new(-5.0, height, 0.0), Vec3::new(5.0, height, 0.0));
+        let (far_left, far_right) = (Vec3::new(-5.0, height, 20.0), Vec3::new(5.0, height, 20.0));
+        let triangles = vec![
+            StaticTriangle::new([near_left, far_right, near_right], 0, 0, BodyKind::Solid),
+            StaticTriangle::new([near_left, far_left, far_right], 0, 0, BodyKind::Solid),
+        ];
+        Space { statics: StaticScene::from_triangles(triangles), ..Space::default() }
+    }
+
+    #[test]
+    fn drives_onto_decks_within_a_step() {
+        // A step up, it drives onto it and rests on it.
+        let space = deck(STEP_HEIGHT - 0.1);
+        let mut hull = chieftain();
+        hull.position.z = -6.0;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..40 {
+            hull.advance(0.1, &space, None);
+        }
+        assert!(hull.position.z > 10.0 && hull.position.y == STEP_HEIGHT - 0.1, "{}", hull.position);
+        // Higher, a bridge it drives under, it stays below.
+        let space = deck(STEP_HEIGHT + 3.0);
+        let mut hull = chieftain();
+        hull.position.z = -6.0;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..40 {
+            hull.advance(0.1, &space, None);
+        }
+        assert!(hull.position.z > 10.0 && hull.position.y == 0.0, "{}", hull.position);
     }
 
     #[test]
