@@ -2,10 +2,12 @@
 
 mod pxml;
 mod res;
+mod space;
+mod havok;
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Read};
 use std::process::ExitCode;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -41,6 +43,8 @@ pub enum Command {
     #[command(name = "pxml")]
     PackedXml(PackedXmlArgs),
     Res(ResArgs),
+    Space(SpaceArgs),
+    Havok(HavokArgs),
 }
 
 /// Packed XML read and write utilities.
@@ -169,10 +173,92 @@ pub struct ResFuseArgs {
     pub mount_path: String,
 }
 
+/// Compiled space (space.bin) inspection, to study its sections.
+///
+/// A compiled space is a table of sections, each identified by 4 characters, most of
+/// them runs of vectors: a vector being its element size, its element count, then its
+/// elements. Strings are referenced by their hash in the BWST section.
+#[derive(Debug, Args)]
+pub struct SpaceArgs {
+    /// If specified, the compiled space is read from a file instead of stdin (fd 0),
+    /// pipe 'wgtk res <dir> read spaces/<name>/space.bin' into it say.
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+    #[command(subcommand)]
+    pub cmd: SpaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SpaceCommand {
+    /// List its sections: their identifier, offset and length.
+    Sections,
+    /// List its string table (BWST), each string with its hash.
+    Strings,
+    /// Walk a section as a run of vectors, the elements of each as 32-bit words, both as
+    /// integers and floats, the integers that are string hashes resolved.
+    Vectors(SpaceVectorsArgs),
+    /// List its static models (BSMO) with their collision, render primitives, bounds and
+    /// how many times BSMI places each.
+    Models,
+}
+
+#[derive(Debug, Args)]
+pub struct SpaceVectorsArgs {
+    /// The section's identifier, 'BSMO' say.
+    pub section: String,
+    /// How many elements of each vector to show.
+    #[arg(short, long, default_value_t = 3)]
+    pub rows: usize,
+}
+
+/// Havok tagfile (TAG0) inspection, as the game ships collision models (.havok).
+#[derive(Debug, Args)]
+pub struct HavokArgs {
+    /// If specified, the tagfile is read from a file instead of stdin (fd 0), pipe
+    /// 'wgtk res <dir> read <path>.havok' into it say.
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
+    #[command(subcommand)]
+    pub cmd: HavokCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HavokCommand {
+    /// List its types: their id, name, parent, format, size and own members.
+    Types,
+    /// Print its objects from the root, following pointers.
+    Tree(HavokTreeArgs),
+    /// Print it as a collision model: its bodies, their material kind and triangle
+    /// count, and its bounds.
+    Collision,
+}
+
+#[derive(Debug, Args)]
+pub struct HavokTreeArgs {
+    /// How deep to follow members, pointers and arrays.
+    #[arg(short, long, default_value_t = 12)]
+    pub depth: usize,
+    /// How many elements of each array to show.
+    #[arg(short, long, default_value_t = 4)]
+    pub elements: usize,
+}
+
 /// Type alias for a result that simply returns a string on error, this will be output
 /// on stderr and process returns a failed exit code. This allows easier error handling
 /// by just mapping the error type to an explanatory text.
 pub type CliResult<T> = Result<T, String>;
+
+/// Read a file, or the standard input without one.
+pub fn read_input(file: Option<&Path>) -> CliResult<Vec<u8>> {
+    match file {
+        Some(path) => std::fs::read(path).map_err(|e| format!("Failed to read file at {path:?}: {e}")),
+        None => {
+            let mut content = Vec::new();
+            io::stdin().read_to_end(&mut content).map_err(|e| format!("Failed to read content from stdin: {e}"))?;
+            Ok(content)
+        }
+    }
+}
 
 /// Entrypoint.
 fn main() -> ExitCode {
@@ -185,6 +271,8 @@ fn main() -> ExitCode {
     let res = match args.cmd {
         Command::PackedXml(args) => pxml::cmd_pxml(args),
         Command::Res(args) => res::cmd_res(opts, args),
+        Command::Space(args) => space::cmd_space(args),
+        Command::Havok(args) => havok::cmd_havok(args),
     };
 
     if let Err(message) = res {

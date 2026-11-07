@@ -226,6 +226,15 @@ pub struct Terrain {
     chunks: HashMap<(i16, i16), Chunk>,
 }
 
+impl Default for Terrain {
+
+    /// No terrain: no height or ground anywhere.
+    fn default() -> Self {
+        Self { chunk_size: DEFAULT_CHUNK_SIZE, chunks: HashMap::new() }
+    }
+
+}
+
 impl Terrain {
 
     /// Load the terrain of a space, `spaces/08_ruinberg` say.

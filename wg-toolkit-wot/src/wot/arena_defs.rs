@@ -6,6 +6,7 @@ use std::io;
 use glam::Vec2;
 
 use wgtk::res::fs::ResFilesystem;
+use wgtk::pxml::Element;
 
 use super::item_defs::{invalid, read_xml};
 
@@ -49,9 +50,7 @@ impl ArenaTypeDef {
         let def = read_xml(fs, &format!("scripts/arena_defs/{name}.xml"))?;
         let geometry = def.get_child_string("geometry")
             .ok_or_else(|| invalid(format!("map {name} has no geometry")))?;
-        let corner = |key| def.get_child_value_at(&["boundingBox", key]).and_then(|value| value.as_vec2())
-            .ok_or_else(|| invalid(format!("map {name} has no bounding box")));
-        let bounds = (corner("bottomLeft")?, corner("upperRight")?);
+        let bounds = read_bounds(&def, name)?;
 
         let spawn = |team| {
             let point = def.get_child_value_at(&["gameplayTypes", "ctf", "teamSpawnPoints", team, "position"]);
@@ -66,4 +65,12 @@ impl ArenaTypeDef {
 
     }
 
+}
+
+/// A map's playable area from its definition, as [`ArenaTypeDef::bounds`] gives it:
+/// every map has one, those without standard battles too, story mode's say.
+pub fn read_bounds(def: &Element, name: &str) -> io::Result<(Vec2, Vec2)> {
+    let corner = |key| def.get_child_value_at(&["boundingBox", key]).and_then(|value| value.as_vec2())
+        .ok_or_else(|| invalid(format!("map {name} has no bounding box")));
+    Ok((corner("bottomLeft")?, corner("upperRight")?))
 }

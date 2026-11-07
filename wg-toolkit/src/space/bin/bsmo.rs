@@ -4,25 +4,37 @@ use glam::Vec3;
 
 use crate::util::io::WgReadExt;
 
-use super::bsmi::skip_vector;
-use super::{Section, SectionId};
+use super::{invalid, skip_vector, SpaceSection};
 
 
-/// The vectors between the models' bounds and their collision, of unknown use.
+/// The vectors of `BSMO` between its models' bounds and their collision, of unknown
+/// use.
 const UNKNOWN_VECTORS: usize = 12;
 
-
-/// StaticModels section: the models [`BSMI`](super::BSMI) places, their bounds, their
+/// `BSMO`: the static models [`BSMI`] places, their bounds, their
 /// render primitives and their collision. Only its third and sixteenth vectors are
-/// known, its others are skipped.
+/// known, the others are skipped.
 #[derive(Debug)]
 pub struct BSMO {
     pub models: Vec<StaticModel>,
 }
 
-impl Section for BSMO {
+/// A static model, its strings as [`BWST`] hashes.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticModel {
+    /// Its bounding box in its own frame, minimum then maximum.
+    pub bounds: [Vec3; 2],
+    /// Its render primitives, a `.primitives` resource.
+    pub primitives_fnv: u32,
+    /// Its collision, a `.havok` resource, none for decor nothing collides with.
+    pub havok_fnv: Option<u32>,
+    /// Its collision's material, `n_wood0` or `default` say, when it has one.
+    pub material_fnv: u32,
+}
 
-    const ID: &'static SectionId = b"BSMO";
+impl SpaceSection for BSMO {
+
+    const ID: [u8; 4] = *b"BSMO";
 
     fn decode<R: Read + Seek>(read: &mut R) -> io::Result<Self> {
 
@@ -40,7 +52,7 @@ impl Section for BSMO {
         let collisions = read.read_vector(|buf| Ok((buf.read_u32()?, buf.read_u32()?)))?;
 
         if collisions.len() != bounds.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "static models and their collisions differ in count"));
+            return Err(invalid("static models and their collisions differ in count"));
         }
 
         let models = bounds.into_iter().zip(collisions)
@@ -55,18 +67,4 @@ impl Section for BSMO {
 
     }
 
-}
-
-
-/// A static model, its strings as [`BWST`](super::BWST) hashes.
-#[derive(Debug, Clone, Copy)]
-pub struct StaticModel {
-    /// Its bounding box in its own frame, minimum then maximum.
-    pub bounds: [Vec3; 2],
-    /// Its render primitives, a `.primitives` resource.
-    pub primitives_fnv: u32,
-    /// Its collision, a `.havok` resource, none for decor nothing collides with.
-    pub havok_fnv: Option<u32>,
-    /// Its collision's material, `n_wood0` or `default` say, when it has one.
-    pub material_fnv: u32,
 }

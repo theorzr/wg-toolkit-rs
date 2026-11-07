@@ -4,15 +4,23 @@
 //! client only shows its results. This one keeps its drive: the engine's power against
 //! the ground's resistance and the slope, up to the top speeds, braking, and turning
 //! with its own acceleration, all depending on the ground under it, its constants fitted
-//! on drives captured from the real server. It rests on the terrain, with no collision
-//! yet.
+//! on drives captured from the real server. It rests on the terrain and stays within
+//! the map's bounds, with no other collision yet.
 
-use glam::{Affine3A, Quat, Vec3};
+use glam::{Affine3A, Quat, Vec2, Vec3};
 
 use wgtk::space::terrain::{Ground, Terrain};
+use wgtk::space::Space;
 
 use crate::wot::item_defs::{AimingDef, MobilityDef};
 
+
+/// How far inside the map's bounds the hull's centre stays, in metres. Fitted: the real
+/// server holds it 0.3 m inside driven square on, 0.0 to 0.1 m inside at 30°.
+const BOUNDS_MARGIN: f32 = 0.2;
+/// How much of the speed an edge stops it also takes along it: their friction. Fitted
+/// on the real server's drag along an edge driven into at 30°.
+const EDGE_FRICTION: f32 = 0.25;
 
 /// The `vehicle_moveWith` flags, `MOVEMENT_FLAGS` in the client's `Avatar.py`.
 pub mod movement_flag {
@@ -121,9 +129,9 @@ const SHIFT_RPM: f32 = 0.3;
 /// share is our choice, between the others.
 const GEAR_SHIFTS: [f32; 3] = [0.27, 0.52, 0.8];
 
-/// The ground at a position on the terrain, if any, else [`DEFAULT_GROUND`].
-pub fn ground_at(terrain: Option<&Terrain>, position: Vec3) -> Ground {
-    terrain.and_then(|terrain| terrain.ground_at(position.x, position.z))
+/// The ground at a position on the terrain, else [`DEFAULT_GROUND`].
+pub fn ground_at(terrain: &Terrain, position: Vec3) -> Ground {
+    terrain.ground_at(position.x, position.z)
         .filter(|&ground| ground != Ground::None)
         .unwrap_or(DEFAULT_GROUND)
 }
@@ -164,13 +172,11 @@ impl Vehicle {
         Self { hull: Hull::new(position, direction, mobility), turret: Turret::new(aiming) }
     }
 
-    /// Advance by `dt` seconds: the hull moves and rests on the terrain, if any, then the
-    /// turret turns. Returns whether the hull moved or turned.
-    pub fn step(&mut self, dt: f32, terrain: Option<&Terrain>) -> bool {
-        let moved = self.hull.step(dt, ground_at(terrain, self.hull.position));
-        if let Some(terrain) = terrain.filter(|_| moved) {
-            self.hull.settle(terrain);
-        }
+    /// Advance by `dt` seconds in its space, within the map's bounds if any: the hull
+    /// moves, see [`Hull::advance`], then the turret turns. Returns whether the hull
+    /// moved or turned.
+    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>) -> bool {
+        let moved = self.hull.advance(dt, space, bounds);
         self.turret.step(dt, &self.hull);
         moved
     }
@@ -236,6 +242,51 @@ impl Hull {
             0.0
         }
 
+    }
+
+    /// Advance by `dt` seconds in its space: [`Self::step`] on the ground under it,
+    /// within the map's bounds if any, see [`Self::keep_within`], then resting on the
+    /// terrain. Returns whether the hull moved or turned.
+    pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>) -> bool {
+        let moved = self.step(dt, ground_at(&space.terrain, self.position));
+        if let Some(bounds) = bounds {
+            self.keep_within(bounds);
+        }
+        if moved {
+            self.settle(&space.terrain);
+        }
+        moved
+    }
+
+    /// Keep its centre within the map's bounds, [`BOUNDS_MARGIN`] inside them: what of
+    /// its velocity goes into an edge stops, and slows the rest by [`EDGE_FRICTION`].
+    /// Driven into an edge at an angle, it drags along it: its tracks keep pushing it in,
+    /// and lose that share again each step.
+    pub fn keep_within(&mut self, (min, max): (Vec2, Vec2)) {
+        let mut velocity = self.velocity();
+        let mut stopped = Vec3::ZERO;
+        for (axis, (least, most)) in [(0, (min.x, max.x)), (2, (min.y, max.y))] {
+            let (least, most) = (least + BOUNDS_MARGIN, most - BOUNDS_MARGIN);
+            let into = if self.position[axis] < least {
+                self.position[axis] = least;
+                velocity[axis].min(0.0)
+            } else if self.position[axis] > most {
+                self.position[axis] = most;
+                velocity[axis].max(0.0)
+            } else {
+                continue;
+            };
+            stopped[axis] = into;
+            velocity[axis] -= into;
+        }
+        if stopped == Vec3::ZERO {
+            return;
+        }
+        // Along the edges, slowed as much as their friction takes of what they stopped.
+        let along = velocity - velocity.project_onto(stopped);
+        velocity -= along.clamp_length_max(EDGE_FRICTION * stopped.length());
+        let (heading, right) = self.axes();
+        (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
     }
 
     /// Advance by `dt` seconds on this ground. Returns whether the hull moved or turned.
@@ -760,6 +811,36 @@ pub(super) mod tests {
             hull.step(0.1, Ground::Medium);
         }
         assert!(hull.slide < -1.0, "{}", hull.slide);
+    }
+
+    #[test]
+    fn stops_at_the_map_edge() {
+        let (space, bounds) = (Space::default(), Some((Vec2::splat(-100.0), Vec2::splat(100.0))));
+        let edge = 100.0 - BOUNDS_MARGIN;
+        // Square on at full speed, it stops dead, still pushing.
+        let mut hull = chieftain();
+        hull.position.z = 90.0;
+        hull.speed = 40.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, bounds);
+        }
+        assert_eq!(hull.position.z, edge);
+        assert!(hull.speed.abs() < 1e-4 && hull.position.x.abs() < 1e-4, "{} {}", hull.speed, hull.position.x);
+        // At 30°, it drags along it, slower and slower: the real server's went 2.6, 1.8,
+        // 0.7 then 0.2 m/s once against it.
+        let mut hull = chieftain();
+        (hull.position.z, hull.direction.z) = (edge, -30f32.to_radians());
+        hull.speed = 40.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        let mut along = Vec::new();
+        for _ in 0..6 {
+            let x = hull.position.x;
+            hull.advance(0.1, &space, bounds);
+            along.push((x - hull.position.x) / 0.1);
+        }
+        assert_eq!(hull.position.z, edge);
+        assert!(along.windows(2).all(|pair| pair[1] <= pair[0]) && (2.0..3.0).contains(&along[1]) && along[4] < 1.0, "{along:?}");
     }
 
     pub(crate) fn chieftain_aiming() -> AimingDef {

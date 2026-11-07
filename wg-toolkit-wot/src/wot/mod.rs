@@ -6,5 +6,4 @@ pub mod item_defs;
 pub mod item_prices;
 pub mod arena_defs;
 pub mod collision;
-pub mod statics;
 pub mod schema;

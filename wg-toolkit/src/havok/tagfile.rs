@@ -192,6 +192,20 @@ impl Tagfile {
 
     }
 
+    /// Its types, by id from 1, each with its own members, not its parents'.
+    pub fn types(&self) -> impl Iterator<Item = TypeInfo<'_>> {
+        self.types.iter().enumerate().skip(1).map(|(id, ty)| TypeInfo {
+            id,
+            name: &ty.name,
+            parent: self.ty(ty.parent).map(|parent| parent.name.as_str()),
+            format: self.format(id),
+            size: self.size(id),
+            members: ty.members.iter()
+                .map(|member| (member.name.as_str(), member.offset, self.ty(member.ty).map_or("", |ty| ty.name.as_str())))
+                .collect(),
+        })
+    }
+
     /// The root object, the first item's.
     pub fn root(&self) -> Option<Node<'_>> {
         self.item(1)?.into_iter().next()
@@ -258,6 +272,35 @@ impl Tagfile {
 
 }
 
+/// A type of a tagfile, as [`Tagfile::types`] describes it.
+#[derive(Debug, Clone)]
+pub struct TypeInfo<'a> {
+    pub id: usize,
+    pub name: &'a str,
+    pub parent: Option<&'a str>,
+    /// Its format, inherited from its parents: its kind in the low 4 bits, see
+    /// [`Kind`].
+    pub format: u32,
+    /// Its size in `DATA`, inherited from its parents.
+    pub size: usize,
+    /// Its own members: their names, offsets and type names.
+    pub members: Vec<(&'a str, usize, &'a str)>,
+}
+
+/// What kind of value a [`Node`] is, from its type's format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Bool,
+    String,
+    Int,
+    Float,
+    Pointer,
+    Record,
+    Array,
+    /// `void` or opaque.
+    Other,
+}
+
 /// A value in a tagfile: an object, a member of one, or an array's element.
 #[derive(Clone, Copy)]
 pub struct Node<'a> {
@@ -270,6 +313,34 @@ impl<'a> Node<'a> {
 
     pub fn type_name(&self) -> &'a str {
         self.file.ty(self.ty).map_or("", |ty| &ty.name)
+    }
+
+    /// What kind of value it is.
+    pub fn kind(&self) -> Kind {
+        match self.file.format(self.ty) & 0xF {
+            format::BOOL => Kind::Bool,
+            format::STRING => Kind::String,
+            format::INT => Kind::Int,
+            format::FLOAT => Kind::Float,
+            format::POINTER => Kind::Pointer,
+            format::RECORD => Kind::Record,
+            format::ARRAY => Kind::Array,
+            _ => Kind::Other,
+        }
+    }
+
+    /// A record's members, its parents' first, by name.
+    pub fn members(&self) -> Vec<(&'a str, Node<'a>)> {
+        let mut chain = Vec::new();
+        let mut id = self.ty;
+        while let Some(ty) = self.file.ty(id) {
+            chain.push(ty);
+            id = ty.parent;
+        }
+        chain.iter().rev()
+            .flat_map(|ty| &ty.members)
+            .map(|member| (member.name.as_str(), Node { file: self.file, ty: member.ty, offset: self.offset + member.offset }))
+            .collect()
     }
 
     /// A record's member.

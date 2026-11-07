@@ -1,40 +1,32 @@
-//! Compiled space codec, use it to open and read sections of a compiled space binaries.
+//! Spaces, as the game ships them in `spaces/<name>`: their compiled space, see
+//! [`bin`], and what moves in a space needs of it, see [`Space`].
 
-pub mod section;
+pub mod bin;
 pub mod terrain;
+pub mod statics;
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 
-use section::{Section, BWTB};
+use crate::res::fs::ResFilesystem;
+
+use statics::StaticScene;
+use terrain::Terrain;
 
 
-/// A structure representing a full compiled space.
-pub struct CompiledSpace<R> {
-    pub inner: R,
-    pub bwtb: BWTB,
+/// A space as what moves in it needs it: its terrain and its static models' collision.
+/// The default one is empty, with neither.
+#[derive(Debug, Default)]
+pub struct Space {
+    pub terrain: Terrain,
+    pub statics: StaticScene,
 }
 
-impl<R: Read + Seek> CompiledSpace<R> {
+impl Space {
 
-    /// Create a new lazy compiled space from a seekable read implementor.
-    /// This function will only read the BWTB header section  before
-    /// actually returning the object.
-    pub fn new(mut inner: R) -> io::Result<Self> {
-
-        let bwtb = BWTB::decode(&mut inner)?;
-
-        Ok(CompiledSpace {
-            inner,
-            bwtb,
-        })
-
-    }
-
-    /// Decode a section from this compiled space.
-    pub fn decode_section<S: Section>(&mut self) -> Option<S> {
-        let meta = self.bwtb.get_section_meta(S::ID)?;
-        self.inner.seek(SeekFrom::Start(meta.off as u64)).ok()?;
-        Some(S::decode(&mut self.inner).unwrap())
+    /// Load a space, `spaces/08_ruinberg` say.
+    pub fn load(fs: &ResFilesystem, space_dir: &str) -> io::Result<Self> {
+        Ok(Self { terrain: Terrain::load(fs, space_dir)?, statics: StaticScene::load(fs, space_dir)? })
     }
 
 }
+

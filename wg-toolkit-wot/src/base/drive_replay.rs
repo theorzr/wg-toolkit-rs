@@ -19,15 +19,17 @@
 use std::f32::consts::PI;
 use std::fs;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
+use wgtk::space::Space;
 
-use crate::wot::item_defs::{MobilityDef, VehicleDef};
+use crate::wot::item_defs::{read_xml, MobilityDef, VehicleDef};
+use crate::wot::arena_defs::read_bounds;
 use crate::wot::items::VehicleDescr;
 
-use super::physics::{ground_at, wrap_angle, Hull};
+use super::physics::{wrap_angle, Hull};
 use super::TICK;
 
 
@@ -199,8 +201,8 @@ impl Errors {
 }
 
 /// Replay the drive in windows of `window` seconds, each from the real state, through
-/// the hull of this mobility, on its terrain's grounds if any.
-fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, window: f64, delay: f64) -> Errors {
+/// the hull of this mobility, in its space and within its map's bounds.
+fn replay(drive: &Drive, mobility: MobilityDef, space: &Space, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
@@ -227,11 +229,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, windo
 
         for pair in updates[start..=end].windows(2) {
             hull.flags = controls_at(pair[0].t);
-            hull.step(ticks_between(pair[0].t, pair[1].t), ground_at(terrain, hull.position));
-            // On its slope, as the vehicle settles in battle.
-            if let Some(terrain) = terrain {
-                hull.settle(terrain);
-            }
+            hull.advance(ticks_between(pair[0].t, pair[1].t), space, bounds);
         }
 
         let real = updates[end];
@@ -289,16 +287,18 @@ fn hull_follows_the_real_server() {
             drive.updates.len(), drive.updates.last().unwrap().t - drive.updates[0].t, def.mobility);
 
         let mobility = drive.setup.apply(def.mobility);
-        let terrain = drive.space.as_ref().map(|space| Terrain::load(&res, &format!("spaces/{space}")).unwrap());
-        if let Some(terrain) = &terrain {
-            let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, terrain);
+        let space = drive.space.as_ref().map(|space| Space::load(&res, &format!("spaces/{space}")).unwrap()).unwrap_or_default();
+        let bounds = drive.space.as_ref()
+            .map(|space| read_bounds(&*read_xml(&res, &format!("scripts/arena_defs/{space}.xml")).unwrap(), space).unwrap());
+        if drive.space.is_some() {
+            let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, &space.terrain);
             println!("  tilt settled: pitch {pitch:.2} / {pitch_90:.2}°, roll {roll:.2} / {roll_90:.2}° (median / 90%)");
         }
         for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
-            replay(&drive, mobility, terrain.as_ref(), 1.0, delay).report(&format!("  delay {delay}"));
+            replay(&drive, mobility, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
         }
         for &(window, max) in &drive.max_median_error {
-            let errors = replay(&drive, mobility, terrain.as_ref(), window, CONTROL_DELAY);
+            let errors = replay(&drive, mobility, &space, bounds, window, CONTROL_DELAY);
             errors.report(&format!("  {window} s windows"));
             errors.report_worst(6);
             assert!(errors.median_distance() <= max, "{name}: median error over {window} s windows: {} m", errors.median_distance());

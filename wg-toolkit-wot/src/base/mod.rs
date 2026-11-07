@@ -28,10 +28,10 @@ use blowfish::Blowfish;
 use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
 use wgtk::pickle::{self, Value as PickleValue};
 use wgtk::app::dispatch::MethodCall;
-use wgtk::script::Script;
-use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::app::base::ClientKey;
+use wgtk::script::Script;
+use wgtk::space::Space;
 use wgtk::app::base;
 use wgtk::pxml;
 
@@ -88,15 +88,16 @@ impl BaseThread {
         schema::register(&mut app)
             .map_err(|e| format!("Failed to bind the entity schemas: {e}"))?;
 
-        // The battles' map, with its terrain for vehicles to rest on.
+        // The battles' map, with its terrain for vehicles to rest on and its static
+        // models to collide with.
         let start = Instant::now();
         let fs = ResFilesystem::new(game_dir.join("res"))
             .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
         let map = ArenaTypeDef::load(&fs, &args.map)
             .map_err(|e| format!("Failed to load the map {}: {e}", args.map))?;
-        let terrain = Terrain::load(&fs, &map.geometry)
-            .map_err(|e| format!("Failed to load the terrain of {}: {e}", map.geometry))?;
-        info!("Loaded the map {} and its terrain in {:.1?}", map.name, start.elapsed());
+        let space = Space::load(&fs, &map.geometry)
+            .map_err(|e| format!("Failed to load the space of {}: {e}", map.geometry))?;
+        info!(triangles = space.statics.len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
 
         let load_vehicle = |vehicle: &String| {
             let (nation, name) = vehicle.split_once(':')
@@ -140,7 +141,7 @@ impl BaseThread {
             required_version,
             game_dir: game_dir.to_path_buf(),
             map,
-            terrain,
+            space,
             battle_options,
             players: HashMap::new(),
             accounts: HashMap::new(),
@@ -170,9 +171,9 @@ pub struct BaseThread {
     required_version: String,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
-    /// The battles' map, and its terrain.
+    /// The battles' map, and its space.
     map: ArenaTypeDef,
-    terrain: Terrain,
+    space: Space,
     /// Who the battles have besides the player.
     battle_options: BattleOptions,
     /// Each logged in client's player.

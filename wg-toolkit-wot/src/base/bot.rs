@@ -1,9 +1,9 @@
 //! A vehicle the server drives itself: it closes in on its enemy, then stops facing
 //! it, keeps its turret on it and says when its gun is on it.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
-use wgtk::space::terrain::Terrain;
+use wgtk::space::Space;
 
 use super::gun::Gun;
 use super::physics::{movement_flag, wrap_angle, Vehicle};
@@ -35,7 +35,7 @@ impl Bot {
     /// Advance by `dt` seconds, its turret on `enemy`, if any: if it `drives`, toward
     /// it until within [`ENGAGE_RANGE`], then turning to face it. Returns whether its
     /// gun points at it.
-    pub fn step(&mut self, dt: f32, terrain: Option<&Terrain>, enemy: Option<Vec3>, drives: bool) -> bool {
+    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, enemy: Option<Vec3>, drives: bool) -> bool {
 
         let hull = &mut self.vehicle.hull;
         let mut flags = 0;
@@ -57,7 +57,7 @@ impl Bot {
         if let Some(enemy) = enemy {
             self.vehicle.turret.track(enemy);
         }
-        self.vehicle.step(dt, terrain);
+        self.vehicle.step(dt, space, bounds);
 
         let Some(enemy) = enemy else { return false };
         let (position, velocity, _) = self.vehicle.turret.gun_marker(&self.vehicle.hull);
@@ -81,7 +81,7 @@ mod tests {
         let mut bot = Bot::new(vehicle, Gun::new(Vec::new(), 10.0));
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {
-            bot.step(0.1, None, Some(enemy), true);
+            bot.step(0.1, &Space::default(), None, Some(enemy), true);
         }
         let hull = &bot.vehicle.hull;
         let to = enemy - hull.position;

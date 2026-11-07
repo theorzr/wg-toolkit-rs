@@ -2,3 +2,4 @@
 
 pub mod tagfile;
 pub mod mesh;
+pub mod collision;

@@ -1,15 +1,13 @@
 //! Vehicle collision models, the client's: each module's
-//! `hitTester/collisionModelClient`, a Havok tagfile. Its "Collision Physics Data" has
-//! one mesh body per armour group, `s_armor_3` say, and its `HKBodyFlagsData` gives each
-//! group, by name without the `s_`, its material kind: the armour's index for armour.
+//! `hitTester/collisionModelClient`, a [`Collision`] with one body per armour group,
+//! `armor_3` say, its material kind the armour's index.
 
 use std::fmt;
 use std::io;
 
 use glam::{Affine3A, Vec3};
 
-use wgtk::havok::mesh::compressed_mesh_triangles;
-use wgtk::havok::tagfile::Tagfile;
+use wgtk::havok::collision::Collision;
 use wgtk::res::fs::ResFilesystem;
 
 
@@ -119,77 +117,20 @@ pub struct VehicleHit {
 
 impl CollisionModel {
 
-    /// Load a model from the game's resources.
+    /// Load a model from the game's resources, its groups its collision's bodies.
     pub fn load(fs: &ResFilesystem, path: &str) -> io::Result<Self> {
-        let file = fs.read(path)
-            .map(io::BufReader::new)
-            .map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
-        let tagfile = Tagfile::from_reader(file)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: {e}")))?;
-        Self::from_tagfile(&tagfile)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: no valid collision data")))
-    }
 
-    /// Its groups are those of every named variant: a vehicle's part has one, a
-    /// destructible building one per fragment, `n_wood0_1_5` say, each with its own
-    /// material kind.
-    fn from_tagfile(tagfile: &Tagfile) -> Option<Self> {
-
-        let mut groups = Vec::new();
-        let mut bounds: Option<[Vec3; 2]> = None;
-
-        for named in tagfile.root()?.get("namedVariants")?.elements()? {
-
-            let handles: Vec<_> = named.get("variant")?.deref()?
-                .get("resourceHandles")?.elements()?.into_iter()
-                .filter_map(|handle| handle.deref())
-                .collect();
-
-            let variant = |name: &str| handles.iter()
-                .find(|handle| handle.get("name").and_then(|n| n.as_str()) == Some(name))
-                .and_then(|handle| handle.get("variant")?.deref());
-
-            let body_flags = variant("HKBodyFlagsData")?;
-            let bound = |name: &str| Some(Vec3::from_slice(&body_flags.get(name)?.as_f32s::<4>()?[..3]));
-            let [min, max] = [bound("minBounds_")?, bound("maxBounds_")?];
-            
-            bounds = Some(bounds.map_or([min, max], |[least, most]| [least.min(min), most.max(max)]));
-
-            let material_kinds: Vec<(&str, u32)> = body_flags
-                .get("flags_")?.elements()?.into_iter()
-                .filter_map(|info| Some((info.get("name")?.as_str()?, info.get("normalMatKind")?.as_int()? as u32)))
-                .collect();
-
-            for body in variant("Collision Physics Data")?.get("bodyCinfos")?.elements()? {
-                
-                let name = body.get("name").and_then(|name| name.as_str()).unwrap_or_default();
-                let name = name.strip_prefix("s_").unwrap_or(name);
-                let shape = body.get("shape")?.deref()?;
-
-                let triangles = match shape.type_name() {
-                    "hknpCompressedMeshShape" => compressed_mesh_triangles(shape)?,
-                    _ => continue,
-                };
-
-                groups.push(ArmorGroup { 
-                    name: name.to_string(), 
-                    material_kind: material_kinds.iter().find(|(n, _)| *n == name).map_or(0, |&(_, kind)| kind), 
-                    material: None, 
-                    triangles,
-                });
-
-            }
-
-        }
-
-        let bounds = bounds?;
+        let collision = Collision::load(fs, path)?;
+        let groups: Vec<_> = collision.bodies.into_iter()
+            .map(|body| ArmorGroup { name: body.name, material_kind: body.material_kind, material: None, triangles: body.triangles })
+            .collect();
 
         let radius = groups.iter()
             .flat_map(|group| group.triangles.iter().flatten())
             .map(|vertex| vertex.length())
             .fold(0.0, f32::max);
 
-        Some(Self { groups, radius, bounds })
+        Ok(Self { groups, radius, bounds: collision.bounds })
 
     }
 

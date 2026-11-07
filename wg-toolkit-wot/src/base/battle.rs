@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::{Affine3A, Vec3};
+use glam::{Affine3A, Vec2, Vec3};
 
 use wgtk::app::entity::{
     AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle,
@@ -15,6 +15,7 @@ use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, Spa
 use wgtk::app::dispatch::MethodCall;
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
+use wgtk::space::Space;
 
 use crate::wot::schema::{
     self, Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag,
@@ -187,8 +188,8 @@ impl BaseThread {
             false => None,
         };
         let enemy_start = match options.enemy_distance {
-            Some(distance) => facing_from(start, distance, &self.terrain),
-            None => team_start(&self.map, &self.terrain, ENEMY_TEAM),
+            Some(distance) => facing_from(start, distance, &self.space.terrain),
+            None => team_start(&self.map, &self.space.terrain, ENEMY_TEAM),
         };
         let mut vehicles = vec![info];
         let sides = (1..=options.allies).map(|slot| (PLAYER_TEAM, start, slot))
@@ -201,7 +202,7 @@ impl BaseThread {
                     (def, def.descr.encode())
                 }
             };
-            let start = slot_start(team_start, slot, &self.terrain);
+            let start = slot_start(team_start, slot, &self.space.terrain);
             let bot = self.create_bot(space, def, &descr, team, format!("Bot {}", index + 1), start, vehicles.len() as u32, index as i32)?;
             info!(%client, entity_id = bot.entity_id, team, "Added a bot to the arena: {}, {}", bot.info.name, def.name);
             vehicles.push(bot.info.clone());
@@ -245,7 +246,7 @@ impl BaseThread {
 
         let public = public_info(name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
 
-        let start = team_start(&self.map, &self.terrain, PLAYER_TEAM);
+        let start = team_start(&self.map, &self.space.terrain, PLAYER_TEAM);
         let vehicle = self.app.create_entity::<schema::Vehicle>(space, EntityInit {
             position: start.position,
             direction: start.direction,
@@ -391,7 +392,7 @@ impl BaseThread {
         let vehicles = shell_targets(battle, own_id);
         let Some(driven) = battle.driven.as_mut() else { return Ok(()) };
         let (position, velocity, dispersion) = driven.vehicle.turret.gun_marker(&driven.vehicle.hull);
-        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, Some(&self.terrain), &vehicles) else {
+        let Some(shot) = driven.gun.fire(now, position, velocity, dispersion, Some(&self.space.terrain), &vehicles) else {
             debug!(%client, "Refused a shot: not loaded, or out of shells");
             return Ok(());
         };
@@ -454,7 +455,7 @@ impl BaseThread {
                     shot.end_velocity.length(),
                     Vec::new(),
                 )?;
-                let normal = self.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
+                let normal = self.space.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
                 if armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND) {
                     let direction = armor::reflect(shot.end_velocity, normal);
                     self.ricochet(client, at, shooter, shot, direction, None)?;
@@ -483,7 +484,7 @@ impl BaseThread {
         landed: Option<(u32, [Affine3A; 4])>,
     ) -> io::Result<()> {
 
-        let Self { app, battle_clients, terrain, .. } = self;
+        let Self { app, battle_clients, space, .. } = self;
         let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let mut vehicles = shell_targets(battle, shooter);
         if let Some((entity_id, transforms)) = landed {
@@ -491,7 +492,7 @@ impl BaseThread {
                 vehicle.transforms = transforms;
             }
         }
-        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(&*terrain), &vehicles) else {
+        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(&space.terrain), &vehicles) else {
             debug!(%client, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
@@ -726,7 +727,8 @@ impl BaseThread {
     /// and fires the rest of its bursts, and the bots on their own, see [`step_bots`].
     fn step(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Self { app, battle_clients, terrain, battle_options, .. } = self;
+        let Self { app, battle_clients, space, battle_options, map, .. } = self;
+        let bounds = Some(map.bounds);
         let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
         let now = battle.game_time();
         let Some(own_id) = battle.driven.as_ref().map(|driven| driven.entity.id()) else { return Ok(()) };
@@ -736,7 +738,7 @@ impl BaseThread {
         let avatar_key = *avatar;
 
         let DrivenVehicle { entity, vehicle, own_vehicle, gun_marker, engine_mode, engine_gear, gun, .. } = driven;
-        vehicle.step(TICK.as_secs_f32(), Some(&*terrain));
+        vehicle.step(TICK.as_secs_f32(), space, bounds);
         let Vehicle { hull, turret } = vehicle;
 
         // Its magazine full again, and loaded: the shells first, as the client expects.
@@ -748,7 +750,7 @@ impl BaseThread {
             own.set_vehicleGunReloadTime(reload_time(gun, now))?;
         }
         let (position, velocity, dispersion) = turret.gun_marker(hull);
-        if let Some(shot) = gun.fire_burst(now, position, velocity, dispersion, Some(&*terrain), &targets) {
+        if let Some(shot) = gun.fire_burst(now, position, velocity, dispersion, Some(&space.terrain), &targets) {
             info!(%client, shot = shot.id, "Fired a shell of the burst from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
             shots.push((now + f64::from(shot.flight_time), entity.id(), shot.clone()));
             // Its reload started with the burst, see `Gun::fire`.
@@ -787,7 +789,7 @@ impl BaseThread {
             avatar_view.set_ownVehicleGear(gear)?;
         }
 
-        step_bots(app, terrain, battle_options, client, battle, now)
+        step_bots(app, space, bounds, battle_options, client, battle, now)
 
     }
 
@@ -851,7 +853,8 @@ impl BaseThread {
 /// the battles' options say.
 fn step_bots(
     app: &mut base::App,
-    terrain: &Terrain,
+    space: &Space,
+    bounds: Option<(Vec2, Vec2)>,
     options: &BattleOptions,
     client: ClientKey,
     battle: &mut Battle,
@@ -898,7 +901,7 @@ fn step_bots(
             .filter(|(team, target)| *team != bot.team && target.entity_id != bot.entity_id)
             .map(|(_, target)| Vec3::from(target.transforms[VehiclePart::Hull as usize].translation))
             .min_by(|a, b| a.distance_squared(hull_position).total_cmp(&b.distance_squared(hull_position)));
-        let on_target = bot.bot.step(TICK.as_secs_f32(), Some(terrain), enemy, drives);
+        let on_target = bot.bot.step(TICK.as_secs_f32(), space, bounds, enemy, drives);
 
         let mut fired = None;
         if fires {
@@ -908,8 +911,8 @@ fn step_bots(
                 .collect();
             let (position, velocity, dispersion) = bot.bot.vehicle.turret.gun_marker(&bot.bot.vehicle.hull);
             let gun = &mut bot.bot.gun;
-            let shot = gun.fire_burst(now, position, velocity, dispersion, Some(terrain), &targets)
-                .or_else(|| on_target.then(|| gun.fire(now, position, velocity, dispersion, Some(terrain), &targets)).flatten());
+            let shot = gun.fire_burst(now, position, velocity, dispersion, Some(&space.terrain), &targets)
+                .or_else(|| on_target.then(|| gun.fire(now, position, velocity, dispersion, Some(&space.terrain), &targets)).flatten());
             if let Some(shot) = shot {
                 info!(%client, entity_id = bot.entity_id, shot = shot.id, "Fired a shell from a bot, landing at {:?} in {:.2} s", shot.end, shot.flight_time);
                 shots.push((now + f64::from(shot.flight_time), bot.entity.id(), shot.clone()));

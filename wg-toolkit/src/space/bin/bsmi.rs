@@ -1,23 +1,31 @@
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 
 use glam::{Affine3A, Mat4};
 
 use crate::util::io::WgReadExt;
 
-use super::{Section, SectionId};
+use super::{invalid, skip_vector, SpaceSection};
 
 
-/// StaticModelInstances section: every static model placed in the space, its
-/// transform and which of [`BSMO`](super::BSMO)'s models it is. Only its first and
-/// fourth vectors are known.
+/// `BSMI`: every static model placed in the space, its transform and which of
+/// [`BSMO`]' it is. Only its first and fourth vectors are known.
 #[derive(Debug)]
 pub struct BSMI {
     pub instances: Vec<StaticModelInstance>,
 }
 
-impl Section for BSMI {
+/// A static model placed in the space.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticModelInstance {
+    /// From the model's frame to the space's.
+    pub transform: Affine3A,
+    /// Its model's index in [`BSMO`].
+    pub model: u32,
+}
 
-    const ID: &'static SectionId = b"BSMI";
+impl SpaceSection for BSMI {
+
+    const ID: [u8; 4] = *b"BSMI";
 
     fn decode<R: Read + Seek>(read: &mut R) -> io::Result<Self> {
 
@@ -36,7 +44,7 @@ impl Section for BSMI {
         let models = read.read_vector(|buf| buf.read_u32())?;
 
         if models.len() != transforms.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "static model instances and their models differ in count"));
+            return Err(invalid("static model instances and their models differ in count"));
         }
 
         let instances = transforms.into_iter().zip(models)
@@ -46,22 +54,4 @@ impl Section for BSMI {
 
     }
 
-}
-
-
-/// A static model placed in the space.
-#[derive(Debug, Clone, Copy)]
-pub struct StaticModelInstance {
-    /// From the model's frame to the space's.
-    pub transform: Affine3A,
-    /// Its model's index in [`BSMO`](super::BSMO).
-    pub model: u32,
-}
-
-
-/// Skip a vector of a section, see [`WgReadExt::read_vector`].
-pub(super) fn skip_vector<R: Read + Seek>(read: &mut R) -> io::Result<()> {
-    let (size, count) = read.read_vector_head()?;
-    read.seek(SeekFrom::Current((size * count) as i64))?;
-    Ok(())
 }

@@ -1,7 +1,6 @@
 //! A space's static models, what its `space.bin` places: each placed model of
-//! `BSMI` is one of `BSMO`'s, whose collision, when it has one, is a Havok tagfile read
-//! as a vehicle's [`CollisionModel`] is. Models without one are decor nothing collides
-//! with, fallen branches or bricks.
+//! [`BSMI`] is one of [`BSMO`]'s, whose [`Collision`], when it has one, is a `.havok`
+//! file. Models without one are decor nothing collides with, fallen branches or bricks.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,11 +9,10 @@ use std::io;
 use glam::{Vec2, Vec3};
 use tracing::warn;
 
-use wgtk::space::section::{BSMI, BSMO, BWST};
-use wgtk::space::CompiledSpace;
-use wgtk::res::fs::ResFilesystem;
+use crate::havok::collision::Collision;
+use crate::res::fs::ResFilesystem;
 
-use super::collision::CollisionModel;
+use super::bin::{SpaceBin, BSMI, BSMO, BWST};
 
 
 /// The side of the grid's square cells the triangles are indexed in, in metres: about
@@ -34,9 +32,9 @@ pub struct StaticScene {
 #[derive(Debug, Clone, Copy)]
 pub struct StaticTriangle {
     pub vertices: [Vec3; 3],
-    /// Which placed model it is of, its index in `BSMI`.
+    /// Which placed model it is of, its index in [`BSMI`].
     pub instance: u32,
-    /// Its group's material kind, see [`super::collision::ArmorGroup`].
+    /// Its body's material kind, see [`crate::havok::collision::CollisionBody`].
     pub material_kind: u32,
 }
 
@@ -46,16 +44,14 @@ impl StaticScene {
     /// collision fails to load is left out, and logged.
     pub fn load(fs: &ResFilesystem, space_dir: &str) -> io::Result<Self> {
 
-        let path = format!("{space_dir}/space.bin");
-        let file = fs.read(&path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
-        let mut space = CompiledSpace::new(io::BufReader::new(file))?;
-        let missing = |section: &str| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: no {section} section"));
-        let strings: BWST = space.decode_section().ok_or_else(|| missing("BWST"))?;
-        let instances: BSMI = space.decode_section().ok_or_else(|| missing("BSMI"))?;
-        let models: BSMO = space.decode_section().ok_or_else(|| missing("BSMO"))?;
+        let mut bin = SpaceBin::load(fs, space_dir)?;
+        let context = |e: io::Error| io::Error::new(e.kind(), format!("{space_dir}/space.bin: {e}"));
+        let strings: BWST = bin.read_section().map_err(context)?;
+        let instances: BSMI = bin.read_section().map_err(context)?;
+        let models: BSMO = bin.read_section().map_err(context)?;
 
         // Each model's collision, loaded once for all its placements.
-        let mut collisions: HashMap<u32, Option<Arc<CollisionModel>>> = HashMap::new();
+        let mut collisions: HashMap<u32, Option<Arc<Collision>>> = HashMap::new();
         let mut scene = Self::default();
         for (index, instance) in instances.instances.iter().enumerate() {
             let Some(havok) = models.models.get(instance.model as usize).and_then(|model| model.havok_fnv) else { continue };
@@ -64,18 +60,18 @@ impl StaticScene {
                     warn!(space = space_dir, hash = havok, "Failed to find a static model's collision path");
                     return None;
                 };
-                CollisionModel::load(fs, path)
+                Collision::load(fs, path)
                     .inspect_err(|e| warn!(space = space_dir, path, "Failed to load a static model's collision: {e}"))
                     .ok()
                     .map(Arc::new)
             });
             let Some(collision) = collision else { continue };
-            for group in &collision.groups {
-                for triangle in &group.triangles {
+            for body in &collision.bodies {
+                for triangle in &body.triangles {
                     scene.triangles.push(StaticTriangle {
                         vertices: triangle.map(|vertex| instance.transform.transform_point3(vertex)),
                         instance: index as u32,
-                        material_kind: group.material_kind,
+                        material_kind: body.material_kind,
                     });
                 }
             }

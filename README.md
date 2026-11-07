@@ -21,6 +21,8 @@ World of Tanks. This crate also provides an implementation of the network protoc
     - BWSG (static geometry)
     - BWCS (compiled space settings)
     - BWAL (asset list)
+    - BSMO (static models, with their collision)
+    - BSMI (static model instances)
 - Resource virtual filesystem (read-only)
   - Package indexing
   - Reading file either from native filesystem or packages
