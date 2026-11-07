@@ -1,18 +1,22 @@
 //! A space's static models, what its `space.bin` places: each placed model of
 //! [`BSMI`] is one of [`BSMO`]'s, whose [`Collision`], when it has one, is a `.havok`
 //! file. Models without one are decor nothing collides with, fallen branches or bricks.
+//!
+//! Their triangles are indexed for collision tests: by their body's [`BodyKind`], then
+//! in a grid of the ground plane, each with its bounds and normal.
 
+use std::io::{self, Read, Seek};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::io;
 
-use glam::{Vec2, Vec3};
+use glam::{IVec2, Vec2, Vec3, Vec3Swizzles};
 use tracing::warn;
 
 use crate::havok::collision::Collision;
 use crate::res::fs::ResFilesystem;
 
 use super::bin::{SpaceBin, BSMI, BSMO, BWST};
+use super::destructibles::Destructibles;
 
 
 /// The side of the grid's square cells the triangles are indexed in, in metres: about
@@ -24,68 +28,130 @@ const CELL: f32 = 8.0;
 #[derive(Debug, Default)]
 pub struct StaticScene {
     triangles: Vec<StaticTriangle>,
-    /// The triangles whose bounds overlap each cell, by index.
-    cells: HashMap<(i32, i32), Vec<u32>>,
+    /// For each [`BodyKind`], the triangles whose bounds overlap each cell, by index.
+    grids: [HashMap<IVec2, Vec<u32>>; 4],
 }
 
 /// A triangle of a placed static model.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticTriangle {
     pub vertices: [Vec3; 3],
+    /// Its bounding box, minimum then maximum.
+    pub bounds: [Vec3; 2],
+    /// Its unit normal, its vertices' winding deciding its side; zero if degenerate.
+    pub normal: Vec3,
     /// Which placed model it is of, its index in [`BSMI`].
     pub instance: u32,
     /// Its body's material kind, see [`crate::havok::collision::CollisionBody`].
     pub material_kind: u32,
+    pub kind: BodyKind,
+}
+
+/// What a static model's body is to what drives into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    /// It stops what drives into it.
+    Solid = 0,
+    /// It is driven up, a truck's `s_ramp_0` say.
+    Ramp = 1,
+    /// It breaks or falls when driven into, as [`Destructibles`] lists it, or as its
+    /// `n_` name says.
+    Destructible = 2,
+    /// What a destructible module leaves once destroyed, `c_c_stone0_1` of
+    /// `n_stone0_1` say: nothing until then.
+    Remains = 3,
+}
+
+impl BodyKind {
+
+    /// The kind of a body of a model, by the model's path and the body's name, see
+    /// [`crate::havok::collision::CollisionBody::name`].
+    pub fn of(destructibles: &Destructibles, model: &str, body: &str) -> Self {
+        if destructibles.is_destructible(model, body) || body.starts_with("n_") {
+            Self::Destructible
+        } else if body.starts_with("c_") {
+            Self::Remains
+        } else if body.starts_with("s_ramp") {
+            Self::Ramp
+        } else {
+            Self::Solid
+        }
+    }
+
+}
+
+impl StaticTriangle {
+
+    pub fn new(vertices: [Vec3; 3], instance: u32, material_kind: u32, kind: BodyKind) -> Self {
+        let [a, b, c] = vertices;
+        Self {
+            vertices,
+            bounds: [a.min(b).min(c), a.max(b).max(c)],
+            normal: (b - a).cross(c - a).normalize_or_zero(),
+            instance,
+            material_kind,
+            kind,
+        }
+    }
+
 }
 
 impl StaticScene {
 
-    /// Load the static models of a space, `spaces/02_malinovka` say. A model whose
-    /// collision fails to load is left out, and logged.
-    pub fn load(fs: &ResFilesystem, space_dir: &str) -> io::Result<Self> {
+    /// Load the static models of a space, `spaces/02_malinovka` say, those visible in
+    /// a visibility mask, see [`super::visibility_mask`], their bodies' kinds from these
+    /// destructibles. A model whose collision fails to load is left out, and logged.
+    pub fn load(fs: &ResFilesystem, space_dir: &str, destructibles: &Destructibles, visibility_mask: u32) -> io::Result<Self> {
 
         let mut bin = SpaceBin::load(fs, space_dir)?;
-        let context = |e: io::Error| io::Error::new(e.kind(), format!("{space_dir}/space.bin: {e}"));
-        let strings: BWST = bin.read_section().map_err(context)?;
-        let instances: BSMI = bin.read_section().map_err(context)?;
-        let models: BSMO = bin.read_section().map_err(context)?;
+        let (strings, instances, models) = read_sections(&mut bin)
+            .map_err(|e| io::Error::new(e.kind(), format!("{space_dir}/space.bin: {e}")))?;
 
-        // Each model's collision, loaded once for all its placements.
-        let mut collisions: HashMap<u32, Option<Arc<Collision>>> = HashMap::new();
-        let mut scene = Self::default();
+        // Each model's collision, loaded once for all its placements, with its bodies'
+        // kinds.
+        let mut collisions: HashMap<u32, Option<(Arc<Collision>, Vec<BodyKind>)>> = HashMap::new();
+        let mut triangles = Vec::new();
         for (index, instance) in instances.instances.iter().enumerate() {
+            if instance.visibility_mask & visibility_mask == 0 {
+                continue;
+            }
             let Some(havok) = models.models.get(instance.model as usize).and_then(|model| model.havok_fnv) else { continue };
             let collision = collisions.entry(havok).or_insert_with(|| {
                 let Some(path) = strings.get_string(havok) else {
                     warn!(space = space_dir, hash = havok, "Failed to find a static model's collision path");
                     return None;
                 };
-                Collision::load(fs, path)
+                let collision = Collision::load(fs, path)
                     .inspect_err(|e| warn!(space = space_dir, path, "Failed to load a static model's collision: {e}"))
-                    .ok()
-                    .map(Arc::new)
+                    .ok()?;
+                let kinds = collision.bodies.iter().map(|body| BodyKind::of(destructibles, path, &body.name)).collect();
+                Some((Arc::new(collision), kinds))
             });
-            let Some(collision) = collision else { continue };
-            for body in &collision.bodies {
+            let Some((collision, kinds)) = collision else { continue };
+            for (body, &kind) in collision.bodies.iter().zip(kinds.iter()) {
                 for triangle in &body.triangles {
-                    scene.triangles.push(StaticTriangle {
-                        vertices: triangle.map(|vertex| instance.transform.transform_point3(vertex)),
-                        instance: index as u32,
-                        material_kind: body.material_kind,
-                    });
+                    let vertices = triangle.map(|vertex| instance.transform.transform_point3(vertex));
+                    triangles.push(StaticTriangle::new(vertices, index as u32, body.material_kind, kind));
                 }
             }
         }
 
-        for (index, triangle) in scene.triangles.iter().enumerate() {
-            let [min, max] = bounds_xz(&triangle.vertices);
-            for cell in cells(min, max) {
-                scene.cells.entry(cell).or_default().push(index as u32);
+        Ok(Self::from_triangles(triangles))
+
+    }
+
+    /// A scene of these triangles, already in the world.
+    pub fn from_triangles(triangles: Vec<StaticTriangle>) -> Self {
+        let mut grids: [HashMap<IVec2, Vec<u32>>; 4] = Default::default();
+        for (index, triangle) in triangles.iter().enumerate() {
+            let [min, max] = triangle.bounds.map(|bound| cell_of(bound.xz()));
+            for x in min.x..=max.x {
+                for z in min.y..=max.y {
+                    grids[triangle.kind as usize].entry(IVec2::new(x, z)).or_default().push(index as u32);
+                }
             }
         }
-
-        Ok(scene)
-
+        Self { triangles, grids }
     }
 
     /// How many triangles it has.
@@ -97,32 +163,34 @@ impl StaticScene {
         self.triangles.is_empty()
     }
 
-    /// The triangles that may overlap a rectangle of the ground plane, its x and z
-    /// least and most: those of the cells it overlaps, each once.
-    pub fn triangles_near(&self, min: Vec2, max: Vec2) -> impl Iterator<Item = &StaticTriangle> {
-        let mut indices: Vec<u32> = cells(min, max)
-            .filter_map(|cell| self.cells.get(&cell))
-            .flatten()
-            .copied()
-            .collect();
-        indices.sort_unstable();
-        indices.dedup();
-        indices.into_iter().map(|index| &self.triangles[index as usize])
+    /// The triangles of a body kind whose bounds overlap a box, minimum then maximum,
+    /// each once: each cell reports those whose overlap with the box starts in it.
+    pub fn triangles_in(&self, kind: BodyKind, min: Vec3, max: Vec3) -> impl Iterator<Item = &StaticTriangle> {
+        let grid = &self.grids[kind as usize];
+        let (first, last) = (cell_of(min.xz()), cell_of(max.xz()));
+        (first.x..=last.x)
+            .flat_map(move |x| (first.y..=last.y).map(move |z| IVec2::new(x, z)))
+            .flat_map(move |cell| grid.get(&cell).into_iter().flatten().map(move |&index| (cell, index)))
+            .map(|(cell, index)| (cell, &self.triangles[index as usize]))
+            .filter(move |(cell, triangle)| {
+                let [low, high] = triangle.bounds;
+                low.cmple(max).all() && high.cmpge(min).all() && *cell == cell_of(low.xz()).max(first)
+            })
+            .map(|(_, triangle)| triangle)
     }
 
 }
 
 
-/// A triangle's bounds on the ground plane, x and z.
-fn bounds_xz(vertices: &[Vec3; 3]) -> [Vec2; 2] {
-    let xz = vertices.map(|vertex| Vec2::new(vertex.x, vertex.z));
-    [xz[0].min(xz[1]).min(xz[2]), xz[0].max(xz[1]).max(xz[2])]
+/// The sections of a compiled space its static models need: its strings, its placed
+/// models and its models.
+fn read_sections<R: Read + Seek>(bin: &mut SpaceBin<R>) -> io::Result<(BWST, BSMI, BSMO)> {
+    Ok((bin.read_section()?, bin.read_section()?, bin.read_section()?))
 }
 
-/// The grid's cells a rectangle of the ground plane overlaps.
-fn cells(min: Vec2, max: Vec2) -> impl Iterator<Item = (i32, i32)> {
-    let (min, max) = ((min / CELL).floor().as_ivec2(), (max / CELL).floor().as_ivec2());
-    (min.x..=max.x).flat_map(move |x| (min.y..=max.y).map(move |z| (x, z)))
+/// The grid's cell of a point of the ground plane.
+fn cell_of(point: Vec2) -> IVec2 {
+    (point / CELL).floor().as_ivec2()
 }
 
 
@@ -131,24 +199,44 @@ mod tests {
 
     use super::*;
 
+    /// A triangle across several cells is found once, in a box over them all, and not
+    /// in a box beside it or above it.
+    #[test]
+    fn finds_each_triangle_once() {
+        let triangle = StaticTriangle::new([Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 0.0, -10.0), Vec3::new(10.0, 5.0, 10.0)], 0, 0, BodyKind::Solid);
+        let scene = StaticScene::from_triangles(vec![triangle]);
+        assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::splat(-20.0), Vec3::splat(20.0)).count(), 1);
+        assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::new(5.0, 1.0, 5.0), Vec3::new(30.0, 2.0, 30.0)).count(), 1);
+        assert_eq!(scene.triangles_in(BodyKind::Ramp, Vec3::splat(-20.0), Vec3::splat(20.0)).count(), 0);
+        assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::new(11.0, 0.0, -20.0), Vec3::new(30.0, 5.0, 20.0)).count(), 0);
+        assert_eq!(scene.triangles_in(BodyKind::Solid, Vec3::new(-20.0, 6.0, -20.0), Vec3::new(20.0, 9.0, 20.0)).count(), 0);
+        assert!((scene.triangles[0].normal.length() - 1.0).abs() < 1e-5);
+    }
+
     /// With the game's `res` directory in `WGT_RES_PATH`: Malinovka's placed collision,
     /// as many triangles as the client's models give, and a hangar of Graf Zeppelin's
-    /// story map where a captured drive hits it, 2.8 m ahead of the hull's centre.
+    /// story map where a captured drive hits it, 2.8 m ahead of the hull's centre, its
+    /// lamp post destructible.
     #[test]
     fn real_static_scenes() {
         let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
         let fs = ResFilesystem::new(res).unwrap();
-        assert_eq!(StaticScene::load(&fs, "spaces/02_malinovka").unwrap().len(), 1_246_841);
+        let destructibles = Destructibles::load(&fs).unwrap();
+        assert_eq!(StaticScene::load(&fs, "spaces/02_malinovka", &destructibles, u32::MAX).unwrap().len(), 1_246_841);
 
-        let scene = StaticScene::load(&fs, "spaces/120_graf_zeppelin_scc").unwrap();
+        let scene = StaticScene::load(&fs, "spaces/120_graf_zeppelin_scc", &destructibles, u32::MAX).unwrap();
         // The hull's centre when it stops against the hangar, heading -z.
         let center = Vec3::new(148.4, 15.7, 480.2);
-        let ahead = scene.triangles_near(Vec2::new(center.x - 4.0, center.z - 4.0), Vec2::new(center.x + 4.0, center.z + 4.0))
+        let ahead = scene.triangles_in(BodyKind::Solid, center - Vec3::new(4.0, 0.3, 4.0), center + Vec3::new(4.0, 3.0, 4.0))
             .flat_map(|triangle| triangle.vertices)
             .filter(|vertex| (center.y - 0.3..center.y + 3.0).contains(&vertex.y))
-            .map(|vertex| Vec2::new(vertex.x - center.x, vertex.z - center.z).length())
+            .map(|vertex| (vertex - center).xz().length())
             .fold(f32::INFINITY, f32::min);
         assert!((2.6..3.0).contains(&ahead), "{ahead}");
+        // The lamp post it hits next, 0.6 m from its centre then.
+        let lamp_post = Vec3::new(156.2, 15.6, 479.8);
+        let near = scene.triangles_in(BodyKind::Destructible, lamp_post - Vec3::splat(2.0), lamp_post + Vec3::splat(2.0)).count();
+        assert!(near > 0);
     }
 
 }

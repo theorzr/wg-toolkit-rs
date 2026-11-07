@@ -5,8 +5,8 @@ use glam::{Vec2, Vec3};
 
 use wgtk::space::Space;
 
-use super::gun::Gun;
 use super::physics::{movement_flag, wrap_angle, Vehicle};
+use super::gun::Gun;
 
 
 /// How close to its enemy the bot drives, in metres on the ground plane.

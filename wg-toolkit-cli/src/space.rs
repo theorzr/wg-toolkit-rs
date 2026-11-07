@@ -93,7 +93,6 @@ fn cmd_vectors(opts: &CliOptions, space: &mut Bin, args: SpaceVectorsArgs) -> Cl
         }
         for row in 0..count.min(args.rows) {
             let element = &bytes[pos + 8 + row * size..pos + 8 + (row + 1) * size];
-            let word = |word: &[u8]| u32::from_le_bytes(word.try_into().unwrap());
             if opts.human {
                 let words: Vec<String> = if size % 4 == 0 {
                     element.chunks_exact(4).map(|w| describe_word(word(w), strings.as_ref())).collect()
@@ -140,17 +139,16 @@ fn cmd_models(opts: &CliOptions, space: &mut Bin) -> CliResult<()> {
         *placed.entry(instance.model).or_default() += 1;
     }
 
-    let name = |hash: u32| strings.get_string(hash).unwrap_or("?").to_string();
 
     if !opts.human {
         for (index, model) in models.models.iter().enumerate() {
             let [min, max] = model.bounds.map(|v| v.to_array());
             let (havok, material) = match model.havok_fnv {
-                Some(havok) => (name(havok), name(model.material_fnv)),
+                Some(havok) => (name(&strings, havok), name(&strings, model.material_fnv)),
                 None => ("-".to_string(), "-".to_string()),
             };
             println!("{index}\t{}\t{}\t{havok}\t{material}\t{}\t{}\t{}\t{}\t{}\t{}",
-                placed.get(&(index as u32)).copied().unwrap_or(0), name(model.primitives_fnv),
+                placed.get(&(index as u32)).copied().unwrap_or(0), name(&strings, model.primitives_fnv),
                 min[0], min[1], min[2], max[0], max[1], max[2]);
         }
         return Ok(());
@@ -159,13 +157,12 @@ fn cmd_models(opts: &CliOptions, space: &mut Bin) -> CliResult<()> {
     let colliding = models.models.iter().filter(|model| model.havok_fnv.is_some()).count();
     println!("{} models, {} with collision, placed {} times", models.models.len(), colliding, instances.instances.len());
 
-    let point = |[x, y, z]: [f32; 3]| format!("({x:.2}, {y:.2}, {z:.2})");
     for (index, model) in models.models.iter().enumerate() {
         let [min, max] = model.bounds;
         println!();
-        println!("#{index} placed {}×: {}", placed.get(&(index as u32)).copied().unwrap_or(0), name(model.primitives_fnv));
+        println!("#{index} placed {}×: {}", placed.get(&(index as u32)).copied().unwrap_or(0), name(&strings, model.primitives_fnv));
         match model.havok_fnv {
-            Some(havok) => println!("    collision {}, material {}", name(havok), name(model.material_fnv)),
+            Some(havok) => println!("    collision {}, material {}", name(&strings, havok), name(&strings, model.material_fnv)),
             None => println!("    no collision"),
         }
         println!("    bounds {} to {}", point(min.to_array()), point(max.to_array()));
@@ -199,6 +196,21 @@ fn describe_word(word: u32, strings: Option<&BWST>) -> String {
     } else {
         format!("{word:#010x}")
     }
+}
+
+/// A little-endian word.
+fn word(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes.try_into().unwrap())
+}
+
+/// The string of a hash, `?` if it has none.
+fn name(strings: &BWST, hash: u32) -> String {
+    strings.get_string(hash).unwrap_or("?").to_string()
+}
+
+/// A point with 2 decimals.
+fn point([x, y, z]: [f32; 3]) -> String {
+    format!("({x:.2}, {y:.2}, {z:.2})")
 }
 
 /// A size in bytes, kilobytes or megabytes.

@@ -11,7 +11,7 @@ use glam::Vec3;
 use crate::res::fs::ResFilesystem;
 
 use super::mesh::compressed_mesh_triangles;
-use super::tagfile::Tagfile;
+use super::tagfile::{Node, Tagfile};
 
 
 /// A collision model's bodies, every variant's, in the model's frame.
@@ -59,13 +59,8 @@ impl Collision {
                 .filter_map(|handle| handle.deref())
                 .collect();
 
-            let variant = |name: &str| handles.iter()
-                .find(|handle| handle.get("name").and_then(|n| n.as_str()) == Some(name))
-                .and_then(|handle| handle.get("variant")?.deref());
-
-            let body_flags = variant("HKBodyFlagsData")?;
-            let bound = |name: &str| Some(Vec3::from_slice(&body_flags.get(name)?.as_f32s::<4>()?[..3]));
-            let [min, max] = [bound("minBounds_")?, bound("maxBounds_")?];
+            let body_flags = variant(&handles, "HKBodyFlagsData")?;
+            let [min, max] = [vector(body_flags, "minBounds_")?, vector(body_flags, "maxBounds_")?];
 
             bounds = Some(bounds.map_or([min, max], |[least, most]| [least.min(min), most.max(max)]));
 
@@ -74,7 +69,7 @@ impl Collision {
                 .filter_map(|info| Some((info.get("name")?.as_str()?, info.get("normalMatKind")?.as_int()? as u32)))
                 .collect();
 
-            for body in variant("Collision Physics Data")?.get("bodyCinfos")?.elements()? {
+            for body in variant(&handles, "Collision Physics Data")?.get("bodyCinfos")?.elements()? {
 
                 let name = body.get("name").and_then(|name| name.as_str()).unwrap_or_default();
                 let name = name.strip_prefix("s_").or_else(|| name.strip_prefix("n_")).unwrap_or(name);
@@ -99,4 +94,16 @@ impl Collision {
 
     }
 
+}
+
+/// The object of a named resource handle.
+fn variant<'a>(handles: &[Node<'a>], name: &str) -> Option<Node<'a>> {
+    handles.iter()
+        .find(|handle| handle.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|handle| handle.get("variant")?.deref())
+}
+
+/// A record's `hkVector4` member, its first 3 coordinates.
+fn vector(record: Node, member: &str) -> Option<Vec3> {
+    Some(Vec3::from_slice(&record.get(member)?.as_f32s::<4>()?[..3]))
 }

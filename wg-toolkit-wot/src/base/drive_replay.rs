@@ -25,8 +25,8 @@ use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
 
-use crate::wot::item_defs::{read_xml, MobilityDef, VehicleDef};
-use crate::wot::arena_defs::read_bounds;
+use crate::wot::item_defs::{self, MobilityDef, VehicleDef};
+use crate::wot::arena_defs::{self, STANDARD_GAMEPLAY};
 use crate::wot::items::VehicleDescr;
 
 use super::physics::{wrap_angle, Hull};
@@ -287,9 +287,9 @@ fn hull_follows_the_real_server() {
             drive.updates.len(), drive.updates.last().unwrap().t - drive.updates[0].t, def.mobility);
 
         let mobility = drive.setup.apply(def.mobility);
-        let space = drive.space.as_ref().map(|space| Space::load(&res, &format!("spaces/{space}")).unwrap()).unwrap_or_default();
+        let space = drive.space.as_ref().map(|space| Space::load(&res, &format!("spaces/{space}"), STANDARD_GAMEPLAY).unwrap()).unwrap_or_default();
         let bounds = drive.space.as_ref()
-            .map(|space| read_bounds(&*read_xml(&res, &format!("scripts/arena_defs/{space}.xml")).unwrap(), space).unwrap());
+            .map(|space| arena_defs::read_bounds(&*item_defs::read_xml(&res, &format!("scripts/arena_defs/{space}.xml")).unwrap(), space).unwrap());
         if drive.space.is_some() {
             let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, &space.terrain);
             println!("  tilt settled: pitch {pitch:.2} / {pitch_90:.2}°, roll {roll:.2} / {roll_90:.2}° (median / 90%)");

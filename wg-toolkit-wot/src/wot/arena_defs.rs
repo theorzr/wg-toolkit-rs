@@ -11,6 +11,10 @@ use wgtk::pxml::Element;
 use super::item_defs::{invalid, read_xml};
 
 
+/// The gameplay type of standard battles, capture the flag.
+pub const STANDARD_GAMEPLAY: &str = "ctf";
+
+
 /// A map, with what standard battles on it need.
 #[derive(Debug, Clone)]
 pub struct ArenaTypeDef {
@@ -53,8 +57,8 @@ impl ArenaTypeDef {
         let bounds = read_bounds(&def, name)?;
 
         let spawn = |team| {
-            let point = def.get_child_value_at(&["gameplayTypes", "ctf", "teamSpawnPoints", team, "position"]);
-            let base = def.get_child_value_at(&["gameplayTypes", "ctf", "teamBasePositions", team, "position1"]);
+            let point = def.get_child_value_at(&["gameplayTypes", STANDARD_GAMEPLAY, "teamSpawnPoints", team, "position"]);
+            let base = def.get_child_value_at(&["gameplayTypes", STANDARD_GAMEPLAY, "teamBasePositions", team, "position1"]);
             point.and_then(|value| value.as_vec2()).map(Spawn::Point)
                 .or_else(|| base.and_then(|value| value.as_vec2()).map(Spawn::Base))
                 .ok_or_else(|| invalid(format!("map {name} has no standard battle spawn for {team}")))

@@ -17,13 +17,13 @@ use crate::res::fs::{ResFilesystem, ResReadFile};
 use crate::util::io::WgReadExt;
 use crate::util::fnv::fnv1a_64;
 
-pub use bwst::BWST;
-pub use bwal::{BWAL, AssetInfo, AssetType};
-pub use bwcs::BWCS;
-pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bwt2::{BWT2, TerrainSettings1, TerrainSettings2, TerrainChunk, OutlandCascade};
-pub use bsmo::{BSMO, StaticModel};
+pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bsmi::{BSMI, StaticModelInstance};
+pub use bwal::{BWAL, AssetInfo, AssetType};
+pub use bsmo::{BSMO, StaticModel};
+pub use bwst::BWST;
+pub use bwcs::BWCS;
 
 
 /// A compiled space, its sections decoded when asked for.

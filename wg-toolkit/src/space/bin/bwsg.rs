@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::io::{self, Read, Seek};
+use std::collections::HashMap;
 
 use crate::util::io::WgReadExt;
 

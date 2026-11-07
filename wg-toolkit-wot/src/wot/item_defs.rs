@@ -79,6 +79,9 @@ pub struct MobilityDef {
     /// to the track's centre, and along. Its chassis' `topRightCarryingPoint`, which its
     /// `carryingTriangles` rest on.
     pub carrying_point: Vec2,
+    /// The box of what collides of it, its chassis and its hull, in the vehicle's frame
+    /// (x right, y up, z forward): minimum then maximum, from their collision models.
+    pub bounds: [Vec3; 2],
 }
 
 /// A shell as the default gun fires it: what the client needs to show its tracer.
@@ -456,7 +459,6 @@ impl VehicleDef {
             .and_then(|limits| limits.get_child_float(direction))
             .map(|kmh| kmh / 3.6)
             .ok_or_else(|| invalid(format!("{name} has no {direction} speed")));
-        let mobility = mobility(fs, &dir, name, &vehicle, turret, guns.get_child_element(&gun_name), gun_def, speed_limit("forward")?, speed_limit("backward")?)?;
 
         // The vehicle may set its own values for a shared gun.
         let gun_float = |path: &[&str]| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
@@ -546,6 +548,15 @@ impl VehicleDef {
             hull_position: chassis.and_then(|chassis| chassis.get_child_vec3("hullPosition"))
                 .ok_or_else(|| invalid(format!("{name} has no hull position")))?,
         });
+
+        // What collides of it: its chassis and its hull, in the vehicle's frame.
+        let [chassis_bounds, hull_bounds] = [collision.parts[0].bounds, collision.parts[1].bounds];
+        let bounds = [
+            chassis_bounds[0].min(hull_bounds[0] + collision.hull_position),
+            chassis_bounds[1].max(hull_bounds[1] + collision.hull_position),
+        ];
+        let mobility = mobility(fs, &dir, name, &vehicle, turret, guns.get_child_element(&gun_name), gun_def,
+            speed_limit("forward")?, speed_limit("backward")?, bounds)?;
 
         let crew_roles = vehicle.get_child_element("crew")
             .into_iter()
@@ -649,6 +660,7 @@ fn mobility(
     gun: &Element,
     speed_forward: f32,
     speed_backward: f32,
+    bounds: [Vec3; 2],
 ) -> io::Result<MobilityDef> {
 
     let missing = |what: &str| invalid(format!("{name} has no {what}"));
@@ -710,6 +722,7 @@ fn mobility(
         weight,
         rolling_friction: [firm, medium, soft],
         carrying_point,
+        bounds,
     })
 
 }

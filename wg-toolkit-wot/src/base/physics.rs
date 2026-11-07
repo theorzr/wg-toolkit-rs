@@ -4,11 +4,13 @@
 //! client only shows its results. This one keeps its drive: the engine's power against
 //! the ground's resistance and the slope, up to the top speeds, braking, and turning
 //! with its own acceleration, all depending on the ground under it, its constants fitted
-//! on drives captured from the real server. It rests on the terrain and stays within
-//! the map's bounds, with no other collision yet.
+//! on drives captured from the real server. It rests on the terrain, stays within the
+//! map's bounds, and is stopped by the solid static models, its collision box against
+//! their triangles.
 
-use glam::{Affine3A, Quat, Vec2, Vec3};
+use glam::{Affine3A, Quat, Vec2, Vec3, Vec3Swizzles};
 
+use wgtk::space::statics::{BodyKind, StaticScene, StaticTriangle};
 use wgtk::space::terrain::{Ground, Terrain};
 use wgtk::space::Space;
 
@@ -21,6 +23,19 @@ const BOUNDS_MARGIN: f32 = 0.2;
 /// How much of the speed an edge stops it also takes along it: their friction. Fitted
 /// on the real server's drag along an edge driven into at 30°.
 const EDGE_FRICTION: f32 = 0.25;
+/// How high above the ground under its centre the hull's box starts, for the static
+/// models it collides with: what is lower it drives over. Fitted roughly: the drives'
+/// real hulls went over debris and porches up to 0.76 m high.
+const STEP_HEIGHT: f32 = 0.8;
+/// How much of the speed a wall stops it also takes along it. Our choice, an edge's
+/// until fitted.
+const WALL_FRICTION: f32 = EDGE_FRICTION;
+/// How far from vertical a solid static triangle stops the hull, in radians: flatter,
+/// it is ground the hull would climb. Our choice, before fitting.
+const WALL_ANGLE: f32 = 50.0 * std::f32::consts::PI / 180.0;
+/// How many times a step pushes the hull out of the static models it overlaps, the
+/// deepest overlap first.
+const WALL_PASSES: usize = 4;
 
 /// The `vehicle_moveWith` flags, `MOVEMENT_FLAGS` in the client's `Avatar.py`.
 pub mod movement_flag {
@@ -245,10 +260,14 @@ impl Hull {
     }
 
     /// Advance by `dt` seconds in its space: [`Self::step`] on the ground under it,
-    /// within the map's bounds if any, see [`Self::keep_within`], then resting on the
-    /// terrain. Returns whether the hull moved or turned.
+    /// within the map's bounds if any, see [`Self::keep_within`], out of the solid
+    /// static models, see [`Self::push_out`], then resting on the terrain. Returns
+    /// whether the hull moved or turned.
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>) -> bool {
         let moved = self.step(dt, ground_at(&space.terrain, self.position));
+        if moved {
+            self.push_out(&space.statics);
+        }
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
@@ -256,6 +275,58 @@ impl Hull {
             self.settle(&space.terrain);
         }
         moved
+    }
+
+    /// Push its collision box out of the solid static models it overlaps, on the ground
+    /// plane: their triangles within [`WALL_ANGLE`] of vertical, between [`STEP_HEIGHT`]
+    /// and its top, the deepest overlap first, [`WALL_PASSES`] at most. What of its velocity goes into a wall stops, and
+    /// slows the rest by [`WALL_FRICTION`]. Its pitch and roll are left out.
+    pub fn push_out(&mut self, statics: &StaticScene) {
+
+        for _ in 0..WALL_PASSES {
+
+            let push = self.overlaps(statics)
+                .map(|(_, push)| push)
+                .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+            let Some(push) = push else { break };
+
+            self.position += Vec3::new(push.x, 0.0, push.y);
+            let normal = Vec3::new(push.x, 0.0, push.y).normalize();
+            let mut velocity = self.velocity();
+            let into = velocity.dot(normal);
+            if into < 0.0 {
+                velocity -= normal * into;
+                let along = velocity - normal * velocity.dot(normal);
+                velocity -= along.clamp_length_max(WALL_FRICTION * -into);
+                let (heading, right) = self.axes();
+                (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
+            }
+
+        }
+
+    }
+
+    /// The solid static triangles its collision box overlaps, see [`Self::push_out`],
+    /// each with how far to push it out of it on the ground plane.
+    pub fn overlaps<'a>(&self, statics: &'a StaticScene) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
+
+        let (heading, right) = self.axes();
+        let (heading, right) = (heading.xz(), right.xz());
+        let [min, max] = self.mobility.bounds;
+        let (center, half) = ((min + max) / 2.0, (max - min) / 2.0);
+        let half = Vec2::new(half.x, half.z);
+        let (low, high) = (self.position.y + STEP_HEIGHT.max(min.y), self.position.y + max.y);
+
+        let middle = self.position.xz() + heading * center.z + right * center.x;
+        let reach = half.length();
+        let (least, most) = (Vec3::new(middle.x - reach, low, middle.y - reach), Vec3::new(middle.x + reach, high, middle.y + reach));
+        statics.triangles_in(BodyKind::Solid, least, most)
+            .filter(|triangle| triangle.normal.y.abs() < WALL_ANGLE.sin())
+            .filter_map(move |triangle| {
+                let outline = clip_to_heights(&triangle.vertices, low, high)?;
+                Some((triangle, box_push(middle, heading, right, half, &outline)?))
+            })
+
     }
 
     /// Keep its centre within the map's bounds, [`BOUNDS_MARGIN`] inside them: what of
@@ -652,6 +723,61 @@ fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
 }
 
 /// A value moved toward a goal by at most `step`.
+/// What of a triangle lies between two heights, on the ground plane: its outline's x
+/// and z, none if it lies all above or below.
+fn clip_to_heights(triangle: &[Vec3; 3], low: f32, high: f32) -> Option<Vec<Vec2>> {
+
+    // Clip the polygon to one side of a height, `keep` telling the side kept.
+    fn clip(polygon: Vec<Vec3>, height: f32, keep: impl Fn(f32) -> bool) -> Vec<Vec3> {
+        let mut clipped = Vec::with_capacity(polygon.len() + 1);
+        for (index, &from) in polygon.iter().enumerate() {
+            let to = polygon[(index + 1) % polygon.len()];
+            if keep(from.y) {
+                clipped.push(from);
+            }
+            if keep(from.y) != keep(to.y) {
+                clipped.push(from.lerp(to, (height - from.y) / (to.y - from.y)));
+            }
+        }
+        clipped
+    }
+
+    let polygon = clip(triangle.to_vec(), low, |y| y >= low);
+    let polygon = clip(polygon, high, |y| y <= high);
+    (!polygon.is_empty()).then(|| polygon.into_iter().map(|vertex| vertex.xz()).collect())
+}
+
+/// How far to push a box on the ground plane, at `middle` with its `heading` and `right`
+/// axes and its `half` sizes across then along, out of a convex outline, least first:
+/// along the axis that separates them least, of the box's two and the outline's edges'
+/// normals, none if they don't overlap.
+fn box_push(middle: Vec2, heading: Vec2, right: Vec2, half: Vec2, outline: &[Vec2]) -> Option<Vec2> {
+
+    let edges = outline.iter().zip(outline.iter().cycle().skip(1))
+        .map(|(&from, &to)| (to - from).perp())
+        .filter(|normal| normal.length_squared() > 1e-8)
+        .map(Vec2::normalize);
+
+    let mut least: Option<Vec2> = None;
+    for axis in [heading, right].into_iter().chain(edges) {
+        let center = middle.dot(axis);
+        let extent = half.x * right.dot(axis).abs() + half.y * heading.dot(axis).abs();
+        let (low, high) = outline.iter().map(|vertex| vertex.dot(axis))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), p| (low.min(p), high.max(p)));
+        // Pushed back past the outline's low side, or forward past its high side.
+        let (back, forward) = (center + extent - low, high - (center - extent));
+        if back <= 0.0 || forward <= 0.0 {
+            return None;
+        }
+        let push = if back < forward { -axis * back } else { axis * forward };
+        if least.is_none_or(|least| push.length_squared() < least.length_squared()) {
+            least = Some(push);
+        }
+    }
+    least
+
+}
+
 fn approach(value: f32, goal: f32, step: f32) -> f32 {
     value + (goal - value).clamp(-step, step)
 }
@@ -697,6 +823,7 @@ pub(super) mod tests {
             weight: 55_000.0,
             rolling_friction: [0.0805, 0.10465, 0.20125],
             carrying_point: glam::Vec2::new(1.6, 2.4),
+            bounds: [Vec3::new(-1.8, 0.0, -3.7), Vec3::new(1.8, 2.6, 3.8)],
         }
     }
 
@@ -811,6 +938,39 @@ pub(super) mod tests {
             hull.step(0.1, Ground::Medium);
         }
         assert!(hull.slide < -1.0, "{}", hull.slide);
+    }
+
+    /// A wall across the way at z = 10, `height` high, as two triangles.
+    fn wall(height: f32) -> Space {
+        let (low_left, low_right) = (Vec3::new(-20.0, -1.0, 10.0), Vec3::new(20.0, -1.0, 10.0));
+        let (high_left, high_right) = (Vec3::new(-20.0, height, 10.0), Vec3::new(20.0, height, 10.0));
+        let triangles = vec![
+            StaticTriangle::new([low_left, low_right, high_right], 0, 0, BodyKind::Solid),
+            StaticTriangle::new([low_left, high_right, high_left], 0, 0, BodyKind::Solid),
+        ];
+        Space { statics: StaticScene::from_triangles(triangles), ..Space::default() }
+    }
+
+    #[test]
+    fn stops_against_walls_it_cannot_drive_over() {
+        // Square on at full speed, it stops with its front against the wall.
+        let space = wall(3.0);
+        let mut hull = chieftain();
+        hull.speed = 40.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None);
+        }
+        let front = hull.position.z + hull.mobility.bounds[1].z;
+        assert!((front - 10.0).abs() < 1e-3 && hull.speed.abs() < 1e-3, "front at {front}, {} m/s", hull.speed);
+        // Lower than its step, it drives over it.
+        let space = wall(STEP_HEIGHT - 0.1);
+        let mut hull = chieftain();
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None);
+        }
+        assert!(hull.position.z > 12.0, "{}", hull.position.z);
     }
 
     #[test]

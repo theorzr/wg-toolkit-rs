@@ -8,7 +8,8 @@ use super::{invalid, skip_vector, SpaceSection};
 
 
 /// `BSMI`: every static model placed in the space, its transform and which of
-/// [`BSMO`]' it is. Only its first and fourth vectors are known.
+/// [`BSMO`]' it is, and in which game modes. Only its first, third and fourth vectors
+/// are known.
 #[derive(Debug)]
 pub struct BSMI {
     pub instances: Vec<StaticModelInstance>,
@@ -21,6 +22,10 @@ pub struct StaticModelInstance {
     pub transform: Affine3A,
     /// Its model's index in [`BSMO`].
     pub model: u32,
+    /// In which game modes it is, see the client's `SpaceVisibilityFlags.py`: its low
+    /// 20 bits are the server's, a bit for each gameplay type as the space's
+    /// `space.settings` maps them, its high 12 bits the client's.
+    pub visibility_mask: u32,
 }
 
 impl SpaceSection for BSMI {
@@ -40,15 +45,15 @@ impl SpaceSection for BSMI {
         })?;
 
         skip_vector(read)?;
-        skip_vector(read)?;
+        let visibility_masks = read.read_vector(|buf| buf.read_u32())?;
         let models = read.read_vector(|buf| buf.read_u32())?;
 
-        if models.len() != transforms.len() {
-            return Err(invalid("static model instances and their models differ in count"));
+        if models.len() != transforms.len() || visibility_masks.len() != transforms.len() {
+            return Err(invalid("static model instances, their models and visibility differ in count"));
         }
 
-        let instances = transforms.into_iter().zip(models)
-            .map(|(transform, model)| StaticModelInstance { transform, model })
+        let instances = transforms.into_iter().zip(models).zip(visibility_masks)
+            .map(|((transform, model), visibility_mask)| StaticModelInstance { transform, model, visibility_mask })
             .collect();
         Ok(Self { instances })
 

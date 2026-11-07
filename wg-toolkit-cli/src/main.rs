@@ -6,8 +6,8 @@ mod space;
 mod havok;
 
 use std::io::{self, IsTerminal, Read};
-use std::process::ExitCode;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 

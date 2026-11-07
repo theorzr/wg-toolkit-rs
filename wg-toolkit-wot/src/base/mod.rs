@@ -47,7 +47,7 @@ use crate::wot::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, 
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
 use crate::wot::collision::VehicleCollision;
-use crate::wot::arena_defs::ArenaTypeDef;
+use crate::wot::arena_defs::{ArenaTypeDef, STANDARD_GAMEPLAY};
 use crate::wot::item_prices::ItemPrices;
 use crate::wot::items::TankmanDescr;
 
@@ -95,7 +95,7 @@ impl BaseThread {
             .map_err(|e| format!("Failed to open resource filesystem: {e}"))?;
         let map = ArenaTypeDef::load(&fs, &args.map)
             .map_err(|e| format!("Failed to load the map {}: {e}", args.map))?;
-        let space = Space::load(&fs, &map.geometry)
+        let space = Space::load(&fs, &map.geometry, STANDARD_GAMEPLAY)
             .map_err(|e| format!("Failed to load the space of {}: {e}", map.geometry))?;
         info!(triangles = space.statics.len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
 
