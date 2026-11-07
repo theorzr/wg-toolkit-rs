@@ -60,8 +60,12 @@ pub struct MobilityDef {
     /// Top speeds forward and backward, in m/s.
     pub speed_forward: f32,
     pub speed_backward: f32,
-    /// How fast the chassis turns the vehicle on the spot, in rad/s.
-    pub rotation_speed: f32,
+    /// How fast the vehicle turns on the spot on firm, medium and soft ground, in rad/s:
+    /// its chassis' `rotationSpeed` on firm ground, slower on the others as their
+    /// resistance is higher, `rotationSpeedLimit` in `vehicles.py`, which its engine's
+    /// power over its weight would also scale, both the default ones here. Measured on
+    /// the real server within 1% on all three grounds.
+    pub rotation_speed: [f32; 3],
     /// The engine's power, in W: the server's physics' own, `smplEnginePower` in the
     /// vehicle's `physics/detailed` section, else the engine's.
     pub engine_power: f32,
@@ -654,6 +658,8 @@ fn mobility(
     let (_, chassis) = first("chassis")?;
     let chassis = chassis.as_element().ok_or_else(|| missing("chassis"))?;
     let chassis_float = |key: &str| chassis.get_child_float(key).ok_or_else(|| missing(&format!("chassis {key}")));
+    let terrain_resistance = chassis.get_child("terrainResistance").and_then(pxml::Value::as_vec3)
+        .ok_or_else(|| missing("chassis terrainResistance"))?;
 
     // What the client keeps of the server's physics, by module name.
     let physics = vehicle.get_child_element("physics").and_then(|physics| physics.get_child_element("detailed"));
@@ -680,10 +686,11 @@ fn mobility(
         + module_float("fuelTanks", "fuelTanks", "weight")?
         + module_float("radios", "radios", "weight")?;
 
+    let rotation_speed = chassis_float("rotationSpeed")?.to_radians();
     Ok(MobilityDef {
         speed_forward,
         speed_backward,
-        rotation_speed: chassis_float("rotationSpeed")?.to_radians(),
+        rotation_speed: terrain_resistance.to_array().map(|resistance| rotation_speed * terrain_resistance.x / resistance),
         engine_power: engine_power * HP_TO_WATTS,
         weight,
         rolling_friction: [firm, medium, soft],
@@ -715,13 +722,15 @@ mod tests {
         let mobility = VehicleDef::load(&fs, "usa", "A83_T110E4").unwrap().mobility;
         assert_eq!(mobility.engine_power, 950.0 * HP_TO_WATTS);
         assert_eq!(mobility.rolling_friction, [0.1127, 0.1288, 0.21735]);
-        assert!((mobility.rotation_speed.to_degrees() - 26.0).abs() < 1e-3);
+        // 26°/s on firm ground, its terrain resistance 1.4, 1.6 and 2.7.
+        let degrees = mobility.rotation_speed.map(f32::to_degrees);
+        assert!(degrees.iter().zip([26.0, 22.75, 13.481]).all(|(real, expected)| (real - expected).abs() < 1e-3), "{degrees:?}");
         // Hull, chassis, turret, engine, fuel tank and radio, and the gun's few tonnes.
         assert!((63_000.0..70_000.0).contains(&mobility.weight), "{}", mobility.weight);
     }
 
-    /// With the game's `res` directory in `WGT_RES_PATH`: every vehicle's physics section
-    /// has what its mobility needs. Slow, loading every vehicle: run with `--ignored`.
+    /// With the game's `res` directory in `WGT_RES_PATH`: every vehicle's chassis and
+    /// physics section have what its mobility needs. Slow, loading every vehicle: run with `--ignored`.
     #[test]
     #[ignore]
     fn every_vehicle_has_rolling_friction() {
@@ -737,7 +746,7 @@ mod tests {
                         assert!(def.mobility.rolling_friction.iter().all(|&friction| friction > 0.0), "{nation}:{name}");
                         loaded += 1;
                     }
-                    Err(e) => assert!(!e.to_string().contains("rolling friction"), "{nation}:{name}: {e}"),
+                    Err(e) => assert!(!e.to_string().contains("rolling friction") && !e.to_string().contains("terrainResistance"), "{nation}:{name}: {e}"),
                 }
             }
         }

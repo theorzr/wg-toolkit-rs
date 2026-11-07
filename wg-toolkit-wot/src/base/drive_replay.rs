@@ -9,6 +9,8 @@
 //! `flags,<vehicle_moveWith flags>` the client sent, or `pos,x,y,z,roll,pitch,yaw` the
 //! server gave the vehicle. Its header, lines starting with `#`, gives:
 //! - `# descr,<bytes>`: the vehicle's compact descriptor;
+//! - `# space,<name>`: the map it drove on, whose grounds the hull is given, medium
+//!   without;
 //! - `# setup,<equipment kg>,<driver>,<medium ground>,<top speed m/s>`: how the vehicle
 //!   was set up, see [`CapturedSetup`], stock without;
 //! - `# max_median_error,<1 s>,<3 s>`: the median errors over 1 s and 3 s windows the
@@ -19,12 +21,13 @@ use std::fs;
 
 use glam::Vec3;
 
+use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::item_defs::{MobilityDef, VehicleDef};
 use crate::wot::items::VehicleDescr;
 
-use super::physics::{wrap_angle, Hull};
+use super::physics::{ground_at, wrap_angle, Hull};
 use super::TICK;
 
 
@@ -46,7 +49,7 @@ fn ticks_between(from: f64, to: f64) -> f32 {
 struct CapturedSetup {
     /// The weight of its equipment, in kg, from `optional_devices.xml`.
     equipment_weight: f32,
-    /// The factor its driver's skill divides every rolling friction by, and multiplies
+    /// The factor its driver's skill divides every terrain resistance by, so multiplies
     /// its turning speed by, `0.57 + 0.43 · efficiency` in `VehicleDescrCrew.py`.
     driver: f32,
     /// What off-road driving divides medium ground's friction by, its
@@ -68,7 +71,12 @@ impl CapturedSetup {
         MobilityDef {
             speed_forward: mobility.speed_forward + self.top_speed,
             speed_backward: mobility.speed_backward + self.top_speed,
-            rotation_speed: mobility.rotation_speed * self.driver,
+            // The driver divides every resistance, and the weight slows the turn.
+            rotation_speed: {
+                let factor = self.driver * mobility.weight / (mobility.weight + self.equipment_weight);
+                let [firm, medium, soft] = mobility.rotation_speed.map(|speed| speed * factor);
+                [firm, medium * self.medium_ground, soft]
+            },
             weight: mobility.weight + self.equipment_weight,
             rolling_friction: [firm / self.driver, medium / (self.driver * self.medium_ground), soft / self.driver],
             ..mobility
@@ -94,6 +102,7 @@ struct Update {
 /// A drive, see the module's documentation.
 struct Drive {
     descr: Vec<u8>,
+    space: Option<String>,
     setup: CapturedSetup,
     max_median_error: Vec<(f64, f32)>,
     controls: Vec<(f64, u8)>,
@@ -103,6 +112,7 @@ struct Drive {
 fn parse(csv: &str) -> Drive {
     let mut drive = Drive {
         descr: Vec::new(),
+        space: None,
         setup: CapturedSetup::STOCK,
         max_median_error: Vec::new(),
         controls: Vec::new(),
@@ -112,6 +122,10 @@ fn parse(csv: &str) -> Drive {
     for line in csv.lines() {
         if let Some(descr) = line.strip_prefix("# descr,") {
             drive.descr = descr.split(',').map(|byte| byte.parse().unwrap()).collect();
+            continue;
+        }
+        if let Some(space) = line.strip_prefix("# space,") {
+            drive.space = Some(space.to_string());
             continue;
         }
         if let Some(setup) = line.strip_prefix("# setup,") {
@@ -173,8 +187,8 @@ impl Errors {
 }
 
 /// Replay the drive in windows of `window` seconds, each from the real state, through
-/// the hull of this mobility.
-fn replay(drive: &Drive, mobility: MobilityDef, window: f64, delay: f64) -> Errors {
+/// the hull of this mobility, on its terrain's grounds if any.
+fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, window: f64, delay: f64) -> Errors {
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
@@ -199,7 +213,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, window: f64, delay: f64) -> Erro
 
         for pair in updates[start..=end].windows(2) {
             hull.flags = controls_at(pair[0].t);
-            hull.step(ticks_between(pair[0].t, pair[1].t));
+            hull.step(ticks_between(pair[0].t, pair[1].t), ground_at(terrain, hull.position));
         }
 
         let real = updates[end];
@@ -236,11 +250,12 @@ fn hull_follows_the_real_server() {
             drive.updates.len(), drive.updates.last().unwrap().t - drive.updates[0].t, def.mobility);
 
         let mobility = drive.setup.apply(def.mobility);
+        let terrain = drive.space.as_ref().map(|space| Terrain::load(&res, &format!("spaces/{space}")).unwrap());
         for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
-            replay(&drive, mobility, 1.0, delay).report(&format!("  delay {delay}"));
+            replay(&drive, mobility, terrain.as_ref(), 1.0, delay).report(&format!("  delay {delay}"));
         }
         for &(window, max) in &drive.max_median_error {
-            let errors = replay(&drive, mobility, window, CONTROL_DELAY);
+            let errors = replay(&drive, mobility, terrain.as_ref(), window, CONTROL_DELAY);
             errors.report(&format!("  {window} s windows"));
             assert!(errors.median_distance() <= max, "{name}: median error over {window} s windows: {} m", errors.median_distance());
         }

@@ -1,11 +1,13 @@
-//! Terrain heights, read from a space's chunks: each `XXXXZZZZo.cdata_processed` (the
-//! chunk's grid coordinates as 16-bit hex) is a zip archive whose `terrain2/heights`
-//! holds the chunk's height map, as BigWorld's `TerrainHeightMap2` reads it.
+//! Terrain heights and grounds, read from a space's chunks: each
+//! `XXXXZZZZo.cdata_processed` (the chunk's grid coordinates as 16-bit hex) is a zip
+//! archive whose `terrain2/heights` holds the chunk's height map, as BigWorld's
+//! `TerrainHeightMap2` reads it, and `terrain2/dominanttextures` its ground map.
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read};
 
 use byteorder::{LittleEndian as LE, ReadBytesExt};
+use flate2::read::ZlibDecoder;
 use glam::Vec3;
 
 use crate::res::fs::ResFilesystem;
@@ -24,6 +26,12 @@ const QUANTISATION_LEVEL: f32 = 0.001;
 /// `TerrainHeightMap2::DEFAULT_VISIBLE_OFFSET`: samples around the chunk's own, shared
 /// with its neighbours, for the first level of detail.
 const VISIBLE_OFFSET: usize = 2;
+/// `DominantTextureMap`'s magic, "mat\0", and the only version known.
+const GROUND_MAP_MAGIC: u32 = 0x0074616d;
+const GROUND_MAP_VERSION: u32 = 1;
+/// The magic of a block BigWorld compresses, "\0piz" as bytes: an unknown 32-bit value
+/// follows, then its size uncompressed, then its zlib stream.
+const COMPRESSED_MAGIC: u32 = 0x7a697000;
 /// The chunk size when the space's settings don't give one.
 const DEFAULT_CHUNK_SIZE: f32 = 100.0;
 /// How far either way the terrain's slope is measured for its normal, in metres: well
@@ -125,11 +133,97 @@ impl HeightMap {
 }
 
 
-/// A space's terrain: its chunks' height maps.
+/// What ground a chunk's cells are, which World of Tanks' physics drives on: its
+/// dominant texture map, whose cells give in their low bits the texture covering them
+/// most, and in their high 4 bits their ground. Its rows go along Z, as the height map's.
+#[derive(Debug, Clone)]
+pub struct GroundMap {
+    width: usize,
+    height: usize,
+    /// Row-major grounds.
+    grounds: Vec<Ground>,
+}
+
+/// A ground, as World of Tanks paints it on the terrain, `GROUND_TYPE_BY_NAME` in its
+/// `constants.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ground {
+    /// Unpainted, mostly beyond the battle's bounds.
+    None,
+    Firm,
+    Medium,
+    Soft,
+}
+
+impl GroundMap {
+
+    /// Decode a `terrain2/dominanttextures` file.
+    pub fn decode<R: Read>(mut read: R) -> io::Result<Self> {
+
+        if read.read_u32::<LE>()? != GROUND_MAP_MAGIC {
+            return Err(invalid("not a dominant texture map"));
+        }
+        let version = read.read_u32::<LE>()?;
+        if version != GROUND_MAP_VERSION {
+            return Err(invalid(format!("unsupported dominant texture map version {version}")));
+        }
+        let textures = read.read_u32::<LE>()? as u64;
+        let name_size = read.read_u32::<LE>()? as u64;
+        let width = read.read_u32::<LE>()? as usize;
+        let height = read.read_u32::<LE>()? as usize;
+        let _pad = read.read_u64::<LE>()?;
+        // The textures' names, which only the client draws.
+        io::copy(&mut (&mut read).take(textures * name_size), &mut io::sink())?;
+
+        if read.read_u32::<LE>()? != COMPRESSED_MAGIC {
+            return Err(invalid("dominant textures not compressed"));
+        }
+        let _unknown = read.read_u32::<LE>()?;
+        let size = read.read_u32::<LE>()? as usize;
+        if size != width * height {
+            return Err(invalid(format!("{size} dominant textures for {width}x{height} cells")));
+        }
+        let mut cells = Vec::with_capacity(size);
+        ZlibDecoder::new(read).read_to_end(&mut cells)?;
+        if cells.len() != size {
+            return Err(invalid("dominant textures shorter than their size"));
+        }
+
+        let grounds = cells.into_iter()
+            .map(|cell| match cell >> 4 {
+                1 => Ground::Firm,
+                2 => Ground::Medium,
+                3 => Ground::Soft,
+                _ => Ground::None,
+            })
+            .collect();
+
+        Ok(Self { width, height, grounds })
+
+    }
+
+    /// The ground at a position relative to the chunk's corner.
+    pub fn ground_at(&self, x: f32, z: f32, chunk_size: f32) -> Ground {
+        let column = ((x / chunk_size * self.width as f32).max(0.0) as usize).min(self.width - 1);
+        let row = ((z / chunk_size * self.height as f32).max(0.0) as usize).min(self.height - 1);
+        self.grounds[row * self.width + column]
+    }
+
+}
+
+
+/// A chunk of terrain: its heights, and its grounds if it has them.
+#[derive(Debug, Clone)]
+struct Chunk {
+    heights: HeightMap,
+    grounds: Option<GroundMap>,
+}
+
+/// A space's terrain: its chunks' height and ground maps.
 #[derive(Debug, Clone)]
 pub struct Terrain {
     chunk_size: f32,
-    chunks: HashMap<(i16, i16), HeightMap>,
+    chunks: HashMap<(i16, i16), Chunk>,
 }
 
 impl Terrain {
@@ -156,9 +250,14 @@ impl Terrain {
             let mut data = Vec::new();
             fs.read(entry.path())?.read_to_end(&mut data)?;
             let mut archive = PackageReader::new(Cursor::new(data))?;
-            let heights = HeightMap::decode(archive.read_by_name("terrain2/heights")?)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", entry.path())))?;
-            chunks.insert((x as i16, z as i16), heights);
+            let context = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", entry.path()));
+            let heights = HeightMap::decode(archive.read_by_name("terrain2/heights")?).map_err(context)?;
+            let grounds = match archive.read_by_name("terrain2/dominanttextures") {
+                Ok(file) => Some(GroundMap::decode(file).map_err(context)?),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(context(e)),
+            };
+            chunks.insert((x as i16, z as i16), Chunk { heights, grounds });
         }
 
         Ok(Self { chunk_size, chunks })
@@ -167,9 +266,21 @@ impl Terrain {
 
     /// The terrain's height at a world position, if it has a chunk there.
     pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let (chunk, x, z) = self.chunk_at(x, z)?;
+        Some(chunk.heights.height_at(x, z, self.chunk_size))
+    }
+
+    /// The ground at a world position, if it has a chunk there with its grounds.
+    pub fn ground_at(&self, x: f32, z: f32) -> Option<Ground> {
+        let (chunk, x, z) = self.chunk_at(x, z)?;
+        Some(chunk.grounds.as_ref()?.ground_at(x, z, self.chunk_size))
+    }
+
+    /// The chunk at a world position, and the position relative to its corner.
+    fn chunk_at(&self, x: f32, z: f32) -> Option<(&Chunk, f32, f32)> {
         let (cx, cz) = ((x / self.chunk_size).floor(), (z / self.chunk_size).floor());
         let chunk = self.chunks.get(&(cx as i16, cz as i16))?;
-        Some(chunk.height_at(x - cx * self.chunk_size, z - cz * self.chunk_size, self.chunk_size))
+        Some((chunk, x - cx * self.chunk_size, z - cz * self.chunk_size))
     }
 
     /// The terrain's normal at a world position, upward, if it has a chunk there: its
@@ -210,11 +321,40 @@ mod tests {
     }
 
     #[test]
+    fn ground_maps_cells_along_z() {
+
+        use std::io::Write;
+        use byteorder::WriteBytesExt;
+
+        // Two textures, 2x2 cells: firm then soft on the first row, medium then none on
+        // the second, along Z.
+        let mut file = Vec::new();
+        for value in [GROUND_MAP_MAGIC, GROUND_MAP_VERSION, 2, 8, 2, 2, 0, 0] {
+            file.write_u32::<LE>(value).unwrap();
+        }
+        file.extend_from_slice(b"grass\0\0\0sand\0\0\0\0");
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0x10, 0x31, 0x20, 0x01]).unwrap();
+        for value in [COMPRESSED_MAGIC, 0, 4] {
+            file.write_u32::<LE>(value).unwrap();
+        }
+        file.extend(encoder.finish().unwrap());
+
+        let map = GroundMap::decode(&file[..]).unwrap();
+        assert_eq!(map.ground_at(10.0, 10.0, 100.0), Ground::Firm);
+        assert_eq!(map.ground_at(60.0, 10.0, 100.0), Ground::Soft);
+        assert_eq!(map.ground_at(10.0, 60.0, 100.0), Ground::Medium);
+        assert_eq!(map.ground_at(100.0, 100.0, 100.0), Ground::None);
+
+    }
+
+    #[test]
     fn normal_leans_against_the_slope() {
         // Rising 1 m per sample along x, as above: a 1 in 1.5625 slope.
         let size = 64 + VISIBLE_OFFSET * 2 + 1;
         let heights = (0..size * size).map(|i| (i % size) as f32).collect();
-        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), HeightMap { width: size, height: size, heights })]) };
+        let chunk = Chunk { heights: HeightMap { width: size, height: size, heights }, grounds: None };
+        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), chunk)]) };
         let normal = terrain.normal_at(30.3, 40.7).unwrap();
         let expected = Vec3::new(-1.0, 100.0 / 64.0, 0.0).normalize();
         assert!(normal.distance(expected) < 1e-3, "{normal}");
