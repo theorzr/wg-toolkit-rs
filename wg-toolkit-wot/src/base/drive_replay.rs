@@ -36,11 +36,11 @@ use super::TICK;
 /// within a few centimetres, below the capture's tick.
 const CONTROL_DELAY: f64 = 0.05;
 
-/// The seconds between two positions: the server sends one per tick, which reach the
-/// capture irregularly, so as many whole ticks as is closest.
-fn ticks_between(from: f64, to: f64) -> f32 {
-    let tick = TICK.as_secs_f64();
-    (((to - from) / tick).round().max(1.0) * tick) as f32
+/// The seconds between two positions: the server sends one each tick, which reach the
+/// capture irregularly, bunched up after a stall, so always one tick. Measured: counted
+/// on the drives' 100 ms clock, their gaps are one tick but for as many of 0 as of 2.
+fn ticks_between(_from: f64, _to: f64) -> f32 {
+    TICK.as_secs_f32()
 }
 
 /// How a drive's vehicle was set up, apart from a stock one, from what the capture's
@@ -156,11 +156,13 @@ fn parse(csv: &str) -> Drive {
     drive
 }
 
-/// The errors at the end of windows, in metres on the ground plane and radians of yaw.
+/// The errors at the end of windows, in metres on the ground plane and radians of yaw,
+/// and when each window starts.
 #[derive(Debug, Default)]
 struct Errors {
     distance: Vec<f32>,
     yaw: Vec<f32>,
+    starts: Vec<f64>,
 }
 
 impl Errors {
@@ -184,6 +186,16 @@ impl Errors {
             self.distance.len(), y50 * 180.0 / PI, y90 * 180.0 / PI, ymax * 180.0 / PI);
     }
 
+    /// The windows ending furthest from the real server, to look into.
+    fn report_worst(&self, count: usize) {
+        let mut worst = (0..self.distance.len()).collect::<Vec<_>>();
+        worst.sort_by(|&a, &b| self.distance[b].total_cmp(&self.distance[a]));
+        let worst = worst.iter().take(count)
+            .map(|&i| format!("{:.1} s ({:.1} m, {:.0}°)", self.starts[i], self.distance[i], self.yaw[i] * 180.0 / PI))
+            .collect::<Vec<_>>();
+        println!("    worst from: {}", worst.join(", "));
+    }
+
 }
 
 /// Replay the drive in windows of `window` seconds, each from the real state, through
@@ -204,7 +216,9 @@ fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, windo
         let dt = ticks_between(before.t, from.t);
         let mut hull = Hull::new(from.position, from.direction, mobility);
         let heading = Vec3::new(from.direction.z.sin(), 0.0, from.direction.z.cos());
+        let right = Vec3::new(from.direction.z.cos(), 0.0, -from.direction.z.sin());
         hull.speed = (from.position - before.position).dot(heading) / dt;
+        hull.slide = (from.position - before.position).dot(right) / dt;
         hull.yaw_rate = wrap_angle(from.direction.z - before.direction.z) / dt;
         let controls_at = |t: f64| drive.controls.iter().rev()
             .find(|&&(at, _)| at + delay <= t)
@@ -214,6 +228,10 @@ fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, windo
         for pair in updates[start..=end].windows(2) {
             hull.flags = controls_at(pair[0].t);
             hull.step(ticks_between(pair[0].t, pair[1].t), ground_at(terrain, hull.position));
+            // On its slope, as the vehicle settles in battle.
+            if let Some(terrain) = terrain {
+                hull.settle(terrain);
+            }
         }
 
         let real = updates[end];
@@ -221,6 +239,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, windo
         if moved >= MOVED {
             errors.distance.push((hull.position - real.position).with_y(0.0).length());
             errors.yaw.push(wrap_angle(hull.direction.z - real.direction.z).abs());
+            errors.starts.push(from.t);
         }
         start = next;
 
@@ -257,6 +276,7 @@ fn hull_follows_the_real_server() {
         for &(window, max) in &drive.max_median_error {
             let errors = replay(&drive, mobility, terrain.as_ref(), window, CONTROL_DELAY);
             errors.report(&format!("  {window} s windows"));
+            errors.report_worst(6);
             assert!(errors.median_distance() <= max, "{name}: median error over {window} s windows: {} m", errors.median_distance());
         }
 

@@ -22,6 +22,8 @@ pub mod movement_flag {
     pub const ROTATE_RIGHT: u8 = 8;
     pub const CRUISE_CONTROL50: u8 = 16;
     pub const CRUISE_CONTROL25: u8 = 32;
+    /// The handbrake.
+    pub const BLOCK_TRACKS: u8 = 64;
 }
 
 // Where each constant comes from: the game's sources, the drives captured from the real
@@ -65,6 +67,10 @@ const ROTATION_ON_MOVE: f32 = 0.85;
 /// speed while turning against straight, 9.0 and 9.9 m/s for the T110E4, 18.1 and
 /// 20.0 m/s for the Type 64, 0.91 both.
 const SPEED_WHILE_TURNING: f32 = 0.91;
+/// How much turning while moving slows the vehicle on top of its ground's resistance, in
+/// m/s². Fitted: the power its acceleration shows while turning falls short of driving
+/// straight by about 0.45 to 1 m/s², on both drives and at every speed.
+const TURNING_RESISTANCE: f32 = 0.8;
 /// How long its turning speed takes to grow from nothing to its turning speed on the
 /// spot, and to fall back, in seconds: the faster it turns, the faster it gets there.
 /// Fitted: turning from rest, the T110E4 (26.8°/s) and the Type 64 (49.3°/s) both get
@@ -72,6 +78,23 @@ const SPEED_WHILE_TURNING: f32 = 0.91;
 /// two ticks.
 const ROTATION_RISE: f32 = 0.3;
 const ROTATION_FALL: f32 = 0.2;
+/// How fast its blocked tracks slow the vehicle sliding along them, and its tracks
+/// sideways, in m/s². Fitted: on the Type 64's two drifts at 20 and 16.7 m/s, its
+/// velocity kept in the world as its hull swings under it, slowed by each separately,
+/// follows the real one within 0.2 to 0.8 m/s for 2 to 3.5 along, 9.5 to 12 across; a
+/// friction on the whole velocity, weighed by the slip angle, fits twice as badly.
+const HANDBRAKE_FRICTION: f32 = 3.0;
+const SIDE_FRICTION: f32 = 11.0;
+/// How fast the vehicle turns with its tracks blocked: this many times its turning speed
+/// on the spot, the less it slides, `1 - e^(-v / HANDBRAKE_ROTATION_SPEED)`. Fitted: the
+/// Type 64 (49.3°/s on the spot) drifts up to 124°/s, then turns at 121, 115, 101, 90,
+/// 74 and 35°/s as it slides at 10, 7.6, 5, 3.8, 2.7 and 1 m/s.
+const HANDBRAKE_ROTATION: f32 = 2.5;
+const HANDBRAKE_ROTATION_SPEED: f32 = 3.0;
+/// How long its turning speed takes to grow by its turning speed on the spot with its
+/// tracks blocked, in seconds. Fitted: the Type 64's drifts turn 72°/s faster each
+/// second.
+const HANDBRAKE_ROTATION_RISE: f32 = 0.7;
 /// Under this speed, in m/s, the vehicle turns as on the spot. Our choice, the split the
 /// fit above uses between turning on the spot and moving.
 const ON_SPOT_SPEED: f32 = 0.5;
@@ -154,6 +177,9 @@ pub struct Hull {
     pub direction: Vec3,
     /// Signed speed along the vehicle's heading, in m/s.
     pub speed: f32,
+    /// Signed speed across its heading, positive to the right, in m/s: it slides with
+    /// its tracks blocked, then its tracks hold it again.
+    pub slide: f32,
     /// Turning speed, in rad/s, positive to the right.
     pub yaw_rate: f32,
     /// The latest `vehicle_moveWith` flags.
@@ -164,7 +190,7 @@ pub struct Hull {
 impl Hull {
 
     pub fn new(position: Vec3, direction: Vec3, mobility: MobilityDef) -> Self {
-        Self { position, direction, speed: 0.0, yaw_rate: 0.0, flags: 0, mobility }
+        Self { position, direction, speed: 0.0, slide: 0.0, yaw_rate: 0.0, flags: 0, mobility }
     }
 
     /// The speed the flags ask for: the top speed in their direction, reduced by cruise
@@ -199,18 +225,26 @@ impl Hull {
     /// speed the flags ask for. Without controls it stops at [`COASTING`], and against
     /// them it brakes at [`BRAKING`]. It turns at its ground's turning speed on the spot,
     /// less while moving, reaching it in [`ROTATION_RISE`].
+    ///
+    /// With its tracks blocked, it slides where it was going as its hull swings under it,
+    /// slowed by [`HANDBRAKE_FRICTION`] along its tracks and [`SIDE_FRICTION`] across
+    /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`].
     pub fn step(&mut self, dt: f32, ground: Ground) -> bool {
 
         use movement_flag::*;
 
         let ground = ground_index(ground);
         let rotation_speed = self.mobility.rotation_speed[ground];
+        let handbrake = self.flags & BLOCK_TRACKS != 0;
 
-        let target = self.target_speed();
+        let target = if handbrake { 0.0 } else { self.target_speed() };
         let way = target.signum();
 
+        self.slide = approach(self.slide, 0.0, SIDE_FRICTION * dt);
         self.speed = 
-            if target == 0.0 {
+            if handbrake {
+                approach(self.speed, 0.0, HANDBRAKE_FRICTION * dt)
+            } else if target == 0.0 {
                 approach(self.speed, 0.0, COASTING * dt)
             } else if self.speed * way < 0.0 {
                 approach(self.speed, 0.0, BRAKING * dt)
@@ -221,7 +255,8 @@ impl Hull {
                 let along = self.speed.abs();
                 let power = POWER_FACTOR * mobility.engine_power / mobility.weight;
                 let drive = (power / along.max(1e-3)).min(MAX_ACCELERATION);
-                let resistance = mobility.rolling_friction[ground] * GRAVITY;
+                let turning = if self.flags & (ROTATE_LEFT | ROTATE_RIGHT) != 0 { TURNING_RESISTANCE } else { 0.0 };
+                let resistance = mobility.rolling_friction[ground] * GRAVITY + turning;
                 let slope = GRAVITY * self.direction.y.sin() * way;
                 let along = if along > target.abs() {
                     approach(along, target.abs(), BRAKING * dt)
@@ -242,19 +277,42 @@ impl Hull {
             turn = -turn;
         }
 
-        let moving = self.speed.abs() >= ON_SPOT_SPEED || target != 0.0;
-        let rotation = rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 };
-        let goal = turn * rotation;
-        let time = if goal.abs() > self.yaw_rate.abs() && goal * self.yaw_rate >= 0.0 { ROTATION_RISE } else { ROTATION_FALL };
+        let (goal, rise) = if handbrake {
+            let sliding = self.speed.hypot(self.slide);
+            let share = 1.0 - (-sliding / HANDBRAKE_ROTATION_SPEED).exp();
+            (turn * rotation_speed * HANDBRAKE_ROTATION * share, HANDBRAKE_ROTATION_RISE)
+        } else {
+            let moving = self.speed.abs() >= ON_SPOT_SPEED || target != 0.0;
+            (turn * rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 }, ROTATION_RISE)
+        };
+        let time = if goal.abs() > self.yaw_rate.abs() && goal * self.yaw_rate >= 0.0 { rise } else { ROTATION_FALL };
         let rate = rotation_speed / time;
+
+        let velocity = self.velocity();
         self.yaw_rate = approach(self.yaw_rate, goal, rate * dt);
         self.direction.z = wrap_angle(self.direction.z + self.yaw_rate * dt);
+        // Its tracks blocked, it keeps going where it went as its hull turns, else its
+        // tracks carry its speed around.
+        if handbrake {
+            let (heading, right) = self.axes();
+            (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
+        }
+        self.position += self.velocity() * dt;
 
+        self.speed != 0.0 || self.slide != 0.0 || self.yaw_rate != 0.0
+
+    }
+
+    /// Its heading and its right on the ground plane.
+    fn axes(&self) -> (Vec3, Vec3) {
         let yaw = self.direction.z;
-        self.position += Vec3::new(yaw.sin(), 0.0, yaw.cos()) * self.speed * dt;
+        (Vec3::new(yaw.sin(), 0.0, yaw.cos()), Vec3::new(yaw.cos(), 0.0, -yaw.sin()))
+    }
 
-        self.speed != 0.0 || self.yaw_rate != 0.0
-
+    /// Its velocity on the ground plane, in m/s.
+    pub fn velocity(&self) -> Vec3 {
+        let (heading, right) = self.axes();
+        heading * self.speed + right * self.slide
     }
 
     /// The vehicle's `engineMode`, which the client's track scroll follows: idle (1)
@@ -593,6 +651,27 @@ pub(super) mod tests {
         hull.speed = 0.0;
         hull.yaw_rate = 0.0;
         assert!(!hull.step(0.1, Ground::Firm));
+    }
+
+    #[test]
+    fn drifts_on_its_handbrake() {
+        let mut hull = chieftain();
+        hull.speed = 10.0;
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;
+        let normal = hull.mobility.rotation_speed[1] * ROTATION_ON_MOVE;
+        let mut fastest: f32 = 0.0;
+        for _ in 0..10 {
+            hull.step(0.1, Ground::Medium);
+            fastest = fastest.max(-hull.yaw_rate);
+        }
+        // Turning faster than it would driving, its hull swung left of where it slides.
+        assert!(fastest > normal * 1.5, "{fastest} for {normal}");
+        assert!(hull.slide > 0.2, "{}", hull.slide);
+        // Until its blocked tracks stop it.
+        for _ in 0..50 {
+            hull.step(0.1, Ground::Medium);
+        }
+        assert_eq!((hull.speed, hull.slide), (0.0, 0.0));
     }
 
     pub(crate) fn chieftain_aiming() -> AimingDef {
