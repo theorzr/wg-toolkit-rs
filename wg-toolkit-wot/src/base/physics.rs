@@ -24,43 +24,46 @@ pub mod movement_flag {
     pub const CRUISE_CONTROL25: u8 = 32;
 }
 
-// Where each constant comes from: the game's sources, the captured drive the hull's
-// drive is fitted on (a T110E4: 950 hp, about 66 t, captured with its setup), or our
-// own choice.
+// Where each constant comes from: the game's sources, the drives captured from the real
+// server the hull is fitted on (a T110E4, 950 hp for 66 t, on Ruinberg's mostly firm
+// ground, captured with its setup; a stock Type 64, 528 hp for 23 t, on Live Oaks'
+// mostly medium ground), or our own choice.
 
 /// Gravity, in m/s². From the game: `G` in `physics_shared.py`, which the server's
 /// physics multiplies by the vehicle's `gravityFactor`, 1 when its definitions don't set
 /// it, as the client's never do.
 const GRAVITY: f32 = 9.81;
 /// How many times its engine's power over its weight drives the vehicle, against its
-/// rolling friction: `a = POWER_FACTOR · P / (m · v) - μ · g`. Fitted: on the drive's 571
-/// samples driving straight forward below the top speed, with forward held for 0.3 s
-/// either side, the acceleration plus gravity along the slope, with the drive's setup
-/// divided out, on medium ground. The drive
-/// can't tell power from friction apart (0.37 m/s² rms whatever the split): 1.15 to 1.23
-/// fit, firm or medium ground, the driver's factor 1.04 to 1.09; this is medium ground
-/// with the factor its turning shows. Field modifications aren't divided out.
-const POWER_FACTOR: f32 = 1.23;
+/// ground's rolling friction: `a = POWER_FACTOR · P / (m · v) - μ · g`. Fitted: on the
+/// samples driving straight forward from 4 m/s to near the top speed, forward held for
+/// 0.4 s before, the acceleration plus gravity along the slope, on the ground under
+/// them, gives a median of 1.125 on the T110E4 (559 samples) and 1.137 on the Type 64
+/// (1040). Fitting the friction too trades it against the power (1.2 to 1.36 for 1.25 to
+/// 1.3 times the friction), so the game's friction is kept.
+const POWER_FACTOR: f32 = 1.13;
 /// The ground the vehicle drives on where the terrain gives none, or off it. Our choice:
 /// unpainted cells are mostly beyond the battle's bounds, and medium is most of the
 /// painted ones.
 const DEFAULT_GROUND: Ground = Ground::Medium;
 /// The most the tracks accelerate the vehicle, in m/s²: the engine's power, over the
-/// speed, would be endless from a standstill. Fitted, roughly: the drive's one start
-/// from a standstill goes from 1.1 to 3.3 m/s in 0.5 s.
-const MAX_ACCELERATION: f32 = 4.5;
-/// How fast the vehicle slows down without controls, in m/s². Fitted, roughly: released
-/// at 9.8 m/s, the drive is at 4.6 m/s 0.4 s later, about 13 m/s², though its 17
-/// coasting samples average 9 m/s². A value between the two.
-const COASTING: f32 = 12.0;
-/// How fast the vehicle brakes against its controls, in m/s². Fitted: reversing at
-/// 6.2 m/s forward, the drive is at 0.4 m/s 0.4 s later, about 14.5 m/s².
+/// speed, would be endless from a standstill. Fitted: the drives' errors are lowest from
+/// 10 to 14, both vehicles starting up to about 6 m/s² in the captured ticks.
+const MAX_ACCELERATION: f32 = 10.0;
+/// How fast the vehicle slows down without controls, and brakes against them, in m/s²,
+/// whatever the vehicle and its ground. Measured: released from forward, both vehicles
+/// lose 1.2 to 1.6 m/s a tick (the T110E4 9.8, 8.7, 7.1, 5.7; the Type 64 11.6, 10.0,
+/// 8.6, 7.0 on medium ground, 17.0, 15.8, 14.3, 12.7 on soft), and reversing slows them
+/// as fast. The drives' errors keep falling up to 20, beyond what they show, so make up
+/// for something else.
+const COASTING: f32 = 14.0;
 const BRAKING: f32 = 14.0;
 /// The share of its turning speed on the spot it turns at while moving. Fitted: the
-/// drive turns at 26.8°/s on the spot and 22.8°/s while moving, medians.
+/// T110E4 turns at 26.8°/s on the spot and 22.8°/s while moving, medians, and the Type
+/// 64 at 49.3°/s and 41.9°/s on medium ground.
 const ROTATION_ON_MOVE: f32 = 0.85;
-/// The share of its top speed it drives at while turning. Fitted: the drive's 90th
-/// percentile speed is 9.0 m/s while turning, 9.9 m/s straight.
+/// The share of its top speed it drives at while turning. Fitted: the 90th percentile
+/// speed while turning against straight, 9.0 and 9.9 m/s for the T110E4, 18.1 and
+/// 20.0 m/s for the Type 64, 0.91 both.
 const SPEED_WHILE_TURNING: f32 = 0.91;
 /// How long its turning speed takes to grow from nothing to its turning speed on the
 /// spot, and to fall back, in seconds: the faster it turns, the faster it gets there.
@@ -541,15 +544,22 @@ pub(super) mod tests {
         hull.direction.z = 2.771;
         hull.flags = movement_flag::FORWARD;
         // Quickly at first, slower as the engine's power spreads over the speed.
-        hull.step(0.1, Ground::Medium);
+        hull.step(0.1, Ground::Firm);
         let first = hull.speed;
-        let resistance = hull.mobility.rolling_friction[1] * GRAVITY;
+        let resistance = hull.mobility.rolling_friction[0] * GRAVITY;
         assert!((first - (MAX_ACCELERATION - resistance) * 0.1).abs() < 1e-4, "{first}");
         for _ in 0..300 {
-            hull.step(0.1, Ground::Medium);
+            hull.step(0.1, Ground::Firm);
         }
         // At top speed after accelerating, heading south-east as captured.
         assert!((hull.speed - 40.0 / 3.6).abs() < 1e-3, "{}", hull.speed);
+        // Short of it on soft ground, where its power only holds it at P / (m · μ · g).
+        for _ in 0..300 {
+            hull.step(0.1, Ground::Soft);
+        }
+        let mobility = &hull.mobility;
+        let held = POWER_FACTOR * mobility.engine_power / (mobility.weight * mobility.rolling_friction[2] * GRAVITY);
+        assert!((hull.speed - held).abs() < 0.05, "{} for {held}", hull.speed);
         assert!(hull.position.x > 0.0 && hull.position.z < 0.0);
         assert_eq!(hull.position.y, 0.0);
     }
