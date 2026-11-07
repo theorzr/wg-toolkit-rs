@@ -224,13 +224,25 @@ pub struct HavokArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum HavokCommand {
-    /// List its types: their id, name, parent, format, size and own members.
-    Types,
+    /// List its types: each as its id, its name with what it points to, and what it is,
+    /// then a record's own members, their offset, name and type.
+    ///
+    /// A pointer, a string or a variable-length array is a 4-byte index of an item, the
+    /// object or elements it refers to, whose type and count the items give.
+    Types(HavokTypesArgs),
     /// Print its objects from the root, following pointers.
     Tree(HavokTreeArgs),
     /// Print it as a collision model: its bodies, their material kind and triangle
     /// count, and its bounds.
     Collision,
+}
+
+#[derive(Debug, Args)]
+pub struct HavokTypesArgs {
+    /// Also list the types only declared, template parameters and opaque types, which
+    /// no data has.
+    #[arg(short, long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -271,8 +283,8 @@ fn main() -> ExitCode {
     let res = match args.cmd {
         Command::PackedXml(args) => pxml::cmd_pxml(args),
         Command::Res(args) => res::cmd_res(opts, args),
-        Command::Space(args) => space::cmd_space(args),
-        Command::Havok(args) => havok::cmd_havok(args),
+        Command::Space(args) => space::cmd_space(opts, args),
+        Command::Havok(args) => havok::cmd_havok(opts, args),
     };
 
     if let Err(message) = res {

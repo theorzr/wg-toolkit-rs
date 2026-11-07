@@ -199,9 +199,11 @@ impl Tagfile {
             name: &ty.name,
             parent: self.ty(ty.parent).map(|parent| parent.name.as_str()),
             format: self.format(id),
+            kind: kind_of(self.format(id)),
             size: self.size(id),
+            pointee: self.pointee(id),
             members: ty.members.iter()
-                .map(|member| (member.name.as_str(), member.offset, self.ty(member.ty).map_or("", |ty| ty.name.as_str())))
+                .map(|member| (member.name.as_str(), member.offset, member.ty))
                 .collect(),
         })
     }
@@ -278,13 +280,18 @@ pub struct TypeInfo<'a> {
     pub id: usize,
     pub name: &'a str,
     pub parent: Option<&'a str>,
-    /// Its format, inherited from its parents: its kind in the low 4 bits, see
-    /// [`Kind`].
+    /// Its format, inherited from its parents: its kind in the low 4 bits, then for an
+    /// integer whether it is signed (`0x200`) and its bits (`0x2000` for 8 up to
+    /// `0x10000` for 64), for a fixed array its length above the low 8 bits.
     pub format: u32,
-    /// Its size in `DATA`, inherited from its parents.
+    pub kind: Kind,
+    /// Its size in `DATA`, inherited from its parents. A pointer, a string and a
+    /// variable-length array are a 4-byte item index there.
     pub size: usize,
-    /// Its own members: their names, offsets and type names.
-    pub members: Vec<(&'a str, usize, &'a str)>,
+    /// What a pointer or an array points to, as a type id, 0 for none.
+    pub pointee: usize,
+    /// Its own members: their names, offsets and type ids.
+    pub members: Vec<(&'a str, usize, usize)>,
 }
 
 /// What kind of value a [`Node`] is, from its type's format.
@@ -317,16 +324,7 @@ impl<'a> Node<'a> {
 
     /// What kind of value it is.
     pub fn kind(&self) -> Kind {
-        match self.file.format(self.ty) & 0xF {
-            format::BOOL => Kind::Bool,
-            format::STRING => Kind::String,
-            format::INT => Kind::Int,
-            format::FLOAT => Kind::Float,
-            format::POINTER => Kind::Pointer,
-            format::RECORD => Kind::Record,
-            format::ARRAY => Kind::Array,
-            _ => Kind::Other,
-        }
+        kind_of(self.file.format(self.ty))
     }
 
     /// A record's members, its parents' first, by name.
@@ -489,6 +487,20 @@ impl<'a> Iterator for ElementsIter<'a> {
         let node = self.elements.get(self.index)?;
         self.index += 1;
         Some(node)
+    }
+}
+
+/// The kind of a type's format.
+fn kind_of(format: u32) -> Kind {
+    match format & 0xF {
+        format::BOOL => Kind::Bool,
+        format::STRING => Kind::String,
+        format::INT => Kind::Int,
+        format::FLOAT => Kind::Float,
+        format::POINTER => Kind::Pointer,
+        format::RECORD => Kind::Record,
+        format::ARRAY => Kind::Array,
+        _ => Kind::Other,
     }
 }
 
