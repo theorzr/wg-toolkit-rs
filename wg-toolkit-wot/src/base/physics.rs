@@ -91,6 +91,10 @@ const SIDE_FRICTION: f32 = 11.0;
 /// 74 and 35°/s as it slides at 10, 7.6, 5, 3.8, 2.7 and 1 m/s.
 const HANDBRAKE_ROTATION: f32 = 2.5;
 const HANDBRAKE_ROTATION_SPEED: f32 = 3.0;
+/// How far from its centre the vehicle pivots, in metres, on its blocked inner track as
+/// its outer one drives it. Fitted: backing up into a turn on its handbrake, the Type 64
+/// settles at 1.8 m/s turning at its 41.9°/s while moving, on medium ground.
+const PIVOT_RADIUS: f32 = 2.5;
 /// How long its turning speed takes to grow by its turning speed on the spot with its
 /// tracks blocked, in seconds. Fitted: the Type 64's drifts turn 72°/s faster each
 /// second.
@@ -228,7 +232,8 @@ impl Hull {
     ///
     /// With its tracks blocked, it slides where it was going as its hull swings under it,
     /// slowed by [`HANDBRAKE_FRICTION`] along its tracks and [`SIDE_FRICTION`] across
-    /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`].
+    /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`]. Driven
+    /// into a turn, it pivots on its blocked inner track, see [`PIVOT_RADIUS`].
     pub fn step(&mut self, dt: f32, ground: Ground) -> bool {
 
         use movement_flag::*;
@@ -237,13 +242,32 @@ impl Hull {
         let rotation_speed = self.mobility.rotation_speed[ground];
         let handbrake = self.flags & BLOCK_TRACKS != 0;
 
+        let mut turn: f32 = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
+            ROTATE_LEFT => -1.0,
+            ROTATE_RIGHT => 1.0,
+            _ => 0.0,
+        };
+        // Backing up steers like a car: left swings the rear to the left.
+        if self.flags & BACKWARD != 0 {
+            turn = -turn;
+        }
+
+        // On its handbrake, driving into a turn pivots it on its blocked inner track,
+        // its outer one carrying it around at this speed.
+        let drive_way = match self.flags & (FORWARD | BACKWARD) {
+            FORWARD => 1.0,
+            BACKWARD => -1.0,
+            _ => 0.0,
+        };
+        let pivot = drive_way * turn.abs() * rotation_speed * ROTATION_ON_MOVE * PIVOT_RADIUS;
+
         let target = if handbrake { 0.0 } else { self.target_speed() };
         let way = target.signum();
 
         self.slide = approach(self.slide, 0.0, SIDE_FRICTION * dt);
         self.speed = 
             if handbrake {
-                approach(self.speed, 0.0, HANDBRAKE_FRICTION * dt)
+                approach(self.speed, pivot, HANDBRAKE_FRICTION * dt)
             } else if target == 0.0 {
                 approach(self.speed, 0.0, COASTING * dt)
             } else if self.speed * way < 0.0 {
@@ -266,21 +290,13 @@ impl Hull {
                 along * way
             };
 
-        let mut turn = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
-            ROTATE_LEFT => -1.0,
-            ROTATE_RIGHT => 1.0,
-            _ => 0.0,
-        };
-
-        // Backing up steers like a car: left swings the rear to the left.
-        if self.flags & BACKWARD != 0 {
-            turn = -turn;
-        }
-
         let (goal, rise) = if handbrake {
-            let sliding = self.speed.hypot(self.slide);
+            // Sliding faster than it pivots swings it round faster than it drives.
+            let sliding = (self.speed.hypot(self.slide) - pivot.abs()).max(0.0);
             let share = 1.0 - (-sliding / HANDBRAKE_ROTATION_SPEED).exp();
-            (turn * rotation_speed * HANDBRAKE_ROTATION * share, HANDBRAKE_ROTATION_RISE)
+            let drifting = rotation_speed * HANDBRAKE_ROTATION * share;
+            let pivoting = if pivot != 0.0 { rotation_speed * ROTATION_ON_MOVE } else { 0.0 };
+            (turn * drifting.max(pivoting), HANDBRAKE_ROTATION_RISE)
         } else {
             let moving = self.speed.abs() >= ON_SPOT_SPEED || target != 0.0;
             (turn * rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 }, ROTATION_RISE)
@@ -371,10 +387,25 @@ impl Hull {
     /// then right track speeds on 8 bits each over -15..30 m/s, and the engine's relative
     /// RPM on 8 bits over 0..1.2, see [`Self::engine`].
     pub fn aux_physics_data(&self) -> u64 {
+        
         use std::f32::consts::FRAC_PI_2;
-        // The inner track goes slower, the outer one faster.
-        let turning = self.yaw_rate * HULL_HALF_WIDTH;
-        let (left, right) = (self.speed + turning, self.speed - turning);
+        use movement_flag::*;
+        
+        let (left, right) = if self.flags & BLOCK_TRACKS != 0 {
+            // On its handbrake, its inner track blocked and its outer one carrying it as
+            // fast as it slides, as the real server's show; both blocked going straight.
+            let outer = self.speed.hypot(self.slide);
+            match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
+                ROTATE_LEFT => (0.0, outer),
+                ROTATE_RIGHT => (outer, 0.0),
+                _ => (0.0, 0.0),
+            }
+        } else {
+            // The inner track goes slower, the outer one faster.
+            let turning = self.yaw_rate * HULL_HALF_WIDTH;
+            (self.speed + turning, self.speed - turning)
+        };
+
         let (roll, pitch, yaw) = (self.direction.x, self.direction.y, self.direction.z);
         pack_range(self.engine().1, 0.0, 1.2, 8) << 56
             | pack_range(right, -15.0, 30.0, 8) << 48
@@ -382,6 +413,7 @@ impl Hull {
             | pack_angle(roll, 13) << 27
             | pack_range(pitch, -FRAC_PI_2, FRAC_PI_2, 12) << 15
             | pack_angle(yaw, 15)
+
     }
 
     /// Rest on the terrain: at its height, rolled and pitched with its slope. Off the
