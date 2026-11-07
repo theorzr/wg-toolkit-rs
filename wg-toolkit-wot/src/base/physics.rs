@@ -99,14 +99,16 @@ const PIVOT_RADIUS: f32 = 2.5;
 /// tracks blocked, in seconds. Fitted: the Type 64's drifts turn 72°/s faster each
 /// second.
 const HANDBRAKE_ROTATION_RISE: f32 = 0.7;
+/// How its tracks grip the terrain the steeper it is, along them and across: fully up to
+/// the first angle, in degrees, least, the share given, from the second, in between as the
+/// cosines go. From the game: `slopeGripLngTerrain` and `slopeGripSdwTerrain`, the
+/// defaults of `physics_shared.py`, which the server's vehicle sections may override.
+const SLOPE_GRIP_ALONG: (f32, f32, f32) = (27.5, 32.0, 0.1);
+const SLOPE_GRIP_ACROSS: (f32, f32, f32) = (24.5, 29.0, 0.1);
 /// Under this speed, in m/s, the vehicle turns as on the spot. Our choice, the split the
 /// fit above uses between turning on the spot and moving.
 const ON_SPOT_SPEED: f32 = 0.5;
 
-/// Where the hull is sampled to tilt it with the ground: half its length and width. Our
-/// choice, a typical tank's rather than the vehicle's own, until its chassis gives them.
-const HULL_HALF_LENGTH: f32 = 3.0;
-const HULL_HALF_WIDTH: f32 = 1.7;
 /// The engine's relative RPM at idle, and just after shifting up. Captured: the RPM
 /// byte of `ownVehicleAuxPhysicsData` in the battle capture of 2026-10-31, whose 5th
 /// percentile is 0.20.
@@ -124,6 +126,20 @@ pub fn ground_at(terrain: Option<&Terrain>, position: Vec3) -> Ground {
     terrain.and_then(|terrain| terrain.ground_at(position.x, position.z))
         .filter(|&ground| ground != Ground::None)
         .unwrap_or(DEFAULT_GROUND)
+}
+
+/// How much the tracks grip on a slope of this angle, in radians, by one of the curves
+/// [`SLOPE_GRIP_ALONG`] and [`SLOPE_GRIP_ACROSS`].
+fn grip(angle: f32, (full, least, least_grip): (f32, f32, f32)) -> f32 {
+    let (full, least) = (full.to_radians().cos(), least.to_radians().cos());
+    let cos = angle.cos();
+    if cos >= full {
+        1.0
+    } else if cos <= least {
+        least_grip
+    } else {
+        least_grip + (1.0 - least_grip) * (cos - least) / (full - least)
+    }
 }
 
 /// A ground's index in a vehicle's per-ground mobility, firm, medium then soft.
@@ -264,28 +280,34 @@ impl Hull {
         let target = if handbrake { 0.0 } else { self.target_speed() };
         let way = target.signum();
 
-        self.slide = approach(self.slide, 0.0, SIDE_FRICTION * dt);
+        // Gravity down the slope, pitched positively nose down and rolled positively
+        // right side up, which the tracks hold against as much as they grip it.
+        let (roll, pitch) = (self.direction.x, self.direction.y);
+        let (grip_along, grip_across) = (grip(pitch, SLOPE_GRIP_ALONG), grip(roll, SLOPE_GRIP_ACROSS));
+        let slope = GRAVITY * pitch.sin();
+        self.slide = approach(self.slide - GRAVITY * roll.sin() * dt, 0.0, SIDE_FRICTION * grip_across * dt);
         self.speed = 
             if handbrake {
-                approach(self.speed, pivot, HANDBRAKE_FRICTION * dt)
+                approach(self.speed + slope * dt, pivot, HANDBRAKE_FRICTION * grip_along * dt)
             } else if target == 0.0 {
-                approach(self.speed, 0.0, COASTING * dt)
+                approach(self.speed + slope * dt, 0.0, COASTING * grip_along * dt)
             } else if self.speed * way < 0.0 {
-                approach(self.speed, 0.0, BRAKING * dt)
+                approach(self.speed + slope * dt, 0.0, BRAKING * grip_along * dt)
             } else {
-                // Along its way: the drive, less the ground's resistance, and the slope,
-                // pitched positively nose down.
+                // Along its way: the drive, less the ground's resistance, and the slope.
                 let mobility = &self.mobility;
                 let along = self.speed.abs();
                 let power = POWER_FACTOR * mobility.engine_power / mobility.weight;
-                let drive = (power / along.max(1e-3)).min(MAX_ACCELERATION);
+                let drive = (power / along.max(1e-3)).min(MAX_ACCELERATION) * grip_along;
                 let turning = if self.flags & (ROTATE_LEFT | ROTATE_RIGHT) != 0 { TURNING_RESISTANCE } else { 0.0 };
                 let resistance = mobility.rolling_friction[ground] * GRAVITY + turning;
-                let slope = GRAVITY * self.direction.y.sin() * way;
                 let along = if along > target.abs() {
-                    approach(along, target.abs(), BRAKING * dt)
+                    approach(along, target.abs(), BRAKING * grip_along * dt)
                 } else {
-                    (along + (drive - resistance + slope) * dt).clamp(0.0, target.abs())
+                    // Short of power it stalls, unless the slope takes it back down past
+                    // what its tracks hold.
+                    let floor = if slope * way + BRAKING * grip_along >= 0.0 { 0.0 } else { f32::NEG_INFINITY };
+                    (along + (drive - resistance + slope * way) * dt).clamp(floor, target.abs())
                 };
                 along * way
             };
@@ -402,7 +424,7 @@ impl Hull {
             }
         } else {
             // The inner track goes slower, the outer one faster.
-            let turning = self.yaw_rate * HULL_HALF_WIDTH;
+            let turning = self.yaw_rate * self.mobility.carrying_point.x;
             (self.speed + turning, self.speed - turning)
         };
 
@@ -416,26 +438,28 @@ impl Hull {
 
     }
 
-    /// Rest on the terrain: at its height, rolled and pitched with its slope. Off the
-    /// terrain, the hull stays as it is.
+    /// Rest on the terrain: at its height, rolled and pitched with its slope under the
+    /// corners its tracks rest on, see `MobilityDef::carrying_point`. Off the terrain,
+    /// the hull stays as it is.
     pub fn settle(&mut self, terrain: &Terrain) {
 
-        let height = |offset: Vec3| {
-            let at = self.position + offset;
+        let (heading, right) = self.axes();
+        let carrying = self.mobility.carrying_point;
+        let height = |along: f32, across: f32| {
+            let at = self.position + heading * along * carrying.y + right * across * carrying.x;
             terrain.height_at(at.x, at.z)
         };
-        let yaw = self.direction.z;
-        let forward = Vec3::new(yaw.sin(), 0.0, yaw.cos()) * HULL_HALF_LENGTH;
-        let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin()) * HULL_HALF_WIDTH;
 
-        let (Some(center), Some(front), Some(back), Some(right_side), Some(left_side)) =
-            (height(Vec3::ZERO), height(forward), height(-forward), height(right), height(-right)) else {
+        let (Some(center), Some(front_right), Some(front_left), Some(back_right), Some(back_left)) =
+            (height(0.0, 0.0), height(1.0, 1.0), height(1.0, -1.0), height(-1.0, 1.0), height(-1.0, -1.0)) else {
             return;
         };
+        let (front, back) = (front_right + front_left, back_right + back_left);
+        let (right_side, left_side) = (front_right + back_right, front_left + back_left);
         self.position.y = center;
         // Rolled positively with its right side up, pitched positively nose down.
-        self.direction.x = ((right_side - left_side) / (2.0 * HULL_HALF_WIDTH)).atan();
-        self.direction.y = -((front - back) / (2.0 * HULL_HALF_LENGTH)).atan();
+        self.direction.x = ((right_side - left_side) / (4.0 * carrying.x)).atan();
+        self.direction.y = -((front - back) / (4.0 * carrying.y)).atan();
 
     }
 
@@ -621,6 +645,7 @@ pub(super) mod tests {
             engine_power: 750.0 * 735.5,
             weight: 55_000.0,
             rolling_friction: [0.0805, 0.10465, 0.20125],
+            carrying_point: glam::Vec2::new(1.6, 2.4),
         }
     }
 
@@ -704,6 +729,37 @@ pub(super) mod tests {
             hull.step(0.1, Ground::Medium);
         }
         assert_eq!((hull.speed, hull.slide), (0.0, 0.0));
+    }
+
+    #[test]
+    fn holds_on_slopes_it_grips() {
+        let still = |pitch: f32, flags: u8| {
+            let mut hull = chieftain();
+            hull.direction.y = pitch.to_radians();
+            hull.flags = flags;
+            for _ in 0..30 {
+                hull.step(0.1, Ground::Medium);
+            }
+            hull.speed
+        };
+        // Parked nose down, it holds on 20°, and slides down 35°.
+        assert_eq!(still(20.0, 0), 0.0);
+        assert!(still(35.0, 0) > 1.0);
+        // Driving up 20°, it crawls as fast as its power holds it against the slope; up
+        // 35°, it slides back.
+        let mobility = chieftain_mobility();
+        let held = POWER_FACTOR * mobility.engine_power / mobility.weight
+            / (mobility.rolling_friction[1] * GRAVITY + GRAVITY * 20f32.to_radians().sin());
+        let up = still(-20.0, movement_flag::FORWARD);
+        assert!((up - held).abs() < 0.05, "{up} for {held}");
+        assert!(still(-35.0, movement_flag::FORWARD) < -1.0);
+        // Across 35°, it slides down to its left, right side up.
+        let mut hull = chieftain();
+        hull.direction.x = 35f32.to_radians();
+        for _ in 0..10 {
+            hull.step(0.1, Ground::Medium);
+        }
+        assert!(hull.slide < -1.0, "{}", hull.slide);
     }
 
     pub(crate) fn chieftain_aiming() -> AimingDef {

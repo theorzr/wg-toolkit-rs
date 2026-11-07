@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
@@ -75,6 +75,10 @@ pub struct MobilityDef {
     /// The chassis' rolling friction on firm, medium and soft ground, from the same
     /// physics section: the share of its weight the ground holds it back with.
     pub rolling_friction: [f32; 3],
+    /// Where its front right track rests on the ground, from its centre, in metres: across
+    /// to the track's centre, and along. Its chassis' `topRightCarryingPoint`, which its
+    /// `carryingTriangles` rest on.
+    pub carrying_point: Vec2,
 }
 
 /// A shell as the default gun fires it: what the client needs to show its tracer.
@@ -660,6 +664,8 @@ fn mobility(
     let chassis_float = |key: &str| chassis.get_child_float(key).ok_or_else(|| missing(&format!("chassis {key}")));
     let terrain_resistance = chassis.get_child("terrainResistance").and_then(pxml::Value::as_vec3)
         .ok_or_else(|| missing("chassis terrainResistance"))?;
+    let carrying_point = chassis.get_child("topRightCarryingPoint").and_then(pxml::Value::as_vec2)
+        .ok_or_else(|| missing("chassis topRightCarryingPoint"))?;
 
     // What the client keeps of the server's physics, by module name.
     let physics = vehicle.get_child_element("physics").and_then(|physics| physics.get_child_element("detailed"));
@@ -694,6 +700,7 @@ fn mobility(
         engine_power: engine_power * HP_TO_WATTS,
         weight,
         rolling_friction: [firm, medium, soft],
+        carrying_point,
     })
 
 }
@@ -746,7 +753,7 @@ mod tests {
                         assert!(def.mobility.rolling_friction.iter().all(|&friction| friction > 0.0), "{nation}:{name}");
                         loaded += 1;
                     }
-                    Err(e) => assert!(!e.to_string().contains("rolling friction") && !e.to_string().contains("terrainResistance"), "{nation}:{name}: {e}"),
+                    Err(e) => assert!(!["rolling friction", "terrainResistance", "topRightCarryingPoint"].iter().any(|part| e.to_string().contains(part)), "{nation}:{name}: {e}"),
                 }
             }
         }

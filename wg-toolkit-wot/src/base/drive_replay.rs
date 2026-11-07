@@ -248,6 +248,26 @@ fn replay(drive: &Drive, mobility: MobilityDef, terrain: Option<&Terrain>, windo
 
 }
 
+/// How far the hull settled where the real vehicle was tilts from it: the median and 90th
+/// percentile pitch and roll errors, in degrees, over the positions on its terrain.
+fn tilt_errors(drive: &Drive, mobility: MobilityDef, terrain: &Terrain) -> [(f32, f32); 2] {
+    let (mut pitch, mut roll) = (Vec::new(), Vec::new());
+    for update in &drive.updates {
+        let mut hull = Hull::new(update.position, update.direction, mobility);
+        hull.direction.x = f32::NAN;
+        hull.settle(terrain);
+        if hull.direction.x.is_nan() {
+            continue;
+        }
+        pitch.push(wrap_angle(hull.direction.y - update.direction.y).abs());
+        roll.push(wrap_angle(hull.direction.x - update.direction.x).abs());
+    }
+    [pitch, roll].map(|errors| {
+        let (median, p90, _) = Errors::stats(&errors);
+        (median * 180.0 / PI, p90 * 180.0 / PI)
+    })
+}
+
 #[test]
 fn hull_follows_the_real_server() {
 
@@ -270,6 +290,10 @@ fn hull_follows_the_real_server() {
 
         let mobility = drive.setup.apply(def.mobility);
         let terrain = drive.space.as_ref().map(|space| Terrain::load(&res, &format!("spaces/{space}")).unwrap());
+        if let Some(terrain) = &terrain {
+            let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, terrain);
+            println!("  tilt settled: pitch {pitch:.2} / {pitch_90:.2}°, roll {roll:.2} / {roll_90:.2}° (median / 90%)");
+        }
         for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
             replay(&drive, mobility, terrain.as_ref(), 1.0, delay).report(&format!("  delay {delay}"));
         }
