@@ -299,7 +299,7 @@ use glam::{Affine3A, Mat3, Quat, Vec2, Vec3, Vec3Swizzles};
 use smallvec::SmallVec;
 use tracing::warn;
 
-use wgtk::space::statics::{BodyKind, StaticScene, StaticTriangle};
+use wgtk::space::statics::{BodyKind, PlacedDestructible, StaticScene, StaticTriangle};
 use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::terrain::{Ground, Terrain};
 use wgtk::app::slots::{SlotKey, Slots};
@@ -409,6 +409,11 @@ const RAM_DAMAGE: f32 = 1.0;
 /// health it took. Fitted: the real Type 64 drove through four house modules of 35
 /// health at 15.6 m/s, all but keeping its speed.
 const RAM_COST: f32 = 0.05;
+/// How much a vehicle damages a destructible it presses against, its tracks driving it
+/// in, per second, of its weight in [`UNIT_VEHICLE_MASS`], on top of [`RAM_DAMAGE`]: one
+/// stopped by a house's wall breaks it in time, a module of 50 health in 2 s at 35 t.
+/// Our choice, by feel.
+const RAM_PRESS: f32 = 25.0;
 /// The weight of a vehicle that destructibles' health is measured against, in kg:
 /// `unitVehicleMass` in the game's `scripts/destructibles.xml`.
 const UNIT_VEHICLE_MASS: f32 = 35_000.0;
@@ -623,7 +628,7 @@ impl Hull {
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
         let moved = self.step(dt, ground_at(&space.terrain, self.position));
         if moved {
-            self.ram(&space.statics, rubble);
+            self.ram(dt, &space.statics, rubble);
             self.push_out(&space.statics, rubble);
         }
         if let Some(bounds) = bounds {
@@ -748,25 +753,26 @@ impl Hull {
     /// Damage the destructibles it drives into, see [`RAM_DAMAGE`], and break those
     /// whose health it took: it goes on through, less the speed their health took; those
     /// still standing stop it as walls do, see [`Self::push_out`]. Its damage adds up
-    /// from a tick to the next, so a crawl through a fence takes a few.
-    fn ram(&mut self, statics: &StaticScene, rubble: &mut Rubble) {
+    /// from a tick to the next, so a crawl through a fence takes a few, and so does
+    /// pressing against one, see [`RAM_PRESS`].
+    fn ram(&mut self, dt: f32, statics: &StaticScene, rubble: &mut Rubble) {
 
         // Each piece once, its first triangle telling the way into it: against its push
         // out, else, a small one it drove onto within a tick having no way out of it, the
         // way from its middle to the triangle's.
         let footprint = self.footprint_at(Pose::of(self));
         let middle = footprint.middle;
-        let mut hits: SmallVec<[(Piece, Vec2, Vec2); 8]> = SmallVec::new();
+        let mut hits: SmallVec<[(Piece, &PlacedDestructible, Vec2, Vec2); 8]> = SmallVec::new();
         for (triangle, push) in self.standing_overlaps(statics, rubble) {
-            let Some(piece) = rubble.standing(statics, triangle) else { continue };
+            let Some((piece, destructible)) = rubble.standing(statics, triangle) else { continue };
             let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]).xz() / 3.0;
-            if !hits.iter().any(|&(hit, _, _)| hit == piece) {
-                hits.push((piece, -push, center - middle));
+            if !hits.iter().any(|&(hit, _, _, _)| hit == piece) {
+                hits.push((piece, destructible, -push, center - middle));
             }
         }
 
         let weight = self.mobility.weight / UNIT_VEHICLE_MASS;
-        for (piece, against, center) in hits {
+        for (piece, destructible, against, center) in hits {
             let velocity = self.velocity();
             // Where it touches it: its corner deepest in it, else, one it drove onto, its
             // point nearest the triangle's middle. Turning on the spot swings it in too.
@@ -788,17 +794,17 @@ impl Hull {
             // Grazing one breaks it too: the real T110E4 drove on along a fence.
             let speed = point.length();
             let energy = RAM_DAMAGE * weight * speed * speed / 2.0;
-            let Some((health, done)) = rubble.damage(statics, piece, energy) else { continue };
+            let Some((health, done)) = rubble.damage(destructible, piece, energy + RAM_PRESS * weight * dt) else { continue };
             if done < health {
                 continue;
             }
             // It loses a little of its energy: see `RAM_COST`.
-            let left = health - (done - energy);
+            let left = (health - (done - energy)).max(0.0);
             let kept = (speed * speed - 2.0 * RAM_COST * left / weight).max(0.0).sqrt();
             if speed > 0.0 {
                 self.set_velocity(velocity * (kept / speed));
             }
-            rubble.break_piece(statics, piece, velocity.x.atan2(velocity.z), speed);
+            rubble.break_piece(destructible, piece, velocity.x.atan2(velocity.z), speed);
         }
 
     }
@@ -1197,12 +1203,14 @@ impl Hull {
 
 }
 
-/// A destructible piece of a placed static model: all of it, or one of a structure's
-/// modules by its material kind.
+/// A destructible piece, as the client numbers it: all of a destructible, or one of a
+/// structure's modules by its material kind. A destructible can be placed as several
+/// models, a house's walls and roof say, each a piece of it alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Piece {
-    /// The placed model, its index in the space's `BSMI`.
-    pub instance: u32,
+    /// Its chunk's id and its index in it, see [`PlacedDestructible`].
+    pub chunk_id: u16,
+    pub index: u16,
     pub module: Option<u8>,
 }
 
@@ -1210,9 +1218,6 @@ pub struct Piece {
 #[derive(Debug, Clone, Copy)]
 pub struct Breakage {
     pub piece: Piece,
-    /// Its chunk's id and its index in it, as the client numbers it.
-    pub chunk_id: u16,
-    pub index: u16,
     pub kind: DestructibleKind,
     /// Which way it falls, the yaw the vehicle went, in radians.
     pub yaw: f32,
@@ -1232,29 +1237,29 @@ pub struct Rubble {
 impl Rubble {
 
     /// The piece a static triangle is of, if it is destructible and still stands.
-    fn standing(&self, statics: &StaticScene, triangle: &StaticTriangle) -> Option<Piece> {
+    fn standing<'a>(&self, statics: &'a StaticScene, triangle: &StaticTriangle) -> Option<(Piece, &'a PlacedDestructible)> {
         let destructible = statics.destructible(triangle.instance)?;
         let module = match destructible.kind {
             DestructibleKind::Structure => Some(destructible.module(triangle.material_kind as u8)?.material_kind),
             _ => None,
         };
         let piece = Piece {
-            instance: triangle.instance,
+            chunk_id: destructible.chunk_id,
+            index: destructible.index,
             module,
         };
-        (!self.broken.contains(&piece)).then_some(piece)
+        (!self.broken.contains(&piece)).then_some((piece, destructible))
     }
 
     /// Whether a static triangle is of a structure's module still standing: those stop
     /// what drives into them until it breaks them, while a fence or a post is driven
     /// into as it breaks, see `Hull::ram`.
     fn blocks(&self, statics: &StaticScene, triangle: &StaticTriangle) -> bool {
-        self.standing(statics, triangle).is_some_and(|piece| piece.module.is_some())
+        self.standing(statics, triangle).is_some_and(|(piece, _)| piece.module.is_some())
     }
 
     /// Damage a piece: its health, and the damage it took in all.
-    fn damage(&mut self, statics: &StaticScene, piece: Piece, damage: f32) -> Option<(f32, f32)> {
-        let destructible = statics.destructible(piece.instance)?;
+    fn damage(&mut self, destructible: &PlacedDestructible, piece: Piece, damage: f32) -> Option<(f32, f32)> {
         let health = match piece.module {
             Some(module) => destructible.module(module)?.health,
             None => destructible.health,
@@ -1265,22 +1270,19 @@ impl Rubble {
     }
 
     /// Break a piece, a module the others it brings down with it, each told of.
-    fn break_piece(&mut self, statics: &StaticScene, piece: Piece, yaw: f32, speed: f32) {
-        let Some(destructible) = statics.destructible(piece.instance) else { return };
+    fn break_piece(&mut self, destructible: &PlacedDestructible, piece: Piece, yaw: f32, speed: f32) {
         let depends = piece.module
             .and_then(|module| destructible.module(module))
             .map(|module| module.depends.as_slice())
             .unwrap_or_default();
         let brought = depends.iter().map(|&module| Piece {
-            instance: piece.instance,
             module: Some(module),
+            ..piece
         });
         for piece in std::iter::once(piece).chain(brought) {
             if self.broken.insert(piece) {
                 self.fresh.push(Breakage {
                     piece,
-                    chunk_id: destructible.chunk_id,
-                    index: destructible.index,
                     kind: destructible.kind,
                     yaw,
                     speed,
@@ -2081,8 +2083,6 @@ pub fn wrap_angle(angle: f32) -> f32 {
 #[cfg(test)]
 pub(super) mod tests {
 
-    use wgtk::space::statics::PlacedDestructible;
-
     use super::*;
 
     /// How high the test gun is above the vehicle's origin.
@@ -2305,7 +2305,7 @@ pub(super) mod tests {
         assert!(after > kept && after < kept + 0.2, "{after} for {kept}");
         let broken: Vec<Breakage> = rubble.fresh.drain(..).collect();
         assert_eq!(broken.len(), 1);
-        assert_eq!((broken[0].chunk_id, broken[0].index, broken[0].kind), (0x7f7f, 3, DestructibleKind::Fragile));
+        assert_eq!((broken[0].piece.chunk_id, broken[0].piece.index, broken[0].kind), (0x7f7f, 3, DestructibleKind::Fragile));
         // Turning on the spot with its nose against one, its corner swings into it and
         // breaks it.
         let space = fence(10.0, false);
@@ -2328,6 +2328,17 @@ pub(super) mod tests {
         }
         let front = hull.position.z + hull.mobility.bounds[1].z;
         assert!((front - 10.0).abs() < 1e-3 && rubble.fresh.is_empty(), "front at {front}");
+        // One it starts against, stopped, it presses until it breaks it.
+        let space = fence(50.0, true);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.position.z = 10.0 - hull.mobility.bounds[1].z - 0.01;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..40 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        assert_eq!(rubble.fresh.len(), 1);
+        assert!(hull.position.z > 12.0, "{}", hull.position.z);
     }
 
     /// A flat deck from z = 0 to 20, `height` high, as two triangles.

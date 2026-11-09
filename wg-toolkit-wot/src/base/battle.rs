@@ -2,7 +2,7 @@
 //! which the client drives, and bots on either side, see [`BattleOptions`]: every vehicle
 //! the same, but who drives it, see [`Controller`].
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::f32::consts::PI;
 use std::time::Instant;
 use std::sync::Arc;
@@ -830,8 +830,16 @@ impl BaseThread {
             }
         }
         world.step(TICK.as_secs_f32());
+        // Each list told once a tick, however much of it broke: a house brings down a
+        // dozen modules at once.
+        let mut broken = HashSet::new();
         for breakage in world.take_breakages() {
-            show_breakage(app, client, areas, breakage)?;
+            if let Some(list) = record_breakage(client, areas, breakage) {
+                broken.insert(list);
+            }
+        }
+        for (chunk_id, kind) in broken {
+            show_breakages(app, &areas[&chunk_id], kind)?;
         }
 
         for index in 0..vehicles.len() {
@@ -1016,40 +1024,48 @@ fn area_position(chunk_id: u16) -> Vec3 {
     )
 }
 
-/// Tell the clients a destructible broke: its chunk's entity lists it, encoded as its
-/// kind is, see [`AreaDestructibles`].
-fn show_breakage(app: &mut base::App, client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: Breakage) -> io::Result<()> {
+/// List a destructible broken in its chunk's entity, encoded as its kind is, see
+/// [`AreaDestructibles`]: the list it changed, by its chunk's id and its kind.
+fn record_breakage(client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: Breakage) -> Option<(u16, DestructibleKind)> {
 
-    let Breakage { piece, chunk_id, index, kind, yaw, speed } = breakage;
-    let Some(area) = areas.get_mut(&chunk_id) else {
-        warn!(%client, chunk_id, index, "Failed to tell of a destructible broken out of the areas");
-        return Ok(());
+    let Breakage { piece, kind, yaw, speed } = breakage;
+    let Some(area) = areas.get_mut(&piece.chunk_id) else {
+        warn!(%client, chunk_id = piece.chunk_id, index = piece.index, "Failed to tell of a destructible broken out of the areas");
+        return None;
     };
 
-    let [high, low] = index.to_be_bytes();
-    let mut entity = app.entity(area.entity)?;
+    let [high, low] = piece.index.to_be_bytes();
     match kind {
         DestructibleKind::Fragile => {
             area.fragiles.push([high, low, 0]);
-            entity.set_destroyedFragiles(area.fragiles.clone())?;
         }
         DestructibleKind::FallingAtom => {
             let fall = ((speed / FALL_SPEED_STEP) as u8).min(3);
             area.columns.push([high, low, pack_angle(yaw) << 2 | fall]);
-            entity.set_fallenColumns(area.columns.clone())?;
         }
         DestructibleKind::Structure => {
             let module = piece.module.unwrap_or_default();
             area.modules.push([high, low, (module & 0x7f) << 1]);
-            entity.set_destroyedModules(area.modules.clone())?;
         }
         // Not numbered: they are speed trees, see `Rubble`.
-        DestructibleKind::Tree => {}
+        DestructibleKind::Tree => return None,
     }
 
-    info!(%client, chunk_id, index, ?kind, module = ?piece.module, "Broke a destructible");
-    Ok(())
+    info!(%client, chunk_id = piece.chunk_id, index = piece.index, ?kind, module = ?piece.module, "Broke a destructible");
+    Some((piece.chunk_id, kind))
 
+}
+
+/// Tell the clients a chunk's list of destructibles of a kind broken, see
+/// [`record_breakage`].
+fn show_breakages(app: &mut base::App, area: &Area, kind: DestructibleKind) -> io::Result<()> {
+    let mut entity = app.entity(area.entity)?;
+    match kind {
+        DestructibleKind::Fragile => entity.set_destroyedFragiles(area.fragiles.clone()),
+        DestructibleKind::FallingAtom => entity.set_fallenColumns(area.columns.clone()),
+        DestructibleKind::Structure => entity.set_destroyedModules(area.modules.clone()),
+        DestructibleKind::Tree => Ok(()),
+    }
 }
 
 /// An angle on 6 bits, as the client's native `packAngleToUint` does: from -π to π
