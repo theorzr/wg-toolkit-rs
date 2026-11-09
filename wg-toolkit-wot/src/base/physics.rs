@@ -703,7 +703,7 @@ impl Hull {
         let (min, max) = self.reach();
         let solid = statics.triangles_in(BodyKind::Solid, min, max);
         let standing = statics.triangles_in(BodyKind::Destructible, min, max)
-            .filter(move |triangle| rubble.standing(statics, triangle).is_some());
+            .filter(move |triangle| rubble.blocks(statics, triangle));
         self.overlapping(solid.chain(standing))
     }
 
@@ -754,7 +754,8 @@ impl Hull {
         // Each piece once, its first triangle telling the way into it: against its push
         // out, else, a small one it drove onto within a tick having no way out of it, the
         // way from its middle to the triangle's.
-        let middle = self.footprint_at(Pose::of(self)).middle;
+        let footprint = self.footprint_at(Pose::of(self));
+        let middle = footprint.middle;
         let mut hits: SmallVec<[(Piece, Vec2, Vec2); 8]> = SmallVec::new();
         for (triangle, push) in self.standing_overlaps(statics, rubble) {
             let Some(piece) = rubble.standing(statics, triangle) else { continue };
@@ -767,14 +768,25 @@ impl Hull {
         let weight = self.mobility.weight / UNIT_VEHICLE_MASS;
         for (piece, against, center) in hits {
             let velocity = self.velocity();
-            let toward = [against, center].into_iter()
+            // Where it touches it: its corner deepest in it, else, one it drove onto, its
+            // point nearest the triangle's middle. Turning on the spot swings it in too.
+            let arm = match against.try_normalize() {
+                Some(against) => wall_contact(&footprint.corners(), -against) - middle,
+                None => {
+                    let local = Vec2::new(center.dot(footprint.right), center.dot(footprint.heading));
+                    let local = local.clamp(-footprint.half, footprint.half);
+                    footprint.right * local.x + footprint.heading * local.y
+                }
+            };
+            let point = self.point_velocity(arm);
+            let closing = [against, center].into_iter()
                 .filter_map(Vec2::try_normalize)
-                .find(|toward| velocity.xz().dot(*toward) > 0.0);
-            if toward.is_none() {
+                .any(|toward| point.dot(toward) > 0.0);
+            if !closing {
                 continue;
             }
             // Grazing one breaks it too: the real T110E4 drove on along a fence.
-            let speed = velocity.length();
+            let speed = point.length();
             let energy = RAM_DAMAGE * weight * speed * speed / 2.0;
             let Some((health, done)) = rubble.damage(statics, piece, energy) else { continue };
             if done < health {
@@ -783,7 +795,9 @@ impl Hull {
             // It loses a little of its energy: see `RAM_COST`.
             let left = health - (done - energy);
             let kept = (speed * speed - 2.0 * RAM_COST * left / weight).max(0.0).sqrt();
-            self.set_velocity(velocity * (kept / speed));
+            if speed > 0.0 {
+                self.set_velocity(velocity * (kept / speed));
+            }
             rubble.break_piece(statics, piece, velocity.x.atan2(velocity.z), speed);
         }
 
@@ -1229,6 +1243,13 @@ impl Rubble {
             module,
         };
         (!self.broken.contains(&piece)).then_some(piece)
+    }
+
+    /// Whether a static triangle is of a structure's module still standing: those stop
+    /// what drives into them until it breaks them, while a fence or a post is driven
+    /// into as it breaks, see `Hull::ram`.
+    fn blocks(&self, statics: &StaticScene, triangle: &StaticTriangle) -> bool {
+        self.standing(statics, triangle).is_some_and(|piece| piece.module.is_some())
     }
 
     /// Damage a piece: its health, and the damage it took in all.
@@ -2231,19 +2252,28 @@ pub(super) mod tests {
     }
 
     /// A fence across the way at z = 10, 3 m high, destructible whole with this health,
-    /// the 4th of its chunk.
-    fn fence(health: f32) -> Space {
+    /// the 4th of its chunk; or a house's wall, its module of this health.
+    fn fence(health: f32, house: bool) -> Space {
         let mut space = wall(3.0);
+        let material_kind = if house { 73 } else { 0 };
         let triangles = space.statics.triangles_in(BodyKind::Solid, Vec3::splat(-30.0), Vec3::splat(30.0))
-            .map(|triangle| StaticTriangle::new(triangle.vertices, 0, 0, BodyKind::Destructible))
+            .map(|triangle| StaticTriangle::new(triangle.vertices, 0, material_kind, BodyKind::Destructible))
             .collect();
         space.statics = StaticScene::from_triangles(triangles);
+        let modules = match house {
+            true => vec![wgtk::space::destructibles::Module {
+                material_kind: 73,
+                health,
+                depends: Vec::new(),
+            }],
+            false => Vec::new(),
+        };
         space.statics.add_destructible(0, PlacedDestructible {
             chunk_id: 0x7f7f,
             index: 3,
-            kind: DestructibleKind::Fragile,
+            kind: if house { DestructibleKind::Structure } else { DestructibleKind::Fragile },
             health,
-            modules: Vec::new(),
+            modules,
         });
         space
     }
@@ -2252,7 +2282,7 @@ pub(super) mod tests {
     fn breaks_through_what_it_rams_hard_enough() {
         // A fence it rams at 20 km/h, it breaks, once, and drives on through, slowed by
         // what its health took.
-        let space = fence(10.0);
+        let space = fence(10.0, false);
         let mut rubble = Rubble::default();
         let mut hull = chieftain();
         hull.speed = 20.0 / 3.6;
@@ -2276,8 +2306,19 @@ pub(super) mod tests {
         let broken: Vec<Breakage> = rubble.fresh.drain(..).collect();
         assert_eq!(broken.len(), 1);
         assert_eq!((broken[0].chunk_id, broken[0].index, broken[0].kind), (0x7f7f, 3, DestructibleKind::Fragile));
-        // One too strong for it stops it as a wall would.
-        let space = fence(1000.0);
+        // Turning on the spot with its nose against one, its corner swings into it and
+        // breaks it.
+        let space = fence(10.0, false);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.position.z = 10.0 - hull.mobility.bounds[1].z - 0.05;
+        hull.flags = movement_flag::ROTATE_LEFT;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        assert_eq!(rubble.fresh.len(), 1);
+        // A house's wall too strong for it stops it as a wall would.
+        let space = fence(1000.0, true);
         let mut rubble = Rubble::default();
         let mut hull = chieftain();
         hull.speed = 20.0 / 3.6;

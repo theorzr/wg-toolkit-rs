@@ -90,15 +90,15 @@ pub enum BodyKind {
 
 impl BodyKind {
 
-    /// The kind of a body of a model, by the model's path and the body's name, see
-    /// [`crate::havok::collision::CollisionBody::name`].
-    pub fn of(destructibles: &Destructibles, model: &str, body: &str) -> Self {
-        if destructibles.is_destructible(model, body) || body.starts_with("n_") {
+    /// The kind of a body of a model, by the model's path and the body's name and
+    /// material kind, see [`crate::havok::collision::CollisionBody`].
+    pub fn of(destructibles: &Destructibles, model: &str, body: &str, material_kind: u32) -> Self {
+        if body.starts_with("s_ramp") && !destructibles.is_destructible(model, body, material_kind) {
+            Self::Ramp
+        } else if destructibles.is_destructible(model, body, material_kind) || body.starts_with("n_") {
             Self::Destructible
         } else if body.starts_with("c_") {
             Self::Remains
-        } else if body.starts_with("s_ramp") {
-            Self::Ramp
         } else {
             Self::Solid
         }
@@ -172,7 +172,7 @@ impl StaticScene {
                 let collision = Collision::load(fs, path)
                     .inspect_err(|e| warn!(space = space_dir, path, "Failed to load a static model's collision: {e}"))
                     .ok()?;
-                let kinds = collision.bodies.iter().map(|body| BodyKind::of(definitions, path, &body.name)).collect();
+                let kinds = collision.bodies.iter().map(|body| BodyKind::of(definitions, path, &body.name, body.material_kind)).collect();
                 Some((Arc::new(collision), kinds))
             });
             let Some((collision, kinds)) = collision else { continue };

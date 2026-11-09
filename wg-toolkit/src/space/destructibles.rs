@@ -120,9 +120,14 @@ impl Destructibles {
     }
 
     /// Whether a body of a model is destructible, the model by any of its paths, its
-    /// `.havok` say, the body by its name.
-    pub fn is_destructible(&self, model: &str, body: &str) -> bool {
-        self.get(model).is_some_and(|destructible| destructible.kind != DestructibleKind::Structure || destructible.modules.contains_key(body))
+    /// `.havok` say, the body by its name and material kind: a structure's module is its
+    /// `n_` body and the solid ones of the same material kind, a gun emplacement's
+    /// `s_wall_1` with its `n_wood0_1` say.
+    pub fn is_destructible(&self, model: &str, body: &str, material_kind: u32) -> bool {
+        let Some(destructible) = self.get(model) else { return false };
+        destructible.kind != DestructibleKind::Structure
+            || destructible.modules.contains_key(body)
+            || destructible.modules.values().any(|module| u32::from(module.material_kind) == material_kind)
     }
 
 }
