@@ -2,6 +2,8 @@
 //! which the client drives, and bots on either side, see [`BattleOptions`]: every vehicle
 //! the same, but who drives it, see [`Controller`].
 
+use std::collections::{BTreeSet, HashMap};
+use std::f32::consts::PI;
 use std::time::Instant;
 use std::sync::Arc;
 use std::io;
@@ -13,12 +15,13 @@ use wgtk::app::entity::{
     AnyEntity, Audience, Bytes, ComponentKey, Entity, EntityId, EntityKey, PathStep, Pickle,
 };
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
+use wgtk::space::destructibles::DestructibleKind;
 use wgtk::app::dispatch::MethodCall;
 use wgtk::space::terrain::Terrain;
 use wgtk::res::fs::ResFilesystem;
 
 use crate::wot::schema::{
-    self, Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag,
+    self, AreaDestructibles, Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag,
     DogTagComponent, Fire, GunMarker, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo,
     ShotResult, VehicleCell, VehicleInfo, VehicleSyncAttrs,
 };
@@ -35,7 +38,7 @@ use super::{
 };
 use super::armor::{self, Explosion, Impact, Outcome};
 use super::gun::{Gun, HitTarget, Landing, Shot};
-use super::physics::{Vehicle, VehicleId, World};
+use super::physics::{wrap_angle, Breakage, Vehicle, VehicleId, World};
 use super::bot::Bot;
 
 
@@ -62,6 +65,18 @@ pub struct Battle {
     vehicles_info: Option<ComponentKey<AvatarVehiclesInfo>>,
     /// Whether its countdown is over: bots only aim until then.
     started: bool,
+    /// The map's chunks that have destructibles, by their id.
+    areas: HashMap<u16, Area>,
+}
+
+/// A map chunk's destructibles entity, and what it lists as destroyed, see
+/// [`AreaDestructibles`].
+#[derive(Debug)]
+struct Area {
+    entity: EntityKey<AreaDestructibles>,
+    modules: Vec<[u8; 3]>,
+    fragiles: Vec<[u8; 3]>,
+    columns: Vec<[u8; 3]>,
 }
 
 /// Who a battle has besides the player, as the server is launched with.
@@ -229,6 +244,7 @@ impl BaseThread {
             shots: Vec::new(), 
             vehicles_info: None, 
             started: false,
+            areas: HashMap::new(),
         };
 
         self.app.create_cell_player(avatar, space, CellPlayerInit {
@@ -283,6 +299,26 @@ impl BaseThread {
         vehicles_info.set_vehiclesInfo(battle.vehicles.iter().map(|vehicle| vehicle.info.clone()).collect())?;
         battle.vehicles_info = Some(vehicles_info.key());
         info!(%client, entity_id = %info.id(), "Created the arena info");
+
+        // The destructibles' entity of each chunk that has some, created right away, as
+        // the real server does.
+        let chunk_ids: BTreeSet<u16> = battle.world.space().statics.destructibles()
+            .map(|(_, destructible)| destructible.chunk_id)
+            .collect();
+        for chunk_id in chunk_ids {
+            let entity = self.app.create_entity::<AreaDestructibles>(space, EntityInit {
+                position: area_position(chunk_id),
+                visibility: Visibility::Always,
+                ..EntityInit::default()
+            })?;
+            battle.areas.insert(chunk_id, Area {
+                entity,
+                modules: Vec::new(),
+                fragiles: Vec::new(),
+                columns: Vec::new(),
+            });
+        }
+        info!(%client, chunks = battle.areas.len(), "Created the destructibles' areas");
 
         self.set_battle(client, battle);
         Ok(())
@@ -781,7 +817,7 @@ impl BaseThread {
         let drives = battle.started && battle_options.bots_drive;
         let bots_fire = battle.started && battle_options.bots_fire;
         let own = battle.own().map(|own| (own.team, battle.world.vehicle(own.id).hull.position));
-        let Battle { avatar, vehicles, world, shots, targets, .. } = battle;
+        let Battle { avatar, vehicles, world, shots, targets, areas, .. } = battle;
 
         for index in 0..vehicles.len() {
             let enemy = nearest_enemy(vehicles, world, index);
@@ -794,6 +830,9 @@ impl BaseThread {
             }
         }
         world.step(TICK.as_secs_f32());
+        for breakage in world.take_breakages() {
+            show_breakage(app, client, areas, breakage)?;
+        }
 
         for index in 0..vehicles.len() {
 
@@ -964,6 +1003,62 @@ fn spot(app: &mut base::App, client: ClientKey, vehicle: &mut BattleVehicle, wor
     Ok(())
 }
 
+/// The position of a chunk's [`AreaDestructibles`] entity: near the middle of the chunk,
+/// `areaDestructiblesPositionFromChunkID` in the client's `DestructiblesCache.py`.
+fn area_position(chunk_id: u16) -> Vec3 {
+    let x = i32::from(chunk_id >> 8) - 127;
+    let z = i32::from(chunk_id & 0xff) - 127;
+    let angle = PI / 10.0 * (x + z) as f32;
+    Vec3::new(
+        x as f32 * 100.0 + 50.0 + AREA_OFFSET * angle.cos(),
+        0.0,
+        z as f32 * 100.0 + 50.0 + AREA_OFFSET * angle.sin(),
+    )
+}
+
+/// Tell the clients a destructible broke: its chunk's entity lists it, encoded as its
+/// kind is, see [`AreaDestructibles`].
+fn show_breakage(app: &mut base::App, client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: Breakage) -> io::Result<()> {
+
+    let Breakage { piece, chunk_id, index, kind, yaw, speed } = breakage;
+    let Some(area) = areas.get_mut(&chunk_id) else {
+        warn!(%client, chunk_id, index, "Failed to tell of a destructible broken out of the areas");
+        return Ok(());
+    };
+
+    let [high, low] = index.to_be_bytes();
+    let mut entity = app.entity(area.entity)?;
+    match kind {
+        DestructibleKind::Fragile => {
+            area.fragiles.push([high, low, 0]);
+            entity.set_destroyedFragiles(area.fragiles.clone())?;
+        }
+        DestructibleKind::FallingAtom => {
+            let fall = ((speed / FALL_SPEED_STEP) as u8).min(3);
+            area.columns.push([high, low, pack_angle(yaw) << 2 | fall]);
+            entity.set_fallenColumns(area.columns.clone())?;
+        }
+        DestructibleKind::Structure => {
+            let module = piece.module.unwrap_or_default();
+            area.modules.push([high, low, (module & 0x7f) << 1]);
+            entity.set_destroyedModules(area.modules.clone())?;
+        }
+        // Not numbered: they are speed trees, see `Rubble`.
+        DestructibleKind::Tree => {}
+    }
+
+    info!(%client, chunk_id, index, ?kind, module = ?piece.module, "Broke a destructible");
+    Ok(())
+
+}
+
+/// An angle on 6 bits, as the client's native `packAngleToUint` does: from -π to π
+/// over 0 to 63. Fitted: the two lamp posts the captured Pershing knocked down fell its
+/// way, within 0.25 rad, read so.
+fn pack_angle(angle: f32) -> u8 {
+    ((wrap_angle(angle) + PI) / (2.0 * PI) * 63.0).round() as u8
+}
+
 /// Give the clients a vehicle as it is: where it is, its gun's angles, and its engine's
 /// mode and whether it slides sideways once they change.
 fn show_vehicle(app: &mut base::App, vehicle: &mut BattleVehicle, driven: &Vehicle) -> io::Result<()> {
@@ -1095,6 +1190,14 @@ fn vehicle_info(id: EntityId, public: &PublicVehicleInfo, account_dbid: u64) -> 
 /// capture, where the real server sets `isStrafing` on the ticks the player's vehicle
 /// moves sideways faster than 0.03 to 0.05 m/s, pushed, skidding or sliding down a slope.
 const STRAFING_SLIDE: f32 = 0.04;
+
+/// How far from the middle of its chunk an [`AreaDestructibles`] entity is, in metres:
+/// `RADIUS_FOR_LOCATION_AD` in the client's `DestructiblesCache.py`.
+const AREA_OFFSET: f32 = 4.5;
+/// How fast a vehicle goes for each step of a column's fall speed, in m/s, of 3 at
+/// most. Fitted: the captured Pershing knocked down lamp posts at 5.5 and 12 m/s, which
+/// fell at 2 and 3.
+const FALL_SPEED_STEP: f32 = 2.5;
 
 /// How much a shell's damage varies, either way, as a share of it.
 const DAMAGE_SPREAD: f32 = 0.25;

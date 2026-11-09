@@ -10,6 +10,7 @@ mod bwsg;
 mod bwt2;
 mod bsmo;
 mod bsmi;
+mod wgde;
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
@@ -21,6 +22,7 @@ pub use bwt2::{BWT2, TerrainSettings1, TerrainSettings2, TerrainChunk, OutlandCa
 pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bsmi::{BSMI, StaticModelInstance};
 pub use bwal::{BWAL, AssetInfo, AssetType};
+pub use wgde::{WGDE, Destructible};
 pub use bsmo::{BSMO, StaticModel};
 pub use bwst::BWST;
 pub use bwcs::BWCS;

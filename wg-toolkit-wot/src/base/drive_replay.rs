@@ -32,7 +32,7 @@ use crate::wot::item_defs::{self, AimingDef, MobilityDef, VehicleDef};
 use crate::wot::arena_defs::{self, STANDARD_GAMEPLAY};
 use crate::wot::items::VehicleDescr;
 
-use super::physics::{wrap_angle, Hull, Vehicle, World};
+use super::physics::{wrap_angle, Hull, Rubble, Vehicle, World};
 use super::TICK;
 
 
@@ -286,6 +286,9 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
+    // What it broke, kept from a window to the next, in order: a window that starts as
+    // the real vehicle drives through a house finds the walls it already broke down.
+    let mut rubble = Rubble::default();
     let mut start = 1;
     while start < updates.len() {
 
@@ -316,7 +319,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
             let dt = ticks_between(pair[0].t, pair[1].t);
             world.remember();
             world.vehicle_mut(me).hull.flags = controls_at(pair[0].t);
-            world.vehicle_mut(me).step(dt, space, bounds);
+            world.vehicle_mut(me).step(dt, space, bounds, &mut rubble);
             for (other, id) in others.iter().zip(&mut present) {
                 match (other.at(pair[1].t), *id) {
                     (Some(vehicle), Some(known)) => *world.vehicle_mut(known) = vehicle,

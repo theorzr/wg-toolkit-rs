@@ -15,8 +15,8 @@ use tracing::warn;
 use crate::havok::collision::Collision;
 use crate::res::fs::ResFilesystem;
 
-use super::bin::{SpaceBin, BSMI, BSMO, BWST};
-use super::destructibles::Destructibles;
+use super::destructibles::{scaled_health, Destructibles, DestructibleKind, Module};
+use super::bin::{SpaceBin, BSMI, BSMO, BWST, WGDE};
 
 
 /// The side of the grid's square cells the triangles are indexed in, in metres: about
@@ -30,6 +30,32 @@ pub struct StaticScene {
     triangles: Vec<StaticTriangle>,
     /// For each [`BodyKind`], the triangles whose bounds overlap each cell, by index.
     grids: [HashMap<IVec2, Vec<u32>>; 4],
+    /// The placed models that are destructible, by their index in [`BSMI`].
+    destructibles: HashMap<u32, PlacedDestructible>,
+}
+
+/// A destructible placed model, as the client numbers it and as it is destroyed, see
+/// [`WGDE`] and [`Destructibles`].
+#[derive(Debug, Clone)]
+pub struct PlacedDestructible {
+    /// The id of the 100 m chunk it is in, see [`WGDE`].
+    pub chunk_id: u16,
+    /// Its index in its chunk.
+    pub index: u16,
+    pub kind: DestructibleKind,
+    /// Its health, whole, scaled with it, see [`scaled_health`].
+    pub health: f32,
+    /// A structure's modules, their health scaled with it.
+    pub modules: Vec<Module>,
+}
+
+impl PlacedDestructible {
+
+    /// One of a structure's modules, by its material kind.
+    pub fn module(&self, material_kind: u8) -> Option<&Module> {
+        self.modules.iter().find(|module| module.material_kind == material_kind)
+    }
+
 }
 
 /// A triangle of a placed static model.
@@ -119,11 +145,15 @@ impl StaticScene {
     /// Load the static models of a space, `spaces/02_malinovka` say, those visible in
     /// a visibility mask, see [`super::visibility_mask`], their bodies' kinds from these
     /// destructibles. A model whose collision fails to load is left out, and logged.
-    pub fn load(fs: &ResFilesystem, space_dir: &str, destructibles: &Destructibles, visibility_mask: u32) -> io::Result<Self> {
+    pub fn load(fs: &ResFilesystem, space_dir: &str, definitions: &Destructibles, visibility_mask: u32) -> io::Result<Self> {
 
         let mut bin = SpaceBin::load(fs, space_dir)?;
         let (strings, instances, models) = read_sections(&mut bin)
             .map_err(|e| io::Error::new(e.kind(), format!("{space_dir}/space.bin: {e}")))?;
+        let numbered = bin.read_section::<WGDE>()
+            .inspect_err(|e| warn!(space = space_dir, "Failed to read the destructibles' numbering: {e}"))
+            .map(|section| section.destructibles)
+            .unwrap_or_default();
 
         // Each model's collision, loaded once for all its placements, with its bodies'
         // kinds.
@@ -142,7 +172,7 @@ impl StaticScene {
                 let collision = Collision::load(fs, path)
                     .inspect_err(|e| warn!(space = space_dir, path, "Failed to load a static model's collision: {e}"))
                     .ok()?;
-                let kinds = collision.bodies.iter().map(|body| BodyKind::of(destructibles, path, &body.name)).collect();
+                let kinds = collision.bodies.iter().map(|body| BodyKind::of(definitions, path, &body.name)).collect();
                 Some((Arc::new(collision), kinds))
             });
             let Some((collision, kinds)) = collision else { continue };
@@ -154,8 +184,53 @@ impl StaticScene {
             }
         }
 
-        Ok(Self::from_triangles(triangles))
+        // Those that the client numbers and the game lists as destructible.
+        let mut destructibles = HashMap::new();
+        for numbered in numbered {
+            for &index in &numbered.instances {
+                let Some(instance) = instances.instances.get(index as usize) else { continue };
+                if instance.visibility_mask & visibility_mask == 0 {
+                    continue;
+                }
+                let Some(havok) = models.models.get(instance.model as usize).and_then(|model| model.havok_fnv) else { continue };
+                let Some(destructible) = strings.get_string(havok).and_then(|path| definitions.get(path)) else { continue };
+                let scale = instance.transform.matrix3.x_axis.length();
+                let modules = destructible.modules.values()
+                    .map(|module| Module {
+                        health: scaled_health(scale, module.health),
+                        ..module.clone()
+                    })
+                    .collect();
+                destructibles.insert(index, PlacedDestructible {
+                    chunk_id: numbered.chunk_id,
+                    index: numbered.index,
+                    kind: destructible.kind,
+                    health: scaled_health(scale, destructible.health),
+                    modules,
+                });
+            }
+        }
 
+        let mut scene = Self::from_triangles(triangles);
+        scene.destructibles = destructibles;
+        Ok(scene)
+
+    }
+
+    /// Make a placed model destructible, by its index in [`BSMI`]: for scenes built of
+    /// triangles, see [`Self::from_triangles`].
+    pub fn add_destructible(&mut self, instance: u32, destructible: PlacedDestructible) {
+        self.destructibles.insert(instance, destructible);
+    }
+
+    /// A placed model's destructible, by its index in [`BSMI`], if it is one.
+    pub fn destructible(&self, instance: u32) -> Option<&PlacedDestructible> {
+        self.destructibles.get(&instance)
+    }
+
+    /// Every destructible placed model, by its index in [`BSMI`].
+    pub fn destructibles(&self) -> impl Iterator<Item = (u32, &PlacedDestructible)> {
+        self.destructibles.iter().map(|(&instance, destructible)| (instance, destructible))
     }
 
     /// A scene of these triangles, already in the world.
@@ -169,7 +244,11 @@ impl StaticScene {
                 }
             }
         }
-        Self { triangles, grids }
+        Self {
+            triangles,
+            grids,
+            destructibles: HashMap::new(),
+        }
     }
 
     /// How many triangles it has.
@@ -270,6 +349,13 @@ mod tests {
         let lamp_post = Vec3::new(156.2, 15.6, 479.8);
         let near = scene.triangles_in(BodyKind::Destructible, lamp_post - Vec3::splat(2.0), lamp_post + Vec3::splat(2.0)).count();
         assert!(near > 0);
+        // What the real server named as the captured Pershing knocked them down: the
+        // lamp post it fell, then the box it broke, in the chunk it drove in.
+        let post = scene.destructible(5387).unwrap();
+        assert_eq!((post.chunk_id, post.index, post.kind, post.health), (0x8083, 21, DestructibleKind::FallingAtom, 10.0));
+        let crate_box = scene.destructible(5396).unwrap();
+        assert_eq!((crate_box.chunk_id, crate_box.index, crate_box.kind), (0x8083, 9, DestructibleKind::Fragile));
     }
+
 
 }

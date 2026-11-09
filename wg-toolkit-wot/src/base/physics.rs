@@ -288,15 +288,19 @@
 //!
 //! A vehicle doesn't fall, flip, climb on debris taller than `STEP_HEIGHT`, or sink in
 //! water: that is the real server's spring suspension, a future step. Vehicles have no
-//! friction between them, take no damage from ramming, and static models don't break.
+//! friction between them and take no damage from ramming. Trees don't fall: the client
+//! numbers them among the speed trees, which aren't decoded.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::vec::Drain;
 
 use glam::{Affine3A, Mat3, Quat, Vec2, Vec3, Vec3Swizzles};
 use smallvec::SmallVec;
 use tracing::warn;
 
 use wgtk::space::statics::{BodyKind, StaticScene, StaticTriangle};
+use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::terrain::{Ground, Terrain};
 use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::Space;
@@ -392,6 +396,22 @@ const SPEED_WHILE_TURNING: f32 = 0.91;
 /// m/s². Fitted: the power its acceleration shows while turning falls short of driving
 /// straight by about 0.45 to 1 m/s², on both drives and at every speed.
 const TURNING_RESISTANCE: f32 = 0.8;
+/// How much a ram damages a destructible: this share of the vehicle's kinetic energy as
+/// it closes on it, `½ · w · v²` of its weight `w` in [`UNIT_VEHICLE_MASS`] and its
+/// speed in m/s, adding up from a tick to the next; it breaks once that reaches its
+/// health, and keeps the energy left. Fitted on the captured drives: the Type 64, 0.66
+/// such units, drove through a house's modules of 50 health at 13 m/s, 55; the Pershing,
+/// 1.23, felled a lamp post of 10 at 5.5 m/s, 19, and broke a barrel of 10 pushing it at
+/// 2.7 m/s, 4.5 a tick; the Type 64 drove through two houses' modules of 35 at
+/// 15.8 m/s, 82.
+const RAM_DAMAGE: f32 = 1.0;
+/// How much of its energy breaking a destructible costs the vehicle, as a share of the
+/// health it took. Fitted: the real Type 64 drove through four house modules of 35
+/// health at 15.6 m/s, all but keeping its speed.
+const RAM_COST: f32 = 0.05;
+/// The weight of a vehicle that destructibles' health is measured against, in kg:
+/// `unitVehicleMass` in the game's `scripts/destructibles.xml`.
+const UNIT_VEHICLE_MASS: f32 = 35_000.0;
 /// How far the hull tilts at most, in radians, either way along it or across: its tracks
 /// grip least from 32° along and 29° across, see [`SLOPE_GRIP_ALONG`]. Our choice: with a
 /// corner on a rock's facet, the ground under its corners tilted it up to 66°, and so
@@ -505,8 +525,8 @@ impl Vehicle {
     /// Advance by `dt` seconds in its space, within the map's bounds if any: the hull
     /// moves, see [`Hull::advance`], then the turret turns. Returns whether the hull
     /// moved or turned.
-    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>) -> bool {
-        let moved = self.hull.advance(dt, space, bounds);
+    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
+        let moved = self.hull.advance(dt, space, bounds, rubble);
         self.turret.step(dt, &self.hull);
         moved
     }
@@ -600,10 +620,11 @@ impl Hull {
     ///
     /// The order matters: a wall can push the hull off the terrain it was on, so the
     /// ground is looked up last.
-    pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>) -> bool {
+    pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
         let moved = self.step(dt, ground_at(&space.terrain, self.position));
         if moved {
-            self.push_out(&space.statics);
+            self.ram(&space.statics, rubble);
+            self.push_out(&space.statics, rubble);
         }
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
@@ -617,8 +638,8 @@ impl Hull {
     /// Put it back where the map holds it after it was shoved by another vehicle: out of
     /// the static models, within the map's bounds, and on the ground, as the end of
     /// [`Self::advance`] does. A vehicle is never shoved through a wall or off the map.
-    pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>) {
-        self.push_out(&space.statics);
+    pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
+        self.push_out(&space.statics, rubble);
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
@@ -631,11 +652,11 @@ impl Hull {
     /// the deepest overlap first, [`WALL_PASSES`] at most. What of its velocity goes into
     /// a wall stops, at its corner in the wall, which turns it, and slows the rest by
     /// [`WALL_FRICTION`].
-    pub fn push_out(&mut self, statics: &StaticScene) {
+    pub fn push_out(&mut self, statics: &StaticScene, rubble: &Rubble) {
 
         for _ in 0..WALL_PASSES {
 
-            let push = self.overlaps(statics)
+            let push = self.overlaps(statics, rubble)
                 .map(|(_, push)| push)
                 .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
             let Some(push) = push else { break };
@@ -678,7 +699,32 @@ impl Hull {
     ///     4. separate the hull's rectangle from it, least axis    (box_push)
     ///     5. bring the push back out of the hull's frame
     /// ```
-    pub fn overlaps<'a>(&self, statics: &'a StaticScene) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
+    pub fn overlaps<'a>(&self, statics: &'a StaticScene, rubble: &'a Rubble) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
+        let (min, max) = self.reach();
+        let solid = statics.triangles_in(BodyKind::Solid, min, max);
+        let standing = statics.triangles_in(BodyKind::Destructible, min, max)
+            .filter(move |triangle| rubble.standing(statics, triangle).is_some());
+        self.overlapping(solid.chain(standing))
+    }
+
+    /// The destructible triangles still standing that its collision box overlaps, see
+    /// [`Self::overlaps`].
+    fn standing_overlaps<'a>(&self, statics: &'a StaticScene, rubble: &'a Rubble) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
+        let (min, max) = self.reach();
+        let standing = statics.triangles_in(BodyKind::Destructible, min, max)
+            .filter(move |triangle| rubble.standing(statics, triangle).is_some());
+        self.overlapping(standing)
+    }
+
+    /// The box around it its collision box may reach, however it is tilted.
+    fn reach(&self) -> (Vec3, Vec3) {
+        let [min, max] = self.mobility.bounds;
+        let reach = Vec3::splat(min.abs().max(max.abs()).length());
+        (self.position - reach, self.position + reach)
+    }
+
+    /// Those of these triangles its collision box overlaps, see [`Self::overlaps`].
+    fn overlapping<'a>(&self, triangles: impl Iterator<Item = &'a StaticTriangle> + 'a) -> impl Iterator<Item = (&'a StaticTriangle, Vec2)> + 'a {
 
         let (position, rotation) = (self.position, self.rotation());
         let inverse = rotation.inverse();
@@ -688,9 +734,7 @@ impl Hull {
         let low = STEP_HEIGHT.max(min.y);
         let high = max.y;
 
-        // As far as its box reaches, however it is tilted.
-        let reach = Vec3::splat(min.abs().max(max.abs()).length());
-        statics.triangles_in(BodyKind::Solid, position - reach, position + reach)
+        triangles
             .filter(|triangle| triangle.normal.y.abs() < WALL_ANGLE.sin())
             .filter_map(move |triangle| {
                 let local = triangle.vertices.map(|vertex| inverse * (vertex - position));
@@ -698,6 +742,50 @@ impl Hull {
                 let push = box_push(center.xz(), Vec2::Y, Vec2::X, half.xz(), &outline)?;
                 Some((triangle, (rotation * Vec3::new(push.x, 0.0, push.y)).xz()))
             })
+
+    }
+
+    /// Damage the destructibles it drives into, see [`RAM_DAMAGE`], and break those
+    /// whose health it took: it goes on through, less the speed their health took; those
+    /// still standing stop it as walls do, see [`Self::push_out`]. Its damage adds up
+    /// from a tick to the next, so a crawl through a fence takes a few.
+    fn ram(&mut self, statics: &StaticScene, rubble: &mut Rubble) {
+
+        // Each piece once, its first triangle telling the way into it: against its push
+        // out, else, a small one it drove onto within a tick having no way out of it, the
+        // way from its middle to the triangle's.
+        let middle = self.footprint_at(Pose::of(self)).middle;
+        let mut hits: SmallVec<[(Piece, Vec2, Vec2); 8]> = SmallVec::new();
+        for (triangle, push) in self.standing_overlaps(statics, rubble) {
+            let Some(piece) = rubble.standing(statics, triangle) else { continue };
+            let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]).xz() / 3.0;
+            if !hits.iter().any(|&(hit, _, _)| hit == piece) {
+                hits.push((piece, -push, center - middle));
+            }
+        }
+
+        let weight = self.mobility.weight / UNIT_VEHICLE_MASS;
+        for (piece, against, center) in hits {
+            let velocity = self.velocity();
+            let toward = [against, center].into_iter()
+                .filter_map(Vec2::try_normalize)
+                .find(|toward| velocity.xz().dot(*toward) > 0.0);
+            if toward.is_none() {
+                continue;
+            }
+            // Grazing one breaks it too: the real T110E4 drove on along a fence.
+            let speed = velocity.length();
+            let energy = RAM_DAMAGE * weight * speed * speed / 2.0;
+            let Some((health, done)) = rubble.damage(statics, piece, energy) else { continue };
+            if done < health {
+                continue;
+            }
+            // It loses a little of its energy: see `RAM_COST`.
+            let left = health - (done - energy);
+            let kept = (speed * speed - 2.0 * RAM_COST * left / weight).max(0.0).sqrt();
+            self.set_velocity(velocity * (kept / speed));
+            rubble.break_piece(statics, piece, velocity.x.atan2(velocity.z), speed);
+        }
 
     }
 
@@ -1095,6 +1183,93 @@ impl Hull {
 
 }
 
+/// A destructible piece of a placed static model: all of it, or one of a structure's
+/// modules by its material kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Piece {
+    /// The placed model, its index in the space's `BSMI`.
+    pub instance: u32,
+    pub module: Option<u8>,
+}
+
+/// A destructible a vehicle broke, as its clients are told of it.
+#[derive(Debug, Clone, Copy)]
+pub struct Breakage {
+    pub piece: Piece,
+    /// Its chunk's id and its index in it, as the client numbers it.
+    pub chunk_id: u16,
+    pub index: u16,
+    pub kind: DestructibleKind,
+    /// Which way it falls, the yaw the vehicle went, in radians.
+    pub yaw: f32,
+    /// How fast the vehicle went, in m/s.
+    pub speed: f32,
+}
+
+/// The destructibles broken in a world, and those broken since last taken, and the
+/// damage those still standing took.
+#[derive(Debug, Default)]
+pub struct Rubble {
+    broken: HashSet<Piece>,
+    fresh: Vec<Breakage>,
+    damage: HashMap<Piece, f32>,
+}
+
+impl Rubble {
+
+    /// The piece a static triangle is of, if it is destructible and still stands.
+    fn standing(&self, statics: &StaticScene, triangle: &StaticTriangle) -> Option<Piece> {
+        let destructible = statics.destructible(triangle.instance)?;
+        let module = match destructible.kind {
+            DestructibleKind::Structure => Some(destructible.module(triangle.material_kind as u8)?.material_kind),
+            _ => None,
+        };
+        let piece = Piece {
+            instance: triangle.instance,
+            module,
+        };
+        (!self.broken.contains(&piece)).then_some(piece)
+    }
+
+    /// Damage a piece: its health, and the damage it took in all.
+    fn damage(&mut self, statics: &StaticScene, piece: Piece, damage: f32) -> Option<(f32, f32)> {
+        let destructible = statics.destructible(piece.instance)?;
+        let health = match piece.module {
+            Some(module) => destructible.module(module)?.health,
+            None => destructible.health,
+        };
+        let done = self.damage.entry(piece).or_default();
+        *done += damage;
+        Some((health, *done))
+    }
+
+    /// Break a piece, a module the others it brings down with it, each told of.
+    fn break_piece(&mut self, statics: &StaticScene, piece: Piece, yaw: f32, speed: f32) {
+        let Some(destructible) = statics.destructible(piece.instance) else { return };
+        let depends = piece.module
+            .and_then(|module| destructible.module(module))
+            .map(|module| module.depends.as_slice())
+            .unwrap_or_default();
+        let brought = depends.iter().map(|&module| Piece {
+            instance: piece.instance,
+            module: Some(module),
+        });
+        for piece in std::iter::once(piece).chain(brought) {
+            if self.broken.insert(piece) {
+                self.fresh.push(Breakage {
+                    piece,
+                    chunk_id: destructible.chunk_id,
+                    index: destructible.index,
+                    kind: destructible.kind,
+                    yaw,
+                    speed,
+                });
+            }
+        }
+    }
+
+}
+
 /// A hull's place on the ground plane, as its box sweeps it: its position and its yaw.
 #[derive(Debug, Clone, Copy)]
 struct Pose {
@@ -1311,6 +1486,7 @@ pub struct World {
     space: Arc<Space>,
     bounds: Option<(Vec2, Vec2)>,
     vehicles: Slots<Placed>,
+    rubble: Rubble,
 }
 
 impl World {
@@ -1320,12 +1496,18 @@ impl World {
             space, 
             bounds, 
             vehicles: Slots::default(),
+            rubble: Rubble::default(),
         }
     }
 
     /// The map's space.
     pub fn space(&self) -> &Space {
         &self.space
+    }
+
+    /// The destructibles broken since last taken, for the battle to tell its clients.
+    pub fn take_breakages(&mut self) -> Drain<'_, Breakage> {
+        self.rubble.fresh.drain(..)
     }
 
     /// Put a vehicle in the world.
@@ -1365,7 +1547,7 @@ impl World {
     pub fn step(&mut self, dt: f32) {
         self.remember();
         for (_, placed) in self.vehicles.iter_mut() {
-            placed.vehicle.step(dt, &self.space, self.bounds);
+            placed.vehicle.step(dt, &self.space, self.bounds, &mut self.rubble);
         }
         self.collide(dt);
         self.report_jumps(dt);
@@ -1428,7 +1610,7 @@ impl World {
     /// The extra passes are for three vehicles in a row: pushing the middle one off the
     /// first can push it into the third, which pass 0 had already checked.
     pub fn collide(&mut self, dt: f32) {
-        let (space, bounds) = (&*self.space, self.bounds);
+        let (space, bounds, rubble) = (&*self.space, self.bounds, &self.rubble);
         for pass in 0..COLLISION_PASSES {
             let mut touched = false;
             self.vehicles.for_each_pair_mut(|placed, other| {
@@ -1439,8 +1621,8 @@ impl World {
                 };
                 if collide(&mut placed.vehicle.hull, from, &mut other.vehicle.hull, other_from, dt) {
                     touched = true;
-                    other.vehicle.hull.keep_on_map(space, bounds);
-                    placed.vehicle.hull.keep_on_map(space, bounds);
+                    other.vehicle.hull.keep_on_map(space, bounds, rubble);
+                    placed.vehicle.hull.keep_on_map(space, bounds, rubble);
                 }
             });
             if !touched {
@@ -1878,6 +2060,8 @@ pub fn wrap_angle(angle: f32) -> f32 {
 #[cfg(test)]
 pub(super) mod tests {
 
+    use wgtk::space::statics::PlacedDestructible;
+
     use super::*;
 
     /// How high the test gun is above the vehicle's origin.
@@ -2032,7 +2216,7 @@ pub(super) mod tests {
         hull.speed = 40.0 / 3.6;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..30 {
-            hull.advance(0.1, &space, None);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         let front = hull.position.z + hull.mobility.bounds[1].z;
         assert!((front - 10.0).abs() < 1e-3 && hull.speed.abs() < 1e-3, "front at {front}, {} m/s", hull.speed);
@@ -2041,9 +2225,68 @@ pub(super) mod tests {
         let mut hull = chieftain();
         hull.flags = movement_flag::FORWARD;
         for _ in 0..30 {
-            hull.advance(0.1, &space, None);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         assert!(hull.position.z > 12.0, "{}", hull.position.z);
+    }
+
+    /// A fence across the way at z = 10, 3 m high, destructible whole with this health,
+    /// the 4th of its chunk.
+    fn fence(health: f32) -> Space {
+        let mut space = wall(3.0);
+        let triangles = space.statics.triangles_in(BodyKind::Solid, Vec3::splat(-30.0), Vec3::splat(30.0))
+            .map(|triangle| StaticTriangle::new(triangle.vertices, 0, 0, BodyKind::Destructible))
+            .collect();
+        space.statics = StaticScene::from_triangles(triangles);
+        space.statics.add_destructible(0, PlacedDestructible {
+            chunk_id: 0x7f7f,
+            index: 3,
+            kind: DestructibleKind::Fragile,
+            health,
+            modules: Vec::new(),
+        });
+        space
+    }
+
+    #[test]
+    fn breaks_through_what_it_rams_hard_enough() {
+        // A fence it rams at 20 km/h, it breaks, once, and drives on through, slowed by
+        // what its health took.
+        let space = fence(10.0);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.speed = 20.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        // Its speed before the tick it broke it, and after.
+        let mut broke = None;
+        for _ in 0..30 {
+            let before = hull.speed;
+            hull.advance(0.1, &space, None, &mut rubble);
+            if broke.is_none() && !rubble.fresh.is_empty() {
+                broke = Some((before, hull.speed));
+            }
+        }
+        assert!(hull.position.z > 12.0, "{}", hull.position.z);
+        // It lost a little of its energy, its engine winning a little back within the
+        // tick.
+        let (before, after) = broke.unwrap();
+        let weight = hull.mobility.weight / UNIT_VEHICLE_MASS;
+        let kept = (before * before - 2.0 * RAM_COST * 10.0 / weight).sqrt();
+        assert!(after > kept && after < kept + 0.2, "{after} for {kept}");
+        let broken: Vec<Breakage> = rubble.fresh.drain(..).collect();
+        assert_eq!(broken.len(), 1);
+        assert_eq!((broken[0].chunk_id, broken[0].index, broken[0].kind), (0x7f7f, 3, DestructibleKind::Fragile));
+        // One too strong for it stops it as a wall would.
+        let space = fence(1000.0);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.speed = 20.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        let front = hull.position.z + hull.mobility.bounds[1].z;
+        assert!((front - 10.0).abs() < 1e-3 && rubble.fresh.is_empty(), "front at {front}");
     }
 
     /// A flat deck from z = 0 to 20, `height` high, as two triangles.
@@ -2067,7 +2310,7 @@ pub(super) mod tests {
         hull.position.z = -6.0;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..40 {
-            hull.advance(0.1, &space, None);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         assert!(hull.position.z > 10.0 && hull.position.y == STEP_HEIGHT - 0.1, "{}", hull.position);
         // Higher, a bridge it drives under, it stays below.
@@ -2076,7 +2319,7 @@ pub(super) mod tests {
         hull.position.z = -6.0;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..40 {
-            hull.advance(0.1, &space, None);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         assert!(hull.position.z > 10.0 && hull.position.y == 0.0, "{}", hull.position);
     }
@@ -2101,7 +2344,7 @@ pub(super) mod tests {
         let mut alone = chieftain();
         alone.flags = movement_flag::FORWARD;
         for _ in 0..60 {
-            alone.advance(0.1, &Space::default(), None);
+            alone.advance(0.1, &Space::default(), None, &mut Rubble::default());
         }
         // Into another as heavy, it shoves it ahead, slower than alone, never into it.
         let (pusher, parked) = push_parked(55_000.0, 0.0, 0.0, 60);
@@ -2216,7 +2459,7 @@ pub(super) mod tests {
         hull.speed = 40.0 / 3.6;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..20 {
-            hull.advance(0.1, &space, bounds);
+            hull.advance(0.1, &space, bounds, &mut Rubble::default());
         }
         assert_eq!(hull.position.z, edge);
         assert!(hull.speed.abs() < 1e-4 && hull.position.x.abs() < 1e-4, "{} {}", hull.speed, hull.position.x);
@@ -2230,7 +2473,7 @@ pub(super) mod tests {
         let mut along = Vec::new();
         for _ in 0..6 {
             let x = hull.position.x;
-            hull.advance(0.1, &space, bounds);
+            hull.advance(0.1, &space, bounds, &mut Rubble::default());
             along.push((x - hull.position.x) / 0.1);
         }
         assert_eq!(hull.position.z, edge);

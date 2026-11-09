@@ -64,6 +64,8 @@ mod tests {
 
     use wgtk::space::Space;
 
+    use crate::base::physics::Rubble;
+
     use super::*;
 
     #[test]
@@ -74,7 +76,7 @@ mod tests {
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {
             Bot.drive(&mut vehicle, Some(enemy), true);
-            vehicle.step(0.1, &Space::default(), None);
+            vehicle.step(0.1, &Space::default(), None, &mut Rubble::default());
         }
         let hull = &vehicle.hull;
         let to = enemy - hull.position;

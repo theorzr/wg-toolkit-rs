@@ -15,6 +15,7 @@ pub fn register(app: &mut base::App) -> Result<(), BindError> {
     app.register::<Avatar>()?;
     app.register::<Vehicle>()?;
     app.register::<AvatarInfo>()?;
+    app.register::<AreaDestructibles>()?;
     app.register_component::<AvatarVehiclesInfo>()?;
     app.register_component::<OwnVehicle>()?;
     app.register_component::<GunMarkerComponent>()?;
@@ -174,6 +175,20 @@ entity_schema! {
     pub AvatarInfo {
         cell {
             avatarID: EntityId,
+        }
+    }
+}
+
+entity_schema! {
+    /// A map chunk's destructibles, those destroyed in it, each encoded as the client's
+    /// `DestructiblesCache.py` does: its index in the chunk, high byte first, then what
+    /// its kind tells, see the client's `AreaDestructibles.py`.
+    pub AreaDestructibles {
+        cell {
+            destroyedModules: Vec<[u8; 3]>,
+            destroyedFragiles: Vec<[u8; 3]>,
+            fallenColumns: Vec<[u8; 3]>,
+            fallenTrees: Vec<[u8; 5]>,
         }
     }
 }
