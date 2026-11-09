@@ -1,12 +1,9 @@
-//! A vehicle the server drives itself: it closes in on its enemy, then stops facing
+//! The server driving a vehicle itself: it closes in on its enemy, then stops facing
 //! it, keeps its turret on it and says when its gun is on it.
 
-use glam::{Vec2, Vec3};
-
-use wgtk::space::Space;
+use glam::Vec3;
 
 use super::physics::{movement_flag, wrap_angle, Vehicle};
-use super::gun::Gun;
 
 
 /// How close to its enemy the bot drives, in metres on the ground plane.
@@ -20,24 +17,17 @@ const HEADING_TOLERANCE: f32 = 0.1;
 const AIM_TOLERANCE: f32 = 0.02;
 
 
-#[derive(Debug, Clone)]
-pub struct Bot {
-    pub vehicle: Vehicle,
-    pub gun: Gun,
-}
+/// The server driving a vehicle, as a client would: it sets its controls and its aim.
+#[derive(Debug, Clone, Default)]
+pub struct Bot;
 
 impl Bot {
 
-    pub fn new(vehicle: Vehicle, gun: Gun) -> Self {
-        Self { vehicle, gun }
-    }
+    /// Set a vehicle's controls and aim for its next step, its turret on `enemy`, if any:
+    /// if it `drives`, toward it until within [`ENGAGE_RANGE`], then turning to face it.
+    pub fn drive(&self, vehicle: &mut Vehicle, enemy: Option<Vec3>, drives: bool) {
 
-    /// Advance by `dt` seconds, its turret on `enemy`, if any: if it `drives`, toward
-    /// it until within [`ENGAGE_RANGE`], then turning to face it. Returns whether its
-    /// gun points at it.
-    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, enemy: Option<Vec3>, drives: bool) -> bool {
-
-        let hull = &mut self.vehicle.hull;
+        let hull = &mut vehicle.hull;
         let mut flags = 0;
         if let (Some(enemy), true) = (enemy, drives) {
             let mut to = enemy - hull.position;
@@ -55,14 +45,15 @@ impl Bot {
         hull.flags = flags;
 
         if let Some(enemy) = enemy {
-            self.vehicle.turret.track(enemy);
+            vehicle.turret.track(enemy);
         }
-        self.vehicle.step(dt, space, bounds);
 
-        let Some(enemy) = enemy else { return false };
-        let (position, velocity, _) = self.vehicle.turret.gun_marker(&self.vehicle.hull);
+    }
+
+    /// Whether a vehicle's gun points at its enemy, to fire.
+    pub fn on_target(&self, vehicle: &Vehicle, enemy: Vec3) -> bool {
+        let (position, velocity, _) = vehicle.turret.gun_marker(&vehicle.hull);
         velocity.angle_between(enemy - position) < AIM_TOLERANCE
-
     }
 
 }
@@ -71,19 +62,21 @@ impl Bot {
 #[cfg(test)]
 mod tests {
 
+    use wgtk::space::Space;
+
     use super::*;
 
     #[test]
     fn closes_in_then_faces_its_enemy() {
         let mobility = crate::base::physics::tests::chieftain_mobility();
         let aiming = crate::base::physics::tests::chieftain_aiming();
-        let vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming);
-        let mut bot = Bot::new(vehicle, Gun::new(Vec::new(), 10.0));
+        let mut vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming);
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {
-            bot.step(0.1, &Space::default(), None, Some(enemy), true);
+            Bot.drive(&mut vehicle, Some(enemy), true);
+            vehicle.step(0.1, &Space::default(), None);
         }
-        let hull = &bot.vehicle.hull;
+        let hull = &vehicle.hull;
         let to = enemy - hull.position;
         let distance = to.x.hypot(to.z);
         assert!(distance <= ENGAGE_RANGE && distance > ENGAGE_RANGE - 20.0, "stopped {distance} m away");

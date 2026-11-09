@@ -299,8 +299,7 @@ impl Hull {
                 velocity -= normal * into;
                 let along = velocity - normal * velocity.dot(normal);
                 velocity -= along.clamp_length_max(WALL_FRICTION * -into);
-                let (heading, right) = self.axes();
-                (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
+                self.set_velocity(velocity);
             }
 
         }
@@ -358,8 +357,7 @@ impl Hull {
         // Along the edges, slowed as much as their friction takes of what they stopped.
         let along = velocity - velocity.project_onto(stopped);
         velocity -= along.clamp_length_max(EDGE_FRICTION * stopped.length());
-        let (heading, right) = self.axes();
-        (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
+        self.set_velocity(velocity);
     }
 
     /// Advance by `dt` seconds on this ground. Returns whether the hull moved or turned.
@@ -477,6 +475,22 @@ impl Hull {
         heading * self.speed + right * self.slide
     }
 
+    /// Set its speeds along and across its heading from a velocity on the ground plane.
+    fn set_velocity(&mut self, velocity: Vec3) {
+        let (heading, right) = self.axes();
+        (self.speed, self.slide) = (velocity.dot(heading), velocity.dot(right));
+    }
+
+    /// Its collision box on the ground plane, upright, as [`box_push`] takes it: its
+    /// middle, its heading and right axes, and its half sizes across then along.
+    fn footprint(&self) -> (Vec2, Vec2, Vec2, Vec2) {
+        let (heading, right) = self.axes();
+        let [min, max] = self.mobility.bounds;
+        let (center, half) = ((min + max) / 2.0, (max - min) / 2.0);
+        let middle = self.position.xz() + heading.xz() * center.z + right.xz() * center.x;
+        (middle, heading.xz(), right.xz(), Vec2::new(half.x, half.z))
+    }
+
     /// The vehicle's `engineMode`, which the client's track scroll follows: idle (1)
     /// without flags, accelerating (3) until at the speed the flags ask for, then
     /// cruising (2), and the flags themselves.
@@ -591,6 +605,68 @@ impl Hull {
 
     }
 
+}
+
+/// Push two hulls apart where their collision boxes overlap, upright on the ground plane,
+/// their heights overlapping too: each moves by the other's share of their weight, and
+/// what they close in on each other at they then share, their momentum kept, so the
+/// heavier shoves the lighter. Driven on, the pusher's engine pushes them both, against
+/// both their grounds. Returns whether they touched.
+pub fn collide(hull: &mut Hull, other: &mut Hull) -> bool {
+
+    let ([min, max], [other_min, other_max]) = (hull.mobility.bounds, other.mobility.bounds);
+    if hull.position.y + max.y <= other.position.y + other_min.y || other.position.y + other_max.y <= hull.position.y + min.y {
+        return false;
+    }
+    let (middle, heading, right, half) = hull.footprint();
+    let (other_middle, other_heading, other_right, other_half) = other.footprint();
+    if middle.distance(other_middle) >= half.length() + other_half.length() {
+        return false;
+    }
+    let corners = [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)]
+        .map(|(along, across)| other_middle + other_heading * along * other_half.y + other_right * across * other_half.x);
+    let Some(push) = box_push(middle, heading, right, half, &corners) else { return false };
+
+    let (mass, other_mass) = (hull.mobility.weight, other.mobility.weight);
+    let share = other_mass / (mass + other_mass);
+    let push = Vec3::new(push.x, 0.0, push.y);
+    hull.position += push * share;
+    other.position -= push * (1.0 - share);
+
+    let normal = push.normalize();
+    let closing = (hull.velocity() - other.velocity()).dot(normal);
+    if closing < 0.0 {
+        let impulse = -closing * mass * other_mass / (mass + other_mass);
+        hull.set_velocity(hull.velocity() + normal * impulse / mass);
+        other.set_velocity(other.velocity() - normal * impulse / other_mass);
+    }
+    true
+
+}
+
+/// Collide every pair of hulls, see [`collide`], then push those that touched back out
+/// of the static models and within the map's bounds, and settle them on the ground: a
+/// hull isn't shoved through a wall.
+pub fn collide_all(hulls: &mut [&mut Hull], space: &Space, bounds: Option<(Vec2, Vec2)>) {
+    let mut touched = vec![false; hulls.len()];
+    for index in 0..hulls.len() {
+        let (head, tail) = hulls.split_at_mut(index + 1);
+        for (offset, other) in tail.iter_mut().enumerate() {
+            if collide(head[index], other) {
+                touched[index] = true;
+                touched[index + 1 + offset] = true;
+            }
+        }
+    }
+    for (hull, touched) in hulls.iter_mut().zip(touched) {
+        if touched {
+            hull.push_out(&space.statics);
+            if let Some(bounds) = bounds {
+                hull.keep_within(bounds);
+            }
+            hull.settle(space);
+        }
+    }
 }
 
 /// A turret and its gun, turning toward what the client aims at at their top speeds,
@@ -1030,6 +1106,41 @@ pub(super) mod tests {
             hull.advance(0.1, &space, None);
         }
         assert!(hull.position.z > 10.0 && hull.position.y == 0.0, "{}", hull.position);
+    }
+
+    /// A Chieftain driven forward for `steps` ticks into another parked 10 m ahead, of
+    /// this weight and `height` above it: where both end.
+    fn push_parked(weight: f32, height: f32, steps: usize) -> (Hull, Hull) {
+        let mut pusher = chieftain();
+        pusher.flags = movement_flag::FORWARD;
+        let mut parked = Hull::new(Vec3::new(0.0, height, 10.0), Vec3::ZERO, MobilityDef { weight, ..chieftain_mobility() });
+        for _ in 0..steps {
+            pusher.advance(0.1, &Space::default(), None);
+            parked.advance(0.1, &Space::default(), None);
+            collide_all(&mut [&mut pusher, &mut parked], &Space::default(), None);
+        }
+        (pusher, parked)
+    }
+
+    #[test]
+    fn pushes_vehicles_it_drives_into() {
+        let mut alone = chieftain();
+        alone.flags = movement_flag::FORWARD;
+        for _ in 0..60 {
+            alone.advance(0.1, &Space::default(), None);
+        }
+        // Into another as heavy, it shoves it ahead, slower than alone, never into it.
+        let (pusher, parked) = push_parked(55_000.0, 0.0, 60);
+        let length = 7.5;
+        assert!(parked.position.z - pusher.position.z >= length - 1e-3, "{} {}", pusher.position.z, parked.position.z);
+        assert!(parked.position.z > 12.0 && pusher.position.z < alone.position.z - 2.0, "{} {} {}", pusher.position.z, parked.position.z, alone.position.z);
+        assert!(pusher.position.x.abs() < 1e-3 && parked.position.x.abs() < 1e-3);
+        // A lighter one, further.
+        let (_, light) = push_parked(20_000.0, 0.0, 60);
+        assert!(light.position.z > parked.position.z + 1.0, "{} {}", light.position.z, parked.position.z);
+        // Above it, on a bridge, it drives under.
+        let (pusher, parked) = push_parked(55_000.0, 3.0, 60);
+        assert!(parked.position.z == 10.0 && pusher.position.z == alone.position.z);
     }
 
     #[test]

@@ -14,7 +14,10 @@
 //! - `# setup,<equipment kg>,<driver>,<medium ground>,<top speed m/s>`: how the vehicle
 //!   was set up, see [`CapturedSetup`], stock without;
 //! - `# max_median_error,<1 s>,<3 s>`: the median errors over 1 s and 3 s windows the
-//!   hull must stay under, in metres, a guard against regressions, none without.
+//!   hull must stay under, in metres, a guard against regressions, none without;
+//! - `# other,<vehicle>,<bytes>`: another vehicle near it, by its entity id, and its
+//!   compact descriptor, whose positions are `other,<vehicle>,x,y,z,yaw` lines: the hull
+//!   collides with it where the real server had it, see [`Other`].
 
 use std::f32::consts::PI;
 use std::fs;
@@ -29,7 +32,7 @@ use crate::wot::item_defs::{self, MobilityDef, VehicleDef};
 use crate::wot::arena_defs::{self, STANDARD_GAMEPLAY};
 use crate::wot::items::VehicleDescr;
 
-use super::physics::{wrap_angle, Hull};
+use super::physics::{collide_all, wrap_angle, Hull};
 use super::TICK;
 
 
@@ -101,6 +104,13 @@ struct Update {
     direction: Vec3,
 }
 
+/// Another vehicle of a drive: its descriptor and its positions.
+struct OtherTrack {
+    id: u32,
+    descr: Vec<u8>,
+    updates: Vec<Update>,
+}
+
 /// A drive, see the module's documentation.
 struct Drive {
     descr: Vec<u8>,
@@ -109,6 +119,41 @@ struct Drive {
     max_median_error: Vec<(f64, f32)>,
     controls: Vec<(f64, u8)>,
     updates: Vec<Update>,
+    others: Vec<OtherTrack>,
+}
+
+/// Another vehicle the hull collides with where the real server had it, as heavy as
+/// [`OTHER_WEIGHT`]: its track already holds how the real hull pushed it, so the hull
+/// gets all of the push, and its speed into it.
+struct Other<'a> {
+    mobility: MobilityDef,
+    updates: &'a [Update],
+}
+
+/// The weight of another vehicle of a drive, far over any vehicle's, see [`Other`].
+const OTHER_WEIGHT: f32 = 1e9;
+
+/// How long after its last position another vehicle of a drive is still there, in
+/// seconds: past it, it left the area the server tells the client about.
+const OTHER_TIMEOUT: f64 = 0.5;
+
+impl Other<'_> {
+
+    /// A hull where it was at `t`, moving as it went then, if it was known.
+    fn hull_at(&self, t: f64) -> Option<Hull> {
+        let index = self.updates.partition_point(|update| update.t <= t);
+        let (before, at) = (self.updates.get(index.checked_sub(2)?)?, self.updates[index - 1]);
+        if t - at.t > OTHER_TIMEOUT {
+            return None;
+        }
+        let mut hull = Hull::new(at.position, at.direction, self.mobility);
+        let velocity = (at.position - before.position).with_y(0.0) / (at.t - before.t).max(1e-3) as f32;
+        let heading = Vec3::new(at.direction.z.sin(), 0.0, at.direction.z.cos());
+        let right = Vec3::new(at.direction.z.cos(), 0.0, -at.direction.z.sin());
+        (hull.speed, hull.slide) = (velocity.dot(heading), velocity.dot(right));
+        Some(hull)
+    }
+
 }
 
 fn parse(csv: &str) -> Drive {
@@ -119,6 +164,7 @@ fn parse(csv: &str) -> Drive {
         max_median_error: Vec::new(),
         controls: Vec::new(),
         updates: Vec::new(),
+        others: Vec::new(),
     };
     let floats = |values: &str| values.split(',').map(|value| value.parse::<f32>().unwrap()).collect::<Vec<_>>();
     for line in csv.lines() {
@@ -139,6 +185,12 @@ fn parse(csv: &str) -> Drive {
             drive.max_median_error = [1.0, 3.0].into_iter().zip(floats(max)).collect();
             continue;
         }
+        if let Some(other) = line.strip_prefix("# other,") {
+            let (id, descr) = other.split_once(',').unwrap();
+            let descr = descr.split(',').map(|byte| byte.parse().unwrap()).collect();
+            drive.others.push(OtherTrack { id: id.parse().unwrap(), descr, updates: Vec::new() });
+            continue;
+        }
         if line.starts_with('#') {
             continue;
         }
@@ -152,6 +204,15 @@ fn parse(csv: &str) -> Drive {
                 position: Vec3::new(float(2), float(3), float(4)),
                 direction: Vec3::new(float(5), float(6), float(7)),
             }),
+            "other" => {
+                let id = fields[2].parse::<u32>().unwrap();
+                let other = drive.others.iter_mut().find(|other| other.id == id).unwrap();
+                other.updates.push(Update {
+                    t,
+                    position: Vec3::new(float(3), float(4), float(5)),
+                    direction: Vec3::new(0.0, 0.0, float(6)),
+                });
+            }
             kind => panic!("unknown line kind {kind}"),
         }
     }
@@ -188,6 +249,15 @@ impl Errors {
             self.distance.len(), y50 * 180.0 / PI, y90 * 180.0 / PI, ymax * 180.0 / PI);
     }
 
+    /// The median error of the windows starting between two times, and how many.
+    fn median_between(&self, from: f64, to: f64) -> (f32, usize) {
+        let within = self.starts.iter().zip(&self.distance)
+            .filter(|&(&start, _)| (from..to).contains(&start))
+            .map(|(_, &distance)| distance)
+            .collect::<Vec<_>>();
+        (if within.is_empty() { 0.0 } else { Self::stats(&within).0 }, within.len())
+    }
+
     /// The windows ending furthest from the real server, to look into.
     fn report_worst(&self, count: usize) {
         let mut worst = (0..self.distance.len()).collect::<Vec<_>>();
@@ -201,8 +271,9 @@ impl Errors {
 }
 
 /// Replay the drive in windows of `window` seconds, each from the real state, through
-/// the hull of this mobility, in its space and within its map's bounds.
-fn replay(drive: &Drive, mobility: MobilityDef, space: &Space, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
+/// the hull of this mobility, in its space and within its map's bounds, colliding with
+/// the other vehicles.
+fn replay(drive: &Drive, mobility: MobilityDef, others: &[Other], space: &Space, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
@@ -230,6 +301,9 @@ fn replay(drive: &Drive, mobility: MobilityDef, space: &Space, bounds: Option<(V
         for pair in updates[start..=end].windows(2) {
             hull.flags = controls_at(pair[0].t);
             hull.advance(ticks_between(pair[0].t, pair[1].t), space, bounds);
+            let mut others = others.iter().filter_map(|other| other.hull_at(pair[1].t)).collect::<Vec<_>>();
+            let mut hulls = std::iter::once(&mut hull).chain(&mut others).collect::<Vec<_>>();
+            collide_all(&mut hulls, space, bounds);
         }
 
         let real = updates[end];
@@ -294,11 +368,28 @@ fn hull_follows_the_real_server() {
             let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, &space);
             println!("  tilt settled: pitch {pitch:.2} / {pitch_90:.2}°, roll {roll:.2} / {roll_90:.2}° (median / 90%)");
         }
+        let others = drive.others.iter()
+            .map(|other| {
+                let decoded = VehicleDescr::decode(&other.descr).unwrap();
+                let def = VehicleDef::load_by_id(&res, decoded.nation, decoded.type_id).unwrap();
+                Other { mobility: MobilityDef { weight: OTHER_WEIGHT, ..def.mobility }, updates: &other.updates }
+            })
+            .collect::<Vec<_>>();
         for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
-            replay(&drive, mobility, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
+            replay(&drive, mobility, &others, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
+        }
+        if !others.is_empty() {
+            for window in [1.0, 3.0] {
+                let (alone, with) = (replay(&drive, mobility, &[], &space, bounds, window, CONTROL_DELAY),
+                    replay(&drive, mobility, &others, &space, bounds, window, CONTROL_DELAY));
+                for (from, to) in [(254.0, 258.0), (267.0, 271.0), (272.0, 282.0)] {
+                    let ((alone, count), (with, _)) = (alone.median_between(from, to), with.median_between(from, to));
+                    println!("  {window} s windows from {from} to {to} s: {alone:.2} m alone, {with:.2} m with the others ({count})");
+                }
+            }
         }
         for &(window, max) in &drive.max_median_error {
-            let errors = replay(&drive, mobility, &space, bounds, window, CONTROL_DELAY);
+            let errors = replay(&drive, mobility, &others, &space, bounds, window, CONTROL_DELAY);
             errors.report(&format!("  {window} s windows"));
             errors.report_worst(6);
             assert!(errors.median_distance() <= max, "{name}: median error over {window} s windows: {} m", errors.median_distance());
