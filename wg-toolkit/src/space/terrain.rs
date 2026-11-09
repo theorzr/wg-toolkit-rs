@@ -102,8 +102,10 @@ impl HeightMap {
         let spacing_z = chunk_size / (self.height - VISIBLE_OFFSET * 2 - 1) as f32;
         let xs = (x / spacing_x + VISIBLE_OFFSET as f32).max(0.0);
         let zs = (z / spacing_z + VISIBLE_OFFSET as f32).max(0.0);
-        let (xf, zf) = (xs.fract(), zs.fract());
-        let (x0, z0) = (xs as usize, zs as usize);
+        let xf = xs.fract();
+        let zf = zs.fract();
+        let x0 = xs as usize;
+        let z0 = zs as usize;
 
         // Neighbouring cells have opposite diagonals.
         if (x0 ^ z0) & 1 != 0 {
@@ -287,7 +289,8 @@ impl Terrain {
 
     /// The chunk at a world position, and the position relative to its corner.
     fn chunk_at(&self, x: f32, z: f32) -> Option<(&Chunk, f32, f32)> {
-        let (cx, cz) = ((x / self.chunk_size).floor(), (z / self.chunk_size).floor());
+        let cx = (x / self.chunk_size).floor();
+        let cz = (z / self.chunk_size).floor();
         let chunk = self.chunks.get(&(cx as i16, cz as i16))?;
         Some((chunk, x - cx * self.chunk_size, z - cz * self.chunk_size))
     }
@@ -298,8 +301,10 @@ impl Terrain {
     pub fn normal_at(&self, x: f32, z: f32) -> Option<Vec3> {
         let height = |x, z| self.height_at(x, z);
         let center = height(x, z)?;
-        let (east, west) = (height(x + NORMAL_STEP, z).unwrap_or(center), height(x - NORMAL_STEP, z).unwrap_or(center));
-        let (north, south) = (height(x, z + NORMAL_STEP).unwrap_or(center), height(x, z - NORMAL_STEP).unwrap_or(center));
+        let east = height(x + NORMAL_STEP, z).unwrap_or(center);
+        let west = height(x - NORMAL_STEP, z).unwrap_or(center);
+        let north = height(x, z + NORMAL_STEP).unwrap_or(center);
+        let south = height(x, z - NORMAL_STEP).unwrap_or(center);
         Some(Vec3::new(west - east, 2.0 * NORMAL_STEP, south - north).normalize())
     }
 

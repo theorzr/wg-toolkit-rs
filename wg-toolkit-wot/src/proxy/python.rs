@@ -38,7 +38,8 @@ impl Requests {
     pub fn on_base_call(&mut self, method: &str, args: &[Value]) -> Option<String> {
 
         if method == "requestToken" {
-            let (id, ty) = (int_arg(args, 0)?, int_arg(args, 1)?);
+            let id = int_arg(args, 0)?;
+            let ty = int_arg(args, 1)?;
             let label = token_label(ty);
             self.tokens.insert(id, Pending { label: label.clone(), sent: Instant::now() });
             return Some(format!("token #{id} {label} requested"));
@@ -48,7 +49,8 @@ impl Requests {
         if !method.starts_with("doCmd") {
             return None;
         }
-        let (id, code) = (int_arg(args, 0)?, int_arg(args, 1)?);
+        let id = int_arg(args, 0)?;
+        let code = int_arg(args, 1)?;
         let label = i16::try_from(code).ok().and_then(ac::command_name)
             .map(str::to_string)
             .unwrap_or_else(|| format!("CMD {code}"));
@@ -76,7 +78,8 @@ impl Requests {
         match method {
             "onCmdResponse" | "onCmdResponseExt" => {
 
-                let (id, code) = (int_arg(args, 0)?, int_arg(args, 1)?);
+                let id = int_arg(args, 0)?;
+                let code = int_arg(args, 1)?;
                 let code = i16::try_from(code).ok();
                 let result = code.and_then(ac::result_name).map(str::to_string)
                     .unwrap_or_else(|| format!("result {}", int_arg(args, 1).unwrap_or_default()));
@@ -102,7 +105,8 @@ impl Requests {
 
             }
             "onTokenReceived" => {
-                let (id, ty) = (int_arg(args, 0)?, int_arg(args, 1)?);
+                let id = int_arg(args, 0)?;
+                let ty = int_arg(args, 1)?;
                 let elapsed = self.tokens.remove(&id)
                     .map(|p| format!(" after {} ms", p.sent.elapsed().as_millis()))
                     .unwrap_or_default();

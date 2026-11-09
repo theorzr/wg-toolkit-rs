@@ -536,7 +536,8 @@ mod tests {
         let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
         let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         // As if it hit something 100 m on.
-        (shot.end, shot.end_velocity) = (Vec3::Z * 100.0, Vec3::Z * 800.0);
+        shot.end = Vec3::Z * 100.0;
+        shot.end_velocity = Vec3::Z * 800.0;
         let off = shot.ricochet(Vec3::X, 0.75, None, &[]).unwrap();
         assert_eq!((off.id, off.ricochets, off.flown), (shot.id, 1, 100.0));
         assert!(off.start.distance(shot.end) < 0.01 && off.start.z < 100.0, "{}", off.start);
@@ -713,7 +714,10 @@ mod tests {
         let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
         // A plate 3 m in front of the hull's origin, the hull 100 m ahead.
         let plate = |triangles| CollisionModel { groups: vec![ArmorGroup { name: "armor_1".into(), material_kind: 1, material: None, triangles }], radius: 5.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
-        let (a, b, c, d) = (Vec3::new(-2.0, -1.0, -3.0), Vec3::new(2.0, -1.0, -3.0), Vec3::new(2.0, 1.0, -3.0), Vec3::new(-2.0, 1.0, -3.0));
+        let a = Vec3::new(-2.0, -1.0, -3.0);
+        let b = Vec3::new(2.0, -1.0, -3.0);
+        let c = Vec3::new(2.0, 1.0, -3.0);
+        let d = Vec3::new(-2.0, 1.0, -3.0);
         let collision = VehicleCollision {
             parts: [plate(vec![]), plate(vec![[a, b, c], [a, c, d]]), plate(vec![]), plate(vec![])],
             hull_position: Vec3::ZERO,

@@ -185,7 +185,8 @@ impl StaticScene {
     /// each once: each cell reports those whose overlap with the box starts in it.
     pub fn triangles_in(&self, kind: BodyKind, min: Vec3, max: Vec3) -> impl Iterator<Item = &StaticTriangle> {
         let grid = &self.grids[kind as usize];
-        let (first, last) = (cell_of(min.xz()), cell_of(max.xz()));
+        let first = cell_of(min.xz());
+        let last = cell_of(max.xz());
         (first.x..=last.x)
             .flat_map(move |x| (first.y..=last.y).map(move |z| IVec2::new(x, z)))
             .flat_map(move |cell| grid.get(&cell).into_iter().flatten().map(move |&index| (cell, index)))
@@ -200,7 +201,8 @@ impl StaticScene {
     /// The triangles of a body kind above or below a point of the ground plane, each
     /// with its height there.
     pub fn triangles_at(&self, kind: BodyKind, point: Vec2) -> impl Iterator<Item = (&StaticTriangle, f32)> {
-        let (min, max) = (Vec3::new(point.x, f32::MIN, point.y), Vec3::new(point.x, f32::MAX, point.y));
+        let min = Vec3::new(point.x, f32::MIN, point.y);
+        let max = Vec3::new(point.x, f32::MAX, point.y);
         self.triangles_in(kind, min, max)
             .filter_map(move |triangle| Some((triangle, triangle.height_at(point)?)))
     }

@@ -31,7 +31,8 @@ pub fn compressed_mesh_triangles(shape: Node) -> Option<Vec<[Vec3; 3]>> {
     for section in tree.get("sections")?.elements()? {
 
         let parms = section.get("codecParms")?.as_f32s::<6>()?;
-        let (offset, scale) = (Vec3::from_slice(&parms[..3]), Vec3::from_slice(&parms[3..]));
+        let offset = Vec3::from_slice(&parms[..3]);
+        let scale = Vec3::from_slice(&parms[3..]);
         let first_packed = int(section.get("firstPackedVertexIndex"))? as usize;
         let num_packed = int(section.get("numPackedVertices"))? as usize;
         let first_shared = int(section.get("firstSharedVertexIndex"))? as usize;

@@ -340,7 +340,10 @@ mod tests {
 
     /// A square plate across `z`, 4 m wide, in a group of its own.
     fn plate(z: f32, material: Material) -> ArmorGroup {
-        let (a, b, c, d) = (Vec3::new(-2.0, -2.0, z), Vec3::new(2.0, -2.0, z), Vec3::new(2.0, 2.0, z), Vec3::new(-2.0, 2.0, z));
+        let a = Vec3::new(-2.0, -2.0, z);
+        let b = Vec3::new(2.0, -2.0, z);
+        let c = Vec3::new(2.0, 2.0, z);
+        let d = Vec3::new(-2.0, 2.0, z);
         ArmorGroup { name: "armor".into(), material_kind: 1, material: Some(material), triangles: vec![[a, b, c], [a, c, d]] }
     }
 
@@ -442,7 +445,8 @@ mod tests {
         ].map(Affine3A::from_translation);
         let fire = |shot: &ShotDef, at: &VehicleDef, height: f32| {
             let transforms = placed(at);
-            let (from, to) = (Vec3::new(0.0, height, 100.0), Vec3::new(0.0, height, -10.0));
+            let from = Vec3::new(0.0, height, 100.0);
+            let to = Vec3::new(0.0, height, -10.0);
             let first = at.collision.first_hit(&transforms, from, to).unwrap();
             let point = from.lerp(to, first.fraction);
             hit(shot, 100.0, 1.0, point, to - from, &at.collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap()

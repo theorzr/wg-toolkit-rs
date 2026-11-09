@@ -144,6 +144,8 @@ struct BattleVehicle {
     spotted: bool,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
+    /// The `isStrafing` last sent, see [`STRAFING_SLIDE`].
+    strafing: bool,
     /// Its `damageStickers`: where shells pierced it.
     damage_stickers: Vec<HitPoint>,
     /// Its fire, with the game time it goes out at, see [`FIRE_DURATION`].
@@ -206,7 +208,8 @@ impl BaseThread {
         let Some(config) = self.battle_clients.get(&client).map(|c| c.config.clone()) else { return Ok(()) };
         let mut world = World::new(self.space.clone(), Some(self.map.bounds));
         let own = self.create_player_vehicle(&mut world, avatar, space, &config, name)?;
-        let (own_id, own_descr) = (own.entity.id(), own.info.compDescr.0.clone());
+        let own_id = own.entity.id();
+        let own_descr = own.info.compDescr.0.clone();
         let hull = &world.vehicle(own.id).hull;
         
         let start = Start { 
@@ -357,6 +360,7 @@ impl BaseThread {
             max_health: config.max_health.into(),
             spotted: true,
             engine_mode: None,
+            strafing: false,
             damage_stickers: Vec::new(),
             fire: None,
         })
@@ -448,6 +452,7 @@ impl BaseThread {
             max_health: def.max_health.into(),
             spotted: false,
             engine_mode: None,
+            strafing: false,
             damage_stickers: Vec::new(),
             fire: None,
         })
@@ -793,6 +798,20 @@ impl BaseThread {
         for index in 0..vehicles.len() {
 
             let enemy = nearest_enemy(vehicles, world, index);
+
+            let shoved = &world.vehicle(vehicles[index].id).hull;
+            if matches!(vehicles[index].controller, Controller::Bot(_)) && (shoved.speed != 0.0 || shoved.slide != 0.0) {
+                debug!(
+                    %client,
+                    entity_id = %vehicles[index].entity.id(),
+                    position = ?shoved.position,
+                    yaw = shoved.direction.z,
+                    speed = shoved.speed,
+                    slide = shoved.slide,
+                    "Shoved a bot",
+                );
+            }
+
             spot(app, client, &mut vehicles[index], world, own)?;
             if !vehicles[index].alive() {
                 let (entity, hull) = (vehicles[index].entity, &world.vehicle(vehicles[index].id).hull);
@@ -946,18 +965,28 @@ fn spot(app: &mut base::App, client: ClientKey, vehicle: &mut BattleVehicle, wor
 }
 
 /// Give the clients a vehicle as it is: where it is, its gun's angles, and its engine's
-/// mode once it changes.
+/// mode and whether it slides sideways once they change.
 fn show_vehicle(app: &mut base::App, vehicle: &mut BattleVehicle, driven: &Vehicle) -> io::Result<()> {
+
     let Vehicle { hull, turret } = driven;
     app.set_position(vehicle.entity, hull.position, hull.direction)?;
     let mut view = app.entity(vehicle.entity)?;
     view.set_gunAnglesPacked(turret.gun_angles_packed())?;
+
     let mode = hull.engine_mode();
     if vehicle.engine_mode != Some(mode) {
         vehicle.engine_mode = Some(mode);
         view.set_engineMode(mode)?;
     }
+
+    let strafing = hull.slide.abs() > STRAFING_SLIDE;
+    if vehicle.strafing != strafing {
+        vehicle.strafing = strafing;
+        view.set_isStrafing(strafing)?;
+    }
+
     Ok(())
+
 }
 
 /// Give the client driving a vehicle what only it knows of it: its server reticle, from
@@ -1060,6 +1089,13 @@ fn vehicle_info(id: EntityId, public: &PublicVehicleInfo, account_dbid: u64) -> 
     }
 }
 
+/// How fast a vehicle slides across its heading, in m/s, before the clients are told it
+/// is strafing: their filter, which models its tracks, otherwise holds it back from
+/// sliding, and draws it metres behind where it is shoved. Fitted on the collisions
+/// capture, where the real server sets `isStrafing` on the ticks the player's vehicle
+/// moves sideways faster than 0.03 to 0.05 m/s, pushed, skidding or sliding down a slope.
+const STRAFING_SLIDE: f32 = 0.04;
+
 /// How much a shell's damage varies, either way, as a share of it.
 const DAMAGE_SPREAD: f32 = 0.25;
 
@@ -1130,7 +1166,8 @@ const FIRE_DURATION: f64 = 5.0;
 /// behind its base, facing the enemy's spawn, inside the map and on the ground.
 fn team_start(map: &ArenaTypeDef, terrain: &Terrain, team: u8) -> Start {
     let at = |spawn: Spawn| match spawn { Spawn::Point(at) | Spawn::Base(at) => at };
-    let (own, enemy) = (map.spawns[team as usize - 1], map.spawns[2 - team as usize]);
+    let own = map.spawns[team as usize - 1];
+    let enemy = map.spawns[2 - team as usize];
     let forward = (at(enemy) - at(own)).normalize_or_zero();
     let at = match own {
         Spawn::Point(at) => at,
@@ -1150,18 +1187,23 @@ fn spawn_start(at: Vec2, yaw: f32, terrain: &Terrain) -> Start {
     let height = terrain.height_at(at.x, at.y).unwrap_or(0.0);
     // In [-pi, pi) as angles are packed.
     let yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-    Start { position: Vec3::new(at.x, height, at.y), direction: Vec3::new(0.0, 0.0, yaw) }
+    Start {
+        position: Vec3::new(at.x, height, at.y),
+        direction: Vec3::new(0.0, 0.0, yaw),
+    }
 }
 
 /// Where a team's vehicle of this slot starts, from its team's start: the first there,
 /// the next ones beside it, either side in turn, in rows of [`SLOT_ROW`], each behind
 /// the last, on the ground.
 fn slot_start(start: Start, slot: u32, terrain: &Terrain) -> Start {
-    let (row, column) = (slot / SLOT_ROW, slot % SLOT_ROW);
+    let row = slot / SLOT_ROW;
+    let column = slot % SLOT_ROW;
     let side = (column + 1) / 2;
     let side = if column % 2 == 1 { side as f32 } else { -(side as f32) };
     let yaw = start.direction.z;
-    let (forward, right) = (Vec3::new(yaw.sin(), 0.0, yaw.cos()), Vec3::new(yaw.cos(), 0.0, -yaw.sin()));
+    let forward = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+    let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
     let mut position = start.position + right * side * SLOT_SPACING - forward * row as f32 * ROW_SPACING;
     position.y = terrain.height_at(position.x, position.z).unwrap_or(position.y);
     Start { position, direction: start.direction }
@@ -1309,7 +1351,11 @@ fn fill_targets(targets: &mut Vec<HitTarget>, vehicles: &[BattleVehicle], world:
 /// A vehicle as shells hit it: its collision models where its parts are.
 fn hit_target(vehicle: &BattleVehicle, world: &World) -> HitTarget {
     let collision = vehicle.collision.clone();
-    HitTarget { entity_id: vehicle.entity.id().0, transforms: world.vehicle(vehicle.id).part_transforms(collision.hull_position), collision }
+    HitTarget {
+        entity_id: vehicle.entity.id().0,
+        transforms: world.vehicle(vehicle.id).part_transforms(collision.hull_position),
+        collision,
+    }
 }
 
 /// A shell's damage, varied by up to [`DAMAGE_SPREAD`] either way.

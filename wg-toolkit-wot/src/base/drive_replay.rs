@@ -151,7 +151,8 @@ impl Other<'_> {
         let velocity = (at.position - before.position).with_y(0.0) / (at.t - before.t).max(1e-3) as f32;
         let heading = Vec3::new(at.direction.z.sin(), 0.0, at.direction.z.cos());
         let right = Vec3::new(at.direction.z.cos(), 0.0, -at.direction.z.sin());
-        (vehicle.hull.speed, vehicle.hull.slide) = (velocity.dot(heading), velocity.dot(right));
+        vehicle.hull.speed = velocity.dot(heading);
+        vehicle.hull.slide = velocity.dot(right);
         Some(vehicle)
     }
 
@@ -189,7 +190,11 @@ fn parse(csv: &str) -> Drive {
         if let Some(other) = line.strip_prefix("# other,") {
             let (id, descr) = other.split_once(',').unwrap();
             let descr = descr.split(',').map(|byte| byte.parse().unwrap()).collect();
-            drive.others.push(OtherTrack { id: id.parse().unwrap(), descr, updates: Vec::new() });
+            drive.others.push(OtherTrack {
+                id: id.parse().unwrap(),
+                descr,
+                updates: Vec::new(),
+            });
             continue;
         }
         if line.starts_with('#') {
@@ -284,7 +289,8 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
     let mut start = 1;
     while start < updates.len() {
 
-        let (before, from) = (updates[start - 1], updates[start]);
+        let before = updates[start - 1];
+        let from = updates[start];
         let end = updates[start..].iter().position(|update| update.t >= from.t + window).map(|offset| start + offset);
         let Some(end) = end else { break };
         let next = end;
@@ -343,7 +349,8 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
 /// How far the hull settled where the real vehicle was tilts from it: the median and 90th
 /// percentile pitch and roll errors, in degrees, over the positions on its terrain.
 fn tilt_errors(drive: &Drive, mobility: MobilityDef, space: &Space) -> [(f32, f32); 2] {
-    let (mut pitch, mut roll) = (Vec::new(), Vec::new());
+    let mut pitch = Vec::new();
+    let mut roll = Vec::new();
     for update in &drive.updates {
         let mut hull = Hull::new(update.position, update.direction, mobility);
         hull.direction.x = f32::NAN;
@@ -395,7 +402,14 @@ fn hull_follows_the_real_server() {
             .map(|other| {
                 let decoded = VehicleDescr::decode(&other.descr).unwrap();
                 let def = VehicleDef::load_by_id(&res, decoded.nation, decoded.type_id).unwrap();
-                Other { mobility: MobilityDef { weight: OTHER_WEIGHT, ..def.mobility }, aiming: def.aiming, updates: &other.updates }
+                Other {
+                    mobility: MobilityDef {
+                        weight: OTHER_WEIGHT,
+                        ..def.mobility
+                    },
+                    aiming: def.aiming,
+                    updates: &other.updates,
+                }
             })
             .collect::<Vec<_>>();
         for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {

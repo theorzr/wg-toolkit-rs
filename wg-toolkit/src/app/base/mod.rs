@@ -1667,7 +1667,9 @@ impl Witness {
             let own = cell.is_controlled_by(self.entity);
             let client_data = visible_properties(state, dispatch, own, false).encode(&dispatch.properties)?;
 
-            let (roll, pitch, yaw) = (cell.direction.x, cell.direction.y, cell.direction.z);
+            let roll = cell.direction.x;
+            let pitch = cell.direction.y;
+            let yaw = cell.direction.z;
             match known.alias {
                 Some(_) => out.write_simple(client::element::CreateEntity {
                     entity_id: known.entity.id,

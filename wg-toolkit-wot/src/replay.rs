@@ -167,7 +167,8 @@ fn start_round_trip_check() -> Rc<RefCell<BTreeMap<&'static str, RoundTripStats>
 fn split_pickles(data: &[u8]) -> (Vec<&[u8]>, Vec<pickle::Value>) {
     let mut around = Vec::new();
     let mut values = Vec::new();
-    let (mut at, mut search) = (0, 0);
+    let mut at = 0;
+    let mut search = 0;
     while let Some(start) = data[search..].windows(2).position(|w| w == [0x80, 0x02]).map(|i| search + i) {
         let Ok((value, len)) = pickle::from_bytes_prefix(&data[start..]) else {
             search = start + 1;
@@ -196,7 +197,8 @@ fn describe_difference(original: &[u8], encoded: &[u8]) -> String {
         return format!("{} pickles read, {} encoded", values_a.len(), values_b.len());
     }
     if let Some(i) = around_a.iter().zip(&around_b).position(|(a, b)| a != b) {
-        let (a, b) = (around_a[i], around_b[i]);
+        let a = around_a[i];
+        let b = around_b[i];
         let at = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
         return format!("bytes around the pickles, part {i}, from offset {at}: read {} encoded {}",
             hex(&a[at..a.len().min(at + 24)]), hex(&b[at..b.len().min(at + 24)]));
@@ -226,7 +228,8 @@ fn preview(value: Option<&pickle::Value>) -> String {
 /// Whether two bodies only differ in how their pickles are laid out, see
 /// [`RoundTripStats::pickle_equal`].
 fn pickle_equal(original: &[u8], encoded: &[u8]) -> bool {
-    let (a, b) = (split_pickles(original), split_pickles(encoded));
+    let a = split_pickles(original);
+    let b = split_pickles(encoded);
     !a.1.is_empty() && a == b
 }
 

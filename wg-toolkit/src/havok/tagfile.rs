@@ -83,7 +83,10 @@ impl Tagfile {
             return Err(DeError::InvalidMagic);
         }
 
-        let (mut sdk_version, mut data, mut type_sections, mut index) = (None, None, None, None);
+        let mut sdk_version = None;
+        let mut data = None;
+        let mut type_sections = None;
+        let mut index = None;
         for section in sections(root) {
             match section? {
                 (tag, content) if tag == *b"SDKV" => sdk_version = Some(String::from_utf8_lossy(content).into_owned()),
@@ -94,7 +97,10 @@ impl Tagfile {
             }
         }
 
-        let (mut type_strings, mut field_strings, mut type_names, mut type_bodies) = (None, None, None, None);
+        let mut type_strings = None;
+        let mut field_strings = None;
+        let mut type_names = None;
+        let mut type_bodies = None;
         for section in sections(type_sections.ok_or(DeError::MissingSection("TYPE"))?) {
             match section? {
                 (tag, content) if tag == *b"TST1" => type_strings = Some(strings(content)),

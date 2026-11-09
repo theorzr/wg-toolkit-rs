@@ -210,7 +210,8 @@ impl VehicleCollision {
             .zip(transforms)
             .flat_map(move |((part, model), transform)| {
                 let inverse = transform.inverse();
-                let (local_from, local_to) = (inverse.transform_point3(from), inverse.transform_point3(to));
+                let local_from = inverse.transform_point3(from);
+                let local_to = inverse.transform_point3(to);
                 model.hits(local_from, local_to).map(move |hit| {
                     let group = &model.groups[hit.group];
                     VehicleHit {
@@ -238,11 +239,13 @@ impl VehicleHit {
     /// the part's index and `context`, a `VEHICLE_HIT_EFFECT` for a hit point.
     pub fn encode_segment(&self, [min, max]: [Vec3; 2], context: u8) -> u64 {
         let reach = (max - min).length();
-        let (from, to) = (self.local_point - self.local_direction * reach, self.local_point + self.local_direction * reach);
+        let from = self.local_point - self.local_direction * reach;
+        let to = self.local_point + self.local_direction * reach;
         let header = (self.part as u64) << 8 | u64::from(context);
         let Some((enter, exit)) = clip_to_box(from, to, min, max) else { return header };
         let quantize = |point: Vec3| ((point - min) * 255.0 / (max - min)).round().clamp(Vec3::ZERO, Vec3::splat(255.0));
-        let (a, b) = (quantize(from.lerp(to, enter)), quantize(from.lerp(to, exit)));
+        let a = quantize(from.lerp(to, enter));
+        let b = quantize(from.lerp(to, exit));
         (b.z as u64) << 56 | (b.y as u64) << 48 | (b.x as u64) << 40
             | (a.z as u64) << 32 | (a.y as u64) << 24 | (a.x as u64) << 16
             | header
@@ -253,7 +256,8 @@ impl VehicleHit {
 /// The fractions of a segment where it enters and leaves a box, if it crosses it.
 fn clip_to_box(from: Vec3, to: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
     let delta = to - from;
-    let (mut enter, mut exit) = (0.0f32, 1.0f32);
+    let mut enter = 0.0f32;
+    let mut exit = 1.0f32;
     for axis in 0..3 {
         if delta[axis].abs() < 1e-9 {
             if from[axis] < min[axis] || from[axis] > max[axis] {
@@ -261,7 +265,8 @@ fn clip_to_box(from: Vec3, to: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)>
             }
             continue;
         }
-        let (a, b) = ((min[axis] - from[axis]) / delta[axis], (max[axis] - from[axis]) / delta[axis]);
+        let a = (min[axis] - from[axis]) / delta[axis];
+        let b = (max[axis] - from[axis]) / delta[axis];
         enter = enter.max(a.min(b));
         exit = exit.min(a.max(b));
         if enter > exit {
@@ -283,13 +288,17 @@ impl fmt::Debug for CollisionModel {
 
 /// The point of a triangle closest to `point` (Ericson, Real-Time Collision Detection).
 fn closest_on_triangle(point: Vec3, &[a, b, c]: &[Vec3; 3]) -> Vec3 {
-    let (ab, ac, ap) = (b - a, c - a, point - a);
-    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    let ab = b - a;
+    let ac = c - a;
+    let ap = point - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
     if d1 <= 0.0 && d2 <= 0.0 {
         return a;
     }
     let bp = point - b;
-    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
     if d3 >= 0.0 && d4 <= d3 {
         return b;
     }
@@ -298,7 +307,8 @@ fn closest_on_triangle(point: Vec3, &[a, b, c]: &[Vec3; 3]) -> Vec3 {
         return a + ab * (d1 / (d1 - d3));
     }
     let cp = point - c;
-    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
     if d6 >= 0.0 && d5 <= d6 {
         return c;
     }
@@ -317,7 +327,8 @@ fn closest_on_triangle(point: Vec3, &[a, b, c]: &[Vec3; 3]) -> Vec3 {
 /// Where a segment from `from` along `delta` crosses a triangle, either face, as a
 /// fraction of it, with the triangle's normal facing `from` (Möller–Trumbore).
 fn segment_triangle(from: Vec3, delta: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<(f32, Vec3)> {
-    let (ab, ac) = (*b - *a, *c - *a);
+    let ab = *b - *a;
+    let ac = *c - *a;
     let p = delta.cross(ac);
     let det = ab.dot(p);
     if det.abs() < 1e-12 {
