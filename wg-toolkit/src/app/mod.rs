@@ -24,10 +24,10 @@ pub mod dispatch;
 pub mod entity;
 pub mod nrl;
 
+pub mod slots;
 pub mod math;
 mod bit;
 mod outbox;
-mod slots;
 
 pub mod client;
 pub mod base;

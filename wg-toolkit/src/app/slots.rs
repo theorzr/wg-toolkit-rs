@@ -71,6 +71,18 @@ impl<T> Slots<T> {
             .filter_map(|(index, slot)| Some((SlotKey { index: index as u32, generation: slot.generation }, slot.value.as_mut()?)))
     }
 
+    /// Call a function on every pair of values, each pair once, in the order of their
+    /// slots.
+    pub fn for_each_pair_mut(&mut self, mut f: impl FnMut(&mut T, &mut T)) {
+        for index in 0..self.slots.len() {
+            let (head, tail) = self.slots.split_at_mut(index + 1);
+            let Some(first) = head[index].value.as_mut() else { continue };
+            for second in tail.iter_mut().filter_map(|slot| slot.value.as_mut()) {
+                f(first, second);
+            }
+        }
+    }
+
     pub fn remove(&mut self, key: SlotKey) -> Option<T> {
         let slot = self.slots.get_mut(key.index as usize).filter(|slot| slot.generation == key.generation)?;
         let value = slot.value.take()?;
@@ -85,6 +97,16 @@ impl<T> Slots<T> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn pairs_skip_removed_values() {
+        let mut slots = Slots::default();
+        let keys = [1, 2, 3, 4].map(|value| slots.insert(value));
+        slots.remove(keys[1]);
+        let mut pairs = Vec::new();
+        slots.for_each_pair_mut(|a, b| pairs.push((*a, *b)));
+        assert_eq!(pairs, [(1, 3), (1, 4), (3, 4)]);
+    }
 
     #[test]
     fn a_removed_value_is_not_reached_through_its_slot() {

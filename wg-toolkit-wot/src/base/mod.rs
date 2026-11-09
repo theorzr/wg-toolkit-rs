@@ -143,7 +143,7 @@ impl BaseThread {
             required_version,
             game_dir: game_dir.to_path_buf(),
             map,
-            space,
+            space: Arc::new(space),
             battle_options,
             players: HashMap::new(),
             accounts: HashMap::new(),
@@ -175,7 +175,7 @@ pub struct BaseThread {
     game_dir: PathBuf,
     /// The battles' map, and its space.
     map: ArenaTypeDef,
-    space: Space,
+    space: Arc<Space>,
     /// Who the battles have besides the player.
     battle_options: BattleOptions,
     /// Each logged in client's player.
