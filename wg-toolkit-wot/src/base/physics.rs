@@ -27,7 +27,8 @@
 //!   │     │    ├─ ram               damage and break destructibles      (if it moved)
 //!   │     │    ├─ push_out          stop against walls                  (if it moved)
 //!   │     │    ├─ keep_within       stop at the map's edge
-//!   │     │    └─ settle            rest on the ground, roll and pitch  (if it moved)
+//!   │     │    └─ settle            rest on the ground, roll and pitch,
+//!   │     │                         or fall off it                      (if it moved)
 //!   │     └─ Turret::step     turn toward the aim, update the dispersion
 //!   │
 //!   ├─ 3. collide(dt), up to 3 passes over every pair of vehicles
@@ -125,8 +126,8 @@
 //!
 //! # The ground (`settle`, `ground_height`)
 //!
-//! A vehicle doesn't fall: after it moves it is put back on the ground, tilted with it.
-//! Five points are looked up, the centre and the four corners of the area its tracks
+//! After it moves, a vehicle is put back on the ground, tilted with it, or falls, see
+//! below. Five points are looked up, the centre and the four corners of the area its tracks
 //! carry it on (`MobilityDef::carrying_point`), and the hull takes the centre's height
 //! and the tilt that the corners' heights give:
 //!
@@ -159,6 +160,26 @@
 //! ```
 //!
 //! If any of the five points has no ground, the hull stays where it is.
+//!
+//! The hull has a vertical speed. In a tick it would fall freely to `free`. If the
+//! ground under its centre is lower than that by more than [`GROUND_REACH`] (0.3 m, what
+//! the suspension reaches), it leaves the ground: it is `airborne`, falls, keeps its tilt,
+//! and nothing grips it, so it keeps going and turning as it went. Otherwise it rests on
+//! the ground, and its vertical speed is how fast it went down, never up, so a ramp's top
+//! doesn't throw it:
+//!
+//! ```text
+//!   free = y + vertical_speed · dt − ½ · g · dt²
+//!   ground < free − GROUND_REACH    airborne: y = free, vertical_speed −= g · dt
+//!   else                            on it:    y = ground, vertical_speed = min(Δy / dt, 0)
+//! ```
+//!
+//! Following a slope down, the vertical speed carries it down with the ground, so it
+//! stays on it. It leaves the ground off a cliff, a bridge's edge, or the crest of a
+//! steep slope taken fast. A corner whose ground is out of that reach below where the
+//! hull's tilt puts it rests on nothing and keeps that height. So a hull with its nose
+//! over a bridge's edge stays level on the deck, rather than tipping into it, until its
+//! centre leaves the deck and it falls.
 //!
 //! # Static geometry (`push_out`, `overlaps`)
 //!
@@ -352,8 +373,9 @@
 //!
 //! # What isn't modelled
 //!
-//! A vehicle doesn't fall, flip, climb on debris taller than `STEP_HEIGHT`, or sink in
-//! water: that is the real server's spring suspension, a future step. Vehicles have no
+//! A vehicle falls, but doesn't tip over an edge, flip, climb on debris taller than
+//! `STEP_HEIGHT`, take damage from a fall, or sink in water: that is the real server's
+//! spring suspension, a future step. Vehicles have no
 //! friction between them and take no damage from ramming, each other or destructibles.
 //! Trees don't fall: the client numbers them among the speed trees, which aren't
 //! decoded. What a destroyed module leaves (`BodyKind::Remains`) is never collided
@@ -386,6 +408,11 @@ const EDGE_FRICTION: f32 = 0.25;
 /// models it collides with: what is lower it drives over. Fitted roughly: the drives'
 /// real hulls went over debris and porches up to 0.76 m high.
 const STEP_HEIGHT: f32 = 0.8;
+/// How far below where it falls to in a tick its tracks still find the ground, in
+/// metres: what its suspension reaches. It follows the start of a slope and the dips of
+/// the ground rather than flying over them, and only leaves the ground off a drop, a
+/// cliff's edge or a bridge's. Our choice, not fitted.
+const GROUND_REACH: f32 = 0.3;
 /// How much of the speed a wall stops it also takes along it. Our choice, an edge's
 /// until fitted.
 const WALL_FRICTION: f32 = EDGE_FRICTION;
@@ -634,6 +661,11 @@ pub struct Hull {
     /// Turning speed hits gave it on top, in rad/s: its tracks don't drive it but hold it,
     /// see [`Self::track_friction`].
     pub spin: f32,
+    /// Vertical speed, in m/s, positive up: falling, or following the ground down, see
+    /// [`Self::settle`].
+    pub vertical_speed: f32,
+    /// Whether it is off the ground, falling: nothing grips it, see [`Self::step`].
+    pub airborne: bool,
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,
     pub mobility: MobilityDef,
@@ -649,6 +681,8 @@ impl Hull {
             slide: 0.0, 
             yaw_rate: 0.0, 
             spin: 0.0, 
+            vertical_speed: 0.0,
+            airborne: false,
             flags: 0, 
             mobility,
         }
@@ -688,7 +722,8 @@ impl Hull {
     ///        ▼
     ///   keep_within(bounds)        inside the map, speed into the edge lost
     ///        ▼   (only if it moved)
-    ///   settle                     back on the ground, rolled and pitched with it
+    ///   settle                     back on the ground, rolled and pitched with it,
+    ///                              or falling, off it
     /// ```
     ///
     /// The order matters: a wall can push the hull off the terrain it was on, so the
@@ -703,20 +738,21 @@ impl Hull {
             self.keep_within(bounds);
         }
         if moved {
-            self.settle(space);
+            self.settle(space, dt);
         }
         moved
     }
 
     /// Put it back where the map holds it after it was shoved by another vehicle: out of
     /// the static models, within the map's bounds, and on the ground, as the end of
-    /// [`Self::advance`] does. A vehicle is never shoved through a wall or off the map.
+    /// [`Self::advance`] does, but for falling: it fell for the tick already. A vehicle
+    /// is never shoved through a wall or off the map, but can be off a ledge.
     pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
         self.push_out(&space.statics, rubble);
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
-        self.settle(space);
+        self.settle(space, 0.0);
     }
 
     /// Push its collision box out of the solid static models it overlaps, on the ground
@@ -919,9 +955,21 @@ impl Hull {
     /// slowed by [`HANDBRAKE_FRICTION`] along its tracks and [`SIDE_FRICTION`] across
     /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`]. Driven
     /// into a turn, it pivots on its blocked inner track, see [`PIVOT_RADIUS`].
+    ///
+    /// In the air, nothing grips it: it keeps going and turning as it went.
     pub fn step(&mut self, dt: f32, ground: Ground) -> bool {
 
         use movement_flag::*;
+
+        if self.airborne {
+            let velocity = self.velocity();
+            self.direction.z = wrap_angle(self.direction.z + (self.yaw_rate + self.spin) * dt);
+            let (heading, right) = self.axes();
+            self.speed = velocity.dot(heading);
+            self.slide = velocity.dot(right);
+            self.position += velocity * dt;
+            return true;
+        }
 
         let ground = ground_index(ground);
         let rotation_speed = self.mobility.rotation_speed[ground];
@@ -1239,7 +1287,15 @@ impl Hull {
     ///   across: (heights on the right side − heights on the left side) / (2 · 2cx)
     ///   along:  (heights at the front − heights at the back)           / (2 · 2cy)
     /// ```
-    pub fn settle(&mut self, space: &Space) {
+    ///
+    /// Over `dt` seconds it falls as far as gravity takes it from its vertical speed. The
+    /// ground under its centre out of [`GROUND_REACH`] below that, it is off the ground
+    /// and falls, keeping its tilt; else it rests on it, following it down at the speed
+    /// it went down, never thrown up off it. A corner whose ground is out of that reach
+    /// below where the hull's tilt puts it rests on nothing, and keeps that height: a hull
+    /// with a corner over a bridge's edge stays on the deck as it was, it doesn't tip
+    /// over until its centre leaves it. With `dt` 0 it only lands, or leaves the ground.
+    pub fn settle(&mut self, space: &Space, dt: f32) {
 
         let (heading, right) = self.axes();
         let carrying = self.mobility.carrying_point;
@@ -1252,6 +1308,29 @@ impl Hull {
             let at = self.position + heading * along * carrying.y + right * across * carrying.x;
             let Some(ground) = ground_height(space, at.xz(), top) else { return };
             *height = ground;
+        }
+
+        let center = heights[0];
+        let free = self.position.y + self.vertical_speed * dt - 0.5 * GRAVITY * dt * dt;
+        if center < free - GROUND_REACH {
+            self.airborne = true;
+            self.position.y = free;
+            self.vertical_speed -= GRAVITY * dt;
+            return;
+        }
+        if dt > 0.0 {
+            self.vertical_speed = ((center - self.position.y) / dt).min(0.0);
+        }
+        self.airborne = false;
+
+        // Where its tilt puts each corner, the centre on the ground.
+        let roll_rise = carrying.x * self.direction.x.tan();
+        let pitch_rise = -carrying.y * self.direction.y.tan();
+        for (height, (along, across)) in heights.iter_mut().zip(corners).skip(1) {
+            let tilted = center + across * roll_rise + along * pitch_rise;
+            if *height < tilted - GROUND_REACH {
+                *height = tilted;
+            }
         }
 
         let [center, front_right, front_left, back_right, back_left] = heights;
@@ -2470,6 +2549,79 @@ pub(super) mod tests {
             hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         assert!(hull.position.z > 10.0 && hull.position.y == 0.0, "{}", hull.position);
+    }
+
+    /// Flat ground from z = −50 to 100, as two triangles, under `deck`: one from z = 0 to
+    /// 20, `height` high, or one that falls `drop` along z from 0 to 40, a slope.
+    fn ground_under(deck: Option<f32>, drop: f32) -> Space {
+        let mut triangles = Vec::new();
+        match deck {
+            Some(height) => {
+                quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
+                quad(&mut triangles, 0.0, 20.0, height, height);
+            }
+            None => {
+                quad(&mut triangles, -50.0, 0.0, 0.0, 0.0);
+                quad(&mut triangles, 0.0, 40.0, 0.0, -drop);
+                quad(&mut triangles, 40.0, 100.0, -drop, -drop);
+            }
+        }
+        Space {
+            statics: StaticScene::from_triangles(triangles),
+            ..Space::default()
+        }
+    }
+
+    /// Two triangles 10 m wide from z = `near` to `far`, at heights `near_y` to `far_y`.
+    fn quad(triangles: &mut Vec<StaticTriangle>, near: f32, far: f32, near_y: f32, far_y: f32) {
+        let near_left = Vec3::new(-5.0, near_y, near);
+        let near_right = Vec3::new(5.0, near_y, near);
+        let far_left = Vec3::new(-5.0, far_y, far);
+        let far_right = Vec3::new(5.0, far_y, far);
+        triangles.push(StaticTriangle::new([near_left, far_right, near_right], 0, 0, BodyKind::Solid));
+        triangles.push(StaticTriangle::new([near_left, far_left, far_right], 0, 0, BodyKind::Solid));
+    }
+
+    #[test]
+    fn falls_off_ledges() {
+        // Off a deck 5 m high at full speed, it falls for about a second, keeping its
+        // speed, and lands where it went on.
+        let space = ground_under(Some(5.0), 0.0);
+        let mut hull = chieftain();
+        hull.position = Vec3::new(0.0, 5.0, 14.0);
+        hull.speed = hull.mobility.speed_forward;
+        hull.flags = movement_flag::FORWARD;
+        let mut ticks_in_air = 0;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            if hull.airborne {
+                ticks_in_air += 1;
+                assert!(hull.position.y > 0.0 && hull.position.y < 5.0, "{}", hull.position);
+            }
+        }
+        assert!((9..=11).contains(&ticks_in_air), "{ticks_in_air} ticks");
+        assert!(!hull.airborne && hull.position.y == 0.0, "{}", hull.position);
+        assert!(hull.position.z > 40.0, "{}", hull.position);
+        // Its nose over the edge, its centre on the deck, it stays on it, level.
+        let mut hull = chieftain();
+        hull.position = Vec3::new(0.0, 5.0, 19.0);
+        hull.settle(&space, 0.1);
+        assert!(!hull.airborne && hull.position.y == 5.0 && hull.direction.y == 0.0, "{} {}", hull.position, hull.direction);
+    }
+
+    #[test]
+    fn follows_slopes_down() {
+        // Onto a 10° slope down at full speed, its tracks keep to it.
+        let space = ground_under(None, 40.0 * 10f32.to_radians().tan());
+        let mut hull = chieftain();
+        hull.position.z = -10.0;
+        hull.speed = hull.mobility.speed_forward;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..50 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            assert!(!hull.airborne, "{}", hull.position);
+        }
+        assert!(hull.position.z > 40.0, "{}", hull.position);
     }
 
     /// A Chieftain driven forward for `steps` ticks into another parked 10 m ahead, of

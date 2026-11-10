@@ -230,6 +230,8 @@ fn parse(csv: &str) -> Drive {
 #[derive(Debug, Default)]
 struct Errors {
     distance: Vec<f32>,
+    /// How far above or below the real vehicle it ends, in metres.
+    height: Vec<f32>,
     yaw: Vec<f32>,
     starts: Vec<f64>,
 }
@@ -250,9 +252,15 @@ impl Errors {
 
     fn report(&self, label: &str) {
         let (d50, d90, dmax) = Self::stats(&self.distance);
+        let (h50, h90, hmax) = Self::stats(&self.height);
         let (y50, y90, ymax) = Self::stats(&self.yaw);
-        println!("{label}: {} windows, distance {d50:.2} / {d90:.2} / {dmax:.2} m, yaw {:.1} / {:.1} / {:.1}° (median / 90% / max)",
-            self.distance.len(), y50 * 180.0 / PI, y90 * 180.0 / PI, ymax * 180.0 / PI);
+        println!(
+            "{label}: {} windows, distance {d50:.2} / {d90:.2} / {dmax:.2} m, height {h50:.2} / {h90:.2} / {hmax:.2} m, yaw {:.1} / {:.1} / {:.1}° (median / 90% / max)",
+            self.distance.len(),
+            y50 * 180.0 / PI,
+            y90 * 180.0 / PI,
+            ymax * 180.0 / PI,
+        );
     }
 
     /// The median distance error in metres and yaw error in degrees of the windows
@@ -308,6 +316,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         hull.speed = (from.position - before.position).dot(heading) / dt;
         hull.slide = (from.position - before.position).dot(right) / dt;
         hull.yaw_rate = wrap_angle(from.direction.z - before.direction.z) / dt;
+        hull.vertical_speed = (from.position.y - before.position.y) / dt;
         let controls_at = |t: f64| drive.controls.iter().rev()
             .find(|&&(at, _)| at + delay <= t)
             .map_or(0, |&(_, flags)| flags);
@@ -339,6 +348,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         let moved = (real.position - from.position).with_y(0.0).length();
         if moved >= MOVED {
             errors.distance.push((hull.position - real.position).with_y(0.0).length());
+            errors.height.push((hull.position.y - real.position.y).abs());
             errors.yaw.push(wrap_angle(hull.direction.z - real.direction.z).abs());
             errors.starts.push(from.t);
         }
@@ -357,7 +367,7 @@ fn tilt_errors(drive: &Drive, mobility: MobilityDef, space: &Space) -> [(f32, f3
     for update in &drive.updates {
         let mut hull = Hull::new(update.position, update.direction, mobility);
         hull.direction.x = f32::NAN;
-        hull.settle(space);
+        hull.settle(space, 0.0);
         if hull.direction.x.is_nan() {
             continue;
         }
