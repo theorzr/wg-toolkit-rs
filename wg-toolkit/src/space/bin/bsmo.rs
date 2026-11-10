@@ -11,7 +11,7 @@ use super::{invalid, skip_vector, SpaceSection};
 /// use.
 const UNKNOWN_VECTORS: usize = 12;
 
-/// `BSMO`: the static models [`BSMI`] places, their bounds, their
+/// `BSMO`: the static models [`BSMI`](super::BSMI) places, their bounds, their
 /// render primitives and their collision. Only its third and sixteenth vectors are
 /// known, the others are skipped.
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct BSMO {
     pub models: Vec<StaticModel>,
 }
 
-/// A static model, its strings as [`BWST`] hashes.
+/// A static model, its strings as [`BWST`](super::BWST) hashes.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticModel {
     /// Its bounding box in its own frame, minimum then maximum.

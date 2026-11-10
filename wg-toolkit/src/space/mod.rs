@@ -1,5 +1,56 @@
 //! Spaces, as the game ships them in `spaces/<name>`: their compiled space, see
 //! [`bin`], and what moves in a space needs of it, see [`Space`].
+//!
+//! # Static models and destructibles, end to end
+//!
+//! What a vehicle can hit besides the terrain is the space's *static models*: houses,
+//! rocks, fences, lamp posts, bridges. Some of them are *destructible*. Four sources
+//! describe them, and [`statics::StaticScene::load`] joins them:
+//!
+//! ```text
+//!   spaces/<map>/space.bin                           scripts/destructibles.xml
+//!   ├─ BWST  strings, by hash ───────────┐           (every map's destructibles,
+//!   ├─ BSMO  models: bounds, .havok hash ┤            by model path: kind, health,
+//!   ├─ BSMI  placed models: transform,   │            a house's modules)
+//!   │        model index, visibility     │                    │
+//!   └─ WGDE  the client's numbering:     │                    ▼
+//!            chunk → index → BSMI ids    │           destructibles::Destructibles
+//!                    │                   ▼                    │
+//!                    │        <model>.havok collision         │
+//!                    │        (bodies of triangles, each      │
+//!                    │         with a name and material kind) │
+//!                    │                   │                    │
+//!                    └──────────┬────────┴────────────────────┘
+//!                               ▼
+//!                    statics::StaticScene
+//!                    ├─ triangles, in the world, each with its BSMI instance,
+//!                    │  material kind and BodyKind (solid, ramp, destructible, remains)
+//!                    ├─ a grid of 8 m cells per BodyKind, to find them near a box
+//!                    └─ PlacedDestructible by BSMI instance: the client's
+//!                       (chunk id, index), kind, scaled health, modules
+//! ```
+//!
+//! The scene only describes the map as it was built. What breaks during a battle is
+//! kept by its physics world, see `Rubble` in `wg-toolkit-wot`'s `base::physics`.
+//!
+//! Each step, in order:
+//!
+//! 1. [`bin`] reads the sections of `space.bin`. A string is referenced by its hash
+//!    in [`bin::BWST`]. A model of [`bin::BSMO`] gives its `.havok` collision's path
+//!    that way, or none for decor nothing collides with. A placed model of
+//!    [`bin::BSMI`] is one of those models, with a transform and the gameplay types
+//!    it exists in, see [`visibility_mask`].
+//! 2. [`crate::havok::collision::Collision`] reads each model's `.havok` once: its
+//!    *bodies*, each a set of triangles with a name (`s_wall_1`, `n_wood0_1`,
+//!    `s_ramp_0`) and a material kind.
+//! 3. [`destructibles::Destructibles`] reads `scripts/destructibles.xml`: which models
+//!    are destructible, of which kind, with which health, and a house's modules.
+//! 4. [`statics::BodyKind::of`] sorts each body by its name and its model's entry.
+//!    Every triangle of every placed model visible in the battle goes into the scene,
+//!    in the world's frame.
+//! 5. [`bin::WGDE`] gives each destructible the number the client knows it by, which
+//!    the server must use to say it broke: its 100 m chunk's id and its index there.
+//!    One destructible can be several placed models, all numbered the same.
 
 pub mod bin;
 pub mod terrain;

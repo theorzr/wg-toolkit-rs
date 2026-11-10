@@ -15,6 +15,25 @@ use super::{invalid, SpaceSection};
 /// has; the second each destructible's first and last instance in the third, inclusive,
 /// none when the last comes before the first; the third the instances' indexes in
 /// `BSMI`, some with their top bit set, its meaning unknown.
+///
+/// ```text
+///   chunks                    ranges                   instances
+///   (chunk id, first, count)  (first, last) into       BSMI index
+///                             instances, inclusive     (top bit masked off)
+///   ┌──────────────┐          ┌──────────┐ index 0     ┌──────┐
+///   │ 0x8083, 0, 3 │ ───────▶ │ 0, 1     │ ──────────▶ │ 5390 │  one destructible,
+///   │ 0x8084, 3, 1 │ ──┐      │ 2, 2     │ index 1     │ 5391 │  two placed models
+///   └──────────────┘   │      │ 0, MAX   │ index 2:    │ 5387 │
+///                      │      ├──────────┤ a tree,     │ 6012 │
+///                      └────▶ │ 3, 3     │ no instance └──────┘
+///                             └──────────┘
+/// ```
+///
+/// A destructible's index within its chunk is its rank in the chunk's run of ranges:
+/// it's the `index` the client's `AreaDestructibles` lists use. The ids and indexes
+/// above are an example, not a real map's. The numbering was checked on the Graf
+/// Zeppelin capture: the six things the real server said a driving Pershing broke all
+/// matched.
 #[derive(Debug)]
 pub struct WGDE {
     pub destructibles: Vec<Destructible>,

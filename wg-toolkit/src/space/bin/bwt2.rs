@@ -6,7 +6,7 @@ use super::{expect_single, skip_vector, SpaceSection};
 
 
 /// `BWT2`: the terrain's settings and chunks, whose heights and grounds are in their
-/// `cdata_processed` archives, see [`super::terrain`].
+/// `cdata_processed` archives, see [`crate::space::terrain`].
 #[derive(Debug)]
 pub struct BWT2 {
     pub settings1: TerrainSettings1,

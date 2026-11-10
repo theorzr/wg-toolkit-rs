@@ -3,6 +3,64 @@
 //! `DestructiblesCache.py`: `trees`, `fallingAtoms` (lamp posts, poles) and `fragiles`
 //! (benches, fences, barrels) are destructible whole, `structures` (houses) by modules,
 //! each a body of their collision by its name, `n_wood0_1_5` say.
+//!
+//! # The file
+//!
+//! One file for every map, each entry naming its model. Only what the server needs to
+//! break things is read here; the effects and the physics of a falling piece are the
+//! client's.
+//!
+//! ```text
+//!   <unitVehicleMass> 35000 </unitVehicleMass>      health is measured against it
+//!   <fragiles>
+//!     <entry>
+//!       <filename> content/…/fence_01.model </filename>
+//!       <health> 10 </health>
+//!     </entry> …
+//!   </fragiles>
+//!   <fallingAtoms> … </fallingAtoms>                the same, lamp posts and poles
+//!   <trees> … </trees>                              the same, speed trees
+//!   <structures>
+//!     <entry>
+//!       <filename> content/…/house_03.model </filename>
+//!       <modules>
+//!         <module> <matName> n_wood0_1 </matName>   <health> 50 </health> </module>
+//!         <module> <matName> n_wood0_2_1 </matName> <health> 35 </health> </module>
+//!       </modules>
+//!     </entry> …
+//!   </structures>
+//! ```
+//!
+//! A model is keyed by its path without extension, in lower case, see `stem`. Its
+//! `.model` (as listed) and its `.havok` (as `space.bin` gives it) then share a key.
+//!
+//! # A structure's modules
+//!
+//! A module's `matName` is also the name of its collision body:
+//! `<type>_<surface>_<id>[_<depends>…]`. In `n_wood0_2_1`, `n` is the type, `wood0`
+//! the surface, `2` the id, and `1` the one module it lists. Its *material kind* is the
+//! number the client knows it by, and the number its collision's bodies carry: 73 for
+//! the module with the lowest id, then one more for each id in order, see
+//! [`FIRST_MODULE_MATERIAL_KIND`]. Ids need not follow each other: with ids 1, 2 and 5,
+//! the kinds are 73, 74 and 75.
+//!
+//! ```text
+//!   matName        id   lists   material kind   breaking it also breaks
+//!   n_wood0_1      1    –       73              –
+//!   n_wood0_2_1    2    1       74              n_wood0_1 (73)
+//! ```
+//!
+//! [`Module::depends`] is what the client's `destroyDepends` is: the modules a module
+//! lists, and theirs, as far as the chain goes, each breaking with it. The client also
+//! keeps the inverse, `inversedDestroyDepends`. No capture has shown yet which of the
+//! two the real server applies when a module breaks.
+//!
+//! # Health
+//!
+//! A destructible's health is at a scale of 1. A model placed larger is stronger, by
+//! the square of its scale, see [`scaled_health`]. A vehicle's ram damage is measured
+//! in units of [`Destructibles::unit_vehicle_mass`], so a 35 t tank and a 70 t tank
+//! break things in the ratio of their weights.
 
 use std::collections::HashMap;
 use std::io;
@@ -63,7 +121,8 @@ pub struct Module {
     /// structure's module ids.
     pub material_kind: u8,
     pub health: f32,
-    /// The material kinds of the modules it brings down with it, as far as they go.
+    /// The material kinds of the modules it brings down with it, as far as they go: the
+    /// client's `destroyDepends`, see the module's docs.
     pub depends: Vec<u8>,
 }
 

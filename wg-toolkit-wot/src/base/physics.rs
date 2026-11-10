@@ -8,7 +8,7 @@
 //! # The big picture
 //!
 //! A [`World`] holds the [`Vehicle`]s of one battle, on its map's [`Space`]: terrain,
-//! static models, and bounds. A vehicle is a [`Hull`] (where it is, how fast it goes and
+//! static models, and bounds, and the [`Rubble`] of what they broke in it. A vehicle is a [`Hull`] (where it is, how fast it goes and
 //! turns) and a [`Turret`] (where its gun points). Whoever drives a vehicle, a client or a
 //! bot, only sets its `hull.flags` (the `vehicle_moveWith` flags) and its turret's aim
 //! before a tick, then [`World::step`] does everything else:
@@ -24,18 +24,21 @@
 //!   ├─ 2. for every vehicle: Vehicle::step
 //!   │     ├─ Hull::advance
 //!   │     │    ├─ Hull::step        drive model: engine, ground, slope, turning
+//!   │     │    ├─ ram               damage and break destructibles      (if it moved)
 //!   │     │    ├─ push_out          stop against walls                  (if it moved)
 //!   │     │    ├─ keep_within       stop at the map's edge
 //!   │     │    └─ settle            rest on the ground, roll and pitch  (if it moved)
 //!   │     └─ Turret::step     turn toward the aim, update the dispersion
 //!   │
-//!   └─ 3. collide(dt), up to 3 passes over every pair of vehicles
+//!   ├─ 3. collide(dt), up to 3 passes over every pair of vehicles
 //!         for a pair whose 3D boxes overlap:
 //!         ├─ 4. find where they first touched in the tick, put both back there
 //!         ├─ 5. push them apart, each by the other's share of their weight
 //!         ├─ 6. exchange an impulse at the contact: speeds and spin
 //!         ├─ 7. let both go on for what was left of the tick at their new speeds
-//!         └─ 8. keep_on_map for both: walls, edge, ground again
+//!   │     └─ 8. keep_on_map for both: walls, edge, ground again
+//!   │
+//!   └─ then the battle takes what broke, World::take_breakages, to tell its clients
 //! ```
 //!
 //! Nothing in a step allocates: boxes, outlines and polygons live on the stack
@@ -159,7 +162,8 @@
 //!
 //! # Static geometry (`push_out`, `overlaps`)
 //!
-//! The map's solid models are triangles in a grid ([`StaticScene`]). The hull's box is
+//! The map's solid models, and the destructible walls still standing (see below), are
+//! triangles in a grid ([`StaticScene`]). The hull's box is
 //! tested against the triangles that are *walls* (within [`WALL_ANGLE`], 50°, of
 //! vertical; flatter ones are ground), but only against the part of each triangle in a
 //! *band* of heights, in the hull's own frame (so a tilted hull's nose clears higher):
@@ -188,6 +192,56 @@
 //! The map's edge is the same idea with 4 planes ([`Hull::keep_within`]): the centre
 //! stays [`BOUNDS_MARGIN`] inside, the speed into the edge is removed, and the rest
 //! slows by [`EDGE_FRICTION`].
+//!
+//! # Destructibles (`ram`, `Rubble`)
+//!
+//! The [`StaticScene`] is the map as built and never changes. What broke during the
+//! battle is the world's [`Rubble`]. A [`Piece`] is what the client numbers: a
+//! destructible by its chunk's id and its index there, and for a house, which module,
+//! by its material kind. A house can be placed as several models, all of them the same
+//! piece, so breaking one breaks the others with it.
+//!
+//! ```text
+//!   a triangle the hull touches, of kind Destructible
+//!     │ triangle.instance
+//!     ▼
+//!   statics.destructible(instance) ──▶ PlacedDestructible { chunk_id, index, kind, … }
+//!     │                                   │ a house: its module by triangle.material_kind
+//!     ▼                                   ▼
+//!   Piece { chunk_id, index, module } ──▶ in rubble.broken?  yes: it is gone, ignored
+//!                                                            no:  it stands
+//! ```
+//!
+//! What a piece still standing does depends on its kind:
+//!
+//! - A **house's module** blocks like a wall ([`Rubble::blocks`], in `push_out`) until
+//!   it breaks.
+//! - A **fence, post or barrel** never blocks. The hull drives into it, damaging it on
+//!   each tick it overlaps it, until it breaks.
+//! - A destructible body of a model the client doesn't number is ignored altogether.
+//!   Nobody could tell the client it broke.
+//!
+//! [`Hull::ram`] runs right after the drive model and before `push_out`, so it sees
+//! the hull's speed before a wall takes it away. For each standing piece the box
+//! overlaps and is closing on, its damage grows by, with `w` the hull's weight in units
+//! of [`UNIT_VEHICLE_MASS`] and `v` the speed of its point of contact, turning
+//! included:
+//!
+//! ```text
+//!   damage += RAM_DAMAGE · ½ · w · v²         the energy of the hit
+//!           + RAM_PRESS · w · dt              pressing, so a stopped hull still breaks it
+//! ```
+//!
+//! The damage adds up from tick to tick in `rubble.damage`. Once it reaches the piece's
+//! health, the piece breaks: it goes into `rubble.broken` with the modules it brings
+//! down ([`Module::depends`](wgtk::space::destructibles::Module::depends)), and into `rubble.fresh` for the battle to tell its
+//! clients. The hull keeps its speed, less [`RAM_COST`] of the health it took. Since
+//! the broken module no longer blocks, `push_out` lets the hull through in the same
+//! tick.
+//!
+//! The battle then takes the fresh breakages ([`World::take_breakages`]) and lists them
+//! in the `AreaDestructibles` entity of their chunk, one list per kind, sent once a tick
+//! (see `record_breakage` in `battle.rs`).
 //!
 //! # Vehicles against each other (`World::collide`, `collide`)
 //!
@@ -288,8 +342,10 @@
 //!
 //! A vehicle doesn't fall, flip, climb on debris taller than `STEP_HEIGHT`, or sink in
 //! water: that is the real server's spring suspension, a future step. Vehicles have no
-//! friction between them and take no damage from ramming. Trees don't fall: the client
-//! numbers them among the speed trees, which aren't decoded.
+//! friction between them and take no damage from ramming, each other or destructibles.
+//! Trees don't fall: the client numbers them among the speed trees, which aren't
+//! decoded. Shells pass through static models, destructible or not. What a destroyed
+//! module leaves (`BodyKind::Remains`) is never collided with.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -564,7 +620,7 @@ pub struct Hull {
     /// Turning speed, in rad/s, positive to the right.
     pub yaw_rate: f32,
     /// Turning speed hits gave it on top, in rad/s: its tracks don't drive it but hold it,
-    /// see [`Self::spin_friction`].
+    /// see [`Self::track_friction`].
     pub spin: f32,
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,

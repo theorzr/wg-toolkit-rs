@@ -14,7 +14,7 @@ pub struct BWAL {
 #[derive(Debug)]
 pub struct AssetInfo {
     pub asset_type: AssetType,
-    /// Its path, as a [`BWST`] hash.
+    /// Its path, as a [`BWST`](super::BWST) hash.
     pub string_fnv: u32,
 }
 

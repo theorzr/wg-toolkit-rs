@@ -1,9 +1,63 @@
 //! A space's static models, what its `space.bin` places: each placed model of
 //! [`BSMI`] is one of [`BSMO`]'s, whose [`Collision`], when it has one, is a `.havok`
 //! file. Models without one are decor nothing collides with, fallen branches or bricks.
+//! See the [`super`] module for how this fits with the other sources.
 //!
-//! Their triangles are indexed for collision tests: by their body's [`BodyKind`], then
-//! in a grid of the ground plane, each with its bounds and normal.
+//! # What the scene holds
+//!
+//! A [`StaticScene`] is the map as it was built, the same for the whole battle:
+//!
+//! - **Triangles**: every triangle of every body of every placed model visible in the
+//!   battle, moved into the world by its placement's transform. Each [`StaticTriangle`]
+//!   keeps its bounds and normal, computed once, and where it came from: its placed
+//!   model (`instance`, its index in [`BSMI`]), its body's material kind and its
+//!   [`BodyKind`]. Malinovka has about 1.2 million.
+//! - **Grids**: one per [`BodyKind`], so a test asks only for the kind it cares about.
+//!   Each maps a square cell of the ground plane, `CELL` (8 m) wide, to the triangles
+//!   whose bounds overlap it. A triangle across several cells is in each of them.
+//! - **Destructibles**: a [`PlacedDestructible`] for each placed model that is
+//!   destructible, keyed by its `BSMI` index, the same as a triangle's `instance`.
+//!   From a triangle a vehicle touches, it gives the client's number for what the
+//!   triangle is a part of, its kind and its health at the scale it is placed at.
+//!
+//! ```text
+//!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind }
+//!          │                                       │          │           │
+//!          │ found through grids[kind]             │          │           └─ BodyKind
+//!          │ by the cells a box covers             ▼          │
+//!          │                      destructibles[instance] ────┤
+//!          │                      PlacedDestructible          │ a house: which
+//!          │                      { chunk_id, index, kind,    │ module, by its
+//!          │                        health, modules } ────────┘ material kind
+//! ```
+//!
+//! # How bodies are sorted
+//!
+//! A `.havok` model has several bodies; [`BodyKind::of`] gives each a kind, by its name
+//! and whether [`Destructibles`] lists its model:
+//!
+//! | Body                                              | Kind           | For a vehicle            |
+//! |---------------------------------------------------|----------------|--------------------------|
+//! | `s_ramp…`, of a model part that isn't destructible | `Ramp`         | ground it drives up      |
+//! | any body of a fence, post or barrel (destructible whole) | `Destructible` | breaks as it drives in |
+//! | a house's module, `n_wood0_1` say, and its solid bodies of the module's material kind, `s_wall_1` say | `Destructible` | a wall until it breaks |
+//! | `n_…` of a model not listed                        | `Destructible` | nothing: no number to break it by |
+//! | `c_…`, what a destroyed module leaves               | `Remains`      | nothing, not used yet    |
+//! | anything else                                      | `Solid`        | a wall, or ground if flat |
+//!
+//! A house's module and its walls share a material kind: the game gives each module
+//! one, see [`super::destructibles::FIRST_MODULE_MATERIAL_KIND`], and its collision's
+//! bodies carry it. A gun emplacement's `s_wall_1` is the solid side of its wooden
+//! `n_wood0_1`, both 73, and breaks with it.
+//!
+//! # Finding triangles
+//!
+//! [`StaticScene::triangles_in`] lists a kind's triangles whose bounds overlap a box,
+//! walking the cells the box covers. A triangle in several of those cells is reported
+//! only by the first of them, the cell where its overlap with the box starts, so each
+//! comes once without a set to remember them. [`StaticScene::triangles_at`] is the same
+//! for a vertical line, with the triangle's height there: it's how the ground under a
+//! vehicle is found on bridges and decks.
 
 use std::io::{self, Read, Seek};
 use std::collections::HashMap;

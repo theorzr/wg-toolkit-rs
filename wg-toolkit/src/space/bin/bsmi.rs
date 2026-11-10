@@ -8,7 +8,7 @@ use super::{invalid, skip_vector, SpaceSection};
 
 
 /// `BSMI`: every static model placed in the space, its transform and which of
-/// [`BSMO`]' it is, and in which game modes. Only its first, third and fourth vectors
+/// [`BSMO`](super::BSMO)' it is, and in which game modes. Only its first, third and fourth vectors
 /// are known.
 #[derive(Debug)]
 pub struct BSMI {
@@ -20,7 +20,7 @@ pub struct BSMI {
 pub struct StaticModelInstance {
     /// From the model's frame to the space's.
     pub transform: Affine3A,
-    /// Its model's index in [`BSMO`].
+    /// Its model's index in [`BSMO`](super::BSMO).
     pub model: u32,
     /// In which game modes it is, see the client's `SpaceVisibilityFlags.py`: its low
     /// 20 bits are the server's, a bit for each gameplay type as the space's
