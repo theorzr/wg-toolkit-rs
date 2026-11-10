@@ -25,7 +25,7 @@
 //!   │     ├─ Hull::advance                                  (unless it rests)
 //!   │     │    ├─ Hull::step        drive model: engine, ground, slope, turning
 //!   │     │    ├─ integrate         the rigid body, 10 steps: gravity, suspension,
-//!   │     │    │                    its tracks' motion while they touch the ground
+//!   │     │    │                    its tracks pushing where they touch the ground
 //!   │     │    ├─ ram               damage and break destructibles
 //!   │     │    ├─ push_out          stop against walls
 //!   │     │    └─ keep_within       stop at the map's edge
@@ -86,9 +86,10 @@
 //! # The drive model (`Hull::step`)
 //!
 //! A hull has two speeds on the ground plane, along its heading (`speed`) and across it
-//! (`slide`), so its velocity is `heading · speed + right · slide`. It moves by
-//! `position += velocity · dt`. The tracks hold `slide` at zero (at `SIDE_FRICTION`)
-//! unless the handbrake is on.
+//! (`slide`), so its velocity is `heading · speed + right · slide`. The drive model
+//! says where its tracks take them in a tick, and its body follows, its tracks pushing
+//! it there as they grip (see the next section). The tracks hold `slide` at zero (at
+//! `SIDE_FRICTION`) unless the handbrake is on.
 //!
 //! The speed along the heading follows the flags, in one of four cases:
 //!
@@ -144,7 +145,7 @@
 //! gives [`SUSPENSION_TRAVEL`] past where it rests, then stops hard: its contact sinks
 //! no deeper, an impulse stopping it as the ground does, and a hull landing from a ledge
 //! stops on its tracks rather than going into the ground. What sank past is moved back
-//! out without the hull keeping any speed from it (a split impulse, see `Hull::stop`),
+//! out without the hull keeping any speed from it (a split impulse, see `Hull::solve`),
 //! or it would be thrown up.
 //!
 //! ```text
@@ -188,11 +189,25 @@
 //!      │ ──────┴──────┴─────╱
 //! ```
 //!
-//! While a contact of its tracks touches the ground, and it is upright enough
-//! ([`TRACKS_UPRIGHT`]), its tracks set its motion along the ground plane, from the
-//! drive model: its spin about the vertical, and its velocity along the ground. Up and
-//! down, its roll and its pitch stay the body's own. Otherwise it is `airborne`:
-//! nothing grips it, and it keeps going, turning and tumbling as it went, until it lands.
+//! Its tracks push it along the ground where they touch it, through their friction:
+//! each of their contacts toward the motion the drive model gives the hull there, as
+//! much as [`TRACK_GRIP`] of how hard it presses on the ground allows, see
+//! `Hull::solve`. A contact in the air, or barely touching, drives nothing: over a crest
+//! its front tracks unload, and over a ledge the hull tips off it rather than being held
+//! on. The pushes are at the ground, under its centre of mass, so it squats as it
+//! speeds up and leans out of turns. With no contact of its tracks on the ground, or
+//! tilted past [`TRACKS_UPRIGHT`], it is `airborne`: nothing grips it, and it keeps
+//! going, turning and tumbling as it went, until it lands.
+//!
+//! ```text
+//!   at a contact of its tracks, arm from the centre of mass, pressed with N:
+//!     wanted = drive velocity + drive spin * (Y x arm from its origin)    the drive model's
+//!     slip   = (v + w x arm) - wanted, along the ground
+//!     push   = against the slip, no more than TRACK_GRIP * N
+//! ```
+//!
+//! Its speeds, `speed` and `slide`, are then read back from its body, at its origin:
+//! rolling about its tracks, its centre of mass swings, but its tracks don't slide.
 //! Off a ledge it falls; with its centre of mass past an edge, its last contacts on it
 //! tip it over, nose first. On its side or its roof, its rigid contacts scrape on the
 //! ground, held back by [`SCRAPE_FRICTION`] of how hard they press on it, and it slides
@@ -435,7 +450,7 @@ const SUBSTEPS: usize = 10;
 const CONTACTS_PER_TRACK: usize = 6;
 /// How many rigid contacts a hull's body has, its hull's box and its turret's, see
 /// `Hull::contacts`.
-const BODY_CONTACTS: usize = 18;
+const BODY_CONTACTS: usize = 22;
 /// The most contacts a hull has, a size `SmallVec` takes: a spring under each road
 /// wheel, 4 rigid ones at each of its tracks' ends, and its body's, see `Hull::contacts`.
 const MAX_CONTACTS: usize = 96;
@@ -446,6 +461,14 @@ const TRACKS_UPRIGHT: f32 = 0.5;
 /// How much a contact sliding on the ground is held back, as a share of how hard it
 /// presses on it: a hull on its side or its roof scrapes to a stop. Our choice.
 const SCRAPE_FRICTION: f32 = 0.6;
+/// How much its tracks hold where they touch the ground, as a share of how hard each
+/// contact presses on it, see `Hull::solve`. Fitted loosely, until its engine drives
+/// them: the drive model asks up to 1.4 g of them, braking at 14 m/s², and the Type 64
+/// turning at speed about 1.5 g sideways. At 1.5, its worst yaw error on its drive grew
+/// from 35° to 59° where the real one held; from 2.5 on, the drives follow the real
+/// server as well as tracks that never slip, and only a contact in the air or barely
+/// touching falls short.
+const TRACK_GRIP: f32 = 2.5;
 /// How fast a hull bounces on its suspension, in Hz, and how much of the damping that
 /// would stop the bounce at once (critical) it has. Our choice, by feel: at 1.5 Hz the
 /// hull sinks 11 cm into its springs at rest.
@@ -462,10 +485,10 @@ const SUSPENSION_TRAVEL: f32 = 0.15;
 /// counts no faster either. Our choice.
 const STOP_RECOVERY: f32 = 0.2;
 const STOP_SPEED: f32 = 2.0;
-/// How many times the contacts past their travel are each stopped in a step, those
-/// stopped moving the others: a hull landing on its nose stops on its front contacts,
-/// and turns onto its back ones.
-const STOP_PASSES: usize = 4;
+/// How many times the contacts touching the ground are each held in a step, those held
+/// moving the others, see `Hull::solve`: a hull landing on its nose stops on its front
+/// contacts, and turns onto its back ones.
+const CONTACT_PASSES: usize = 4;
 /// How high its centre of mass is, as a share of its collision box's height. Our choice:
 /// a hull's mass is low, its turret's higher.
 const CENTER_OF_MASS_HEIGHT: f32 = 0.35;
@@ -713,23 +736,22 @@ pub struct Hull {
     pub position: Vec3,
     /// How it is turned in the world, see [`Self::direction`].
     pub orientation: Quat,
-    /// Signed speed along the vehicle's heading, in m/s.
+    /// Signed speed of its origin along the vehicle's heading, in m/s: its body's, see
+    /// [`Self::integrate`], and between its ticks, what hits and walls leave it, for its
+    /// body to take at the next, see [`Self::take_speeds`].
     pub speed: f32,
-    /// Signed speed across its heading, positive to the right, in m/s: it slides with
-    /// its tracks blocked, then its tracks hold it again.
+    /// Signed speed of its origin across its heading, positive to the right, in m/s, as
+    /// `speed` is: it slides with its tracks blocked, then its tracks hold it again.
     pub slide: f32,
-    /// Turning speed, in rad/s, positive to the right.
+    /// Turning speed its tracks drive it at, in rad/s, positive to the right: the drive
+    /// model's, see [`Self::step`].
     pub yaw_rate: f32,
-    /// Turning speed hits gave it on top, in rad/s: its tracks don't drive it but hold it,
-    /// see [`Self::track_friction`].
+    /// Turning speed it has on top, about the vertical, in rad/s, as hits gave it: its
+    /// tracks don't drive it but hold it, see [`Self::track_friction`].
     pub spin: f32,
-    /// The velocity of its centre of mass, in m/s. On the ground, its tracks set it along
-    /// the ground plane, from `speed` and `slide`; up and down, and in the air, it is the
-    /// body's own.
+    /// The velocity of its centre of mass, in m/s: its body's, see [`Self::integrate`].
     pub linear_velocity: Vec3,
-    /// How fast it turns, about each axis of the world, in rad/s. On the ground, its
-    /// tracks set it about the vertical, from `yaw_rate` and `spin`; its roll and pitch,
-    /// and in the air all of it, are the body's own.
+    /// How fast it turns, about each axis of the world, in rad/s: its body's.
     pub angular_velocity: Vec3,
     /// Whether its tracks don't grip the ground: none of their contacts touches it, or
     /// it is on its side or its roof, see [`TRACKS_UPRIGHT`]. Nothing drives it then.
@@ -815,9 +837,12 @@ impl Hull {
     /// Advance by `dt` seconds in its space. Returns whether the hull moved or turned.
     ///
     /// ```text
-    ///   step(ground under it)      the drive model: its speeds and turning on the ground,
-    ///        ▼                     or, in the air, those its body has
-    ///   integrate                  the body moves: its tracks, gravity, its suspension
+    ///   take_speeds                its body takes the speeds hits and walls left it
+    ///        ▼
+    ///   step(ground under it)      the drive model: the speeds and turning its tracks
+    ///        ▼                     drive it to, unless it is in the air
+    ///   integrate                  the body moves: gravity, its suspension, its tracks
+    ///        ▼                     pushing where they touch the ground
     ///        ▼   (only if it moved)
     ///   ram, push_out              into destructibles, out of the solid static models,
     ///        ▼                     speed into them lost
@@ -827,9 +852,8 @@ impl Hull {
     /// A hull still on the ground for [`REST_TICKS`] rests: it isn't moved until its
     /// controls or a hit move it again.
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
-        if self.airborne {
-            self.follow_body();
-        } else {
+        self.take_speeds();
+        if !self.airborne {
             self.step(dt, ground_at(&space.terrain, self.position));
         }
         let still = self.touching
@@ -863,15 +887,6 @@ impl Hull {
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
-    }
-
-    /// Take its speeds and turning on the ground plane from its body's, in the air, where
-    /// its tracks hold nothing: it lands going as it went.
-    fn follow_body(&mut self) {
-        let (heading, right) = self.axes();
-        self.speed = self.linear_velocity.dot(heading);
-        self.slide = self.linear_velocity.dot(right);
-        self.yaw_rate = self.angular_velocity.y - self.spin;
     }
 
     /// Push its collision box out of the solid static models it overlaps, on the ground
@@ -1075,7 +1090,8 @@ impl Hull {
     /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`]. Driven
     /// into a turn, it pivots on its blocked inner track, see [`PIVOT_RADIUS`].
     ///
-    /// It only changes its speeds and turning: [`Self::integrate`] moves it.
+    /// It only changes its speeds and turning, those its tracks drive it to:
+    /// [`Self::integrate`] moves it, its tracks pushing it toward them as they grip.
     pub fn step(&mut self, dt: f32, ground: Ground) {
 
         use movement_flag::*;
@@ -1121,7 +1137,8 @@ impl Hull {
                 approach(self.speed + slope * dt, pivot, HANDBRAKE_FRICTION * grip_along * dt)
             } else if target == 0.0 {
                 approach(self.speed + slope * dt, 0.0, COASTING * grip_along * dt)
-            } else if self.speed * way < 0.0 {
+            } else if self.speed * way < -REST_SPEED {
+                // Against its way, not by what its body jitters at rest.
                 approach(self.speed + slope * dt, 0.0, BRAKING * grip_along * dt)
             } else {
                 // Along its way: the drive, less the ground's resistance, and the slope.
@@ -1393,17 +1410,27 @@ impl Hull {
     /// is on the ground; `ω` is [`SUSPENSION_FREQUENCY`]'s. A spring gives
     /// [`SUSPENSION_TRAVEL`] more at most: past it, its contact is stopped, an impulse at
     /// it taking away the speed it sinks at, as the ground under it moves, and another
-    /// moving it back out without giving it any speed, see [`Self::stop`]. A hull landing
-    /// hard stops on its contacts rather than going into the ground. A contact finds the ground up
-    /// to [`STEP_HEIGHT`] above itself, where it is on the tilted hull: a nose raised by
-    /// a rock's face finds the face further up, and the hull climbs it.
+    /// moving it back out without giving it any speed, see [`Self::solve`]. A hull
+    /// landing hard stops on its contacts rather than going into the ground. A contact
+    /// finds the ground up to [`STEP_HEIGHT`] above itself, where it is on the tilted
+    /// hull: a nose raised by a rock's face finds the face further up, and the hull climbs
+    /// it.
     ///
-    /// While a contact touches the ground, its tracks set its motion along it: its spin
-    /// about the vertical is `yaw_rate + spin`, and its velocity along the ground is
-    /// `speed` along its heading and `slide` across it, carried around as it turns, or,
-    /// its tracks blocked, kept in the world as its hull swings under it. In the air it
-    /// keeps all its own. Where no contact finds any ground, off the terrain, nothing
-    /// holds it up, and it doesn't fall either.
+    /// Its tracks push it along the ground where they touch it, through their friction
+    /// there, see [`Self::solve`]: toward the motion the drive model gave it, `speed`
+    /// along its heading and `slide` across it, carried round as it turns, or, its tracks
+    /// blocked, kept in the world as its hull swings under it, and `yaw_rate + spin`
+    /// about the vertical. Each contact holds as much as it is pressed on the ground: one
+    /// in the air, or barely touching, drives nothing. Upright, on the ground, it is
+    /// driven as the drive model says; with its tracks off the ground, or on its side or
+    /// its roof ([`TRACKS_UPRIGHT`]), it is `airborne`, and keeps going, turning and
+    /// tumbling as it went, until it lands. Where no contact finds any ground at all, off
+    /// the terrain, nothing holds it up and it doesn't fall either: it is driven as the
+    /// drive model says.
+    ///
+    /// After, its speeds are its body's, read back: `speed` and `slide`, and `spin`,
+    /// what turns it besides its tracks, or, airborne, `yaw_rate`, so that it lands
+    /// turning as it went.
     pub fn integrate(&mut self, dt: f32, space: &Space) {
 
         let mass = self.mobility.weight;
@@ -1418,6 +1445,8 @@ impl Hull {
         let stop = sag + SUSPENSION_TRAVEL;
         let handbrake = self.flags & movement_flag::BLOCK_TRACKS != 0;
         let step = dt / SUBSTEPS as f32;
+        // Its blocked tracks hold it going as it went in the world.
+        let held = self.velocity();
 
         for _ in 0..SUBSTEPS {
 
@@ -1427,12 +1456,7 @@ impl Hull {
             let mut torque = Vec3::ZERO;
             let mut any_ground = false;
             let mut tracks_touching = false;
-            let mut touching = false;
-            // Those past their travel: where they are from the centre of mass, how fast
-            // the ground under them rises, and how far past it they are.
-            let mut stopped: SmallVec<[(Vec3, f32, f32); MAX_CONTACTS]> = SmallVec::new();
-            let mut push_velocity = Vec3::ZERO;
-            let mut push_spin = Vec3::ZERO;
+            let mut touches: SmallVec<[Touch; MAX_CONTACTS]> = SmallVec::new();
 
             for (contact, previous) in contacts.iter().zip(&mut self.depths) {
                 let point = self.position + rotation * contact.point;
@@ -1449,7 +1473,6 @@ impl Hull {
                 if depth <= 0.0 {
                     continue;
                 }
-                touching = true;
                 tracks_touching |= contact.kind != ContactKind::Body;
                 let arm = point - mass_center;
                 let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
@@ -1457,115 +1480,156 @@ impl Hull {
                 // an edge the ground jumps, and only the contact's own speed counts.
                 let sinking = if sank.abs() <= DEPTH_JUMP { sank / step } else { -velocity.y };
                 let past = if spring { depth - stop } else { depth };
-                if past > 0.0 {
-                    // The ground's rise under it, as fast as it is stopped at most: off a
-                    // rough triangle's edges, it would throw it.
-                    let rising = (sinking + velocity.y).min(STOP_SPEED);
-                    stopped.push((arm, rising, past));
-                }
+                // The ground's rise under it, as fast as it is stopped at most: off a
+                // rough triangle's edges, it would throw it.
+                let stopped = if past > 0.0 { Some(((sinking + velocity.y).min(STOP_SPEED), past)) } else { None };
+                let mut load = 0.0;
                 if spring {
                     let push = (stiffness * depth.min(stop) + damping * sinking).max(0.0);
                     force.y += push;
                     torque += arm.cross(Vec3::Y * push);
+                    load = push * step;
                 }
+                touches.push(Touch {
+                    arm,
+                    kind: contact.kind,
+                    load,
+                    stopped,
+                });
             }
 
+            let drive = Drive {
+                velocity: if handbrake { held } else { self.velocity() },
+                spin: self.yaw_rate + self.spin,
+                origin: self.position - mass_center,
+            };
+            let mut push_velocity = Vec3::ZERO;
+            let mut push_spin = Vec3::ZERO;
             if any_ground {
+                // Its tracks grip only upright: on its side or its roof, it scrapes.
+                let gripping = tracks_touching && (rotation * Vec3::Y).y > TRACKS_UPRIGHT;
                 let world_inertia = Mat3::from_quat(rotation) * Mat3::from_diagonal(inertia) * Mat3::from_quat(rotation.inverse());
                 let inverse_inertia = world_inertia.inverse();
                 let gyroscopic = self.angular_velocity.cross(world_inertia * self.angular_velocity);
                 self.linear_velocity += force / mass * step;
                 self.angular_velocity += inverse_inertia * (torque - gyroscopic) * step;
-                (push_velocity, push_spin) = self.stop(&stopped, mass, inverse_inertia, step);
+                let drive = if gripping { Some(drive) } else { None };
+                (push_velocity, push_spin) = self.solve(&touches, drive, mass, inverse_inertia, step);
+                self.airborne = !gripping;
+                self.touching = !touches.is_empty();
             } else {
-                touching = true;
-                tracks_touching = true;
-                self.linear_velocity.y = 0.0;
-                self.angular_velocity.x = 0.0;
-                self.angular_velocity.z = 0.0;
-            }
-            // Its tracks grip only upright: on its side or its roof, it scrapes.
-            let gripping = tracks_touching && (rotation * Vec3::Y).y > TRACKS_UPRIGHT;
-            self.airborne = !gripping;
-            self.touching = touching;
-
-            if gripping {
-                let along = self.velocity();
-                self.linear_velocity.x = along.x;
-                self.linear_velocity.z = along.z;
-                self.angular_velocity.y = self.yaw_rate + self.spin;
+                self.angular_velocity = Vec3::Y * drive.spin;
+                self.linear_velocity = drive.velocity - self.angular_velocity.cross(drive.origin);
+                self.airborne = false;
+                self.touching = true;
             }
 
             let mass_center = mass_center + (self.linear_velocity + push_velocity) * step;
             self.orientation = (Quat::from_scaled_axis((self.angular_velocity + push_spin) * step) * rotation).normalize();
             self.position = mass_center - self.orientation * center;
 
-            if gripping && handbrake {
-                let (heading, right) = self.axes();
-                self.speed = self.linear_velocity.dot(heading);
-                self.slide = self.linear_velocity.dot(right);
-            }
+        }
 
+        let (heading, right) = self.axes();
+        let velocity = self.origin_velocity();
+        self.speed = velocity.dot(heading);
+        self.slide = velocity.dot(right);
+        if self.airborne {
+            self.yaw_rate = self.angular_velocity.y - self.spin;
+        } else {
+            self.spin = self.angular_velocity.y - self.yaw_rate;
         }
 
     }
 
-    /// Stop the contacts past their suspension's travel, see [`Self::integrate`]: each,
-    /// `arm` from the centre of mass, the ground under it rising at `rising`, `past` its
-    /// travel. Two impulses, split: one stops it sinking, its velocity and spin rising
-    /// with its ground, the other only moves it back out, as fast as [`STOP_RECOVERY`]
-    /// says, for this step: pushed out, the hull keeps no speed from it, which would
-    /// throw it up. The second is returned, as a velocity and a spin to move by. Never a
-    /// pull: a contact leaving the ground goes.
+    /// Give its body the speeds and turning on the ground plane its hull has, which hits
+    /// and walls change between its steps, see [`Self::integrate`].
+    fn take_speeds(&mut self) {
+        self.angular_velocity.y = self.yaw_rate + self.spin;
+        let velocity = self.velocity() - (self.origin_velocity() - self.linear_velocity);
+        self.linear_velocity.x = velocity.x;
+        self.linear_velocity.z = velocity.z;
+    }
+
+    /// How fast its origin moves, in m/s, on the ground under its tracks: its centre of
+    /// mass's velocity, and how it turns about it. Its speeds are its origin's: rolling
+    /// over, its centre of mass swings over its tracks, but they don't slide.
+    fn origin_velocity(&self) -> Vec3 {
+        let origin = -(self.orientation * self.center_of_mass());
+        self.linear_velocity + self.angular_velocity.cross(origin)
+    }
+
+    /// Hold its contacts touching the ground, see [`Self::integrate`], [`CONTACT_PASSES`]
+    /// times each, those held moving the others, as impulses: an impulse at each, along
+    /// the ground, and at those past their travel another up, and one more moving them
+    /// out, split. Never a pull: a contact leaving the ground goes.
     ///
-    /// Each also scrapes: an impulse along the ground stops it sliding, as much as
-    /// [`SCRAPE_FRICTION`] of how hard it was stopped allows. On its tracks, they set
-    /// its motion along the ground after, see [`Self::integrate`]; on its side or its
-    /// roof, this is what stops it.
+    /// Up, one stops it sinking, its velocity and spin rising with its ground, the other
+    /// only moves it back out, as fast as [`STOP_RECOVERY`] says, for this step: pushed
+    /// out, the hull keeps no speed from it, which would throw it up. The second is
+    /// returned, as a velocity and a spin to move by.
+    ///
+    /// Along the ground, a contact of its tracks, as they grip, takes the velocity their
+    /// `drive` gives it, as much as [`TRACK_GRIP`] of how hard it presses on the ground
+    /// allows: its spring's push, or how hard it was stopped. Any other scrapes, held back
+    /// to a stop by [`SCRAPE_FRICTION`] of it.
     ///
     /// ```text
-    ///   short   = wanted − (v + ω × arm).y                 > 0: it sinks too fast
-    ///   impulse = short / (1/m + (arm × Y) · I⁻¹ (arm × Y))     upward, at the contact
-    ///   wanted  = rising                                    its velocity and spin
-    ///           = min(STOP_RECOVERY · past / step, STOP_SPEED)   the move out, from 0
-    ///   scrape  = −(its velocity along X and Z) / their effective masses,
-    ///             all a contact's together no longer than SCRAPE_FRICTION · its stop
+    ///   up      short   = wanted − (v + ω × arm).y           > 0: it sinks too fast
+    ///           impulse = short / (1/m + (arm × Y) · I⁻¹ (arm × Y))
+    ///           wanted  = rising                             its velocity and spin
+    ///                   = min(STOP_RECOVERY · past / step, STOP_SPEED)   the move out
+    ///   along   slip    = (v + ω × arm) − (drive.v + drive.spin · Y × (arm − origin)),
+    ///                     along X and Z, the origin's arm from the centre of mass
+    ///           impulse = −slip / their effective masses,
+    ///                     all a contact's together no longer than grip · its push
     /// ```
-    fn stop(&mut self, stopped: &[(Vec3, f32, f32)], mass: f32, inverse_inertia: Mat3, step: f32) -> (Vec3, Vec3) {
+    fn solve(&mut self, touches: &[Touch], drive: Option<Drive>, mass: f32, inverse_inertia: Mat3, step: f32) -> (Vec3, Vec3) {
         let mut push_velocity = Vec3::ZERO;
         let mut push_spin = Vec3::ZERO;
         let mut stops = [0.0; MAX_CONTACTS];
-        let mut scrapes = [Vec3::ZERO; MAX_CONTACTS];
-        for _ in 0..STOP_PASSES {
-            for (index, &(arm, rising, past)) in stopped.iter().enumerate() {
+        let mut frictions = [Vec3::ZERO; MAX_CONTACTS];
+        for _ in 0..CONTACT_PASSES {
+            for (index, touch) in touches.iter().enumerate() {
+                let arm = touch.arm;
                 let lever = arm.cross(Vec3::Y);
                 let effective = 1.0 / mass + lever.dot(inverse_inertia * lever);
-                let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
-                let short = rising - velocity.y;
-                if short > 0.0 {
-                    let impulse = short / effective;
-                    stops[index] += impulse;
-                    self.linear_velocity.y += impulse / mass;
-                    self.angular_velocity += inverse_inertia * lever * impulse;
+                if let Some((rising, _)) = touch.stopped {
+                    let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                    let short = rising - velocity.y;
+                    if short > 0.0 {
+                        let impulse = short / effective;
+                        stops[index] += impulse;
+                        self.linear_velocity.y += impulse / mass;
+                        self.angular_velocity += inverse_inertia * lever * impulse;
+                    }
                 }
-                let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                let (target, grip) = match drive {
+                    Some(drive) if touch.kind != ContactKind::Body => {
+                        (drive.velocity + Vec3::Y.cross(arm - drive.origin) * drive.spin, TRACK_GRIP)
+                    }
+                    _ => (Vec3::ZERO, SCRAPE_FRICTION),
+                };
+                let slip = self.linear_velocity + self.angular_velocity.cross(arm) - target;
                 let mut wanted = Vec3::ZERO;
                 for axis in [Vec3::X, Vec3::Z] {
                     let lever = arm.cross(axis);
                     let effective = 1.0 / mass + lever.dot(inverse_inertia * lever);
-                    wanted -= axis * (velocity.dot(axis) / effective);
+                    wanted -= axis * (slip.dot(axis) / effective);
                 }
-                let scrape = (scrapes[index] + wanted).clamp_length_max(SCRAPE_FRICTION * stops[index]);
-                let change = scrape - scrapes[index];
-                scrapes[index] = scrape;
+                let friction = (frictions[index] + wanted).clamp_length_max(grip * (touch.load + stops[index]));
+                let change = friction - frictions[index];
+                frictions[index] = friction;
                 self.linear_velocity += change / mass;
                 self.angular_velocity += inverse_inertia * arm.cross(change);
-                let pushed = push_velocity + push_spin.cross(arm);
-                let short = (STOP_RECOVERY * past / step).min(STOP_SPEED) - pushed.y;
-                if short > 0.0 {
-                    let impulse = short / effective;
-                    push_velocity.y += impulse / mass;
-                    push_spin += inverse_inertia * lever * impulse;
+                if let Some((_, past)) = touch.stopped {
+                    let pushed = push_velocity + push_spin.cross(arm);
+                    let short = (STOP_RECOVERY * past / step).min(STOP_SPEED) - pushed.y;
+                    if short > 0.0 {
+                        let impulse = short / effective;
+                        push_velocity.y += impulse / mass;
+                        push_spin += inverse_inertia * lever * impulse;
+                    }
                 }
             }
         }
@@ -1666,8 +1730,12 @@ impl Hull {
     /// Its body's rigid contacts, [`BODY_CONTACTS`] of them: what hits the ground when it
     /// rolls over. Its hull's box's 4 corners at its top and 4 at half its height, the
     /// middles of its top's edges and its top's middle, then its turret's box's top
-    /// corners and middle, as it faces ahead. Not its box's bottom: its tracks' contacts
-    /// are there.
+    /// corners and middle, as it faces ahead. At its box's sides' bottom, over its tracks'
+    /// ends on the ground, 4 more, their outer edges: on its side it lies on them, its
+    /// centre of mass being lower than half its height. They are as high as its springs
+    /// stop, [`SUSPENSION_TRAVEL`]: upright, they touch only once its springs did, or
+    /// rolled 40° onto them. Not its box's bottom corners, which reach past its tracks
+    /// and would scrape on every bump.
     ///
     /// ```text
     ///   seen from the side         hull's box                 turret's box
@@ -1675,15 +1743,18 @@ impl Hull {
     ///   *-------------*-------------*   top: corners, edges' middles, middle
     ///   |                           |
     ///   *                           *   half its height: corners
-    ///   |___________________________|   bottom: its tracks
+    ///   |___*_________________*_____|   bottom: its tracks, its sides over their ends
     /// ```
     fn body_contacts(&self, contacts: &mut SmallVec<[Contact; MAX_CONTACTS]>) {
         let [min, max] = self.mobility.bounds;
         let middle = (min + max) / 2.0;
         let mut points: SmallVec<[Vec3; BODY_CONTACTS]> = SmallVec::new();
+        let low = min.y.max(SUSPENSION_TRAVEL);
+        let carried = self.mobility.carrying_point.y;
         for (x, z) in [(min.x, min.z), (min.x, max.z), (max.x, min.z), (max.x, max.z)] {
             points.push(Vec3::new(x, max.y, z));
             points.push(Vec3::new(x, middle.y, z));
+            points.push(Vec3::new(x, low, z.signum() * carried));
         }
         for (x, z) in [(middle.x, min.z), (middle.x, max.z), (min.x, middle.z), (max.x, middle.z), (middle.x, middle.z)] {
             points.push(Vec3::new(x, max.y, z));
@@ -1714,6 +1785,28 @@ impl Hull {
 struct Contact {
     point: Vec3,
     kind: ContactKind,
+}
+
+/// A [`Contact`] touching the ground in a step, see [`Hull::solve`]: where it is from
+/// the hull's centre of mass, how hard its spring pushed it up in the step, as an
+/// impulse, and, past its travel, how fast the ground under it rises and how far past it
+/// is.
+#[derive(Debug, Clone, Copy)]
+struct Touch {
+    arm: Vec3,
+    kind: ContactKind,
+    load: f32,
+    stopped: Option<(f32, f32)>,
+}
+
+/// The motion a hull's tracks drive it to, see [`Hull::solve`]: its origin's velocity on
+/// the ground plane, its spin about the vertical, and where its origin is from its centre
+/// of mass.
+#[derive(Debug, Clone, Copy)]
+struct Drive {
+    velocity: Vec3,
+    spin: f32,
+    origin: Vec3,
 }
 
 /// What of a hull a [`Contact`] is.
@@ -2692,6 +2785,7 @@ pub(super) mod tests {
     /// A tick of `dt` seconds on this ground, in a space without any: the drive model,
     /// then its body moving, as [`Hull::advance`] does but for the map.
     fn drive(hull: &mut Hull, dt: f32, ground: Ground) {
+        hull.take_speeds();
         hull.step(dt, ground);
         hull.integrate(dt, &Space::default());
     }
@@ -2981,6 +3075,13 @@ pub(super) mod tests {
             Some(height) => {
                 quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
                 quad(&mut triangles, 0.0, 20.0, height, height);
+                // Its face, down to the ground.
+                let top_left = Vec3::new(-5.0, height, 20.0);
+                let top_right = Vec3::new(5.0, height, 20.0);
+                let low_left = Vec3::new(-5.0, 0.0, 20.0);
+                let low_right = Vec3::new(5.0, 0.0, 20.0);
+                triangles.push(StaticTriangle::new([low_left, low_right, top_right], 0, 0, BodyKind::Solid));
+                triangles.push(StaticTriangle::new([low_left, top_right, top_left], 0, 0, BodyKind::Solid));
             }
             None => {
                 quad(&mut triangles, -50.0, 0.0, 0.0, 0.0);
@@ -3052,8 +3153,8 @@ pub(super) mod tests {
         let mut hull = chieftain();
         hull.position.y = 5.0;
         hull.set_direction(Vec3::new(std::f32::consts::PI, 0.0, 0.0));
-        hull.linear_velocity = Vec3::new(3.0, 0.0, 0.0);
-        hull.angular_velocity = Vec3::new(0.0, 0.5, 0.0);
+        hull.slide = 3.0;
+        hull.spin = 0.5;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..60 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
@@ -3062,10 +3163,12 @@ pub(super) mod tests {
         }
         assert!(hull.airborne && (hull.orientation * Vec3::Y).y < -0.9, "{}", hull.direction());
         assert!(hull.linear_velocity.length() < 0.1, "{}", hull.linear_velocity);
-        // Rolled past its side, it tips over onto it, and rests on it, its tracks
-        // holding nothing either.
+        // Rolled past its side, its edge 10 cm off the ground, it tips over onto it, rocks
+        // back toward its tracks, and rests on its side, its tracks holding nothing
+        // either. Dropped from higher, it rolls on over the edge of its tracks, back onto
+        // them: a box this wide, its centre of mass this low, barely rests on its side.
         let mut hull = chieftain();
-        hull.position.y = 3.0;
+        hull.position.y = 2.3;
         hull.set_direction(Vec3::new(100f32.to_radians(), 0.0, 0.0));
         for _ in 0..60 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
@@ -3117,22 +3220,22 @@ pub(super) mod tests {
         assert!(!hull.airborne && (hull.position.y - 5.0).abs() < 0.1, "{}", hull.position);
         assert!(direction.y.abs() < 3f32.to_radians(), "{direction}");
         // Its centre of mass past the edge, it tips over it nose first, down onto the
-        // ground. Its tracks still hold it along the ground while its rear one is on the
-        // edge, so it rests leaning against it rather than sliding off: until its tracks
-        // push it by their forces, not by the drive model.
+        // ground, its rear track sliding off the edge, which holds it only as much as it
+        // presses on it, and it stands on its nose, leaning on the deck's face.
         let mut hull = chieftain();
         hull.position = Vec3::new(0.0, 5.0, 21.0);
-        let mut steepest: f32 = 0.0;
-        for _ in 0..20 {
+        for _ in 0..40 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
-            steepest = steepest.max(hull.direction().y);
         }
-        assert!(steepest > 20f32.to_radians(), "{}°", steepest.to_degrees());
+        let pitch = hull.direction().y;
+        assert!(pitch > 60f32.to_radians(), "{}°", pitch.to_degrees());
         let lowest = hull.contacts()
             .iter()
             .map(|contact| (hull.position + hull.orientation * contact.point).y)
             .fold(f32::INFINITY, f32::min);
-        assert!(lowest < 0.5, "its nose {lowest} m up, at {}", hull.position);
+        assert!(lowest < 0.2, "its nose {lowest} m up, at {}", hull.position);
+        let mass_center = hull.position + hull.orientation * hull.center_of_mass();
+        assert!(mass_center.z > 20.5 && mass_center.y < 5.0, "{mass_center}");
     }
 
     #[test]
