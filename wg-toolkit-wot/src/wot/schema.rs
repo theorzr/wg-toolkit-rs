@@ -96,7 +96,9 @@ entity_schema! {
                 // The shell's last step, along which the client projects the crater.
                 step: Vec3,
                 speed: f32,
-                damaged_destructibles: Vec<Value>,
+                // What it broke, each `chunk id << 16 | index << 8 | material kind`, so
+                // that the client breaks it as it explodes, see `unpackChunkObstacles`.
+                damaged_destructibles: Vec<u32>,
             );
             fn showShotResults(results: Vec<ShotResult>);
         }

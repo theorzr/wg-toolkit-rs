@@ -1,17 +1,20 @@
 //! A vehicle's gun as the server runs it: its ammunition, the shell loaded, its magazine
 //! and bursts, the reload, and each shot's flight until it hits a vehicle, the terrain,
-//! or runs out of range, and on off what it ricochets off. Vehicles are hit on their
-//! collision models; destructibles are not hit yet.
+//! a static model, or runs out of range, and on off what it ricochets off. Vehicles are
+//! hit on their collision models, static models on theirs, see [`Obstacles`].
 
 use std::sync::Arc;
 
 use glam::{Affine3A, Vec3};
 use rand::Rng;
 
-use wgtk::space::terrain::Terrain;
+use wgtk::space::statics::BodyKind;
+use wgtk::space::Space;
 
-use crate::wot::collision::{VehicleCollision, VehicleHit};
-use crate::wot::item_defs::{MagazineDef, ShotDef};
+use crate::wot::collision::{segment_triangle, VehicleCollision, VehicleHit};
+use crate::wot::item_defs::{MagazineDef, ShellKind, ShotDef};
+
+use super::physics::{Piece, Rubble};
 
 
 /// The flight is followed in steps of this many seconds.
@@ -88,8 +91,9 @@ pub struct Shot {
     pub range: f32,
     /// The times it ricocheted.
     pub ricochets: u32,
-    /// The share of its shell's penetration it kept off its ricochets, 1 until it
-    /// ricochets, see [`armor::ricochet_pen`](super::armor::ricochet_pen).
+    /// The share of its shell's penetration it kept, 1 until it ricochets, see
+    /// [`armor::ricochet_pen_factor`](super::armor::ricochet_pen_factor), or flies
+    /// through a destructible, see [`ShotPiece`].
     pub pen_factor: f32,
     pub end: Vec3,
     /// The velocity at `end`.
@@ -97,6 +101,9 @@ pub struct Shot {
     /// When it gets to `end`, in seconds after firing.
     pub flight_time: f32,
     pub landing: Landing,
+    /// The destructibles it flies through on its way to `end`, in order: each breaks as
+    /// it gets there, see [`super::physics::World::break_shot`].
+    pub through: Vec<ShotPiece>,
     /// The shells fired at once with it when it is the first of them, it included: the
     /// client shows them all from the first one, see `showShooting`. None for the others
     /// of a burst.
@@ -109,8 +116,38 @@ pub enum Landing {
     /// A vehicle, placed by `transforms` as it was then, see [`HitTarget`].
     Vehicle { entity_id: u32, hit: VehicleHit, transforms: [Affine3A; 4] },
     Terrain,
+    /// A static model: a wall, a rock, a house's module too strong to fly through. Its
+    /// triangle faces `normal`, toward where the shell came from. `piece` is the
+    /// destructible it is of, which the shell damages, see
+    /// [`super::physics::World::shoot`].
+    Static { normal: Vec3, piece: Option<ShotPiece> },
     /// Nothing, at its maximum distance.
     Range,
+}
+
+/// A destructible a shell meets. One of no more health than
+/// [`Destructibles::shoot_through_health`] is flown through, breaking, the shell losing
+/// some of its penetration, see [`Destructibles::shoot_through_loss`]; a stronger one
+/// stops it, see [`Landing::Static`]. An HE or HESH shell explodes on whatever it meets,
+/// and flies through nothing.
+///
+/// [`Destructibles::shoot_through_health`]: wgtk::space::destructibles::Destructibles::shoot_through_health
+/// [`Destructibles::shoot_through_loss`]: wgtk::space::destructibles::Destructibles::shoot_through_loss
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotPiece {
+    /// The placed model of the triangle it met, its index in `BSMI`.
+    pub instance: u32,
+    pub piece: Piece,
+    /// When the shell gets there, in seconds after its start, as [`Shot::flight_time`].
+    pub time: f32,
+}
+
+/// What of a map a shell can hit besides vehicles: its terrain and its static models,
+/// but for what broke of them.
+#[derive(Debug, Clone, Copy)]
+pub struct Obstacles<'a> {
+    pub space: &'a Space,
+    pub rubble: &'a Rubble,
 }
 
 /// A vehicle shells can hit: its collision models, placed in the world.
@@ -172,7 +209,7 @@ impl Gun {
     /// else reloads whole with its next shell, or another one once there is none of it
     /// left. That reload starts now, the burst's other shells in it, for the client to
     /// know when it can fire again as soon as it fires.
-    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         self.settle(now);
         if self.burst_shells.is_some() || !self.is_loaded(now) || self.magazine_shells == 0 {
@@ -180,7 +217,7 @@ impl Gun {
         }
 
         let burst = self.magazine.burst_size.min(self.magazine_shells);
-        let mut shot = self.shoot(start, direction, dispersion, terrain, vehicles)?;
+        let mut shot = self.shoot(start, direction, dispersion, obstacles, vehicles)?;
         shot.burst = Some(burst);
         if burst > 1 {
             let burst_time = (burst - 1) as f32 * self.magazine.burst_interval;
@@ -197,10 +234,10 @@ impl Gun {
     /// Fire the next shell of the burst going on, if it is due by game time `now`, as
     /// [`Self::fire`] does, whose reload goes on. Once the burst empties the magazine,
     /// the gun loads its next shell.
-    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         let (left, at) = self.burst_shells.filter(|&(_, at)| now >= at)?;
-        let Some(shot) = self.shoot(start, direction, dispersion, terrain, vehicles) else {
+        let Some(shot) = self.shoot(start, direction, dispersion, obstacles, vehicles) else {
             self.burst_shells = None;
             self.after_shots(now);
             return None;
@@ -343,7 +380,7 @@ impl Gun {
     }
 
     /// Fire a shell of the magazine, without waiting or reloading.
-    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[HitTarget]) -> Option<Shot> {
 
         if self.magazine_shells == 0 {
             return None;
@@ -357,9 +394,31 @@ impl Gun {
         self.next_shot_id += 1;
 
         let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
-        let (end, end_velocity, flight_time, landing) = fly(start, velocity, def.gravity, def.max_distance, terrain, vehicles);
         let range = def.max_distance;
-        Some(Shot { id, def, start, velocity, flown: 0.0, range, ricochets: 0, pen_factor: 1.0, end, end_velocity, flight_time, landing, burst: None })
+        let launch = Launch {
+            start,
+            velocity,
+            flown: 0.0,
+            range,
+            pen_factor: 1.0,
+        };
+        let flight = fly(&def, launch, obstacles, vehicles);
+        Some(Shot {
+            id,
+            def,
+            start,
+            velocity,
+            flown: 0.0,
+            range,
+            ricochets: 0,
+            pen_factor: flight.pen_factor,
+            end: flight.end,
+            end_velocity: flight.end_velocity,
+            flight_time: flight.flight_time,
+            landing: flight.landing,
+            through: flight.through,
+            burst: None,
+        })
 
     }
 
@@ -408,7 +467,7 @@ impl Shot {
     /// same speed, as the server shows ricochets, for the rest of its range, keeping
     /// `pen_factor` of its penetration. None once it ricocheted [`MAX_RICOCHETS`] times,
     /// or out of range.
-    pub fn ricochet(&self, direction: Vec3, pen_factor: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> Option<Shot> {
+    pub fn ricochet(&self, direction: Vec3, pen_factor: f32, obstacles: Option<Obstacles>, vehicles: &[HitTarget]) -> Option<Shot> {
         if self.ricochets >= MAX_RICOCHETS {
             return None;
         }
@@ -418,7 +477,14 @@ impl Shot {
         }
         let start = self.end - self.end_velocity.normalize_or_zero() * RICOCHET_STANDOFF;
         let velocity = direction.normalize() * self.end_velocity.length();
-        let (end, end_velocity, flight_time, landing) = fly(start, velocity, self.def.gravity, range, terrain, vehicles);
+        let launch = Launch {
+            start,
+            velocity,
+            flown: self.distance(),
+            range,
+            pen_factor: self.pen_factor * pen_factor,
+        };
+        let flight = fly(&self.def, launch, obstacles, vehicles);
         Some(Shot {
             id: self.id,
             def: self.def.clone(),
@@ -427,11 +493,12 @@ impl Shot {
             flown: self.distance(),
             range,
             ricochets: self.ricochets + 1,
-            pen_factor: self.pen_factor * pen_factor,
-            end,
-            end_velocity,
-            flight_time,
-            landing,
+            pen_factor: flight.pen_factor,
+            end: flight.end,
+            end_velocity: flight.end_velocity,
+            flight_time: flight.flight_time,
+            landing: flight.landing,
+            through: flight.through,
             burst: None,
         })
     }
@@ -453,44 +520,204 @@ fn disperse(direction: Vec3, angle: f32, rng: &mut impl Rng) -> Vec3 {
     (direction * off.cos() + (side * around.cos() + up * around.sin()) * off.sin()).normalize()
 }
 
-/// Follow a shell from `start`: where it ends, its velocity and the time then, and what
-/// it ends on.
-fn fly(start: Vec3, velocity: Vec3, gravity: f32, max_distance: f32, terrain: Option<&Terrain>, vehicles: &[HitTarget]) -> (Vec3, Vec3, f32, Landing) {
-    let (mut position, mut velocity, mut time) = (start, velocity, 0.0);
+/// Where a shell's flight starts, see [`fly`].
+#[derive(Debug, Clone, Copy)]
+struct Launch {
+    start: Vec3,
+    velocity: Vec3,
+    /// How far it flew before `start`, in metres, see [`Shot::flown`].
+    flown: f32,
+    /// How far from `start` it flies at most, in metres.
+    range: f32,
+    /// The share of its shell's penetration it has, see [`Shot::pen_factor`].
+    pen_factor: f32,
+}
+
+/// A shell's flight, see [`fly`].
+#[derive(Debug)]
+struct Flight {
+    end: Vec3,
+    /// The velocity at `end`.
+    end_velocity: Vec3,
+    /// When it gets to `end`, in seconds after its start.
+    flight_time: f32,
+    landing: Landing,
+    /// What it flew through, in order.
+    through: Vec<ShotPiece>,
+    /// The share of its shell's penetration it kept, what it flew through taken.
+    pen_factor: f32,
+}
+
+/// Follow a shell from its launch until the first thing that stops it: a vehicle, the
+/// terrain, a static model, or its range. Each step is a segment that is tested against
+/// all of them, the nearest along it winning. Destructibles weak enough are flown
+/// through, see [`ShotPiece`].
+fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[HitTarget]) -> Flight {
+
+    let Launch { start, velocity, flown, range, mut pen_factor } = launch;
+    let mut position = start;
+    let mut velocity = velocity;
+    let mut time = 0.0;
+    let mut through = Vec::new();
+    let mut crossed = Vec::new();
+
     loop {
+
         let next = position + velocity * FLIGHT_STEP;
-        let next_velocity = velocity - Vec3::Y * gravity * FLIGHT_STEP;
-        let hit = vehicles.iter()
+        let next_velocity = velocity - Vec3::Y * def.gravity * FLIGHT_STEP;
+
+        // The first thing the step meets, as a share of it, and what it lands on.
+        let mut first: Option<(f32, Landing)> = vehicles.iter()
             .filter_map(|vehicle| Some((vehicle, vehicle.collision.first_hit(&vehicle.transforms, position, next)?)))
-            .min_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction));
-        if let Some((vehicle, hit)) = hit {
-            let t = hit.fraction;
-            let landing = Landing::Vehicle { entity_id: vehicle.entity_id, hit, transforms: vehicle.transforms };
-            return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, landing);
-        }
-        if let Some(ground) = terrain.and_then(|terrain| terrain.height_at(next.x, next.z)) {
-            if next.y <= ground {
-                // Where the step crosses the ground, assumed flat over it.
-                let above = position.y - terrain.and_then(|t| t.height_at(position.x, position.z)).unwrap_or(ground);
-                let below = ground - next.y;
-                let t = (above / (above + below)).clamp(0.0, 1.0);
-                return (position.lerp(next, t), velocity.lerp(next_velocity, t), time + FLIGHT_STEP * t, Landing::Terrain);
+            .min_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction))
+            .map(|(vehicle, hit)| {
+                let landing = Landing::Vehicle {
+                    entity_id: vehicle.entity_id,
+                    hit,
+                    transforms: vehicle.transforms,
+                };
+                (hit.fraction, landing)
+            });
+
+        crossed.clear();
+        if let Some(obstacles) = obstacles {
+            let statics = meet_statics(obstacles, def, position, next, time, &mut crossed);
+            let terrain = cross_terrain(obstacles, position, next)
+                .map(|t| (t, Landing::Terrain));
+            for candidate in [statics, terrain].into_iter().flatten() {
+                if first.as_ref().is_none_or(|(t, _)| candidate.0 < *t) {
+                    first = Some(candidate);
+                }
             }
         }
-        if (next - start).length() >= max_distance {
-            return (next, next_velocity, time + FLIGHT_STEP, Landing::Range);
+
+        // What it flies through before that, each piece once, losing penetration.
+        let stop = first.as_ref().map_or(1.0, |(t, _)| *t);
+        crossed.sort_by(|a: &(f32, ShotPiece), b| a.0.total_cmp(&b.0));
+        for &(t, piece) in crossed.iter().filter(|(t, _)| *t < stop) {
+            if through.iter().any(|done: &ShotPiece| done.piece == piece.piece) {
+                continue;
+            }
+            let Some(obstacles) = obstacles else { break };
+            let distance = flown + start.distance(position.lerp(next, t));
+            let pen = def.pen_at(distance) * pen_factor;
+            let left = obstacles.space.destructibles.shoot_through_loss.apply(pen);
+            pen_factor = if pen > 0.0 { pen_factor * left / pen } else { 0.0 };
+            through.push(piece);
         }
-        (position, velocity, time) = (next, next_velocity, time + FLIGHT_STEP);
+
+        if let Some((t, landing)) = first {
+            return Flight {
+                end: position.lerp(next, t),
+                end_velocity: velocity.lerp(next_velocity, t),
+                flight_time: time + FLIGHT_STEP * t,
+                landing,
+                through,
+                pen_factor,
+            };
+        }
+        if (next - start).length() >= range {
+            return Flight {
+                end: next,
+                end_velocity: next_velocity,
+                flight_time: time + FLIGHT_STEP,
+                landing: Landing::Range,
+                through,
+                pen_factor,
+            };
+        }
+
+        position = next;
+        velocity = next_velocity;
+        time += FLIGHT_STEP;
+
     }
+
+}
+
+/// The static triangles a step of a shell from `from` to `to`, starting `time` after its
+/// start, meets: the first that stops it, as a share of the step, and in `crossed`, the
+/// destructibles it flies through, each with the share of the step it meets them at. A
+/// destructible already broken, or that the client doesn't number, isn't met, nor is a
+/// triangle shells pass, see [`StaticTriangle::shells_pass`].
+///
+/// [`StaticTriangle::shells_pass`]: wgtk::space::statics::StaticTriangle::shells_pass
+fn meet_statics(
+    obstacles: Obstacles,
+    def: &ShotDef,
+    from: Vec3,
+    to: Vec3,
+    time: f32,
+    crossed: &mut Vec<(f32, ShotPiece)>,
+) -> Option<(f32, Landing)> {
+
+    let Obstacles { space, rubble } = obstacles;
+    let statics = &space.statics;
+    let min = from.min(to);
+    let max = from.max(to);
+    let mut stop: Option<(f32, Landing)> = None;
+    let explodes = matches!(def.kind(), ShellKind::HighExplosive | ShellKind::ArmorPiercingHe);
+
+    for kind in [BodyKind::Solid, BodyKind::Ramp, BodyKind::Destructible] {
+        for triangle in statics.triangles_in(kind, min, max) {
+            if triangle.shells_pass {
+                continue;
+            }
+            let Some((t, normal)) = segment_triangle(from, to - from, &triangle.vertices) else { continue };
+            let mut met = None;
+            if kind == BodyKind::Destructible {
+                let Some((piece, destructible)) = rubble.standing(statics, triangle) else { continue };
+                let piece_met = ShotPiece {
+                    instance: triangle.instance,
+                    piece,
+                    time: time + FLIGHT_STEP * t,
+                };
+                let health = destructible.health_of(piece.module).unwrap_or(f32::INFINITY);
+                if !explodes && health <= space.destructibles.shoot_through_health {
+                    crossed.push((t, piece_met));
+                    continue;
+                }
+                met = Some(piece_met);
+            }
+            if stop.as_ref().is_none_or(|(first, _)| t < *first) {
+                let landing = Landing::Static {
+                    normal,
+                    piece: met,
+                };
+                stop = Some((t, landing));
+            }
+        }
+    }
+
+    stop
+
+}
+
+/// Where a step from `from` to `to` goes into the terrain, as a share of it: the ground
+/// taken as flat between the two ends.
+fn cross_terrain(obstacles: Obstacles, from: Vec3, to: Vec3) -> Option<f32> {
+    let terrain = &obstacles.space.terrain;
+    let ground = terrain.height_at(to.x, to.z)?;
+    if to.y > ground {
+        return None;
+    }
+    let above = from.y - terrain.height_at(from.x, from.z).unwrap_or(ground);
+    let below = ground - to.y;
+    Some((above / (above + below)).clamp(0.0, 1.0))
 }
 
 
 #[cfg(test)]
 mod tests {
 
-    use super::*;
+    use wgtk::space::statics::{PlacedDestructible, StaticScene, StaticTriangle};
+    use wgtk::space::destructibles::{DestructibleKind, Module, PenetrationLoss};
+
     use crate::wot::collision::{ArmorGroup, CollisionModel, VehiclePart};
     use crate::wot::items::{item_type, IntCompactDescr};
+    use crate::base::physics::World;
+
+    use super::*;
 
     fn shell() -> ShotDef {
         ShotDef {
@@ -730,6 +957,117 @@ mod tests {
         assert_eq!(hit.material_kind, 1);
         assert_eq!(hit.normal, -Vec3::Z);
         assert!((shot.end.z - 97.0).abs() < 0.01 && hit.local_point.z == -3.0);
+    }
+
+    /// A wall 4 m wide across the way at z = 50, of this kind, as two triangles of
+    /// the placed model 0; destructible with this health when it is one, the 2nd of its
+    /// chunk, a fence or a house's module; one shells pass if `shells_pass`.
+    fn wall(kind: BodyKind, health: f32, house: bool, shells_pass: bool) -> Space {
+        let a = Vec3::new(-2.0, -2.0, 50.0);
+        let b = Vec3::new(2.0, -2.0, 50.0);
+        let c = Vec3::new(2.0, 2.0, 50.0);
+        let d = Vec3::new(-2.0, 2.0, 50.0);
+        let material_kind = if house { 73 } else { 0 };
+        let triangles = [[a, b, c], [a, c, d]]
+            .map(|vertices| StaticTriangle {
+                shells_pass,
+                ..StaticTriangle::new(vertices, 0, material_kind, kind)
+            })
+            .to_vec();
+        let mut statics = StaticScene::from_triangles(triangles);
+        let modules = match house {
+            true => vec![Module {
+                material_kind: 73,
+                health,
+                depends: Vec::new(),
+            }],
+            false => Vec::new(),
+        };
+        statics.add_destructible(0, PlacedDestructible {
+            chunk_id: 0x7f7f,
+            index: 1,
+            kind: if house { DestructibleKind::Structure } else { DestructibleKind::Fragile },
+            health,
+            modules,
+        });
+        let mut space = Space {
+            statics,
+            ..Space::default()
+        };
+        space.destructibles.shoot_through_health = 19.0;
+        space.destructibles.shoot_through_loss = PenetrationLoss {
+            factor: 0.0,
+            min: 25.0,
+        };
+        space
+    }
+
+    /// Fire a shell at a space straight along +Z.
+    fn fire_at(space: &Space, rubble: &Rubble, def: ShotDef) -> Shot {
+        let mut gun = Gun::new(vec![(def, 1)], 10.0);
+        let obstacles = Obstacles {
+            space,
+            rubble,
+        };
+        gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, Some(obstacles), &[]).unwrap()
+    }
+
+    #[test]
+    fn static_models_stop_shells_but_what_they_fly_through() {
+        let rubble = Rubble::default();
+        // A wall, or a ramp, stops it where it meets it, facing it.
+        for kind in [BodyKind::Solid, BodyKind::Ramp] {
+            let shot = fire_at(&wall(kind, 0.0, false, false), &rubble, shell());
+            let landing = Landing::Static {
+                normal: -Vec3::Z,
+                piece: None,
+            };
+            assert_eq!(shot.landing, landing);
+            assert!((shot.end.z - 50.0).abs() < 0.01, "{}", shot.end);
+            assert!(shot.through.is_empty());
+        }
+        // A fence of 10 health it flies through, breaking it, 25 mm of its penetration
+        // lost.
+        let shot = fire_at(&wall(BodyKind::Destructible, 10.0, false, false), &rubble, shell());
+        assert_eq!(shot.landing, Landing::Range);
+        assert_eq!(shot.through.len(), 1);
+        assert_eq!((shot.through[0].instance, shot.through[0].piece.index), (0, 1));
+        // When it gets there, not when it lands.
+        let at = 50.0 / shell().speed;
+        assert!((shot.through[0].time - at).abs() < 0.01, "{} s, not {at} s", shot.through[0].time);
+        let pen = shell().pen_at(50.0);
+        assert!((shot.pen_factor - (pen - 25.0) / pen).abs() < 1e-3, "{}", shot.pen_factor);
+        // An HE shell explodes on that fence instead, hitting it.
+        let he = ShotDef {
+            kind_index: 1,
+            ..shell()
+        };
+        let shot = fire_at(&wall(BodyKind::Destructible, 10.0, false, false), &rubble, he.clone());
+        let Landing::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
+        assert_eq!(hit.piece.index, 1);
+        assert!(shot.through.is_empty());
+        // A light fence shells pass, neither stops nor breaks, whatever the shell.
+        let light = wall(BodyKind::Destructible, 1.0, false, true);
+        for def in [shell(), he] {
+            let shot = fire_at(&light, &rubble, def);
+            assert_eq!(shot.landing, Landing::Range);
+            assert!(shot.through.is_empty());
+        }
+        // A house's module of 50 health stops it, hit.
+        let shot = fire_at(&wall(BodyKind::Destructible, 50.0, true, false), &rubble, shell());
+        let Landing::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
+        assert_eq!((hit.instance, hit.piece.module), (0, Some(73)));
+        assert!(shot.through.is_empty());
+        // Shells' damage adds up on it: 30 then 30 of its 50 break it, once.
+        let space = wall(BodyKind::Destructible, 50.0, true, false);
+        let mut world = World::new(Arc::new(space), None);
+        assert!(world.shoot(0, hit.piece, 30.0, 0.0).is_empty());
+        assert_eq!(world.shoot(0, hit.piece, 30.0, 0.0).len(), 1);
+        assert!(world.shoot(0, hit.piece, 30.0, 0.0).is_empty());
+        // Once broken, it isn't there.
+        let shot = fire_at(world.space(), world.rubble(), shell());
+        assert_eq!(shot.landing, Landing::Range);
+        assert_eq!(world.take_breakages().count(), 1);
     }
 
     #[test]

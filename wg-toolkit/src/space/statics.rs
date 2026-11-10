@@ -21,7 +21,7 @@
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
 //!
 //! ```text
-//!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind }
+//!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass }
 //!          │                                       │          │           │
 //!          │ found through grids[kind]             │          │           └─ BodyKind
 //!          │ by the cells a box covers             ▼          │
@@ -49,6 +49,10 @@
 //! one, see [`super::destructibles::FIRST_MODULE_MATERIAL_KIND`], and its collision's
 //! bodies carry it. A gun emplacement's `s_wall_1` is the solid side of its wooden
 //! `n_wood0_1`, both 73, and breaks with it.
+//!
+//! Apart from its kind, a body's collision flags can mark it as one shells fly through
+//! untouched ([`StaticTriangle::shells_pass`]). The light fences have that mark, and so
+//! do the invisible helper walls and ramps on a fence; a vehicle still hits them all.
 //!
 //! # Finding triangles
 //!
@@ -110,6 +114,15 @@ impl PlacedDestructible {
         self.modules.iter().find(|module| module.material_kind == material_kind)
     }
 
+    /// The health of all of it, or of one of a structure's modules, by its material
+    /// kind: none for a module it doesn't have.
+    pub fn health_of(&self, module: Option<u8>) -> Option<f32> {
+        match module {
+            Some(material_kind) => self.module(material_kind).map(|module| module.health),
+            None => Some(self.health),
+        }
+    }
+
 }
 
 /// A triangle of a placed static model.
@@ -125,6 +138,10 @@ pub struct StaticTriangle {
     /// Its body's material kind, see [`crate::havok::collision::CollisionBody`].
     pub material_kind: u32,
     pub kind: BodyKind,
+    /// Whether shells fly through it untouched, as its body's flags say, see
+    /// [`CollisionBody::shells_pass`](crate::havok::collision::CollisionBody::shells_pass).
+    /// False unless set.
+    pub shells_pass: bool,
 }
 
 /// What a static model's body is to what drives into it.
@@ -171,6 +188,7 @@ impl StaticTriangle {
             instance,
             material_kind,
             kind,
+            shells_pass: false,
         }
     }
 
@@ -233,7 +251,10 @@ impl StaticScene {
             for (body, &kind) in collision.bodies.iter().zip(kinds.iter()) {
                 for triangle in &body.triangles {
                     let vertices = triangle.map(|vertex| instance.transform.transform_point3(vertex));
-                    triangles.push(StaticTriangle::new(vertices, index as u32, body.material_kind, kind));
+                    triangles.push(StaticTriangle {
+                        shells_pass: body.shells_pass(),
+                        ..StaticTriangle::new(vertices, index as u32, body.material_kind, kind)
+                    });
                 }
             }
         }

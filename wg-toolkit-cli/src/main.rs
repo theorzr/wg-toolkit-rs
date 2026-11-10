@@ -232,8 +232,8 @@ pub enum HavokCommand {
     Types(HavokTypesArgs),
     /// Print its objects from the root, following pointers.
     Tree(HavokTreeArgs),
-    /// Print it as a collision model: its bodies, their material kind and triangle
-    /// count, and its bounds.
+    /// Print it as a collision model: its bodies, their material kind, collision flags
+    /// and triangle count, and its bounds.
     Collision,
 }
 

@@ -37,8 +37,8 @@ use super::{
     SETTING_RESET_FULL_CLIP, TICK,
 };
 use super::armor::{self, Explosion, Impact, Outcome};
-use super::gun::{Gun, HitTarget, Landing, Shot};
-use super::physics::{wrap_angle, Breakage, Vehicle, VehicleId, World};
+use super::gun::{Gun, HitTarget, Landing, Obstacles, Shot, ShotPiece};
+use super::physics::{wrap_angle, Breakage, Piece, Vehicle, VehicleId, World};
 use super::bot::Bot;
 
 
@@ -61,6 +61,9 @@ pub struct Battle {
     running: bool,
     /// The shells in flight, with the game time they land at and who fired them.
     shots: Vec<(f64, EntityId, Shot)>,
+    /// What the shells in flight fly through, with the game time they get there and the
+    /// yaw they go: it breaks then, see [`Shot::through`].
+    shot_through: Vec<(f64, ShotPiece, f32)>,
     /// The arena's vehicles, on its info entity.
     vehicles_info: Option<ComponentKey<AvatarVehiclesInfo>>,
     /// Whether its countdown is over: bots only aim until then.
@@ -242,6 +245,7 @@ impl BaseThread {
             targets: Vec::new(),
             running: false, 
             shots: Vec::new(), 
+            shot_through: Vec::new(),
             vehicles_info: None, 
             started: false,
             areas: HashMap::new(),
@@ -509,7 +513,11 @@ impl BaseThread {
         let Some(own) = battle.vehicles.iter_mut().find(|vehicle| vehicle.controller.is_client()) else { return Ok(()) };
         let driven = battle.world.vehicle(own.id);
         let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
-        let Some(shot) = own.gun.fire(now, position, velocity, dispersion, Some(&self.space.terrain), &targets) else {
+        let obstacles = Obstacles {
+            space: &self.space,
+            rubble: battle.world.rubble(),
+        };
+        let Some(shot) = own.gun.fire(now, position, velocity, dispersion, Some(obstacles), &targets) else {
             debug!(%client, "Refused a shot: not loaded, or out of shells");
             return Ok(());
         };
@@ -518,17 +526,40 @@ impl BaseThread {
             show_gun(&mut self.app, own_vehicle, own_id, &own.gun, now)?;
         }
         let vehicle = own.entity;
+        fly_through(&mut battle.shot_through, now, &shot);
         battle.shots.push((now + f64::from(shot.flight_time), own_id, shot.clone()));
 
         show_shot(&mut self.app, avatar, vehicle, &shot)
 
     }
 
-    /// A shell gets to its end, at game time `at`: what it does to the vehicle it hits,
-    /// by its armour, see [`armor::hit`], or it explodes on the ground, where an HE shell
-    /// damages the vehicles in its explosion's reach, see [`armor::explosion`]. A shell
-    /// ricocheting off either goes on, see [`Self::ricochet`].
+    /// A shell gets to its end, at game time `at` (what it flew through broke as it got
+    /// there, see [`Shot::through`]): what it does to the vehicle it hits, by its armour,
+    /// see [`armor::hit`], or it explodes on the ground or a static model, a destructible
+    /// one taking its damage, see [`World::shoot`], and an HE shell damaging the vehicles
+    /// in its explosion's reach, see [`armor::explosion`]. A shell ricocheting off a
+    /// vehicle or the ground goes on, see [`Self::ricochet`]; a static model stops it
+    /// whole.
     fn land_shot(&mut self, client: ClientKey, at: f64, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+
+        // What a destructible hit breaks the client breaks as the shell explodes.
+        let mut damaged = Vec::new();
+        let battle = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut());
+        if let (Landing::Static { piece: Some(hit), .. }, Some(battle)) = (shot.landing, battle) {
+            let yaw = shot.end_velocity.x.atan2(shot.end_velocity.z);
+            let damage = shot.def.damage_at(shot.distance());
+            let broken = battle.world.shoot(hit.instance, hit.piece, damage, yaw);
+            info!(
+                %client,
+                shot = shot.id,
+                chunk_id = hit.piece.chunk_id,
+                index = hit.piece.index,
+                module = ?hit.piece.module,
+                "Hit a destructible for {damage:.0} damage{}",
+                if broken.is_empty() { "" } else { ", broke it" },
+            );
+            damaged.extend(broken.iter().filter_map(|breakage| chunk_obstacle(breakage.piece)));
+        }
 
         let Some(battle) = self.battle_clients.get(&client).and_then(|c| c.battle.as_ref()) else { return Ok(()) };
         let avatar_key = battle.avatar;
@@ -553,7 +584,10 @@ impl BaseThread {
                 }
                 Ok(())
             }
-            Landing::Terrain => {
+            Landing::Terrain | Landing::Static { .. } => {
+                if let Landing::Static { normal, .. } = shot.landing {
+                    debug!(%client, shot = shot.id, "Hit a static model at {:?}, facing {normal:?}", shot.end);
+                }
                 // EXPERIMENT: the explosion comes for a shot the client does not know, so
                 // that it shows it from these arguments alone.
                 self.app.entity(avatar_key)?.explodeProjectile(
@@ -567,10 +601,17 @@ impl BaseThread {
                     // Its last step: the client projects the crater along it, both ways.
                     shot.end_velocity * EXPLOSION_STEP,
                     shot.end_velocity.length(),
-                    Vec::new(),
+                    damaged,
                 )?;
-                let normal = self.space.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
-                if armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND) {
+                // Off the ground only: a static model stops a shell whole.
+                let skims = match shot.landing {
+                    Landing::Terrain => {
+                        let normal = self.space.terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
+                        armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND).then_some(normal)
+                    }
+                    _ => None,
+                };
+                if let Some(normal) = skims {
                     let direction = armor::reflect(shot.end_velocity, normal);
                     self.ricochet(client, at, shooter, shot, direction, None)?;
                 } else if def.kind() == ShellKind::HighExplosive {
@@ -606,7 +647,11 @@ impl BaseThread {
                 vehicle.transforms = transforms;
             }
         }
-        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(&space.terrain), &vehicles) else {
+        let obstacles = Obstacles {
+            space,
+            rubble: battle.world.rubble(),
+        };
+        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(obstacles), &vehicles) else {
             debug!(%client, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
@@ -614,6 +659,7 @@ impl BaseThread {
             "Ricocheted a shell off {}, {:.0}% of its penetration left, landing at {:?} in {:.2} s",
             if landed.is_some() { "a vehicle" } else { "the ground" }, next.pen_factor * 100.0, next.end, next.flight_time);
         show_tracer(app, battle.avatar, shooter, &next, true)?;
+        fly_through(&mut battle.shot_through, at, &next);
         battle.shots.push((at + f64::from(next.flight_time), shooter, next));
         Ok(())
 
@@ -817,7 +863,7 @@ impl BaseThread {
         let drives = battle.started && battle_options.bots_drive;
         let bots_fire = battle.started && battle_options.bots_fire;
         let own = battle.own().map(|own| (own.team, battle.world.vehicle(own.id).hull.position));
-        let Battle { avatar, vehicles, world, shots, targets, areas, .. } = battle;
+        let Battle { avatar, vehicles, world, shots, shot_through, targets, .. } = battle;
 
         for index in 0..vehicles.len() {
             let enemy = nearest_enemy(vehicles, world, index);
@@ -830,17 +876,6 @@ impl BaseThread {
             }
         }
         world.step(TICK.as_secs_f32());
-        // Each list told once a tick, however much of it broke: a house brings down a
-        // dozen modules at once.
-        let mut broken = HashSet::new();
-        for breakage in world.take_breakages() {
-            if let Some(list) = record_breakage(client, areas, breakage) {
-                broken.insert(list);
-            }
-        }
-        for (chunk_id, kind) in broken {
-            show_breakages(app, &areas[&chunk_id], kind)?;
-        }
 
         for index in 0..vehicles.len() {
 
@@ -886,16 +921,20 @@ impl BaseThread {
                 own_vehicle.set_vehicleGunReloadTime(reload_time(&vehicle.gun, now))?;
             }
 
-            let terrain = Some(&world.space().terrain);
+            let obstacles = Some(Obstacles {
+                space: world.space(),
+                rubble: world.rubble(),
+            });
             let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
-            let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, terrain, targets);
+            let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, obstacles, targets);
             if let (None, Controller::Bot(bot), Some(enemy), true) = (&shot, &vehicle.controller, enemy, bots_fire) {
                 if bot.on_target(driven, enemy) {
-                    shot = vehicle.gun.fire(now, position, velocity, dispersion, terrain, targets);
+                    shot = vehicle.gun.fire(now, position, velocity, dispersion, obstacles, targets);
                 }
             }
             if let Some(shot) = shot {
                 info!(%client, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+                fly_through(shot_through, now, &shot);
                 shots.push((now + f64::from(shot.flight_time), vehicle.entity.id(), shot.clone()));
                 // Its reload started with the burst, see `Gun::fire`.
                 if let Some(own_vehicle) = vehicle.driver().and_then(|driver| driver.own_vehicle) {
@@ -916,7 +955,8 @@ impl BaseThread {
 
     }
 
-    /// End a tick: step every battle, land the shells due, then give the clients what
+    /// End a tick: step every battle, break what shells got through, land the shells
+    /// due, tell what broke, see [`Self::show_rubble`], then give the clients what
     /// changed.
     pub fn battle_tick(&mut self) {
 
@@ -933,6 +973,13 @@ impl BaseThread {
         for &client in &clients {
             let Some(battle) = self.battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { continue };
             let now = battle.game_time();
+            let (reached, ahead): (Vec<_>, _) = std::mem::take(&mut battle.shot_through)
+                .into_iter()
+                .partition(|&(at, _, _)| at <= now);
+            battle.shot_through = ahead;
+            for (_, through, yaw) in reached {
+                battle.world.break_shot(through.instance, through.piece, yaw);
+            }
             let (landed, flying): (Vec<_>, _) = std::mem::take(&mut battle.shots).into_iter().partition(|&(at, _, _)| at <= now);
             battle.shots = flying;
             for (at, shooter, shot) in landed {
@@ -940,10 +987,31 @@ impl BaseThread {
                     warn!(%client, shot = shot.id, "Failed to land a shot: {e}");
                 }
             }
+            if let Err(e) = self.show_rubble(client) {
+                warn!(%client, "Failed to tell the destructibles broken: {e}");
+            }
         }
 
         self.app.end_tick();
 
+    }
+
+    /// Tell a battle's client what broke this tick, rammed or shot: each list once,
+    /// however much of it broke, a house bringing down a dozen modules at once.
+    fn show_rubble(&mut self, client: ClientKey) -> io::Result<()> {
+        let Self { app, battle_clients, .. } = self;
+        let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return Ok(()) };
+        let Battle { world, areas, .. } = battle;
+        let mut broken = HashSet::new();
+        for breakage in world.take_breakages() {
+            if let Some(list) = record_breakage(client, areas, breakage) {
+                broken.insert(list);
+            }
+        }
+        for (chunk_id, kind) in broken {
+            show_breakages(app, &areas[&chunk_id], kind)?;
+        }
+        Ok(())
     }
 
     /// An entity of its battle was created on the client.
@@ -1024,11 +1092,27 @@ fn area_position(chunk_id: u16) -> Vec3 {
     )
 }
 
+/// Keep what a shell flies through to break as it gets there, the shell fired at game
+/// time `fired`.
+fn fly_through(shot_through: &mut Vec<(f64, ShotPiece, f32)>, fired: f64, shot: &Shot) {
+    let yaw = shot.velocity.x.atan2(shot.velocity.z);
+    for &through in &shot.through {
+        shot_through.push((fired + f64::from(through.time), through, yaw));
+    }
+}
+
+/// A piece as an explosion lists it, see `explodeProjectile`: none of an index the code
+/// has no room for.
+fn chunk_obstacle(piece: Piece) -> Option<u32> {
+    let index = u8::try_from(piece.index).ok()?;
+    Some(u32::from(piece.chunk_id) << 16 | u32::from(index) << 8 | u32::from(piece.module.unwrap_or(0)))
+}
+
 /// List a destructible broken in its chunk's entity, encoded as its kind is, see
 /// [`AreaDestructibles`]: the list it changed, by its chunk's id and its kind.
 fn record_breakage(client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: Breakage) -> Option<(u16, DestructibleKind)> {
 
-    let Breakage { piece, kind, yaw, speed } = breakage;
+    let Breakage { piece, kind, yaw, speed, shot } = breakage;
     let Some(area) = areas.get_mut(&piece.chunk_id) else {
         warn!(%client, chunk_id = piece.chunk_id, index = piece.index, "Failed to tell of a destructible broken out of the areas");
         return None;
@@ -1037,7 +1121,7 @@ fn record_breakage(client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: 
     let [high, low] = piece.index.to_be_bytes();
     match kind {
         DestructibleKind::Fragile => {
-            area.fragiles.push([high, low, 0]);
+            area.fragiles.push([high, low, u8::from(shot)]);
         }
         DestructibleKind::FallingAtom => {
             let fall = ((speed / FALL_SPEED_STEP) as u8).min(3);
@@ -1045,13 +1129,13 @@ fn record_breakage(client: ClientKey, areas: &mut HashMap<u16, Area>, breakage: 
         }
         DestructibleKind::Structure => {
             let module = piece.module.unwrap_or_default();
-            area.modules.push([high, low, (module & 0x7f) << 1]);
+            area.modules.push([high, low, (module & 0x7f) << 1 | u8::from(shot)]);
         }
         // Not numbered: they are speed trees, see `Rubble`.
         DestructibleKind::Tree => return None,
     }
 
-    info!(%client, chunk_id = piece.chunk_id, index = piece.index, ?kind, module = ?piece.module, "Broke a destructible");
+    info!(%client, chunk_id = piece.chunk_id, index = piece.index, ?kind, module = ?piece.module, shot, "Broke a destructible");
     Some((piece.chunk_id, kind))
 
 }

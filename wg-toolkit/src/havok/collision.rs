@@ -1,7 +1,7 @@
 //! Collision models, as the game ships them for its vehicles' parts and its maps' static
 //! models: a Havok tagfile whose named variants each hold a "Collision Physics Data"
 //! system of mesh bodies, and an `HKBodyFlagsData` giving their bounds and each body's
-//! material kind, by its name without its `s_` (solid) or `n_` prefix. A vehicle's part
+//! material kind and collision flags, by its name without its `s_` (solid) or `n_` prefix. A vehicle's part
 //! has one variant, a destructible building one per fragment, `n_wood0_1_5` say.
 
 use std::io;
@@ -29,7 +29,27 @@ pub struct CollisionBody {
     pub name: String,
     /// Its material kind, 0 if its body flags don't give one.
     pub material_kind: u32,
+    /// Its collision flags, as its body flags give them, 0 if they don't, see
+    /// [`Self::shells_pass`].
+    pub flags: u32,
     pub triangles: Vec<[Vec3; 3]>,
+}
+
+impl CollisionBody {
+
+    /// The collision flag of a body shells fly through untouched, see
+    /// [`Self::shells_pass`].
+    pub const SHELLS_PASS: u32 = 1 << 1;
+
+    /// Whether shells fly through it untouched, by its flags. No game source says so;
+    /// it is inferred from the game's fences. A light fence's breakable body (`n_wood0`,
+    /// 1 health) has this flag, while a stone fence's has 0. The invisible `s_wall` and
+    /// `s_ramp` helper bodies that guide vehicles over a fence have it too, with 4 and 8
+    /// (14 in all).
+    pub fn shells_pass(&self) -> bool {
+        self.flags & Self::SHELLS_PASS != 0
+    }
+
 }
 
 impl Collision {
@@ -64,9 +84,15 @@ impl Collision {
 
             bounds = Some(bounds.map_or([min, max], |[least, most]| [least.min(min), most.max(max)]));
 
-            let material_kinds: Vec<(&str, u32)> = body_flags
+            // Each body's name, material kind and collision flags.
+            let infos: Vec<(&str, u32, u32)> = body_flags
                 .get("flags_")?.elements()?.into_iter()
-                .filter_map(|info| Some((info.get("name")?.as_str()?, info.get("normalMatKind")?.as_int()? as u32)))
+                .filter_map(|info| {
+                    let name = info.get("name")?.as_str()?;
+                    let material_kind = info.get("normalMatKind")?.as_int()? as u32;
+                    let flags = info.get("collisionFlags").and_then(|flags| flags.as_int()).unwrap_or(0) as u32;
+                    Some((name, material_kind, flags))
+                })
                 .collect();
 
             for body in variant(&handles, "Collision Physics Data")?.get("bodyCinfos")?.elements()? {
@@ -80,9 +106,11 @@ impl Collision {
                     _ => continue,
                 };
 
+                let info = infos.iter().find(|(n, _, _)| *n == name);
                 bodies.push(CollisionBody {
                     name: name.to_string(),
-                    material_kind: material_kinds.iter().find(|(n, _)| *n == name).map_or(0, |&(_, kind)| kind),
+                    material_kind: info.map_or(0, |&(_, kind, _)| kind),
+                    flags: info.map_or(0, |&(_, _, flags)| flags),
                     triangles,
                 });
 

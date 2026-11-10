@@ -326,7 +326,7 @@ fn closest_on_triangle(point: Vec3, &[a, b, c]: &[Vec3; 3]) -> Vec3 {
 
 /// Where a segment from `from` along `delta` crosses a triangle, either face, as a
 /// fraction of it, with the triangle's normal facing `from` (Möller–Trumbore).
-fn segment_triangle(from: Vec3, delta: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<(f32, Vec3)> {
+pub fn segment_triangle(from: Vec3, delta: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<(f32, Vec3)> {
     let ab = *b - *a;
     let ac = *c - *a;
     let p = delta.cross(ac);

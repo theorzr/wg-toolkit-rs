@@ -57,14 +57,14 @@ pub fn cmd_havok(opts: CliOptions, args: HavokArgs) -> CliResult<()> {
             if opts.human {
                 println!("bounds {min} {max}");
                 for body in &collision.bodies {
-                    println!("{} material kind {}: {} triangles", body.name, body.material_kind, body.triangles.len());
+                    println!("{} material kind {}, flags {}: {} triangles", body.name, body.material_kind, body.flags, body.triangles.len());
                 }
             } else {
                 // `bounds` (minimum then maximum coordinates), then each `body` (its name,
-                // material kind and triangle count).
+                // material kind, collision flags and triangle count).
                 println!("bounds\t{}\t{}\t{}\t{}\t{}\t{}", min.x, min.y, min.z, max.x, max.y, max.z);
                 for body in &collision.bodies {
-                    println!("body\t{}\t{}\t{}", body.name, body.material_kind, body.triangles.len());
+                    println!("body\t{}\t{}\t{}\t{}", body.name, body.material_kind, body.flags, body.triangles.len());
                 }
             }
         }

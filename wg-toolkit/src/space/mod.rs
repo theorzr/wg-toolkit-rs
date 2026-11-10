@@ -73,6 +73,10 @@ use terrain::Terrain;
 pub struct Space {
     pub terrain: Terrain,
     pub statics: StaticScene,
+    /// What of the game's models is destructible, the space's or not: what the
+    /// destructibles of [`Self::statics`] were read from, and the settings that apply to
+    /// all of them.
+    pub destructibles: Destructibles,
 }
 
 impl Space {
@@ -83,7 +87,11 @@ impl Space {
     pub fn load(fs: &ResFilesystem, space_dir: &str, gameplay: &str) -> io::Result<Self> {
         let destructibles = Destructibles::load(fs)?;
         let mask = visibility_mask(fs, space_dir, gameplay)?;
-        Ok(Self { terrain: Terrain::load(fs, space_dir)?, statics: StaticScene::load(fs, space_dir, &destructibles, mask)? })
+        Ok(Self {
+            terrain: Terrain::load(fs, space_dir)?,
+            statics: StaticScene::load(fs, space_dir, &destructibles, mask)?,
+            destructibles,
+        })
     }
 
 }

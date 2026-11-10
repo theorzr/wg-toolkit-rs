@@ -239,9 +239,21 @@
 //! the broken module no longer blocks, `push_out` lets the hull through in the same
 //! tick.
 //!
-//! The battle then takes the fresh breakages ([`World::take_breakages`]) and lists them
-//! in the `AreaDestructibles` entity of their chunk, one list per kind, sent once a tick
-//! (see `record_breakage` in `battle.rs`).
+//! Shells break pieces too, see `fly` in `gun.rs`. A body whose collision flags say
+//! shells pass it, every light fence's, is ignored by them altogether. A piece of no more
+//! than 19 health is flown through, and breaks whole when the shell gets there
+//! ([`World::break_shot`]), but for an HE or HESH shell, which explodes on it. A
+//! stronger one stops the shell, and takes its damage ([`World::shoot`]). That damage
+//! adds up in `rubble.damage` with the rams', and a house's module (10 to 80 health)
+//! breaks at the first shell. The breakage is marked `shot`, and the client plays its
+//! hit effect rather than its ram effect.
+//!
+//! The battle takes the fresh breakages ([`World::take_breakages`]) at the end of the
+//! tick, after the shells landed, and lists them in the `AreaDestructibles` entity of
+//! their chunk, one list per kind, each sent once a tick (see `show_rubble` in
+//! `battle.rs`). The explosion of a shell that broke a piece lists it as well,
+//! `explodeProjectile`'s `damagedDestructibles`. The client waits up to 0.11 s for one
+//! to come with the other, then breaks the piece as the shell explodes.
 //!
 //! # Vehicles against each other (`World::collide`, `collide`)
 //!
@@ -344,8 +356,8 @@
 //! water: that is the real server's spring suspension, a future step. Vehicles have no
 //! friction between them and take no damage from ramming, each other or destructibles.
 //! Trees don't fall: the client numbers them among the speed trees, which aren't
-//! decoded. Shells pass through static models, destructible or not. What a destroyed
-//! module leaves (`BodyKind::Remains`) is never collided with.
+//! decoded. What a destroyed module leaves (`BodyKind::Remains`) is never collided
+//! with. Shells are flown in `gun.rs`, against the same static scene and rubble.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -860,7 +872,7 @@ impl Hull {
             if speed > 0.0 {
                 self.set_velocity(velocity * (kept / speed));
             }
-            rubble.break_piece(destructible, piece, velocity.x.atan2(velocity.z), speed);
+            rubble.break_piece(destructible, piece, velocity.x.atan2(velocity.z), speed, false);
         }
 
     }
@@ -1279,6 +1291,8 @@ pub struct Breakage {
     pub yaw: f32,
     /// How fast the vehicle went, in m/s.
     pub speed: f32,
+    /// Whether a shell broke it, flying through it or hitting it, not a vehicle.
+    pub shot: bool,
 }
 
 /// The destructibles broken in a world, and those broken since last taken, and the
@@ -1293,7 +1307,7 @@ pub struct Rubble {
 impl Rubble {
 
     /// The piece a static triangle is of, if it is destructible and still stands.
-    fn standing<'a>(&self, statics: &'a StaticScene, triangle: &StaticTriangle) -> Option<(Piece, &'a PlacedDestructible)> {
+    pub fn standing<'a>(&self, statics: &'a StaticScene, triangle: &StaticTriangle) -> Option<(Piece, &'a PlacedDestructible)> {
         let destructible = statics.destructible(triangle.instance)?;
         let module = match destructible.kind {
             DestructibleKind::Structure => Some(destructible.module(triangle.material_kind as u8)?.material_kind),
@@ -1316,17 +1330,14 @@ impl Rubble {
 
     /// Damage a piece: its health, and the damage it took in all.
     fn damage(&mut self, destructible: &PlacedDestructible, piece: Piece, damage: f32) -> Option<(f32, f32)> {
-        let health = match piece.module {
-            Some(module) => destructible.module(module)?.health,
-            None => destructible.health,
-        };
+        let health = destructible.health_of(piece.module)?;
         let done = self.damage.entry(piece).or_default();
         *done += damage;
         Some((health, *done))
     }
 
     /// Break a piece, a module the others it brings down with it, each told of.
-    fn break_piece(&mut self, destructible: &PlacedDestructible, piece: Piece, yaw: f32, speed: f32) {
+    fn break_piece(&mut self, destructible: &PlacedDestructible, piece: Piece, yaw: f32, speed: f32, shot: bool) {
         let depends = piece.module
             .and_then(|module| destructible.module(module))
             .map(|module| module.depends.as_slice())
@@ -1342,6 +1353,7 @@ impl Rubble {
                     kind: destructible.kind,
                     yaw,
                     speed,
+                    shot,
                 });
             }
         }
@@ -1582,6 +1594,34 @@ impl World {
     /// The map's space.
     pub fn space(&self) -> &Space {
         &self.space
+    }
+
+    /// What its vehicles and shells broke of the map, see [`Rubble`].
+    pub fn rubble(&self) -> &Rubble {
+        &self.rubble
+    }
+
+    /// Break a piece a shell flew through, with the modules it brings down, the shell
+    /// going `yaw`: its placed model by its index in `BSMI`, of the triangle it met.
+    /// Nothing if it is already broken.
+    pub fn break_shot(&mut self, instance: u32, piece: Piece, yaw: f32) {
+        let Some(destructible) = self.space.statics.destructible(instance) else { return };
+        self.rubble.break_piece(destructible, piece, yaw, 0.0, true);
+    }
+
+    /// Damage a piece a shell hit and stopped on, a house's module say, the shell going
+    /// `yaw`: it breaks once the damage of all the shells that hit it is its health,
+    /// with the modules it brings down. What broke.
+    pub fn shoot(&mut self, instance: u32, piece: Piece, damage: f32, yaw: f32) -> &[Breakage] {
+        let fresh = self.rubble.fresh.len();
+        if let Some(destructible) = self.space.statics.destructible(instance)
+            && !self.rubble.broken.contains(&piece)
+            && let Some((health, done)) = self.rubble.damage(destructible, piece, damage)
+            && done >= health
+        {
+            self.rubble.break_piece(destructible, piece, yaw, 0.0, true);
+        }
+        &self.rubble.fresh[fresh..]
     }
 
     /// The destructibles broken since last taken, for the battle to tell its clients.

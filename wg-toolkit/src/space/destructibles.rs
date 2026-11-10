@@ -61,6 +61,16 @@
 //! the square of its scale, see [`scaled_health`]. A vehicle's ram damage is measured
 //! in units of [`Destructibles::unit_vehicle_mass`], so a 35 t tank and a 70 t tank
 //! break things in the ratio of their weights.
+//!
+//! # Shells
+//!
+//! A shell ignores a body its collision flags say shells pass, see
+//! [`crate::havok::collision::CollisionBody::shells_pass`]: every light fence's. It flies
+//! through a destructible of no more than [`Destructibles::shoot_through_health`] (19),
+//! breaking it, and loses [`Destructibles::shoot_through_loss`] of its penetration
+//! (25 mm), unless it is HE, which explodes on it. A stronger one, a house's wall, stops
+//! it whole and takes its damage. With modules of 10 to 80 health
+//! and shells of 100 or more, a module breaks at the first shell.
 
 use std::collections::HashMap;
 use std::io;
@@ -87,6 +97,31 @@ pub struct Destructibles {
     /// The weight of a vehicle that the destructibles' health is measured against, in
     /// kilograms.
     pub unit_vehicle_mass: f32,
+    /// The most health a destructible can have for a shell to fly through it, breaking
+    /// it: `maxHpForShootingThrough`, a server setting the client ships too. Anything
+    /// stronger stops the shell.
+    pub shoot_through_health: f32,
+    /// What flying through a destructible costs a shell, see [`PenetrationLoss`]:
+    /// `projectilePiercingPowerReduction`, by effect material. The game gives every
+    /// material the same, so only the first, `ground`, is read.
+    pub shoot_through_loss: PenetrationLoss,
+}
+
+/// What flying through a destructible costs a shell of its penetration, in mm: this
+/// share of it, but this much at least.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PenetrationLoss {
+    pub factor: f32,
+    pub min: f32,
+}
+
+impl PenetrationLoss {
+
+    /// The penetration left of this much, in mm, never below 0.
+    pub fn apply(self, penetration: f32) -> f32 {
+        (penetration - (self.factor * penetration).max(self.min)).max(0.0)
+    }
+
 }
 
 /// A destructible model, see [`Destructibles`].
@@ -140,6 +175,8 @@ impl Destructibles {
         let mut destructibles = Self {
             models: HashMap::new(),
             unit_vehicle_mass: number(&root, "unitVehicleMass").unwrap_or(35_000.0),
+            shoot_through_health: number(&root, "maxHpForShootingThrough").unwrap_or(0.0),
+            shoot_through_loss: penetration_loss(&root).unwrap_or_default(),
         };
 
         let whole = [
@@ -255,6 +292,20 @@ fn reached(root: u8, direct: &HashMap<u8, Vec<u8>>) -> Vec<u8> {
     }
     reached.retain(|&kind| kind != root);
     reached
+}
+
+/// What flying through a destructible costs a shell, see
+/// [`Destructibles::shoot_through_loss`]: its `ground` entry, `"0\t25"` say, the factor
+/// then the minimum.
+fn penetration_loss(root: &Element) -> Option<PenetrationLoss> {
+    let value = root.get_child_element("projectilePiercingPowerReduction")?.get_child_string("ground")?;
+    let mut numbers = value.split_whitespace().map(str::parse::<f32>);
+    let factor = numbers.next()?.ok()?;
+    let min = numbers.next()?.ok()?;
+    Some(PenetrationLoss {
+        factor,
+        min,
+    })
 }
 
 /// A child's number, written as an integer or a float.
