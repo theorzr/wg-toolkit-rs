@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::io;
 
-use glam::{Vec2, Vec3};
+use glam::{Affine3A, Vec2, Vec3};
+
+use tracing::warn;
 
 use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
@@ -82,6 +84,65 @@ pub struct MobilityDef {
     /// The box of what collides of it, its chassis and its hull, in the vehicle's frame
     /// (x right, y up, z forward): minimum then maximum, from their collision models.
     pub bounds: [Vec3; 2],
+    /// Its chassis' wheels, where its model places them, if it does.
+    pub wheels: Option<Wheels>,
+}
+
+/// The most road wheels a chassis has, both sides, and wheels at its tracks' ends.
+pub const MAX_ROAD_WHEELS: usize = 32;
+pub const MAX_TRACK_ENDS: usize = 4;
+
+/// A wheel of a chassis: its centre, in the vehicle's frame, and its radius, in metres.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WheelDef {
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+/// A chassis' wheels, as its definition names them (`chassis/wheels`) and its model's
+/// nodes place them (`<chassis>.visual_processed`): those its tracks rest on, the road
+/// wheels, and those its tracks turn around at their ends, the leading ones, its idlers
+/// and sprockets, `isLeading`. The return rollers, on top of its tracks, aren't kept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wheels {
+    road: [WheelDef; MAX_ROAD_WHEELS],
+    road_count: u8,
+    ends: [WheelDef; MAX_TRACK_ENDS],
+    end_count: u8,
+    /// How thick its tracks are, in metres: how far above the ground its road wheels'
+    /// bottoms are, on average, its origin on the ground.
+    pub track_thickness: f32,
+}
+
+impl Wheels {
+
+    /// Wheels of these road wheels and track ends, as many as fit, see
+    /// [`MAX_ROAD_WHEELS`] and [`MAX_TRACK_ENDS`].
+    pub fn new(road: &[WheelDef], ends: &[WheelDef], track_thickness: f32) -> Self {
+        let road = &road[..road.len().min(MAX_ROAD_WHEELS)];
+        let ends = &ends[..ends.len().min(MAX_TRACK_ENDS)];
+        let mut wheels = Self {
+            road: [WheelDef::default(); MAX_ROAD_WHEELS],
+            road_count: road.len() as u8,
+            ends: [WheelDef::default(); MAX_TRACK_ENDS],
+            end_count: ends.len() as u8,
+            track_thickness,
+        };
+        wheels.road[..road.len()].copy_from_slice(road);
+        wheels.ends[..ends.len()].copy_from_slice(ends);
+        wheels
+    }
+
+    /// Its road wheels.
+    pub fn road(&self) -> &[WheelDef] {
+        &self.road[..self.road_count as usize]
+    }
+
+    /// The wheels at its tracks' ends, the frontmost and the rearmost of each side.
+    pub fn ends(&self) -> &[WheelDef] {
+        &self.ends[..self.end_count as usize]
+    }
+
 }
 
 /// A shell as the default gun fires it: what the client needs to show its tracer.
@@ -714,6 +775,10 @@ fn mobility(
         + module_float("radios", "radios", "weight")?;
 
     let rotation_speed = chassis_float("rotationSpeed")?.to_radians();
+    let wheels = read_wheels(fs, chassis)
+        .inspect_err(|e| warn!(vehicle = name, "Failed to read a chassis' wheels: {e}"))
+        .ok()
+        .flatten();
     Ok(MobilityDef {
         speed_forward,
         speed_backward,
@@ -723,8 +788,108 @@ fn mobility(
         rolling_friction: [firm, medium, soft],
         carrying_point,
         bounds,
+        wheels,
     })
 
+}
+
+/// How far above the lowest road wheel's bottom a wheel's bottom may be, in metres, for
+/// it to be a road wheel: higher, it is a return roller, on top of its track, a metre
+/// up. Our choice.
+const ROAD_WHEEL_RISE: f32 = 0.25;
+
+/// A chassis' wheels, see [`Wheels`]: none if its definition names none, or its model
+/// places none of them.
+fn read_wheels(fs: &ResFilesystem, chassis: &Element) -> io::Result<Option<Wheels>> {
+
+    // Each wheel's name, its radius, and whether it is a leading one.
+    let mut named: Vec<(String, f32, bool)> = Vec::new();
+    let Some(wheels) = chassis.get_child_element("wheels") else { return Ok(None) };
+    for (key, value) in wheels.iter_children_all() {
+        let Some(wheel) = value.as_element() else { continue };
+        let Some(radius) = wheel.get_child_float("radius") else { continue };
+        match key.as_str() {
+            "wheel" => {
+                let Some(name) = wheel.get_child_string("name") else { continue };
+                let leading = wheel.get_child("isLeading").and_then(pxml::Value::as_boolean).unwrap_or(false);
+                named.push((name.to_string(), radius, leading));
+            }
+            "group" => {
+                let Some(template) = wheel.get_child_string("template") else { continue };
+                let start = wheel.get_child_integer("startIndex").unwrap_or(0);
+                let count = wheel.get_child_integer("count").unwrap_or(0);
+                for index in start..start + count {
+                    named.push((format!("{template}{index}"), radius, false));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some(model) = chassis.get_child_element("models").and_then(|models| models.get_child_string("undamaged")) else {
+        return Ok(None);
+    };
+    let path = model.strip_suffix(".model").map_or_else(|| model.to_string(), |stem| format!("{stem}.visual_processed"));
+    let visual = read_xml(fs, &path)?;
+    let mut placed = HashMap::new();
+    if let Some(root) = visual.get_child_element("node") {
+        place_nodes(root, Affine3A::IDENTITY, &mut placed);
+    }
+
+    let found: Vec<(WheelDef, bool)> = named.iter()
+        .filter_map(|(name, radius, leading)| {
+            let wheel = WheelDef {
+                center: *placed.get(name.as_str())?,
+                radius: *radius,
+            };
+            Some((wheel, *leading))
+        })
+        .collect();
+    let lowest = found.iter()
+        .filter(|(_, leading)| !leading)
+        .map(|(wheel, _)| wheel.center.y - wheel.radius)
+        .reduce(f32::min);
+    let Some(lowest) = lowest else { return Ok(None) };
+
+    let road: Vec<WheelDef> = found.iter()
+        .filter(|(wheel, leading)| !leading && wheel.center.y - wheel.radius <= lowest + ROAD_WHEEL_RISE)
+        .map(|(wheel, _)| *wheel)
+        .collect();
+    let bottoms = road.iter().map(|wheel| wheel.center.y - wheel.radius).sum::<f32>();
+    let track_thickness = (bottoms / road.len() as f32).max(0.0);
+
+    // The frontmost and the rearmost leading wheel of each side.
+    let mut ends: Vec<WheelDef> = Vec::new();
+    for right in [true, false] {
+        let side: Vec<WheelDef> = found.iter()
+            .filter(|(wheel, leading)| *leading && (wheel.center.x > 0.0) == right)
+            .map(|(wheel, _)| *wheel)
+            .collect();
+        let front = side.iter().copied().max_by(|a, b| a.center.z.total_cmp(&b.center.z));
+        let back = side.iter().copied().min_by(|a, b| a.center.z.total_cmp(&b.center.z));
+        for wheel in [front, back].into_iter().flatten() {
+            if !ends.contains(&wheel) {
+                ends.push(wheel);
+            }
+        }
+    }
+
+    Ok(Some(Wheels::new(&road, &ends, track_thickness)))
+
+}
+
+/// Where each node of a visual's tree is, by its identifier: its transform's
+/// translation once composed with its parents', from `parent`.
+fn place_nodes<'a>(node: &'a Element, parent: Affine3A, placed: &mut HashMap<&'a str, Vec3>) {
+    let transform = parent * node.get_child("transform").and_then(pxml::Value::as_affine3).unwrap_or(Affine3A::IDENTITY);
+    if let Some(identifier) = node.get_child_string("identifier") {
+        placed.insert(identifier, transform.translation.into());
+    }
+    for child in node.iter_children("node") {
+        if let Some(child) = child.as_element() {
+            place_nodes(child, transform, placed);
+        }
+    }
 }
 
 /// Where a nation's vehicles are defined: the core's directory, then each enabled

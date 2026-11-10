@@ -32,7 +32,7 @@ impl Bot {
         if let (Some(enemy), true) = (enemy, drives) {
             let mut to = enemy - hull.position;
             to.y = 0.0;
-            let off = wrap_angle(to.x.atan2(to.z) - hull.direction.z);
+            let off = wrap_angle(to.x.atan2(to.z) - hull.yaw());
             if off > HEADING_TOLERANCE {
                 flags |= movement_flag::ROTATE_RIGHT;
             } else if off < -HEADING_TOLERANCE {
@@ -82,7 +82,7 @@ mod tests {
         let to = enemy - hull.position;
         let distance = to.x.hypot(to.z);
         assert!(distance <= ENGAGE_RANGE && distance > ENGAGE_RANGE - 20.0, "stopped {distance} m away");
-        assert!(wrap_angle(to.x.atan2(to.z) - hull.direction.z).abs() <= HEADING_TOLERANCE + 0.05);
+        assert!(wrap_angle(to.x.atan2(to.z) - hull.yaw()).abs() <= HEADING_TOLERANCE + 0.05);
     }
 
 }

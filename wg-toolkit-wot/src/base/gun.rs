@@ -975,13 +975,14 @@ mod tests {
             })
             .to_vec();
         let mut statics = StaticScene::from_triangles(triangles);
-        let modules = match house {
-            true => vec![Module {
+        let modules = if house {
+            vec![Module {
                 material_kind: 73,
                 health,
                 depends: Vec::new(),
-            }],
-            false => Vec::new(),
+            }]
+        } else {
+            Vec::new()
         };
         statics.add_destructible(0, PlacedDestructible {
             chunk_id: 0x7f7f,

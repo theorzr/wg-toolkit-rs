@@ -232,7 +232,7 @@ impl BaseThread {
         
         let start = Start { 
             position: hull.position, 
-            direction: hull.direction,
+            direction: hull.direction(),
         };
         
         let mut battle = Battle {
@@ -264,12 +264,11 @@ impl BaseThread {
         // The bots, allies then enemies, each team in rows from its start, the player
         // first in its own. They drive the given vehicles in turn, else the player's.
         let options = self.battle_options.clone();
-        let own_def = match options.bot_vehicles.is_empty() {
-            true => {
-                let decoded = VehicleDescr::decode(&own_descr).map_err(|e| invalid_data(&e.to_string()))?;
-                Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
-            }
-            false => None,
+        let own_def = if options.bot_vehicles.is_empty() {
+            let decoded = VehicleDescr::decode(&own_descr).map_err(|e| invalid_data(&e.to_string()))?;
+            Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
+        } else {
+            None
         };
         let enemy_start = match options.enemy_distance {
             Some(distance) => facing_from(start, distance, &self.space.terrain),
@@ -887,7 +886,7 @@ impl BaseThread {
                     %client,
                     entity_id = %vehicles[index].entity.id(),
                     position = ?shoved.position,
-                    yaw = shoved.direction.z,
+                    yaw = shoved.yaw(),
                     speed = shoved.speed,
                     slide = shoved.slide,
                     "Shoved a bot",
@@ -897,8 +896,8 @@ impl BaseThread {
             spot(app, client, &mut vehicles[index], world, own)?;
             if !vehicles[index].alive() {
                 let (entity, hull) = (vehicles[index].entity, &world.vehicle(vehicles[index].id).hull);
-                if app.position(entity) != Some((hull.position, hull.direction)) {
-                    app.set_position(entity, hull.position, hull.direction)?;
+                if app.position(entity) != Some((hull.position, hull.direction())) {
+                    app.set_position(entity, hull.position, hull.direction())?;
                 }
                 continue;
             }
@@ -1164,7 +1163,7 @@ fn pack_angle(angle: f32) -> u8 {
 fn show_vehicle(app: &mut base::App, vehicle: &mut BattleVehicle, driven: &Vehicle) -> io::Result<()> {
 
     let Vehicle { hull, turret } = driven;
-    app.set_position(vehicle.entity, hull.position, hull.direction)?;
+    app.set_position(vehicle.entity, hull.position, hull.direction())?;
     let mut view = app.entity(vehicle.entity)?;
     view.set_gunAnglesPacked(turret.gun_angles_packed())?;
 
@@ -1201,7 +1200,7 @@ fn show_own_vehicle(
     }
     // Every tick, to compare with what the client simulates.
     debug!(%client, "Stepped the vehicle: at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
-        hull.position, hull.direction, hull.speed, turret.yaw, turret.pitch);
+        hull.position, hull.direction(), hull.speed, turret.yaw, turret.pitch);
     app.set_position(avatar, hull.position, Vec3::ZERO)?;
     let mut avatar_view = app.entity(avatar)?;
     avatar_view.set_ownVehicleAuxPhysicsData(hull.aux_physics_data())?;

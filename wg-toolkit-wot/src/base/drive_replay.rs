@@ -283,6 +283,12 @@ impl Errors {
             .map(|&i| format!("{:.1} s ({:.1} m, {:.0}°)", self.starts[i], self.distance[i], self.yaw[i] * 180.0 / PI))
             .collect::<Vec<_>>();
         println!("    worst from: {}", worst.join(", "));
+        let mut highest = (0..self.height.len()).collect::<Vec<_>>();
+        highest.sort_by(|&a, &b| self.height[b].total_cmp(&self.height[a]));
+        let highest = highest.iter().take(count)
+            .map(|&i| format!("{:.1} s ({:.2} m)", self.starts[i], self.height[i]))
+            .collect::<Vec<_>>();
+        println!("    worst in height from: {}", highest.join(", "));
     }
 
 }
@@ -316,7 +322,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         hull.speed = (from.position - before.position).dot(heading) / dt;
         hull.slide = (from.position - before.position).dot(right) / dt;
         hull.yaw_rate = wrap_angle(from.direction.z - before.direction.z) / dt;
-        hull.vertical_speed = (from.position.y - before.position.y) / dt;
+        hull.linear_velocity = (from.position - before.position) / dt;
         let controls_at = |t: f64| drive.controls.iter().rev()
             .find(|&&(at, _)| at + delay <= t)
             .map_or(0, |&(_, flags)| flags);
@@ -349,7 +355,7 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         if moved >= MOVED {
             errors.distance.push((hull.position - real.position).with_y(0.0).length());
             errors.height.push((hull.position.y - real.position.y).abs());
-            errors.yaw.push(wrap_angle(hull.direction.z - real.direction.z).abs());
+            errors.yaw.push(wrap_angle(hull.yaw() - real.direction.z).abs());
             errors.starts.push(from.t);
         }
         start = next;
@@ -359,26 +365,33 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
 
 }
 
-/// How far the hull settled where the real vehicle was tilts from it: the median and 90th
-/// percentile pitch and roll errors, in degrees, over the positions on its terrain.
+/// How far the hull, left to rest on its suspension for [`REST_TIME`] where the real
+/// vehicle was, tilts from it: the median and 90th percentile pitch and roll errors, in
+/// degrees, over every tenth position, those on the ground.
 fn tilt_errors(drive: &Drive, mobility: MobilityDef, space: &Space) -> [(f32, f32); 2] {
     let mut pitch = Vec::new();
     let mut roll = Vec::new();
-    for update in &drive.updates {
+    for update in drive.updates.iter().step_by(10) {
         let mut hull = Hull::new(update.position, update.direction, mobility);
-        hull.direction.x = f32::NAN;
-        hull.settle(space, 0.0);
-        if hull.direction.x.is_nan() {
+        let mut rubble = Rubble::default();
+        for _ in 0..(REST_TIME / 0.1) as usize {
+            hull.advance(0.1, space, None, &mut rubble);
+        }
+        if hull.airborne {
             continue;
         }
-        pitch.push(wrap_angle(hull.direction.y - update.direction.y).abs());
-        roll.push(wrap_angle(hull.direction.x - update.direction.x).abs());
+        let direction = hull.direction();
+        pitch.push(wrap_angle(direction.y - update.direction.y).abs());
+        roll.push(wrap_angle(direction.x - update.direction.x).abs());
     }
     [pitch, roll].map(|errors| {
         let (median, p90, _) = Errors::stats(&errors);
         (median * 180.0 / PI, p90 * 180.0 / PI)
     })
 }
+
+/// How long [`tilt_errors`] lets a hull rest, in seconds.
+const REST_TIME: f32 = 3.0;
 
 #[test]
 fn hull_follows_the_real_server() {

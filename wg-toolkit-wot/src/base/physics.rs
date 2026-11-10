@@ -22,13 +22,13 @@
 //!   ├─ 1. remember()        pose ← where each vehicle is, for the sweep in 4
 //!   │
 //!   ├─ 2. for every vehicle: Vehicle::step
-//!   │     ├─ Hull::advance
+//!   │     ├─ Hull::advance                                  (unless it rests)
 //!   │     │    ├─ Hull::step        drive model: engine, ground, slope, turning
-//!   │     │    ├─ ram               damage and break destructibles      (if it moved)
-//!   │     │    ├─ push_out          stop against walls                  (if it moved)
-//!   │     │    ├─ keep_within       stop at the map's edge
-//!   │     │    └─ settle            rest on the ground, roll and pitch,
-//!   │     │                         or fall off it                      (if it moved)
+//!   │     │    ├─ integrate         the rigid body, 10 steps: gravity, suspension,
+//!   │     │    │                    its tracks' motion while they touch the ground
+//!   │     │    ├─ ram               damage and break destructibles
+//!   │     │    ├─ push_out          stop against walls
+//!   │     │    └─ keep_within       stop at the map's edge
 //!   │     └─ Turret::step     turn toward the aim, update the dispersion
 //!   │
 //!   ├─ 3. collide(dt), up to 3 passes over every pair of vehicles
@@ -79,8 +79,9 @@
 //!
 //! For example, a vehicle whose front tracks stand 0.5 m lower than its back tracks,
 //! 4 m apart, has `pitch = atan(0.5 / 4) ≈ +7°`; with its right track 0.3 m higher than
-//! its left one, 3 m apart, `roll = atan(0.3 / 3) ≈ +6°`. That is exactly what
-//! [`Hull::settle`] computes from the ground under the vehicle.
+//! its left one, 3 m apart, `roll = atan(0.3 / 3) ≈ +6°`, about where its suspension
+//! settles it, see [`Hull::integrate`]. The hull's truth is its `orientation`, a
+//! quaternion; these angles are read from it, [`Hull::direction`].
 //!
 //! # The drive model (`Hull::step`)
 //!
@@ -124,62 +125,77 @@
 //! share: a hull sliding sideways turns freely, as a rammed one does, and one at rest
 //! holds the turn a weak push would give it, see `Hull::track_friction`.
 //!
-//! # The ground (`settle`, `ground_height`)
+//! # The body and its suspension (`integrate`, `ground_height`)
 //!
-//! After it moves, a vehicle is put back on the ground, tilted with it, or falls, see
-//! below. Five points are looked up, the centre and the four corners of the area its tracks
-//! carry it on (`MobilityDef::carrying_point`), and the hull takes the centre's height
-//! and the tilt that the corners' heights give:
+//! A hull is a rigid body: a position and an orientation, the velocity of its centre of
+//! mass and its spin about each axis of the world, its weight as its mass and a box's
+//! inertia. Each tick moves it in [`SUBSTEPS`] steps of 10 ms. In each, gravity pulls at
+//! its centre of mass, and its suspension pushes it up under each of its road wheels,
+//! where its chassis' model places them (`MobilityDef::wheels`): a spring and a damper
+//! at each, sharing its weight, sinking `SAG` at rest so that its origin is on the
+//! ground. Its idlers and sprockets, at its tracks' ends, have no spring: the track
+//! around them is rigid, and stops the hull as soon as it touches the ground, a rock or
+//! a step meeting the track's front before its first road wheel, see [`Hull::contacts`].
+//! Its wheels unknown, [`CONTACTS_PER_TRACK`] springs along each track stand in for
+//! them. The pushes' torques roll and pitch it, and
+//! its spin carries on from a step to the next: it bounces, rocks, and tips. A spring
+//! gives [`SUSPENSION_TRAVEL`] past where it rests, then stops hard: its contact sinks
+//! no deeper, an impulse stopping it as the ground does, and a hull landing from a ledge
+//! stops on its tracks rather than going into the ground. What sank past is moved back
+//! out without the hull keeping any speed from it (a split impulse, see `Hull::stop`),
+//! or it would be thrown up.
 //!
 //! ```text
-//!          front
-//!     FL ●─────────● FR            roll  = atan( (FR+BR − FL−BL) / (4 · cx) )
-//!        │     ● C  │              pitch = −atan( (FR+FL − BR−BL) / (4 · cy) )
-//!     BL ●─────────● BR            y     = C
-//!          back                    cx, cy: the carrying point's half width and length
+//!   back                                           front
+//!           _______________________________________
+//!          |                   x                   |           x   centre of mass
+//!          |_______________________________________|           |   a spring, from the hull
+//!       (O)     |     |     |     |     |     |     (O)            down to its road wheel
+//!        #\     o     o     o     o     o     o     /#         o   road wheels
+//!          #\___*_____*_____*_____*_____*_____*___/#           *   where it pushes: the track
+//!     ===================================================          on the ground under it
+//!                          ground                             (O)  sprocket, idler, no spring
+//!                                                              #   rigid, on the track
+//!
+//!   for a spring, at its contact *:
+//!                 depth = ground + SAG - the contact's height   (none: it is in the air)
+//!                 push  = k * depth + d * (how fast depth grows), up, at *
+//!                 SAG   = g / w^2,  w = 2 pi * SUSPENSION_FREQUENCY
 //! ```
 //!
-//! The ground at a point is the *highest* of the terrain and of the static triangles that
-//! are ground-like (flatter than [`WALL_ANGLE`] from vertical, or ramps) *no higher than
-//! `y + STEP_HEIGHT`*. That last bound is what makes a bridge work from both sides:
+//! The ground under a contact is the *highest* of the terrain and of the static
+//! triangles that are ground-like (flatter than [`WALL_ANGLE`] from vertical, or ramps)
+//! *no higher than `STEP_HEIGHT` above the contact*. The contact is where it is on the
+//! tilted hull, so a nose raised by a rock's face, a step or a ramp finds the ground
+//! further up, and the hull climbs onto it. That bound is also what makes a bridge work
+//! from both sides:
 //!
 //! ```text
-//!    height                                         the deck is above y + 0.8 m, so it
-//!      ▲                      ═════════════════     isn't ground: the tank drives under
-//!      │         ┌──────┐
+//!    height                                         the deck is above the contacts by
+//!      ▲                      ═════════════════     more than 0.8 m, so it isn't ground:
+//!      │         ┌──────┐                           the tank drives under
 //!      │ y+0.8 ┈ │ tank │ ┈┈┈┈┈┈┈┈┈┈┈ top ┈┈┈┈     ground = highest surface below this
 //!      │ y     ──┴──────┴────────── terrain
 //!      ┴───────────────────────────────────▶
 //!
-//!      on the ramp, y rises with the highest surface below `top`, and once the tank is on
-//!      the deck, the deck is below `top` and holds it, not the terrain 5 m under it:
+//!      on the ramp, the front contacts find it first and lift the nose, and once the
+//!      tank is on the deck, the deck is below `top` and holds it, not the terrain under:
 //!
 //!      │                          ╱═════════════════ deck
 //!      │       ┌──────┐        ╱   (ramp)
 //!      │ ──────┴──────┴─────╱
 //! ```
 //!
-//! If any of the five points has no ground, the hull stays where it is.
+//! While any contact touches the ground, its tracks set its motion along the ground
+//! plane, from the drive model: its spin about the vertical, and its velocity along the
+//! ground. Up and down, its roll and its pitch stay the body's own. With no contact on the
+//! ground it is `airborne`: nothing grips it, and it keeps going, turning and tumbling as
+//! it went, until it lands. Off a ledge it falls; with its centre of mass past an edge,
+//! its last contacts on it tip it over, nose first. Where no contact finds any ground at
+//! all, off the terrain, it is held as it is.
 //!
-//! The hull has a vertical speed. In a tick it would fall freely to `free`. If the
-//! ground under its centre is lower than that by more than [`GROUND_REACH`] (0.3 m, what
-//! the suspension reaches), it leaves the ground: it is `airborne`, falls, keeps its tilt,
-//! and nothing grips it, so it keeps going and turning as it went. Otherwise it rests on
-//! the ground, and its vertical speed is how fast it went down, never up, so a ramp's top
-//! doesn't throw it:
-//!
-//! ```text
-//!   free = y + vertical_speed · dt − ½ · g · dt²
-//!   ground < free − GROUND_REACH    airborne: y = free, vertical_speed −= g · dt
-//!   else                            on it:    y = ground, vertical_speed = min(Δy / dt, 0)
-//! ```
-//!
-//! Following a slope down, the vertical speed carries it down with the ground, so it
-//! stays on it. It leaves the ground off a cliff, a bridge's edge, or the crest of a
-//! steep slope taken fast. A corner whose ground is out of that reach below where the
-//! hull's tilt puts it rests on nothing and keeps that height. So a hull with its nose
-//! over a bridge's edge stays level on the deck, rather than tipping into it, until its
-//! centre leaves the deck and it falls.
+//! A hull still on the ground for [`REST_TICKS`] rests: its body isn't moved, and sends
+//! nothing, until its controls or a hit wake it.
 //!
 //! # Static geometry (`push_out`, `overlaps`)
 //!
@@ -206,9 +222,6 @@
 //! impulse at its corner deepest in the wall (or the middle of an edge flat against it),
 //! as a vehicle would that doesn't move: a corner swings the hull round. The rest slows
 //! by [`WALL_FRICTION`] of it, so a tank scrapes along a wall instead of sticking.
-//!
-//! The ground under the corners can tilt the hull no more than [`MAX_TILT`]: a corner on
-//! a rock's facet would tip it over, and so tilted, the walls would push it metres aside.
 //!
 //! The map's edge is the same idea with 4 planes ([`Hull::keep_within`]): the centre
 //! stays [`BOUNDS_MARGIN`] inside, the speed into the edge is removed, and the rest
@@ -339,8 +352,8 @@
 //! ```text
 //!     ┌───────────┐
 //!     │     A     │            ▒ the overlap seen from above (clipped polygon)
-//!     │      ┌────┼──────┐     ● its centroid: the contact point
-//!     │      │▒▒●▒│      │     r_A: from A's middle to ●     r_B: from B's middle to ●
+//!     │      ┌────┼──────┐     * its centroid: the contact point
+//!     │      │▒▒*▒│      │     r_A: from A's middle to *     r_B: from B's middle to *
 //!     └──────┼────┘      │
 //!            │     B     │
 //!            └───────────┘
@@ -373,9 +386,10 @@
 //!
 //! # What isn't modelled
 //!
-//! A vehicle falls, but doesn't tip over an edge, flip, climb on debris taller than
-//! `STEP_HEIGHT`, take damage from a fall, or sink in water: that is the real server's
-//! spring suspension, a future step. Vehicles have no
+//! Along the ground the hull still moves as the drive model says, not by its tracks'
+//! forces at its contacts: that is next, then walls and vehicles hitting it in 3D. It
+//! takes no damage from a fall, doesn't float or sink in water, and can't climb what is
+//! more than `STEP_HEIGHT` above its contacts. Vehicles have no
 //! friction between them and take no damage from ramming, each other or destructibles.
 //! Trees don't fall: the client numbers them among the speed trees, which aren't
 //! decoded. What a destroyed module leaves (`BodyKind::Remains`) is never collided
@@ -385,7 +399,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::vec::Drain;
 
-use glam::{Affine3A, Mat3, Quat, Vec2, Vec3, Vec3Swizzles};
+use glam::{Affine3A, EulerRot, Mat3, Quat, Vec2, Vec3, Vec3Swizzles};
 use smallvec::SmallVec;
 use tracing::warn;
 
@@ -395,7 +409,7 @@ use wgtk::space::terrain::{Ground, Terrain};
 use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::Space;
 
-use crate::wot::item_defs::{AimingDef, MobilityDef};
+use crate::wot::item_defs::{AimingDef, MobilityDef, MAX_ROAD_WHEELS, MAX_TRACK_ENDS};
 
 
 /// How far inside the map's bounds the hull's centre stays, in metres. Fitted: the real
@@ -408,11 +422,49 @@ const EDGE_FRICTION: f32 = 0.25;
 /// models it collides with: what is lower it drives over. Fitted roughly: the drives'
 /// real hulls went over debris and porches up to 0.76 m high.
 const STEP_HEIGHT: f32 = 0.8;
-/// How far below where it falls to in a tick its tracks still find the ground, in
-/// metres: what its suspension reaches. It follows the start of a slope and the dips of
-/// the ground rather than flying over them, and only leaves the ground off a drop, a
-/// cliff's edge or a bridge's. Our choice, not fitted.
-const GROUND_REACH: f32 = 0.3;
+/// How many steps a tick's motion of a hull's body is integrated in, see
+/// `Hull::integrate`: 10 ms each, short enough for its suspension's springs.
+const SUBSTEPS: usize = 10;
+/// How many contacts its suspension has along each track when its chassis' wheels
+/// aren't known, see `Hull::contacts`. Our choice: about one a metre.
+const CONTACTS_PER_TRACK: usize = 6;
+/// The most contacts a hull has, a size `SmallVec` takes: a spring under each road
+/// wheel, and 4 rigid ones at each of its tracks' ends, see `Hull::contacts`.
+const MAX_CONTACTS: usize = 64;
+const _: () = assert!(MAX_ROAD_WHEELS + 4 * MAX_TRACK_ENDS <= MAX_CONTACTS);
+/// How fast a hull bounces on its suspension, in Hz, and how much of the damping that
+/// would stop the bounce at once (critical) it has. Our choice, by feel: at 1.5 Hz the
+/// hull sinks 11 cm into its springs at rest.
+const SUSPENSION_FREQUENCY: f32 = 1.5;
+const SUSPENSION_DAMPING: f32 = 0.7;
+/// How much further than at rest a contact's spring gives, in metres, before it stops
+/// hard: past it, the contact sinks no deeper, the hull's body stopped there as if
+/// rigid, see `Hull::integrate`. Our choice: a real track's road wheels travel about a
+/// quarter of a metre, 11 cm of it sunk at rest.
+const SUSPENSION_TRAVEL: f32 = 0.15;
+/// How a contact past its travel is pushed back out: this share of how far past it is,
+/// a step, no faster than this, in m/s. A contact is past it on landing, or meeting a
+/// step: pushed out at once, the hull would be thrown off it. Its ground's rise under it
+/// counts no faster either. Our choice.
+const STOP_RECOVERY: f32 = 0.2;
+const STOP_SPEED: f32 = 2.0;
+/// How many times the contacts past their travel are each stopped in a step, those
+/// stopped moving the others: a hull landing on its nose stops on its front contacts,
+/// and turns onto its back ones.
+const STOP_PASSES: usize = 4;
+/// How high its centre of mass is, as a share of its collision box's height. Our choice:
+/// a hull's mass is low, its turret's higher.
+const CENTER_OF_MASS_HEIGHT: f32 = 0.35;
+/// How many ticks in a row a hull is still on the ground before it rests, its body no
+/// longer moved, and what still is: under this speed, in m/s, and this turning speed, in
+/// rad/s. Resting, it sends no position updates for nothing. Our choice.
+const REST_TICKS: u8 = 5;
+/// How far, in metres, a contact's depth in the ground may change in a step of a hull's
+/// body for its damper to take it as the contact sinking: more is the ground jumping
+/// under it, off an edge or onto a step. 5 m/s.
+const DEPTH_JUMP: f32 = 0.05;
+const REST_SPEED: f32 = 0.02;
+const REST_SPIN: f32 = 0.01;
 /// How much of the speed a wall stops it also takes along it. Our choice, an edge's
 /// until fitted.
 const WALL_FRICTION: f32 = EDGE_FRICTION;
@@ -512,11 +564,6 @@ const RAM_PRESS: f32 = 25.0;
 /// The weight of a vehicle that destructibles' health is measured against, in kg:
 /// `unitVehicleMass` in the game's `scripts/destructibles.xml`.
 const UNIT_VEHICLE_MASS: f32 = 35_000.0;
-/// How far the hull tilts at most, in radians, either way along it or across: its tracks
-/// grip least from 32° along and 29° across, see [`SLOPE_GRIP_ALONG`]. Our choice: with a
-/// corner on a rock's facet, the ground under its corners tilted it up to 66°, and so
-/// tilted, the walls pushed it metres aside; it waits for a suspension.
-const MAX_TILT: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// How long its turning speed takes to grow from nothing to its turning speed on the
 /// spot, and to fall back, in seconds: the faster it turns, the faster it gets there.
 /// Fitted: turning from rest, the T110E4 (26.8°/s) and the Type 64 (49.3°/s) both get
@@ -644,13 +691,14 @@ impl Vehicle {
 
 }
 
-/// A vehicle's hull, moving as the client drives it.
+/// A vehicle's hull, moving as the client drives it: a rigid body, held up by its
+/// suspension, see [`Self::integrate`].
 #[derive(Debug, Clone)]
 pub struct Hull {
+    /// Its origin: the middle of its tracks' footprint, on the ground at rest.
     pub position: Vec3,
-    /// Roll, pitch and yaw, in radians, the order position updates carry them. A yaw
-    /// of 0 faces +Z, and turning right increases it.
-    pub direction: Vec3,
+    /// How it is turned in the world, see [`Self::direction`].
+    pub orientation: Quat,
     /// Signed speed along the vehicle's heading, in m/s.
     pub speed: f32,
     /// Signed speed across its heading, positive to the right, in m/s: it slides with
@@ -661,11 +709,22 @@ pub struct Hull {
     /// Turning speed hits gave it on top, in rad/s: its tracks don't drive it but hold it,
     /// see [`Self::track_friction`].
     pub spin: f32,
-    /// Vertical speed, in m/s, positive up: falling, or following the ground down, see
-    /// [`Self::settle`].
-    pub vertical_speed: f32,
-    /// Whether it is off the ground, falling: nothing grips it, see [`Self::step`].
+    /// The velocity of its centre of mass, in m/s. On the ground, its tracks set it along
+    /// the ground plane, from `speed` and `slide`; up and down, and in the air, it is the
+    /// body's own.
+    pub linear_velocity: Vec3,
+    /// How fast it turns, about each axis of the world, in rad/s. On the ground, its
+    /// tracks set it about the vertical, from `yaw_rate` and `spin`; its roll and pitch,
+    /// and in the air all of it, are the body's own.
+    pub angular_velocity: Vec3,
+    /// Whether none of its suspension's contacts touches the ground: nothing grips it.
     pub airborne: bool,
+    /// How many ticks in a row it has been still on the ground, see [`REST_TICKS`].
+    still: u8,
+    /// How deep each of its contacts was in the ground at the end of the last step, NaN
+    /// where none was found: their dampers resist how fast they sink, see
+    /// [`Self::integrate`].
+    depths: [f32; MAX_CONTACTS],
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,
     pub mobility: MobilityDef,
@@ -676,16 +735,38 @@ impl Hull {
     pub fn new(position: Vec3, direction: Vec3, mobility: MobilityDef) -> Self {
         Self { 
             position, 
-            direction, 
+            orientation: rotation_of(direction), 
             speed: 0.0, 
             slide: 0.0, 
             yaw_rate: 0.0, 
             spin: 0.0, 
-            vertical_speed: 0.0,
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
             airborne: false,
+            still: 0,
+            depths: [f32::NAN; MAX_CONTACTS],
             flags: 0, 
             mobility,
         }
+    }
+
+    /// Its roll, pitch and yaw, in radians, the order position updates carry them: rolled
+    /// positively right side up, pitched positively nose down. A yaw of 0 faces +Z, and
+    /// turning right increases it.
+    pub fn direction(&self) -> Vec3 {
+        let (yaw, pitch, roll) = self.orientation.to_euler(EulerRot::YXZ);
+        Vec3::new(roll, pitch, yaw)
+    }
+
+    /// Turn it to a roll, pitch and yaw, see [`Self::direction`].
+    #[cfg(test)]
+    pub fn set_direction(&mut self, direction: Vec3) {
+        self.orientation = rotation_of(direction);
+    }
+
+    /// Its yaw, see [`Self::direction`].
+    pub fn yaw(&self) -> f32 {
+        self.orientation.to_euler(EulerRot::YXZ).0
     }
 
     /// The speed the flags ask for: the top speed in their direction, reduced by cruise
@@ -716,43 +797,63 @@ impl Hull {
     /// Advance by `dt` seconds in its space. Returns whether the hull moved or turned.
     ///
     /// ```text
-    ///   step(ground under it)      the drive model: speeds, turning, new position
+    ///   step(ground under it)      the drive model: its speeds and turning on the ground,
+    ///        ▼                     or, in the air, those its body has
+    ///   integrate                  the body moves: its tracks, gravity, its suspension
     ///        ▼   (only if it moved)
-    ///   push_out                   out of the solid static models, speed into them lost
-    ///        ▼
+    ///   ram, push_out              into destructibles, out of the solid static models,
+    ///        ▼                     speed into them lost
     ///   keep_within(bounds)        inside the map, speed into the edge lost
-    ///        ▼   (only if it moved)
-    ///   settle                     back on the ground, rolled and pitched with it,
-    ///                              or falling, off it
     /// ```
     ///
-    /// The order matters: a wall can push the hull off the terrain it was on, so the
-    /// ground is looked up last.
+    /// A hull still on the ground for [`REST_TICKS`] rests: it isn't moved until its
+    /// controls or a hit move it again.
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
-        let moved = self.step(dt, ground_at(&space.terrain, self.position));
-        if moved {
-            self.ram(dt, &space.statics, rubble);
-            self.push_out(&space.statics, rubble);
+        if self.airborne {
+            self.follow_body();
+        } else {
+            self.step(dt, ground_at(&space.terrain, self.position));
         }
-        if let Some(bounds) = bounds {
-            self.keep_within(bounds);
+        let still = !self.airborne
+            && self.flags == 0
+            && self.speed.abs() < REST_SPEED
+            && self.slide.abs() < REST_SPEED
+            && self.yaw_rate.abs() < REST_SPIN
+            && self.spin.abs() < REST_SPIN
+            && self.linear_velocity.length() < REST_SPEED
+            && self.angular_velocity.length() < REST_SPIN;
+        self.still = if still { self.still.saturating_add(1) } else { 0 };
+        if self.still > REST_TICKS {
+            return false;
         }
-        if moved {
-            self.settle(space, dt);
-        }
-        moved
-    }
-
-    /// Put it back where the map holds it after it was shoved by another vehicle: out of
-    /// the static models, within the map's bounds, and on the ground, as the end of
-    /// [`Self::advance`] does, but for falling: it fell for the tick already. A vehicle
-    /// is never shoved through a wall or off the map, but can be off a ledge.
-    pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
+        self.integrate(dt, space);
+        self.ram(dt, &space.statics, rubble);
         self.push_out(&space.statics, rubble);
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
-        self.settle(space, 0.0);
+        true
+    }
+
+    /// Put it back where the map holds it after it was shoved by another vehicle: out of
+    /// the static models and within the map's bounds, as the end of [`Self::advance`]
+    /// does. A vehicle is never shoved through a wall or off the map, but can be off a
+    /// ledge: its suspension finds out on the next tick.
+    pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
+        self.still = 0;
+        self.push_out(&space.statics, rubble);
+        if let Some(bounds) = bounds {
+            self.keep_within(bounds);
+        }
+    }
+
+    /// Take its speeds and turning on the ground plane from its body's, in the air, where
+    /// its tracks hold nothing: it lands going as it went.
+    fn follow_body(&mut self) {
+        let (heading, right) = self.axes();
+        self.speed = self.linear_velocity.dot(heading);
+        self.slide = self.linear_velocity.dot(right);
+        self.yaw_rate = self.angular_velocity.y - self.spin;
     }
 
     /// Push its collision box out of the solid static models it overlaps, on the ground
@@ -956,20 +1057,10 @@ impl Hull {
     /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`]. Driven
     /// into a turn, it pivots on its blocked inner track, see [`PIVOT_RADIUS`].
     ///
-    /// In the air, nothing grips it: it keeps going and turning as it went.
-    pub fn step(&mut self, dt: f32, ground: Ground) -> bool {
+    /// It only changes its speeds and turning: [`Self::integrate`] moves it.
+    pub fn step(&mut self, dt: f32, ground: Ground) {
 
         use movement_flag::*;
-
-        if self.airborne {
-            let velocity = self.velocity();
-            self.direction.z = wrap_angle(self.direction.z + (self.yaw_rate + self.spin) * dt);
-            let (heading, right) = self.axes();
-            self.speed = velocity.dot(heading);
-            self.slide = velocity.dot(right);
-            self.position += velocity * dt;
-            return true;
-        }
 
         let ground = ground_index(ground);
         let rotation_speed = self.mobility.rotation_speed[ground];
@@ -999,8 +1090,9 @@ impl Hull {
 
         // Gravity down the slope, pitched positively nose down and rolled positively
         // right side up, which the tracks hold against as much as they grip it.
-        let roll = self.direction.x;
-        let pitch = self.direction.y;
+        let direction = self.direction();
+        let roll = direction.x;
+        let pitch = direction.y;
         let grip_along = grip(pitch, SLOPE_GRIP_ALONG);
         let grip_across = grip(roll, SLOPE_GRIP_ACROSS);
         let slope = GRAVITY * pitch.sin();
@@ -1049,27 +1141,15 @@ impl Hull {
         let time = if goal.abs() > self.yaw_rate.abs() && goal * self.yaw_rate >= 0.0 { rise } else { ROTATION_FALL };
         let rate = rotation_speed / time;
 
-        let velocity = self.velocity();
         self.yaw_rate = approach(self.yaw_rate, goal, rate * dt);
         // Its tracks hold a spin before it turns: one too weak to skid them doesn't.
         self.spin = approach(self.spin, 0.0, spin_friction * dt);
-        self.direction.z = wrap_angle(self.direction.z + (self.yaw_rate + self.spin) * dt);
-        // Its tracks blocked, it keeps going where it went as its hull turns, else its
-        // tracks carry its speed around.
-        if handbrake {
-            let (heading, right) = self.axes();
-            self.speed = velocity.dot(heading);
-            self.slide = velocity.dot(right);
-        }
-        self.position += self.velocity() * dt;
-
-        self.speed != 0.0 || self.slide != 0.0 || self.yaw_rate != 0.0 || self.spin != 0.0
 
     }
 
     /// Its heading and its right on the ground plane.
     fn axes(&self) -> (Vec3, Vec3) {
-        let yaw = self.direction.z;
+        let yaw = self.yaw();
         (Vec3::new(yaw.sin(), 0.0, yaw.cos()), Vec3::new(yaw.cos(), 0.0, -yaw.sin()))
     }
 
@@ -1143,17 +1223,17 @@ impl Hull {
     /// Let it go on for `time` seconds at the speed and turning it has, its tracks holding
     /// its spin first, as in [`Self::step`].
     fn coast(&mut self, time: f32) {
-        let grip_across = grip(self.direction.x, SLOPE_GRIP_ACROSS);
+        let grip_across = grip(self.direction().x, SLOPE_GRIP_ACROSS);
         let (_, spin_friction) = self.track_friction(grip_across);
         self.spin = approach(self.spin, 0.0, spin_friction * time);
         self.position += self.velocity() * time;
-        self.direction.z = wrap_angle(self.direction.z + (self.yaw_rate + self.spin) * time);
+        self.orientation = Quat::from_rotation_y((self.yaw_rate + self.spin) * time) * self.orientation;
     }
 
     /// Put it at a pose.
     fn place(&mut self, pose: Pose) {
         self.position = pose.position;
-        self.direction = pose.direction;
+        self.orientation = pose.orientation;
     }
 
     /// Its collision box in space.
@@ -1163,7 +1243,7 @@ impl Hull {
 
     /// Its collision box in space, were it at this pose.
     fn obb_at(&self, pose: Pose) -> Obb {
-        let axes = Mat3::from_quat(rotation_of(pose.direction));
+        let axes = Mat3::from_quat(pose.orientation);
         let [min, max] = self.mobility.bounds;
         Obb {
             center: pose.position + axes * ((min + max) / 2.0),
@@ -1175,7 +1255,7 @@ impl Hull {
     /// Its collision box on the ground plane, upright, were it at this pose: where it
     /// touches another, see [`overlap_center`].
     fn footprint_at(&self, pose: Pose) -> Footprint {
-        let (sin, cos) = pose.direction.z.sin_cos();
+        let (sin, cos) = pose.orientation.to_euler(EulerRot::YXZ).0.sin_cos();
         let heading = Vec2::new(sin, cos);
         let right = Vec2::new(cos, -sin);
         let [min, max] = self.mobility.bounds;
@@ -1234,7 +1314,7 @@ impl Hull {
     /// The hull's orientation: yaw about Y, then pitch about X (nose down), then roll
     /// about Z (right side up), as the client's matrices compose them.
     pub fn rotation(&self) -> Quat {
-        rotation_of(self.direction)
+        self.orientation
     }
 
     /// The hull's orientation and its tracks' speeds, as the avatar's
@@ -1263,9 +1343,10 @@ impl Hull {
             (self.speed + turning, self.speed - turning)
         };
 
-        let roll = self.direction.x;
-        let pitch = self.direction.y;
-        let yaw = self.direction.z;
+        let direction = self.direction();
+        let roll = direction.x;
+        let pitch = direction.y;
+        let yaw = direction.z;
         pack_range(self.engine().1, 0.0, 1.2, 8) << 56
             | pack_range(right, -15.0, 30.0, 8) << 48
             | pack_range(left, -15.0, 30.0, 8) << 40
@@ -1275,79 +1356,272 @@ impl Hull {
 
     }
 
-    /// Rest on the ground: at its height, rolled and pitched with its slope under the
-    /// corners its tracks rest on, see `MobilityDef::carrying_point`, the ground being
-    /// the terrain or a static model on it, see [`ground_height`]. Off the ground, the
-    /// hull stays as it is.
-    ///
-    /// The tilt comes from the average slope on each axis, which is more stable than a
-    /// plane through three of the points and ignores a single bump under one corner:
+    /// Move its body by `dt` seconds, in [`SUBSTEPS`] steps, each under its weight at its
+    /// centre of mass and its suspension at its contacts, see [`Self::contacts`]: a
+    /// spring and a damper at each, pushing it up from the ground under it as far as the
+    /// contact sinks into it. Its velocity and its spin carry on from a step to the next,
+    /// changed only by those forces and their torques, against its mass and its inertia
+    /// (with the gyroscopic term, `ω × Iω`).
     ///
     /// ```text
-    ///   across: (heights on the right side − heights on the left side) / (2 · 2cx)
-    ///   along:  (heights at the front − heights at the back)           / (2 · 2cy)
+    ///   each contact c, its point p in the world, the ground under it g:
+    ///     depth  = g + SAG − p.y               > 0: it touches, and pushes
+    ///     push   = k · depth + d · (how fast depth grows),   upward, never pulling
+    ///   force    = Σ push − m · g              torque = Σ (p − centre of mass) × push
+    ///   v += force / m · h                     ω += I⁻¹ (torque − ω × Iω) · h
     /// ```
     ///
-    /// Over `dt` seconds it falls as far as gravity takes it from its vertical speed. The
-    /// ground under its centre out of [`GROUND_REACH`] below that, it is off the ground
-    /// and falls, keeping its tilt; else it rests on it, following it down at the speed
-    /// it went down, never thrown up off it. A corner whose ground is out of that reach
-    /// below where the hull's tilt puts it rests on nothing, and keeps that height: a hull
-    /// with a corner over a bridge's edge stays on the deck as it was, it doesn't tip
-    /// over until its centre leaves it. With `dt` 0 it only lands, or leaves the ground.
-    pub fn settle(&mut self, space: &Space, dt: f32) {
+    /// The springs share its weight, so at rest each sinks `SAG = g / ω²` and its origin
+    /// is on the ground; `ω` is [`SUSPENSION_FREQUENCY`]'s. A spring gives
+    /// [`SUSPENSION_TRAVEL`] more at most: past it, its contact is stopped, an impulse at
+    /// it taking away the speed it sinks at, as the ground under it moves, and another
+    /// moving it back out without giving it any speed, see [`Self::stop`]. A hull landing
+    /// hard stops on its contacts rather than going into the ground. A contact finds the ground up
+    /// to [`STEP_HEIGHT`] above itself, where it is on the tilted hull: a nose raised by
+    /// a rock's face finds the face further up, and the hull climbs it.
+    ///
+    /// While a contact touches the ground, its tracks set its motion along it: its spin
+    /// about the vertical is `yaw_rate + spin`, and its velocity along the ground is
+    /// `speed` along its heading and `slide` across it, carried around as it turns, or,
+    /// its tracks blocked, kept in the world as its hull swings under it. In the air it
+    /// keeps all its own. Where no contact finds any ground, off the terrain, nothing
+    /// holds it up, and it doesn't fall either.
+    pub fn integrate(&mut self, dt: f32, space: &Space) {
 
-        let (heading, right) = self.axes();
-        let carrying = self.mobility.carrying_point;
-        let top = self.position.y + STEP_HEIGHT;
+        let mass = self.mobility.weight;
+        let center = self.center_of_mass();
+        let inertia = self.inertia();
+        let contacts = self.contacts();
+        let springs = contacts.iter().filter(|contact| contact.spring).count().max(1) as f32;
+        let omega = std::f32::consts::TAU * SUSPENSION_FREQUENCY;
+        let stiffness = mass * omega * omega / springs;
+        let damping = 2.0 * SUSPENSION_DAMPING * mass * omega / springs;
+        let sag = GRAVITY / (omega * omega);
+        let stop = sag + SUSPENSION_TRAVEL;
+        let handbrake = self.flags & movement_flag::BLOCK_TRACKS != 0;
+        let step = dt / SUBSTEPS as f32;
 
-        // Its centre, then its front right, front left, back right and back left corners.
-        let mut heights = [0.0; 5];
-        let corners = [(0.0, 0.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)];
-        for (height, (along, across)) in heights.iter_mut().zip(corners) {
-            let at = self.position + heading * along * carrying.y + right * across * carrying.x;
-            let Some(ground) = ground_height(space, at.xz(), top) else { return };
-            *height = ground;
-        }
+        for _ in 0..SUBSTEPS {
 
-        let center = heights[0];
-        let free = self.position.y + self.vertical_speed * dt - 0.5 * GRAVITY * dt * dt;
-        if center < free - GROUND_REACH {
-            self.airborne = true;
-            self.position.y = free;
-            self.vertical_speed -= GRAVITY * dt;
-            return;
-        }
-        if dt > 0.0 {
-            self.vertical_speed = ((center - self.position.y) / dt).min(0.0);
-        }
-        self.airborne = false;
+            let rotation = self.orientation;
+            let mass_center = self.position + rotation * center;
+            let mut force = Vec3::NEG_Y * GRAVITY * mass;
+            let mut torque = Vec3::ZERO;
+            let mut any_ground = false;
+            let mut touching = false;
+            // Those past their travel: where they are from the centre of mass, how fast
+            // the ground under them rises, and how far past it they are.
+            let mut stopped: SmallVec<[(Vec3, f32, f32); MAX_CONTACTS]> = SmallVec::new();
+            let mut push_velocity = Vec3::ZERO;
+            let mut push_spin = Vec3::ZERO;
 
-        // Where its tilt puts each corner, the centre on the ground.
-        let roll_rise = carrying.x * self.direction.x.tan();
-        let pitch_rise = -carrying.y * self.direction.y.tan();
-        for (height, (along, across)) in heights.iter_mut().zip(corners).skip(1) {
-            let tilted = center + across * roll_rise + along * pitch_rise;
-            if *height < tilted - GROUND_REACH {
-                *height = tilted;
+            for (contact, previous) in contacts.iter().zip(&mut self.depths) {
+                let point = self.position + rotation * contact.point;
+                let Some(ground) = ground_height(space, point.xz(), point.y + STEP_HEIGHT) else {
+                    *previous = f32::NAN;
+                    continue;
+                };
+                any_ground = true;
+                // A spring sinks into the ground at rest, a rigid contact never.
+                let depth = if contact.spring { ground + sag - point.y } else { ground - point.y };
+                let sank = depth - *previous;
+                *previous = depth;
+                if depth <= 0.0 {
+                    continue;
+                }
+                touching = true;
+                let arm = point - mass_center;
+                let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                // How fast it sinks: into the ground as it follows it, not down; but off
+                // an edge the ground jumps, and only the contact's own speed counts.
+                let sinking = if sank.abs() <= DEPTH_JUMP { sank / step } else { -velocity.y };
+                let past = if contact.spring { depth - stop } else { depth };
+                if past > 0.0 {
+                    // The ground's rise under it, as fast as it is stopped at most: off a
+                    // rough triangle's edges, it would throw it.
+                    let rising = (sinking + velocity.y).min(STOP_SPEED);
+                    stopped.push((arm, rising, past));
+                }
+                if contact.spring {
+                    let push = (stiffness * depth.min(stop) + damping * sinking).max(0.0);
+                    force.y += push;
+                    torque += arm.cross(Vec3::Y * push);
+                }
             }
-        }
 
-        let [center, front_right, front_left, back_right, back_left] = heights;
-        let front = front_right + front_left;
-        let back = back_right + back_left;
-        let right_side = front_right + back_right;
-        let left_side = front_left + back_left;
-        self.position.y = center;
-        // Rolled positively with its right side up, pitched positively nose down, no
-        // steeper than it can rest: a corner on a rock's facet doesn't tip it over.
-        let roll = ((right_side - left_side) / (4.0 * carrying.x)).atan();
-        let pitch = -((front - back) / (4.0 * carrying.y)).atan();
-        self.direction.x = roll.clamp(-MAX_TILT, MAX_TILT);
-        self.direction.y = pitch.clamp(-MAX_TILT, MAX_TILT);
+            if any_ground {
+                let world_inertia = Mat3::from_quat(rotation) * Mat3::from_diagonal(inertia) * Mat3::from_quat(rotation.inverse());
+                let inverse_inertia = world_inertia.inverse();
+                let gyroscopic = self.angular_velocity.cross(world_inertia * self.angular_velocity);
+                self.linear_velocity += force / mass * step;
+                self.angular_velocity += inverse_inertia * (torque - gyroscopic) * step;
+                (push_velocity, push_spin) = self.stop(&stopped, mass, inverse_inertia, step);
+            } else {
+                touching = true;
+                self.linear_velocity.y = 0.0;
+                self.angular_velocity.x = 0.0;
+                self.angular_velocity.z = 0.0;
+            }
+            self.airborne = !touching;
+
+            if touching {
+                let along = self.velocity();
+                self.linear_velocity.x = along.x;
+                self.linear_velocity.z = along.z;
+                self.angular_velocity.y = self.yaw_rate + self.spin;
+            }
+
+            let mass_center = mass_center + (self.linear_velocity + push_velocity) * step;
+            self.orientation = (Quat::from_scaled_axis((self.angular_velocity + push_spin) * step) * rotation).normalize();
+            self.position = mass_center - self.orientation * center;
+
+            if touching && handbrake {
+                let (heading, right) = self.axes();
+                self.speed = self.linear_velocity.dot(heading);
+                self.slide = self.linear_velocity.dot(right);
+            }
+
+        }
 
     }
 
+    /// Stop the contacts past their suspension's travel, see [`Self::integrate`]: each,
+    /// `arm` from the centre of mass, the ground under it rising at `rising`, `past` its
+    /// travel. Two impulses, split: one stops it sinking, its velocity and spin rising
+    /// with its ground, the other only moves it back out, as fast as [`STOP_RECOVERY`]
+    /// says, for this step: pushed out, the hull keeps no speed from it, which would
+    /// throw it up. The second is returned, as a velocity and a spin to move by. Never a
+    /// pull: a contact leaving the ground goes.
+    ///
+    /// ```text
+    ///   short   = wanted − (v + ω × arm).y                 > 0: it sinks too fast
+    ///   impulse = short / (1/m + (arm × Y) · I⁻¹ (arm × Y))     upward, at the contact
+    ///   wanted  = rising                                    its velocity and spin
+    ///           = min(STOP_RECOVERY · past / step, STOP_SPEED)   the move out, from 0
+    /// ```
+    fn stop(&mut self, stopped: &[(Vec3, f32, f32)], mass: f32, inverse_inertia: Mat3, step: f32) -> (Vec3, Vec3) {
+        let mut push_velocity = Vec3::ZERO;
+        let mut push_spin = Vec3::ZERO;
+        for _ in 0..STOP_PASSES {
+            for &(arm, rising, past) in stopped {
+                let lever = arm.cross(Vec3::Y);
+                let effective = 1.0 / mass + lever.dot(inverse_inertia * lever);
+                let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                let short = rising - velocity.y;
+                if short > 0.0 {
+                    let impulse = short / effective;
+                    self.linear_velocity.y += impulse / mass;
+                    self.angular_velocity += inverse_inertia * lever * impulse;
+                }
+                let pushed = push_velocity + push_spin.cross(arm);
+                let short = (STOP_RECOVERY * past / step).min(STOP_SPEED) - pushed.y;
+                if short > 0.0 {
+                    let impulse = short / effective;
+                    push_velocity.y += impulse / mass;
+                    push_spin += inverse_inertia * lever * impulse;
+                }
+            }
+        }
+        (push_velocity, push_spin)
+    }
+
+    /// Its centre of mass, in its own frame: over its origin, the middle of what its
+    /// tracks carry it on, at [`CENTER_OF_MASS_HEIGHT`] of its collision box's height. Over
+    /// its tracks' middle, it rests level on flat ground, as the real ones do, rather than
+    /// tilted toward its box's middle.
+    fn center_of_mass(&self) -> Vec3 {
+        let [min, max] = self.mobility.bounds;
+        Vec3::new(0.0, min.y + (max.y - min.y) * CENTER_OF_MASS_HEIGHT, 0.0)
+    }
+
+    /// Its inertia about its centre of mass, along its own axes (right, up, heading), in
+    /// kg·m²: a box's of its weight over its collision box, `m (b² + c²) / 12` for each
+    /// axis and the box's two other sides.
+    fn inertia(&self) -> Vec3 {
+        let [min, max] = self.mobility.bounds;
+        let size = max - min;
+        let share = self.mobility.weight / 12.0;
+        Vec3::new(
+            share * (size.y * size.y + size.z * size.z),
+            share * (size.x * size.x + size.z * size.z),
+            share * (size.x * size.x + size.y * size.y),
+        )
+    }
+
+    /// The points its suspension holds it at, in its own frame, see [`Contact`]. Under
+    /// each of its road wheels, a spring, at its origin's height, where its track rests
+    /// on the ground. Around each wheel at its tracks' ends, its idlers and sprockets,
+    /// which have no spring, 4 rigid ones on its track: under the wheel, at 45° out and
+    /// down, at its outer end, and halfway down the track from there to the road wheel
+    /// nearest it, where a rock or a step meets the track first.
+    ///
+    /// ```text
+    ///   around the idler, front to the right:
+    ///
+    ///                         (O)#   tip       each "radius + track thickness" out
+    ///                           #    corner    of the idler's centre, but halfway
+    ///                         #      below
+    ///     o     o     o   #          halfway
+    ///   __s_____s_____s__________    ground
+    /// ```
+    ///
+    /// Its wheels unknown, [`CONTACTS_PER_TRACK`] springs along each track, evenly over the
+    /// length its tracks carry it on, see `MobilityDef::carrying_point`.
+    fn contacts(&self) -> SmallVec<[Contact; MAX_CONTACTS]> {
+
+        let mut contacts = SmallVec::new();
+        let Some(wheels) = &self.mobility.wheels else {
+            let carrying = self.mobility.carrying_point;
+            for index in 0..2 * CONTACTS_PER_TRACK {
+                let side = if index < CONTACTS_PER_TRACK { 1.0 } else { -1.0 };
+                let share = (index % CONTACTS_PER_TRACK) as f32 / (CONTACTS_PER_TRACK - 1) as f32;
+                contacts.push(Contact {
+                    point: Vec3::new(side * carrying.x, 0.0, (share * 2.0 - 1.0) * carrying.y),
+                    spring: true,
+                });
+            }
+            return contacts;
+        };
+
+        for wheel in wheels.road() {
+            contacts.push(Contact {
+                point: Vec3::new(wheel.center.x, 0.0, wheel.center.z),
+                spring: true,
+            });
+        }
+
+        for end in wheels.ends() {
+            let out = end.center.z.signum();
+            let reach = end.radius + wheels.track_thickness;
+            let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+            let below = end.center - Vec3::Y * reach;
+            let corner = end.center + Vec3::new(0.0, -diagonal, out * diagonal) * reach;
+            let tip = end.center + Vec3::Z * out * reach;
+            let nearest = wheels.road().iter()
+                .filter(|wheel| wheel.center.x.signum() == end.center.x.signum())
+                .max_by(|a, b| (a.center.z * out).total_cmp(&(b.center.z * out)));
+            let halfway = nearest.map(|wheel| Vec3::new(wheel.center.x, 0.0, wheel.center.z).lerp(corner, 0.5));
+            for point in [halfway, Some(below), Some(corner), Some(tip)].into_iter().flatten() {
+                // Never lower than the springs rest: it would always be in the ground.
+                contacts.push(Contact {
+                    point: point.with_y(point.y.max(0.0)),
+                    spring: false,
+                });
+            }
+        }
+
+        contacts
+
+    }
+
+}
+
+/// A point a hull's suspension holds it at, see [`Hull::contacts`]: in its own frame, on
+/// a spring, or rigid, stopping it as soon as it touches the ground.
+#[derive(Debug, Clone, Copy)]
+struct Contact {
+    point: Vec3,
+    spring: bool,
 }
 
 /// A destructible piece, as the client numbers it: all of a destructible, or one of a
@@ -1440,12 +1714,11 @@ impl Rubble {
 
 }
 
-/// A hull's place on the ground plane, as its box sweeps it: its position and its yaw.
+/// A hull's place, as its box sweeps it: its position and its orientation.
 #[derive(Debug, Clone, Copy)]
 struct Pose {
     position: Vec3,
-    /// Roll, pitch and yaw.
-    direction: Vec3,
+    orientation: Quat,
 }
 
 impl Pose {
@@ -1453,7 +1726,7 @@ impl Pose {
     fn of(hull: &Hull) -> Self {
         Self { 
             position: hull.position, 
-            direction: hull.direction,
+            orientation: hull.orientation,
         }
     }
 
@@ -1461,11 +1734,7 @@ impl Pose {
     fn lerp(self, to: Self, t: f32) -> Self {
         Self { 
             position: self.position.lerp(to.position, t), 
-            direction: self.direction + Vec3::new(
-                wrap_angle(to.direction.x - self.direction.x),
-                wrap_angle(to.direction.y - self.direction.y),
-                wrap_angle(to.direction.z - self.direction.z),
-            ) * t,
+            orientation: self.orientation.slerp(to.orientation, t),
         }
     }
 
@@ -1778,14 +2047,14 @@ impl World {
             let hull = &placed.vehicle.hull;
             let moved = hull.position - placed.pose.position;
             let allowed = (hull.speed.abs() + hull.slide.abs()) * dt * 1.5 + 0.5;
-            let turned = wrap_angle(hull.direction.z - placed.pose.direction.z).abs();
+            let turned = hull.orientation.angle_between(placed.pose.orientation);
             let rose = moved.y.abs() - moved.xz().length();
             if moved.length() > allowed || rose > 0.4 || turned > 0.25 {
                 warn!(
                     from = ?placed.pose.position,
                     to = ?hull.position,
-                    yaw_from = placed.pose.direction.z,
-                    yaw_to = hull.direction.z,
+                    yaw_from = placed.pose.orientation.to_euler(EulerRot::YXZ).0,
+                    yaw_to = hull.yaw(),
                     speed = hull.speed,
                     "Jumped a vehicle in a step",
                 );
@@ -1796,7 +2065,7 @@ impl World {
     /// Push apart the vehicles whose collision boxes overlap, see [`collide`]: where they
     /// first touched since they were remembered, a step of `dt` seconds ago, the vehicles
     /// pushed into others apart again, and those that touched back out of the static
-    /// models and within the map's bounds, and settle them on the ground: a vehicle isn't
+    /// models and within the map's bounds, their suspension catching them: a vehicle isn't
     /// shoved through a wall.
     ///
     /// ```text
@@ -1946,9 +2215,10 @@ fn overlap_center(middle: Vec2, heading: Vec2, right: Vec2, half: Vec2, corners:
         area += cross;
         sum += (a + b) * cross;
     }
-    match area.abs() > 1e-6 {
-        true => first + sum / (3.0 * area),
-        false => overlap.iter().sum::<Vec2>() / overlap.len() as f32,
+    if area.abs() > 1e-6 {
+        first + sum / (3.0 * area)
+    } else {
+        overlap.iter().sum::<Vec2>() / overlap.len() as f32
     }
 
 }
@@ -2258,6 +2528,8 @@ pub fn wrap_angle(angle: f32) -> f32 {
 #[cfg(test)]
 pub(super) mod tests {
 
+    use crate::wot::item_defs::{WheelDef, Wheels};
+
     use super::*;
 
     /// How high the test gun is above the vehicle's origin.
@@ -2275,47 +2547,83 @@ pub(super) mod tests {
             rolling_friction: [0.0805, 0.10465, 0.20125],
             carrying_point: glam::Vec2::new(1.6, 2.4),
             bounds: [Vec3::new(-1.8, 0.0, -3.7), Vec3::new(1.8, 2.6, 3.8)],
+            wheels: Some(chieftain_wheels()),
         }
+    }
+
+    /// Wheels laid out as the T110E4's model lays them, over the Chieftain's tracks: 6
+    /// road wheels a side, 0.33 m, on tracks 9 cm thick, an idler in front, 0.92 m up,
+    /// and a sprocket behind, 1 m up.
+    fn chieftain_wheels() -> Wheels {
+        let mut road = Vec::new();
+        for side in [1.6, -1.6] {
+            for index in 0..6 {
+                road.push(WheelDef {
+                    center: Vec3::new(side, 0.42, -2.4 + 0.96 * index as f32),
+                    radius: 0.33,
+                });
+            }
+        }
+        let ends = [1.6, -1.6].into_iter()
+            .flat_map(|side| [
+                WheelDef {
+                    center: Vec3::new(side, 0.92, 3.2),
+                    radius: 0.3,
+                },
+                WheelDef {
+                    center: Vec3::new(side, 1.0, -3.15),
+                    radius: 0.34,
+                },
+            ])
+            .collect::<Vec<_>>();
+        Wheels::new(&road, &ends, 0.09)
     }
 
     fn chieftain() -> Hull {
         Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility())
     }
 
+    /// A tick of `dt` seconds on this ground, in a space without any: the drive model,
+    /// then its body moving, as [`Hull::advance`] does but for the map.
+    fn drive(hull: &mut Hull, dt: f32, ground: Ground) {
+        hull.step(dt, ground);
+        hull.integrate(dt, &Space::default());
+    }
+
     #[test]
     fn drives_forward_along_heading() {
         let mut hull = chieftain();
-        hull.direction.z = 2.771;
+        hull.set_direction(Vec3::new(0.0, 0.0, 2.771));
         hull.flags = movement_flag::FORWARD;
         // Quickly at first, slower as the engine's power spreads over the speed.
-        hull.step(0.1, Ground::Firm);
+        drive(&mut hull, 0.1, Ground::Firm);
         let first = hull.speed;
         let resistance = hull.mobility.rolling_friction[0] * GRAVITY;
         assert!((first - (MAX_ACCELERATION - resistance) * 0.1).abs() < 1e-4, "{first}");
         for _ in 0..300 {
-            hull.step(0.1, Ground::Firm);
+            drive(&mut hull, 0.1, Ground::Firm);
         }
         // At top speed after accelerating, heading south-east as captured.
         assert!((hull.speed - 40.0 / 3.6).abs() < 1e-3, "{}", hull.speed);
         // Short of it on soft ground, where its power only holds it at P / (m · μ · g).
         for _ in 0..300 {
-            hull.step(0.1, Ground::Soft);
+            drive(&mut hull, 0.1, Ground::Soft);
         }
         let mobility = &hull.mobility;
         let held = POWER_FACTOR * mobility.engine_power / (mobility.weight * mobility.rolling_friction[2] * GRAVITY);
         assert!((hull.speed - held).abs() < 0.05, "{} for {held}", hull.speed);
         assert!(hull.position.x > 0.0 && hull.position.z < 0.0);
-        assert_eq!(hull.position.y, 0.0);
+        assert!(hull.position.y.abs() < 1e-4, "{}", hull.position.y);
     }
 
     #[test]
     fn stops_and_turns() {
         let mut hull = chieftain();
         hull.flags = movement_flag::FORWARD;
-        hull.step(1.0, Ground::Firm);
+        drive(&mut hull, 1.0, Ground::Firm);
         hull.flags = movement_flag::ROTATE_RIGHT;
         for _ in 0..20 {
-            hull.step(0.1, Ground::Firm);
+            drive(&mut hull, 0.1, Ground::Firm);
         }
         // Stopped, then turning on the spot at full speed.
         assert_eq!(hull.speed, 0.0);
@@ -2323,20 +2631,24 @@ pub(super) mod tests {
         // Slower while driving.
         hull.flags = movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
         for _ in 0..20 {
-            hull.step(0.1, Ground::Firm);
+            drive(&mut hull, 0.1, Ground::Firm);
         }
         assert!((hull.yaw_rate - 28f32.to_radians() * ROTATION_ON_MOVE).abs() < 1e-4, "{}", hull.yaw_rate);
         // Backing up while steering right turns the hull the other way, soon.
         hull.flags = movement_flag::BACKWARD | movement_flag::ROTATE_RIGHT;
         for _ in 0..5 {
-            hull.step(0.1, Ground::Firm);
+            drive(&mut hull, 0.1, Ground::Firm);
         }
         assert!(hull.yaw_rate < 0.0);
-        // Standing still with no input reports no movement.
+        // Standing still with no input, it soon rests.
         hull.flags = 0;
         hull.speed = 0.0;
         hull.yaw_rate = 0.0;
-        assert!(!hull.step(0.1, Ground::Firm));
+        let space = Space::default();
+        let moved: Vec<bool> = (0..10)
+            .map(|_| hull.advance(0.1, &space, None, &mut Rubble::default()))
+            .collect();
+        assert!(!moved[9], "{moved:?}");
     }
 
     #[test]
@@ -2347,7 +2659,7 @@ pub(super) mod tests {
         let normal = hull.mobility.rotation_speed[1] * ROTATION_ON_MOVE;
         let mut fastest: f32 = 0.0;
         for _ in 0..10 {
-            hull.step(0.1, Ground::Medium);
+            drive(&mut hull, 0.1, Ground::Medium);
             fastest = fastest.max(-hull.yaw_rate);
         }
         // Turning faster than it would driving, its hull swung left of where it slides.
@@ -2355,7 +2667,7 @@ pub(super) mod tests {
         assert!(hull.slide > 0.2, "{}", hull.slide);
         // Until its blocked tracks stop it.
         for _ in 0..50 {
-            hull.step(0.1, Ground::Medium);
+            drive(&mut hull, 0.1, Ground::Medium);
         }
         assert_eq!((hull.speed, hull.slide), (0.0, 0.0));
     }
@@ -2364,10 +2676,10 @@ pub(super) mod tests {
     fn holds_on_slopes_it_grips() {
         let still = |pitch: f32, flags: u8| {
             let mut hull = chieftain();
-            hull.direction.y = pitch.to_radians();
+            hull.set_direction(Vec3::new(0.0, pitch.to_radians(), 0.0));
             hull.flags = flags;
             for _ in 0..30 {
-                hull.step(0.1, Ground::Medium);
+                drive(&mut hull, 0.1, Ground::Medium);
             }
             hull.speed
         };
@@ -2384,9 +2696,9 @@ pub(super) mod tests {
         assert!(still(-35.0, movement_flag::FORWARD) < -1.0);
         // Across 35°, it slides down to its left, right side up.
         let mut hull = chieftain();
-        hull.direction.x = 35f32.to_radians();
+        hull.set_direction(Vec3::new(35f32.to_radians(), 0.0, 0.0));
         for _ in 0..10 {
-            hull.step(0.1, Ground::Medium);
+            drive(&mut hull, 0.1, Ground::Medium);
         }
         assert!(hull.slide < -1.0, "{}", hull.slide);
     }
@@ -2435,13 +2747,14 @@ pub(super) mod tests {
             .map(|triangle| StaticTriangle::new(triangle.vertices, 0, material_kind, BodyKind::Destructible))
             .collect();
         space.statics = StaticScene::from_triangles(triangles);
-        let modules = match house {
-            true => vec![wgtk::space::destructibles::Module {
+        let modules = if house {
+            vec![wgtk::space::destructibles::Module {
                 material_kind: 73,
                 health,
                 depends: Vec::new(),
-            }],
-            false => Vec::new(),
+            }]
+        } else {
+            Vec::new()
         };
         space.statics.add_destructible(0, PlacedDestructible {
             chunk_id: 0x7f7f,
@@ -2531,24 +2844,27 @@ pub(super) mod tests {
 
     #[test]
     fn drives_onto_decks_within_a_step() {
-        // A step up, it drives onto it and rests on it.
-        let space = deck(STEP_HEIGHT - 0.1);
+        // A step up, it climbs onto it, nose first, and rests on it.
+        let space = ground_under(Some(STEP_HEIGHT - 0.1), 0.0);
         let mut hull = chieftain();
         hull.position.z = -6.0;
         hull.flags = movement_flag::FORWARD;
+        let mut steepest: f32 = 0.0;
         for _ in 0..40 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
+            steepest = steepest.min(hull.direction().y);
         }
-        assert!(hull.position.z > 10.0 && hull.position.y == STEP_HEIGHT - 0.1, "{}", hull.position);
+        assert!(hull.position.z > 10.0 && (hull.position.y - (STEP_HEIGHT - 0.1)).abs() < 0.05, "{}", hull.position);
+        assert!(steepest < -3f32.to_radians(), "{}°", steepest.to_degrees());
         // Higher, a bridge it drives under, it stays below.
-        let space = deck(STEP_HEIGHT + 3.0);
+        let space = ground_under(Some(STEP_HEIGHT + 3.0), 0.0);
         let mut hull = chieftain();
         hull.position.z = -6.0;
         hull.flags = movement_flag::FORWARD;
         for _ in 0..40 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
         }
-        assert!(hull.position.z > 10.0 && hull.position.y == 0.0, "{}", hull.position);
+        assert!(hull.position.z > 10.0 && hull.position.y.abs() < 0.01, "{}", hull.position);
     }
 
     /// Flat ground from z = −50 to 100, as two triangles, under `deck`: one from z = 0 to
@@ -2583,44 +2899,112 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn meets_steps_with_its_tracks_front() {
+        // Driven at a step 0.5 m high, its track's front, rising to its idler, meets it
+        // before its front road wheel does, and lifts its nose.
+        let mut triangles = Vec::new();
+        quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
+        quad(&mut triangles, 4.0, 60.0, 0.5, 0.5);
+        let space = Space {
+            statics: StaticScene::from_triangles(triangles),
+            ..Space::default()
+        };
+        let mut hull = chieftain();
+        hull.flags = movement_flag::FORWARD;
+        let mut pitch_before_wheels = None;
+        for _ in 0..60 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            if hull.position.z > 1.3 && pitch_before_wheels.is_none() {
+                pitch_before_wheels = Some(hull.direction().y);
+            }
+        }
+        let pitch = pitch_before_wheels.expect("got to the step");
+        assert!(pitch < -1f32.to_radians(), "{}°", pitch.to_degrees());
+        // And climbs onto it.
+        assert!(hull.position.z > 10.0 && (hull.position.y - 0.5).abs() < 0.05, "{}", hull.position);
+    }
+
+    #[test]
     fn falls_off_ledges() {
-        // Off a deck 5 m high at full speed, it falls for about a second, keeping its
-        // speed, and lands where it went on.
+        // Off a deck 5 m high at full speed, it falls, gravity taking it no faster than
+        // `g · t`, for most of a second in the air, keeping its speed, and lands where it
+        // went on, its suspension stopping it hard rather than letting it into the
+        // ground.
         let space = ground_under(Some(5.0), 0.0);
         let mut hull = chieftain();
         hull.position = Vec3::new(0.0, 5.0, 14.0);
         hull.speed = hull.mobility.speed_forward;
         hull.flags = movement_flag::FORWARD;
         let mut ticks_in_air = 0;
+        let mut height = hull.position.y;
         for _ in 0..30 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
+            assert!(height - hull.position.y < 1.5, "dropped from {height} to {}", hull.position.y);
+            height = hull.position.y;
+            let lowest = hull.contacts()
+                .iter()
+                .map(|contact| (hull.position + hull.orientation * contact.point).y)
+                .fold(f32::INFINITY, f32::min);
+            assert!(lowest > -(SUSPENSION_TRAVEL + 0.1), "a contact {lowest} m deep, at {}", hull.position);
+            assert!(hull.position.y > -0.1, "{}", hull.position);
             if hull.airborne {
                 ticks_in_air += 1;
-                assert!(hull.position.y > 0.0 && hull.position.y < 5.0, "{}", hull.position);
             }
         }
-        assert!((9..=11).contains(&ticks_in_air), "{ticks_in_air} ticks");
-        assert!(!hull.airborne && hull.position.y == 0.0, "{}", hull.position);
+        assert!((6..=11).contains(&ticks_in_air), "{ticks_in_air} ticks");
+        assert!(!hull.airborne && hull.position.y.abs() < 0.1, "{}", hull.position);
         assert!(hull.position.z > 40.0, "{}", hull.position);
-        // Its nose over the edge, its centre on the deck, it stays on it, level.
+        // Its nose over the edge, its centre of mass on the deck, it stays on it, all but
+        // level.
         let mut hull = chieftain();
-        hull.position = Vec3::new(0.0, 5.0, 19.0);
-        hull.settle(&space, 0.1);
-        assert!(!hull.airborne && hull.position.y == 5.0 && hull.direction.y == 0.0, "{} {}", hull.position, hull.direction);
+        hull.position = Vec3::new(0.0, 5.0, 18.5);
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        let direction = hull.direction();
+        assert!(!hull.airborne && (hull.position.y - 5.0).abs() < 0.1, "{}", hull.position);
+        assert!(direction.y.abs() < 3f32.to_radians(), "{direction}");
+        // Its centre of mass past the edge, it tips over it nose first, down onto the
+        // ground. Its tracks still hold it along the ground while its rear one is on the
+        // edge, so it rests leaning against it rather than sliding off: until its tracks
+        // push it by their forces, not by the drive model.
+        let mut hull = chieftain();
+        hull.position = Vec3::new(0.0, 5.0, 21.0);
+        let mut steepest: f32 = 0.0;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            steepest = steepest.max(hull.direction().y);
+        }
+        assert!(steepest > 20f32.to_radians(), "{}°", steepest.to_degrees());
+        let lowest = hull.contacts()
+            .iter()
+            .map(|contact| (hull.position + hull.orientation * contact.point).y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(lowest < 0.5, "its nose {lowest} m up, at {}", hull.position);
     }
 
     #[test]
     fn follows_slopes_down() {
-        // Onto a 10° slope down at full speed, its tracks keep to it.
+        // Over the crest of a 10° slope down at full speed, it is light for a moment,
+        // then its tracks keep to the slope, its nose down with it.
         let space = ground_under(None, 40.0 * 10f32.to_radians().tan());
         let mut hull = chieftain();
         hull.position.z = -10.0;
         hull.speed = hull.mobility.speed_forward;
         hull.flags = movement_flag::FORWARD;
+        let mut ticks_in_air = 0;
         for _ in 0..50 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
-            assert!(!hull.airborne, "{}", hull.position);
+            if hull.airborne {
+                ticks_in_air += 1;
+                assert!(hull.position.z < 10.0, "{}", hull.position);
+            }
+            if (12.0..28.0).contains(&hull.position.z) {
+                let pitch = hull.direction().y.to_degrees();
+                assert!((pitch - 10.0).abs() < 2.0, "{pitch}° at {}", hull.position);
+            }
         }
+        assert!(ticks_in_air <= 3, "{ticks_in_air} ticks");
         assert!(hull.position.z > 40.0, "{}", hull.position);
     }
 
@@ -2687,18 +3071,18 @@ pub(super) mod tests {
         let middle = (min.z + max.z) / 2.0;
         let (rammer, behind) = ram_side(8.0, middle + 1.5);
         let (_, ahead) = ram_side(8.0, middle - 1.5);
-        let behind = behind.direction.z - FRAC_PI_2;
-        let ahead = ahead.direction.z - FRAC_PI_2;
+        let behind = behind.yaw() - FRAC_PI_2;
+        let ahead = ahead.yaw() - FRAC_PI_2;
         assert!(behind < -0.1, "{behind}");
         // As much give or take its turning about its position, not its box's middle.
         assert!((behind + ahead).abs() < 0.15 * behind.abs(), "{behind} {ahead}");
-        assert!(rammer.direction.z.abs() < 0.01, "{}", rammer.direction.z);
+        assert!(rammer.yaw().abs() < 0.01, "{}", rammer.yaw());
         // A bump hardly turns it: its tracks hold it.
         let (_, bumped) = ram_side(3.0, 1.5);
-        assert!((bumped.direction.z - FRAC_PI_2).abs() < 0.03, "{}", bumped.direction.z);
+        assert!((bumped.yaw() - FRAC_PI_2).abs() < 0.03, "{}", bumped.yaw());
         // Nor does a slow push off its middle from behind, both moving along their tracks.
         let (pusher, pushed) = push_parked(55_000.0, 0.0, -1.5, 60);
-        assert!(pushed.direction.z.abs() < 0.05 && pusher.direction.z.abs() < 0.05, "{} {}", pushed.direction.z, pusher.direction.z);
+        assert!(pushed.yaw().abs() < 0.05 && pusher.yaw().abs() < 0.05, "{} {}", pushed.yaw(), pusher.yaw());
     }
 
     #[test]
@@ -2767,7 +3151,7 @@ pub(super) mod tests {
         // 0.7 then 0.2 m/s once against it.
         let mut hull = chieftain();
         hull.position.z = edge;
-        hull.direction.z = -30f32.to_radians();
+        hull.set_direction(Vec3::new(0.0, 0.0, -30f32.to_radians()));
         hull.speed = 40.0 / 3.6;
         hull.flags = movement_flag::FORWARD;
         let mut along = Vec::new();
@@ -2834,7 +3218,7 @@ pub(super) mod tests {
     #[test]
     fn holding_where_it_tracks_keeps_the_aim_on_a_tilted_hull() {
         let mut hull = chieftain();
-        hull.direction = Vec3::new(0.05, 0.08, 1.2);
+        hull.set_direction(Vec3::new(0.05, 0.08, 1.2));
         let mut turret = Turret::new(chieftain_aiming());
         let point = Vec3::new(150.0, 5.0, 40.0);
         turret.track(point);
@@ -2879,7 +3263,7 @@ pub(super) mod tests {
         // at 1.76 m/s, the RPM at 0xaf.
         let captured: u64 = 0xaf5f5f813c00f875;
         let mut hull = chieftain();
-        hull.direction = Vec3::new(0.0299, 0.0012, 2.7713);
+        hull.set_direction(Vec3::new(0.0299, 0.0012, 2.7713));
         hull.speed = 1.76;
         // Without the RPM, which depends on the engine model.
         assert_eq!(hull.aux_physics_data() & 0x00ff_ffff_ffff_ffff, captured & 0x00ff_ffff_ffff_ffff);
