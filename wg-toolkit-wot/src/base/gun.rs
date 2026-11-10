@@ -710,8 +710,8 @@ fn cross_terrain(obstacles: Obstacles, from: Vec3, to: Vec3) -> Option<f32> {
 #[cfg(test)]
 mod tests {
 
-    use wgtk::space::statics::{PlacedDestructible, StaticScene, StaticTriangle};
     use wgtk::space::destructibles::{DestructibleKind, Module, PenetrationLoss};
+    use wgtk::space::statics::{PlacedDestructible, Statics, StaticTriangle};
 
     use crate::wot::collision::{ArmorGroup, CollisionModel, VehiclePart};
     use crate::wot::items::{item_type, IntCompactDescr};
@@ -974,7 +974,7 @@ mod tests {
                 ..StaticTriangle::new(vertices, 0, material_kind, kind)
             })
             .to_vec();
-        let mut statics = StaticScene::from_triangles(triangles);
+        let mut statics = Statics::from_triangles(triangles);
         let modules = if house {
             vec![Module {
                 material_kind: 73,

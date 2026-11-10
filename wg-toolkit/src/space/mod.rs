@@ -5,7 +5,7 @@
 //!
 //! What a vehicle can hit besides the terrain is the space's *static models*: houses,
 //! rocks, fences, lamp posts, bridges. Some of them are *destructible*. Four sources
-//! describe them, and [`statics::StaticScene::load`] joins them:
+//! describe them, and [`statics::Statics::load`] joins them:
 //!
 //! ```text
 //!   spaces/<map>/space.bin                           scripts/destructibles.xml
@@ -22,7 +22,7 @@
 //!                    │                   │                    │
 //!                    └──────────┬────────┴────────────────────┘
 //!                               ▼
-//!                    statics::StaticScene
+//!                    statics::Statics
 //!                    ├─ triangles, in the world, each with its BSMI instance,
 //!                    │  material kind and BodyKind (solid, ramp, destructible, remains)
 //!                    ├─ a grid of 8 m cells per BodyKind, to find them near a box
@@ -30,7 +30,7 @@
 //!                       (chunk id, index), kind, scaled health, modules
 //! ```
 //!
-//! The scene only describes the map as it was built. What breaks during a battle is
+//! The statics only describe the map as it was built. What breaks during a battle is
 //! kept by its physics world, see `Rubble` in `wg-toolkit-wot`'s `base::physics`.
 //!
 //! Each step, in order:
@@ -46,7 +46,7 @@
 //! 3. [`destructibles::Destructibles`] reads `scripts/destructibles.xml`: which models
 //!    are destructible, of which kind, with which health, and a house's modules.
 //! 4. [`statics::BodyKind::of`] sorts each body by its name and its model's entry.
-//!    Every triangle of every placed model visible in the battle goes into the scene,
+//!    Every triangle of every placed model visible in the battle goes into the statics,
 //!    in the world's frame.
 //! 5. [`bin::WGDE`] gives each destructible the number the client knows it by, which
 //!    the server must use to say it broke: its 100 m chunk's id and its index there.
@@ -63,7 +63,7 @@ use crate::res::fs::ResFilesystem;
 use crate::pxml;
 
 use destructibles::Destructibles;
-use statics::StaticScene;
+use statics::Statics;
 use terrain::Terrain;
 
 
@@ -72,7 +72,7 @@ use terrain::Terrain;
 #[derive(Debug, Default)]
 pub struct Space {
     pub terrain: Terrain,
-    pub statics: StaticScene,
+    pub statics: Statics,
     /// What of the game's models is destructible, the space's or not: what the
     /// destructibles of [`Self::statics`] were read from, and the settings that apply to
     /// all of them.
@@ -89,7 +89,7 @@ impl Space {
         let mask = visibility_mask(fs, space_dir, gameplay)?;
         Ok(Self {
             terrain: Terrain::load(fs, space_dir)?,
-            statics: StaticScene::load(fs, space_dir, &destructibles, mask)?,
+            statics: Statics::load(fs, space_dir, &destructibles, mask)?,
             destructibles,
         })
     }

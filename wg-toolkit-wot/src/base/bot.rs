@@ -70,8 +70,8 @@ mod tests {
 
     #[test]
     fn closes_in_then_faces_its_enemy() {
-        let mobility = crate::base::physics::tests::chieftain_mobility();
-        let aiming = crate::base::physics::tests::chieftain_aiming();
+        let mobility = crate::base::physics::fixtures::chieftain_mobility();
+        let aiming = crate::base::physics::fixtures::chieftain_aiming();
         let mut vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming);
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {
