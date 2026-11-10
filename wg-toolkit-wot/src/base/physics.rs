@@ -137,7 +137,9 @@
 //! around them is rigid, and stops the hull as soon as it touches the ground, a rock or
 //! a step meeting the track's front before its first road wheel, see [`Hull::contacts`].
 //! Its wheels unknown, [`CONTACTS_PER_TRACK`] springs along each track stand in for
-//! them. The pushes' torques roll and pitch it, and
+//! them. The rest of it is rigid too: [`BODY_CONTACTS`] points on its hull's box and
+//! its turret's, which stop it on the ground when it rolls over, see
+//! [`Hull::body_contacts`]. The pushes' torques roll and pitch it, and
 //! its spin carries on from a step to the next: it bounces, rocks, and tips. A spring
 //! gives [`SUSPENSION_TRAVEL`] past where it rests, then stops hard: its contact sinks
 //! no deeper, an impulse stopping it as the ground does, and a hull landing from a ledge
@@ -186,13 +188,16 @@
 //!      │ ──────┴──────┴─────╱
 //! ```
 //!
-//! While any contact touches the ground, its tracks set its motion along the ground
-//! plane, from the drive model: its spin about the vertical, and its velocity along the
-//! ground. Up and down, its roll and its pitch stay the body's own. With no contact on the
-//! ground it is `airborne`: nothing grips it, and it keeps going, turning and tumbling as
-//! it went, until it lands. Off a ledge it falls; with its centre of mass past an edge,
-//! its last contacts on it tip it over, nose first. Where no contact finds any ground at
-//! all, off the terrain, it is held as it is.
+//! While a contact of its tracks touches the ground, and it is upright enough
+//! ([`TRACKS_UPRIGHT`]), its tracks set its motion along the ground plane, from the
+//! drive model: its spin about the vertical, and its velocity along the ground. Up and
+//! down, its roll and its pitch stay the body's own. Otherwise it is `airborne`:
+//! nothing grips it, and it keeps going, turning and tumbling as it went, until it lands.
+//! Off a ledge it falls; with its centre of mass past an edge, its last contacts on it
+//! tip it over, nose first. On its side or its roof, its rigid contacts scrape on the
+//! ground, held back by [`SCRAPE_FRICTION`] of how hard they press on it, and it slides
+//! to a stop there. Where no contact finds any ground at all, off the terrain, it is held
+//! as it is.
 //!
 //! A hull still on the ground for [`REST_TICKS`] rests: its body isn't moved, and sends
 //! nothing, until its controls or a hit wake it.
@@ -428,10 +433,19 @@ const SUBSTEPS: usize = 10;
 /// How many contacts its suspension has along each track when its chassis' wheels
 /// aren't known, see `Hull::contacts`. Our choice: about one a metre.
 const CONTACTS_PER_TRACK: usize = 6;
+/// How many rigid contacts a hull's body has, its hull's box and its turret's, see
+/// `Hull::contacts`.
+const BODY_CONTACTS: usize = 18;
 /// The most contacts a hull has, a size `SmallVec` takes: a spring under each road
-/// wheel, and 4 rigid ones at each of its tracks' ends, see `Hull::contacts`.
-const MAX_CONTACTS: usize = 64;
-const _: () = assert!(MAX_ROAD_WHEELS + 4 * MAX_TRACK_ENDS <= MAX_CONTACTS);
+/// wheel, 4 rigid ones at each of its tracks' ends, and its body's, see `Hull::contacts`.
+const MAX_CONTACTS: usize = 96;
+const _: () = assert!(MAX_ROAD_WHEELS + 4 * MAX_TRACK_ENDS + BODY_CONTACTS <= MAX_CONTACTS);
+/// How upright a hull must be for its tracks to grip, as its up axis' height: past 60°
+/// of tilt, on its side or its roof, they hold nothing. Our choice.
+const TRACKS_UPRIGHT: f32 = 0.5;
+/// How much a contact sliding on the ground is held back, as a share of how hard it
+/// presses on it: a hull on its side or its roof scrapes to a stop. Our choice.
+const SCRAPE_FRICTION: f32 = 0.6;
 /// How fast a hull bounces on its suspension, in Hz, and how much of the damping that
 /// would stop the bounce at once (critical) it has. Our choice, by feel: at 1.5 Hz the
 /// hull sinks 11 cm into its springs at rest.
@@ -717,8 +731,11 @@ pub struct Hull {
     /// tracks set it about the vertical, from `yaw_rate` and `spin`; its roll and pitch,
     /// and in the air all of it, are the body's own.
     pub angular_velocity: Vec3,
-    /// Whether none of its suspension's contacts touches the ground: nothing grips it.
+    /// Whether its tracks don't grip the ground: none of their contacts touches it, or
+    /// it is on its side or its roof, see [`TRACKS_UPRIGHT`]. Nothing drives it then.
     pub airborne: bool,
+    /// Whether any of its contacts touches the ground, its body's too: it can rest.
+    touching: bool,
     /// How many ticks in a row it has been still on the ground, see [`REST_TICKS`].
     still: u8,
     /// How deep each of its contacts was in the ground at the end of the last step, NaN
@@ -743,6 +760,7 @@ impl Hull {
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             airborne: false,
+            touching: true,
             still: 0,
             depths: [f32::NAN; MAX_CONTACTS],
             flags: 0, 
@@ -814,7 +832,7 @@ impl Hull {
         } else {
             self.step(dt, ground_at(&space.terrain, self.position));
         }
-        let still = !self.airborne
+        let still = self.touching
             && self.flags == 0
             && self.speed.abs() < REST_SPEED
             && self.slide.abs() < REST_SPEED
@@ -1392,7 +1410,7 @@ impl Hull {
         let center = self.center_of_mass();
         let inertia = self.inertia();
         let contacts = self.contacts();
-        let springs = contacts.iter().filter(|contact| contact.spring).count().max(1) as f32;
+        let springs = contacts.iter().filter(|contact| contact.kind == ContactKind::Spring).count().max(1) as f32;
         let omega = std::f32::consts::TAU * SUSPENSION_FREQUENCY;
         let stiffness = mass * omega * omega / springs;
         let damping = 2.0 * SUSPENSION_DAMPING * mass * omega / springs;
@@ -1408,6 +1426,7 @@ impl Hull {
             let mut force = Vec3::NEG_Y * GRAVITY * mass;
             let mut torque = Vec3::ZERO;
             let mut any_ground = false;
+            let mut tracks_touching = false;
             let mut touching = false;
             // Those past their travel: where they are from the centre of mass, how fast
             // the ground under them rises, and how far past it they are.
@@ -1423,26 +1442,28 @@ impl Hull {
                 };
                 any_ground = true;
                 // A spring sinks into the ground at rest, a rigid contact never.
-                let depth = if contact.spring { ground + sag - point.y } else { ground - point.y };
+                let spring = contact.kind == ContactKind::Spring;
+                let depth = if spring { ground + sag - point.y } else { ground - point.y };
                 let sank = depth - *previous;
                 *previous = depth;
                 if depth <= 0.0 {
                     continue;
                 }
                 touching = true;
+                tracks_touching |= contact.kind != ContactKind::Body;
                 let arm = point - mass_center;
                 let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
                 // How fast it sinks: into the ground as it follows it, not down; but off
                 // an edge the ground jumps, and only the contact's own speed counts.
                 let sinking = if sank.abs() <= DEPTH_JUMP { sank / step } else { -velocity.y };
-                let past = if contact.spring { depth - stop } else { depth };
+                let past = if spring { depth - stop } else { depth };
                 if past > 0.0 {
                     // The ground's rise under it, as fast as it is stopped at most: off a
                     // rough triangle's edges, it would throw it.
                     let rising = (sinking + velocity.y).min(STOP_SPEED);
                     stopped.push((arm, rising, past));
                 }
-                if contact.spring {
+                if spring {
                     let push = (stiffness * depth.min(stop) + damping * sinking).max(0.0);
                     force.y += push;
                     torque += arm.cross(Vec3::Y * push);
@@ -1458,13 +1479,17 @@ impl Hull {
                 (push_velocity, push_spin) = self.stop(&stopped, mass, inverse_inertia, step);
             } else {
                 touching = true;
+                tracks_touching = true;
                 self.linear_velocity.y = 0.0;
                 self.angular_velocity.x = 0.0;
                 self.angular_velocity.z = 0.0;
             }
-            self.airborne = !touching;
+            // Its tracks grip only upright: on its side or its roof, it scrapes.
+            let gripping = tracks_touching && (rotation * Vec3::Y).y > TRACKS_UPRIGHT;
+            self.airborne = !gripping;
+            self.touching = touching;
 
-            if touching {
+            if gripping {
                 let along = self.velocity();
                 self.linear_velocity.x = along.x;
                 self.linear_velocity.z = along.z;
@@ -1475,7 +1500,7 @@ impl Hull {
             self.orientation = (Quat::from_scaled_axis((self.angular_velocity + push_spin) * step) * rotation).normalize();
             self.position = mass_center - self.orientation * center;
 
-            if touching && handbrake {
+            if gripping && handbrake {
                 let (heading, right) = self.axes();
                 self.speed = self.linear_velocity.dot(heading);
                 self.slide = self.linear_velocity.dot(right);
@@ -1493,26 +1518,48 @@ impl Hull {
     /// throw it up. The second is returned, as a velocity and a spin to move by. Never a
     /// pull: a contact leaving the ground goes.
     ///
+    /// Each also scrapes: an impulse along the ground stops it sliding, as much as
+    /// [`SCRAPE_FRICTION`] of how hard it was stopped allows. On its tracks, they set
+    /// its motion along the ground after, see [`Self::integrate`]; on its side or its
+    /// roof, this is what stops it.
+    ///
     /// ```text
     ///   short   = wanted − (v + ω × arm).y                 > 0: it sinks too fast
     ///   impulse = short / (1/m + (arm × Y) · I⁻¹ (arm × Y))     upward, at the contact
     ///   wanted  = rising                                    its velocity and spin
     ///           = min(STOP_RECOVERY · past / step, STOP_SPEED)   the move out, from 0
+    ///   scrape  = −(its velocity along X and Z) / their effective masses,
+    ///             all a contact's together no longer than SCRAPE_FRICTION · its stop
     /// ```
     fn stop(&mut self, stopped: &[(Vec3, f32, f32)], mass: f32, inverse_inertia: Mat3, step: f32) -> (Vec3, Vec3) {
         let mut push_velocity = Vec3::ZERO;
         let mut push_spin = Vec3::ZERO;
+        let mut stops = [0.0; MAX_CONTACTS];
+        let mut scrapes = [Vec3::ZERO; MAX_CONTACTS];
         for _ in 0..STOP_PASSES {
-            for &(arm, rising, past) in stopped {
+            for (index, &(arm, rising, past)) in stopped.iter().enumerate() {
                 let lever = arm.cross(Vec3::Y);
                 let effective = 1.0 / mass + lever.dot(inverse_inertia * lever);
                 let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
                 let short = rising - velocity.y;
                 if short > 0.0 {
                     let impulse = short / effective;
+                    stops[index] += impulse;
                     self.linear_velocity.y += impulse / mass;
                     self.angular_velocity += inverse_inertia * lever * impulse;
                 }
+                let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                let mut wanted = Vec3::ZERO;
+                for axis in [Vec3::X, Vec3::Z] {
+                    let lever = arm.cross(axis);
+                    let effective = 1.0 / mass + lever.dot(inverse_inertia * lever);
+                    wanted -= axis * (velocity.dot(axis) / effective);
+                }
+                let scrape = (scrapes[index] + wanted).clamp_length_max(SCRAPE_FRICTION * stops[index]);
+                let change = scrape - scrapes[index];
+                scrapes[index] = scrape;
+                self.linear_velocity += change / mass;
+                self.angular_velocity += inverse_inertia * arm.cross(change);
                 let pushed = push_velocity + push_spin.cross(arm);
                 let short = (STOP_RECOVERY * past / step).min(STOP_SPEED) - pushed.y;
                 if short > 0.0 {
@@ -1577,16 +1624,17 @@ impl Hull {
                 let share = (index % CONTACTS_PER_TRACK) as f32 / (CONTACTS_PER_TRACK - 1) as f32;
                 contacts.push(Contact {
                     point: Vec3::new(side * carrying.x, 0.0, (share * 2.0 - 1.0) * carrying.y),
-                    spring: true,
+                    kind: ContactKind::Spring,
                 });
             }
+            self.body_contacts(&mut contacts);
             return contacts;
         };
 
         for wheel in wheels.road() {
             contacts.push(Contact {
                 point: Vec3::new(wheel.center.x, 0.0, wheel.center.z),
-                spring: true,
+                kind: ContactKind::Spring,
             });
         }
 
@@ -1605,23 +1653,78 @@ impl Hull {
                 // Never lower than the springs rest: it would always be in the ground.
                 contacts.push(Contact {
                     point: point.with_y(point.y.max(0.0)),
-                    spring: false,
+                    kind: ContactKind::TrackEnd,
                 });
             }
         }
 
+        self.body_contacts(&mut contacts);
         contacts
 
     }
 
+    /// Its body's rigid contacts, [`BODY_CONTACTS`] of them: what hits the ground when it
+    /// rolls over. Its hull's box's 4 corners at its top and 4 at half its height, the
+    /// middles of its top's edges and its top's middle, then its turret's box's top
+    /// corners and middle, as it faces ahead. Not its box's bottom: its tracks' contacts
+    /// are there.
+    ///
+    /// ```text
+    ///   seen from the side         hull's box                 turret's box
+    ///                                                      *-----*-----*
+    ///   *-------------*-------------*   top: corners, edges' middles, middle
+    ///   |                           |
+    ///   *                           *   half its height: corners
+    ///   |___________________________|   bottom: its tracks
+    /// ```
+    fn body_contacts(&self, contacts: &mut SmallVec<[Contact; MAX_CONTACTS]>) {
+        let [min, max] = self.mobility.bounds;
+        let middle = (min + max) / 2.0;
+        let mut points: SmallVec<[Vec3; BODY_CONTACTS]> = SmallVec::new();
+        for (x, z) in [(min.x, min.z), (min.x, max.z), (max.x, min.z), (max.x, max.z)] {
+            points.push(Vec3::new(x, max.y, z));
+            points.push(Vec3::new(x, middle.y, z));
+        }
+        for (x, z) in [(middle.x, min.z), (middle.x, max.z), (min.x, middle.z), (max.x, middle.z), (middle.x, middle.z)] {
+            points.push(Vec3::new(x, max.y, z));
+        }
+        let [turret_min, turret_max] = self.mobility.turret_bounds;
+        let turret_middle = (turret_min + turret_max) / 2.0;
+        for (x, z) in [
+            (turret_min.x, turret_min.z),
+            (turret_min.x, turret_max.z),
+            (turret_max.x, turret_min.z),
+            (turret_max.x, turret_max.z),
+            (turret_middle.x, turret_middle.z),
+        ] {
+            points.push(Vec3::new(x, turret_max.y, z));
+        }
+        for point in points {
+            contacts.push(Contact {
+                point,
+                kind: ContactKind::Body,
+            });
+        }
+    }
+
 }
 
-/// A point a hull's suspension holds it at, see [`Hull::contacts`]: in its own frame, on
-/// a spring, or rigid, stopping it as soon as it touches the ground.
+/// A point a hull touches the ground at, see [`Hull::contacts`], in its own frame.
 #[derive(Debug, Clone, Copy)]
 struct Contact {
     point: Vec3,
-    spring: bool,
+    kind: ContactKind,
+}
+
+/// What of a hull a [`Contact`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactKind {
+    /// Under a road wheel, on a spring.
+    Spring,
+    /// On its track around a wheel at its end, rigid: its tracks grip there too.
+    TrackEnd,
+    /// On its hull or its turret, rigid: it scrapes there, nothing grips.
+    Body,
 }
 
 /// A destructible piece, as the client numbers it: all of a destructible, or one of a
@@ -2047,13 +2150,15 @@ impl World {
             let hull = &placed.vehicle.hull;
             let moved = hull.position - placed.pose.position;
             let allowed = (hull.speed.abs() + hull.slide.abs()) * dt * 1.5 + 0.5;
-            let turned = hull.orientation.angle_between(placed.pose.orientation);
+            // Its yaw only: on its suspension, it pitches and rolls fast over bumps.
+            let yaw_from = placed.pose.orientation.to_euler(EulerRot::YXZ).0;
+            let turned = wrap_angle(hull.yaw() - yaw_from).abs();
             let rose = moved.y.abs() - moved.xz().length();
             if moved.length() > allowed || rose > 0.4 || turned > 0.25 {
                 warn!(
                     from = ?placed.pose.position,
                     to = ?hull.position,
-                    yaw_from = placed.pose.orientation.to_euler(EulerRot::YXZ).0,
+                    yaw_from,
                     yaw_to = hull.yaw(),
                     speed = hull.speed,
                     "Jumped a vehicle in a step",
@@ -2547,6 +2652,7 @@ pub(super) mod tests {
             rolling_friction: [0.0805, 0.10465, 0.20125],
             carrying_point: glam::Vec2::new(1.6, 2.4),
             bounds: [Vec3::new(-1.8, 0.0, -3.7), Vec3::new(1.8, 2.6, 3.8)],
+            turret_bounds: [Vec3::new(-1.3, 2.0, -1.5), Vec3::new(1.3, 2.9, 1.5)],
             wheels: Some(chieftain_wheels()),
         }
     }
@@ -2922,6 +3028,52 @@ pub(super) mod tests {
         assert!(pitch < -1f32.to_radians(), "{}°", pitch.to_degrees());
         // And climbs onto it.
         assert!(hull.position.z > 10.0 && (hull.position.y - 0.5).abs() < 0.05, "{}", hull.position);
+    }
+
+    /// How deep its contacts that are deepest in a flat ground at 0 are.
+    fn deepest(hull: &Hull) -> f32 {
+        hull.contacts()
+            .iter()
+            .map(|contact| -(hull.position + hull.orientation * contact.point).y)
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    #[test]
+    fn lands_on_its_roof_or_its_side() {
+        let mut triangles = Vec::new();
+        quad(&mut triangles, -50.0, 50.0, 0.0, 0.0);
+        let space = Space {
+            statics: StaticScene::from_triangles(triangles),
+            ..Space::default()
+        };
+        // Dropped on its roof from 2 m, spinning, it lands on its turret and its hull's
+        // top, and scrapes to a stop there, never in the ground, its tracks up and
+        // holding nothing.
+        let mut hull = chieftain();
+        hull.position.y = 5.0;
+        hull.set_direction(Vec3::new(std::f32::consts::PI, 0.0, 0.0));
+        hull.linear_velocity = Vec3::new(3.0, 0.0, 0.0);
+        hull.angular_velocity = Vec3::new(0.0, 0.5, 0.0);
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..60 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            let deepest = deepest(&hull);
+            assert!(deepest < 0.15, "a contact {deepest} m deep at {}", hull.position);
+        }
+        assert!(hull.airborne && (hull.orientation * Vec3::Y).y < -0.9, "{}", hull.direction());
+        assert!(hull.linear_velocity.length() < 0.1, "{}", hull.linear_velocity);
+        // Rolled past its side, it tips over onto it, and rests on it, its tracks
+        // holding nothing either.
+        let mut hull = chieftain();
+        hull.position.y = 3.0;
+        hull.set_direction(Vec3::new(100f32.to_radians(), 0.0, 0.0));
+        for _ in 0..60 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            let deepest = deepest(&hull);
+            assert!(deepest < 0.15, "a contact {deepest} m deep at {}", hull.position);
+        }
+        let up = hull.orientation * Vec3::Y;
+        assert!(hull.airborne && up.y.abs() < TRACKS_UPRIGHT, "up {up}");
     }
 
     #[test]

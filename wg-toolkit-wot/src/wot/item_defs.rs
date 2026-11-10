@@ -84,6 +84,9 @@ pub struct MobilityDef {
     /// The box of what collides of it, its chassis and its hull, in the vehicle's frame
     /// (x right, y up, z forward): minimum then maximum, from their collision models.
     pub bounds: [Vec3; 2],
+    /// Its turret's box, from its collision model, in the vehicle's frame as it faces
+    /// ahead: what else of it hits the ground when it rolls over.
+    pub turret_bounds: [Vec3; 2],
     /// Its chassis' wheels, where its model places them, if it does.
     pub wheels: Option<Wheels>,
 }
@@ -616,8 +619,9 @@ impl VehicleDef {
             chassis_bounds[0].min(hull_bounds[0] + collision.hull_position),
             chassis_bounds[1].max(hull_bounds[1] + collision.hull_position),
         ];
+        let turret_bounds = collision.parts[2].bounds.map(|corner| corner + aiming.turret_position);
         let mobility = mobility(fs, &dir, name, &vehicle, turret, guns.get_child_element(&gun_name), gun_def,
-            speed_limit("forward")?, speed_limit("backward")?, bounds)?;
+            speed_limit("forward")?, speed_limit("backward")?, [bounds, turret_bounds])?;
 
         let crew_roles = vehicle.get_child_element("crew")
             .into_iter()
@@ -721,7 +725,7 @@ fn mobility(
     gun: &Element,
     speed_forward: f32,
     speed_backward: f32,
-    bounds: [Vec3; 2],
+    [bounds, turret_bounds]: [[Vec3; 2]; 2],
 ) -> io::Result<MobilityDef> {
 
     let missing = |what: &str| invalid(format!("{name} has no {what}"));
@@ -788,6 +792,7 @@ fn mobility(
         rolling_friction: [firm, medium, soft],
         carrying_point,
         bounds,
+        turret_bounds,
         wheels,
     })
 
