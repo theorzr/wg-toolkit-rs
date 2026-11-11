@@ -94,12 +94,10 @@ pub fn chieftain() -> Hull {
     Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility())
 }
 
-/// A tick of `dt` seconds on this ground, in a space without any: the drive model,
-/// then its body moving, as [`Hull::advance`] does but for the map.
+/// A tick of `dt` seconds on this ground, in a space without any, see
+/// [`Hull::advance_on`].
 pub fn tick(hull: &mut Hull, dt: f32, ground: Ground) {
-    hull.speeds_to_body();
-    let drive = hull.drive(dt, ground);
-    hull.integrate(dt, &Space::default(), &Rubble::default(), &drive);
+    hull.advance_on(dt, &Space::default(), None, &mut Rubble::default(), Some(ground));
 }
 
 /// A wall across the way at z = 10, `height` high, as two triangles, on flat ground from

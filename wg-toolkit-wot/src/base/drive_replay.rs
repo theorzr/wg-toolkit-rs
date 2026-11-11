@@ -149,6 +149,8 @@ impl Other<'_> {
         }
         let mut vehicle = Vehicle::new(at.position, at.direction, self.mobility, self.aiming.clone());
         let velocity = (at.position - before.position).with_y(0.0) / (at.t - before.t).max(1e-3) as f32;
+        // Faster than it drives, it jumped where the capture lost it: still.
+        let velocity = if velocity.length() > 2.0 * self.mobility.speed_forward { Vec3::ZERO } else { velocity };
         let heading = Vec3::new(at.direction.z.sin(), 0.0, at.direction.z.cos());
         let right = Vec3::new(at.direction.z.cos(), 0.0, -at.direction.z.sin());
         vehicle.hull.speed = velocity.dot(heading);
@@ -335,13 +337,13 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
 
         // The other vehicles that are there, by their place in `others`.
         let mut present = vec![None; others.len()];
+        // What it broke, the world's for the window.
+        std::mem::swap(world.rubble_mut(), &mut rubble);
         for pair in updates[start..=end].windows(2) {
             let dt = ticks_between(pair[0].t, pair[1].t);
-            world.remember();
             world.vehicle_mut(me).hull.flags = controls_at(pair[0].t);
-            world.vehicle_mut(me).step(dt, space, bounds, &mut rubble);
             for (other, id) in others.iter().zip(&mut present) {
-                match (other.at(pair[1].t), *id) {
+                match (other.at(pair[0].t), *id) {
                     (Some(vehicle), Some(known)) => *world.vehicle_mut(known) = vehicle,
                     (Some(vehicle), None) => *id = Some(world.add(vehicle)),
                     (None, Some(known)) => {
@@ -351,8 +353,9 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
                     (None, None) => {}
                 }
             }
-            world.collide(dt);
+            world.step(dt);
         }
+        std::mem::swap(world.rubble_mut(), &mut rubble);
         let hull = &world.vehicle(me).hull;
 
         let real = updates[end];

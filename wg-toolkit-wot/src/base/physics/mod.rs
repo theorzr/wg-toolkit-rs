@@ -19,34 +19,37 @@
 //!                ▼
 //!   World::step(dt)                                   dt = one tick, 0.1 s    (here)
 //!   │
-//!   ├─ 1. remember()           pose ← where each vehicle is, for the sweep in 3
+//!   ├─ 1. remember()           pose ← where each vehicle is, to tell jumps
 //!   │
-//!   ├─ 2. for every vehicle: Vehicle::step
-//!   │     ├─ Hull::advance                                                   (here)
-//!   │     │    ├─ drive            the drive model: how hard its engine,       drive
-//!   │     │    │                   brakes and steering push it                ground
-//!   │     │    ├─ (still for long enough: it rests, and the rest is skipped)
-//!   │     │    ├─ ram              damage and break the destructibles it is   rubble
-//!   │     │    │                   about to get into
-//!   │     │    ├─ speeds_to_body   its body takes what hits and rams left it  body
-//!   │     │    ├─ integrate        the rigid body, 10 steps: gravity, its      body
-//!   │     │    │                   suspension, its tracks driven, all it      contacts
-//!   │     │    │                   touches of the terrain and static models   (wgtk::space)
-//!   │     │    │                   holding it off
-//!   │     │    └─ keep_within      stop at the map's edge                     walls
-//!   │     └─ Turret::step          turn toward the aim, update the dispersion  turret
+//!   ├─ 2. for every vehicle, on its own                                      (here)
+//!   │     ├─ start: drive      the drive model: how hard its engine,          drive
+//!   │     │                    brakes and steering push it                    ground
+//!   │     ├─ rests?            still for long enough: it rests, unless one
+//!   │     │                    moving may reach it, and the rest is skipped
+//!   │     └─ set_off: ram      damage and break the destructibles it is       rubble
+//!   │                          about to get into; its body takes what         body
+//!   │                          hits and rams left it
 //!   │
-//!   ├─ 3. collide(dt), up to 3 passes over every pair of vehicles       (here), collision
-//!   │     for a pair whose 3D boxes overlap:
-//!   │     ├─ find where they first touched in the tick, put both back there
-//!   │     ├─ push them apart, each by the other's share of their weight
-//!   │     ├─ exchange an impulse at the contact: speeds and spin
-//!   │     ├─ let both go on for what was left of the tick at their new speeds
-//!   │     └─ keep_on_map for both: walls, edge, ground again
+//!   ├─ 3. their bodies together, 10 steps of each                     (here), body
+//!   │     ├─ each one's boxes and its tracks' ends' spheres, where       collision
+//!   │     │  they touch each other's
+//!   │     ├─ each one's gravity, its suspension and its tracks           contacts
+//!   │     │  driven, all it touches of the terrain and static models     (wgtk::space)
+//!   │     │  holding it off; its springs on another, pushing it back
+//!   │     ├─ 4 passes: each one held off the space, then the vehicles
+//!   │     │  held apart where they touch, sharing their impulses
+//!   │     └─ each moves
+//!   │
+//!   ├─ 4. for every vehicle: finish, its speeds read back, stopped at        walls
+//!   │     the map's edge; Turret::step, turn toward the aim, update the     turret
+//!   │     dispersion
 //!   │
 //!   └─ then the battle tells its clients what moved (client: engine and aux data)
 //!      and what broke, World::take_breakages
 //! ```
+//!
+//! A vehicle alone, the drive harness's or a test's, moves through a world of it alone,
+//! `Hull::advance`.
 //!
 //! The modules, in the order a tick uses them:
 //!
@@ -60,13 +63,15 @@
 //!   rubble      destructibles: what it rams and breaks, what shells break
 //!   contacts    where its body touches the space: its springs, its tracks' ends,
 //!               its hull's boxes and its turret's
-//!   walls       the map's edge, shoves out of the static models, what it rams
-//!   collision   two vehicles' boxes, where they first touch, the impulse between
+//!   collision   vehicles' bodies against each other: where they touch, and the
+//!               impulses holding them apart
+//!   walls       the map's edge, what it rams
 //!   turret      the turret and its gun: turning, aiming, dispersion
 //!   client      what the client is told beyond positions: engine and tracks
 //! ```
 //!
-//! Nothing in a tick allocates: boxes, outlines and polygons live on the stack
+//! Nothing in a tick allocates, once the world's lists of bodies and of where they touch
+//! have grown: boxes, outlines and polygons live on the stack
 //! ([`SmallVec`](smallvec::SmallVec)), and vehicles are in a slab
 //! ([`Slots`](wgtk::app::slots::Slots)).
 //!
@@ -117,7 +122,7 @@
 //!   (the hull's fields)                                             change
 //!            │  speeds_to_body, as a tick starts          ▲
 //!            ▼                                            │  speeds_from_body, as
-//!   in 3D (its body)             linear_velocity,                   integrate ends
+//!   in 3D (its body)             linear_velocity,                   its steps end
 //!                                angular_velocity                   what gravity, its
 //!                                                                   springs and tracks move
 //! ```
@@ -136,23 +141,26 @@
 //! choice until a capture can fit it. The drive harness replays those captures through
 //! this module in windows, each starting from the real state, and reports the errors:
 //! about 0.25 m median over 1 s windows. Collisions between vehicles were checked on the
-//! Pershing's pushes of its allies, but their model (the impulse without bounce or
-//! friction) is ours.
+//! Pershing's pushes of its allies, where the harness puts them as the real server had
+//! them each tick; how high its tracks grip is the game's own (`comFrictionYOffs`), but
+//! the rest of their model is ours: a vehicle not driven holds against a push with its
+//! brakes, so that one pushes another as heavy at a crawl, and two not at all.
 //!
 //! # What isn't modelled
 //!
-//! Vehicles still hit each other on the ground plane, not in 3D: that is next. Its
-//! collision shapes are boxes, not its hull's mesh: a rock catches its box's corner
-//! where the real hull is narrower. A house's floor, not one of its destructible modules,
-//! stays when it breaks, and the hull drives up onto it, where the real one went on
-//! below it on Live Oaks. It takes no damage from a fall, and doesn't float or sink in
-//! water. Its tracks don't scrub sideways as it turns: its steering turns it as the
-//! game's turning speeds say, and holds back a hull spun by a push off its middle only
-//! as fast as it would stop turning. Vehicles have no friction between them and
-//! take no damage from ramming, each other or destructibles. Trees don't fall: the
-//! client numbers them among the speed trees, which aren't decoded. What a destroyed
-//! module leaves (`BodyKind::Remains`) is never collided with. Shells are flown in
-//! `gun.rs`, against the same statics and rubble.
+//! Its collision shapes are boxes, not its hull's mesh: a rock catches its box's corner
+//! where the real hull is narrower, and another vehicle meets its box's face, as high as
+//! its hull, where the real ones meet their sloped plates. Its tracks on another vehicle
+//! drive it, but don't push that one back. Its gun touches nothing. A house's floor, not
+//! one of its destructible modules, stays when it breaks, and the hull drives up onto it,
+//! where the real one went on below it on Live Oaks. It takes no damage from a fall, and
+//! doesn't float or sink in water. Its tracks don't scrub sideways as it turns: its
+//! steering turns it as the game's turning speeds say, and holds back a hull spun by a
+//! push off its middle only as fast as it would stop turning. Vehicles take no damage
+//! from ramming, each other or destructibles. Trees don't fall: the client numbers them
+//! among the speed trees, which aren't decoded. What a destroyed module leaves
+//! (`BodyKind::Remains`) is never collided with. Shells are flown in `gun.rs`, against
+//! the same statics and rubble.
 
 mod drive;
 mod body;
@@ -166,19 +174,22 @@ mod client;
 #[cfg(test)]
 pub mod fixtures;
 
-use std::sync::Arc;
 use std::vec::Drain;
+use std::sync::Arc;
+use std::ops::Deref;
 
 use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles};
 use tracing::warn;
 
 use wgtk::app::slots::{SlotKey, Slots};
+use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
 use crate::wot::item_defs::{AimingDef, MobilityDef};
 
+use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
-use self::collision::{collide, Pose};
+use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::ground::ground_at;
 
 pub use self::rubble::{Breakage, Piece, Rubble};
@@ -207,44 +218,63 @@ const GRAVITY: f32 = 9.81;
 const REST_TICKS: u8 = 5;
 const REST_SPEED: f32 = 0.02;
 const REST_SPIN: f32 = 0.01;
-/// How many times a step pushes vehicles apart, those pushed into a third again.
-const COLLISION_PASSES: usize = 3;
 
 /// A vehicle of a [`World`]. It is stale once the vehicle is removed, even if another one
 /// takes its place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VehicleId(SlotKey);
 
-/// A vehicle in a [`World`] and where it was when last remembered, see
-/// [`World::remember`].
+/// A vehicle in a [`World`], where it was when last remembered, see
+/// [`World::remember`], and in a tick, what holds of its body over it, whether it moves,
+/// and its step under way.
 #[derive(Debug)]
 struct Placed {
     vehicle: Vehicle,
     pose: Pose,
+    tick: Option<Tick>,
+    moving: bool,
+    step: Option<Step>,
+}
+
+impl Placed {
+
+    /// Its hull and its step under way, if it moves.
+    fn body(&mut self) -> Option<(&mut Hull, &mut Step)> {
+        Some((&mut self.vehicle.hull, self.step.as_mut()?))
+    }
+
 }
 
 /// The vehicles of a battle on its map, which the map's statics and bounds hold in and
-/// which push each other. A step allocates nothing. See the module's documentation for
-/// what a step does, in order.
+/// which push each other. See the module's documentation for what a step does, in
+/// order. A step allocates nothing, once its lists of bodies and of where they touch
+/// have grown.
 ///
 /// Vehicles are in a slab with generational keys ([`Slots`]): a [`VehicleId`] never
-/// reaches the vehicle that took the place of a removed one.
+/// reaches the vehicle that took the place of a removed one. Its space is shared with
+/// the battle, an `Arc`, or borrowed, for a test's vehicle alone, see `Hull::advance`.
 #[derive(Debug)]
-pub struct World {
-    space: Arc<Space>,
+pub struct World<S = Arc<Space>> {
+    space: S,
     bounds: Option<(Vec2, Vec2)>,
     vehicles: Slots<Placed>,
     rubble: Rubble,
+    /// The bodies of the vehicles moving, in a step, for each other to touch.
+    solids: Vec<Solid>,
+    /// Where they touch, in a step.
+    touching: Vec<Touching>,
 }
 
-impl World {
+impl<S: Deref<Target = Space>> World<S> {
 
-    pub fn new(space: Arc<Space>, bounds: Option<(Vec2, Vec2)>) -> Self {
+    pub fn new(space: S, bounds: Option<(Vec2, Vec2)>) -> Self {
         Self {
             space,
             bounds,
             vehicles: Slots::default(),
             rubble: Rubble::default(),
+            solids: Vec::new(),
+            touching: Vec::new(),
         }
     }
 
@@ -258,6 +288,13 @@ impl World {
         &self.rubble
     }
 
+    /// What its vehicles and shells broke, to change: the drive harness keeps it from a
+    /// window to the next.
+    #[allow(dead_code)]
+    pub fn rubble_mut(&mut self) -> &mut Rubble {
+        &mut self.rubble
+    }
+
     // -- Its vehicles --
 
     /// Put a vehicle in the world.
@@ -265,6 +302,9 @@ impl World {
         VehicleId(self.vehicles.insert(Placed {
             pose: Pose::of(&vehicle.hull),
             vehicle,
+            tick: None,
+            moving: false,
+            step: None,
         }))
     }
 
@@ -286,67 +326,151 @@ impl World {
 
     // -- Its tick --
 
-    /// Advance every vehicle by `dt` seconds on its controls, then push apart those that
-    /// ran into each other, see [`Self::collide`].
+    /// Advance every vehicle by `dt` seconds on its controls, their bodies together, so
+    /// that they push each other.
     pub fn step(&mut self, dt: f32) {
+        self.step_on(dt, None);
+    }
 
-        // 1. Where each vehicle starts the tick, for the collisions to sweep from.
+    /// Advance every vehicle by `dt` seconds, see [`Self::step`], on this `ground` if any,
+    /// whatever the terrain's: the tests'.
+    fn step_on(&mut self, dt: f32, ground: Option<Ground>) {
+
+        // 1. Where each vehicle starts the tick, to tell jumps.
         self.remember();
 
-        // 2. Each vehicle on its own, see `Vehicle::step`.
+        // 2. Each on its own: its drive model, on the ground under it, then it rests or
+        //    sets off.
         for (_, placed) in self.vehicles.iter_mut() {
-            placed.vehicle.step(dt, &self.space, self.bounds, &mut self.rubble);
+            let hull = &mut placed.vehicle.hull;
+            let under = ground.unwrap_or_else(|| ground_at(&self.space.terrain, hull.position));
+            placed.tick = Some(hull.start(dt, under));
+            placed.moving = !hull.rests();
+            if placed.moving {
+                hull.set_off(dt, &self.space, &mut self.rubble);
+            }
+        }
+        self.wake(dt);
+
+        // 3. Their bodies, together.
+        let step = dt / SUBSTEPS as f32;
+        for _ in 0..SUBSTEPS {
+            self.step_bodies(step);
         }
 
-        // 3. Those that ran into each other, pushed apart.
-        self.collide(dt);
+        // 4. Each: its speeds read back from its body, held within the map, its turret
+        //    turned on it.
+        for (_, placed) in self.vehicles.iter_mut() {
+            if placed.moving {
+                placed.vehicle.hull.finish(self.bounds);
+            }
+            placed.vehicle.turret.step(dt, &placed.vehicle.hull);
+            placed.tick = None;
+        }
 
         self.report_jumps(dt);
 
     }
 
-    /// Remember where every vehicle is, as a step starts: [`Self::collide`] finds from
-    /// there where vehicles first touched, so that fast ones don't get into each other.
+    /// Remember where every vehicle is, as a step starts, to tell jumps after.
     pub fn remember(&mut self) {
         for (_, placed) in self.vehicles.iter_mut() {
             placed.pose = Pose::of(&placed.vehicle.hull);
         }
     }
 
-    /// Push apart the vehicles whose collision boxes overlap, see [`collide`]: where they
-    /// first touched since they were remembered, a step of `dt` seconds ago, the vehicles
-    /// pushed into others apart again, and those that touched back out of the static
-    /// models and within the map's bounds, their suspension catching them: a vehicle isn't
-    /// shoved through a wall.
+    /// Wake the vehicles at rest that one moving may reach in a tick of `dt` seconds:
+    /// they move with it, pushed.
+    fn wake(&mut self, dt: f32) {
+        let (space, rubble) = (&*self.space, &mut self.rubble);
+        self.vehicles.for_each_pair_mut(|placed, other| {
+            if placed.moving == other.moving {
+                return;
+            }
+            let (moving, resting) = if placed.moving { (placed, other) } else { (other, placed) };
+            let (center, radius) = moving.vehicle.hull.reach();
+            let (other_center, other_radius) = resting.vehicle.hull.reach();
+            let speed = moving.vehicle.hull.linear_velocity.length() + moving.vehicle.hull.angular_velocity.length() * radius;
+            if center.distance(other_center) < radius + other_radius + speed * dt + CONTACT_MARGIN {
+                resting.moving = true;
+                resting.vehicle.hull.wake();
+                resting.vehicle.hull.set_off(dt, space, rubble);
+            }
+        });
+    }
+
+    /// A step of the moving vehicles' bodies, `step` seconds long, see the `body` and
+    /// `collision` modules:
     ///
     /// ```text
-    ///   pass 0   every pair, swept from the remembered poses to where the step left them
-    ///   pass 1   every pair again, from where pass 0 left them (nothing to sweep: they
-    ///   pass 2   were put there), if any pair touched, up to COLLISION_PASSES passes
+    ///   1. each one's body where it starts, for the others to touch
+    ///   2. where they touch each other
+    ///   3. each begins its step: where it touches the space and its springs the others,
+    ///      its weight and its springs accelerating it
+    ///   4. its springs on the others push them back
+    ///   5. CONTACT_PASSES passes: each one's contacts with the space held, then where
+    ///      they touch each other, held apart
+    ///   6. each moves
     /// ```
-    ///
-    /// The extra passes are for three vehicles in a row: pushing the middle one off the
-    /// first can push it into the third, which pass 0 had already checked.
-    pub fn collide(&mut self, dt: f32) {
-        let (space, bounds, rubble) = (&*self.space, self.bounds, &self.rubble);
-        for pass in 0..COLLISION_PASSES {
-            let mut touched = false;
-            self.vehicles.for_each_pair_mut(|placed, other| {
-                // Past the first pass, they were pushed to where they are.
-                let (from, other_from) = match pass {
-                    0 => (placed.pose, other.pose),
-                    _ => (Pose::of(&placed.vehicle.hull), Pose::of(&other.vehicle.hull)),
-                };
-                if collide(&mut placed.vehicle.hull, from, &mut other.vehicle.hull, other_from, dt) {
-                    touched = true;
-                    other.vehicle.hull.keep_on_map(space, bounds, rubble);
-                    placed.vehicle.hull.keep_on_map(space, bounds, rubble);
-                }
-            });
-            if !touched {
-                break;
+    fn step_bodies(&mut self, step: f32) {
+
+        let space = &*self.space;
+        let keep = blocking(space, &self.rubble);
+
+        // 1. Their bodies.
+        self.solids.clear();
+        for (key, placed) in self.vehicles.iter() {
+            if placed.moving {
+                self.solids.push(Solid::of(key, &placed.vehicle.hull));
             }
         }
+
+        // 2. Where they touch each other.
+        self.touching.clear();
+        for (index, solid) in self.solids.iter().enumerate() {
+            for other in &self.solids[index + 1..] {
+                touching(solid, other, step, &mut self.touching);
+            }
+        }
+
+        // 3. Each begins its step.
+        for (index, solid) in self.solids.iter().enumerate() {
+            let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
+            let tick = placed.tick.as_ref().expect("a tick under way");
+            placed.step = Some(placed.vehicle.hull.begin_step(tick, space, &keep, &self.solids, Some(index)));
+        }
+
+        // 4. Its springs on the others push them back.
+        for solid in &self.solids {
+            let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
+            let Some(step) = placed.step.as_mut() else { continue };
+            let reactions = std::mem::take(&mut step.reactions);
+            for reaction in reactions {
+                let other = self.vehicles.get_mut(self.solids[reaction.other].key).expect("a vehicle of the world");
+                let Some((hull, step)) = other.body() else { continue };
+                hull.take(reaction.impulse, reaction.point - step.mass_center, &step.body);
+            }
+        }
+
+        // 5. Held off the space, and apart.
+        for pass in 0..CONTACT_PASSES {
+            for (_, placed) in self.vehicles.iter_mut() {
+                let Placed { vehicle, tick, step: Some(step), .. } = placed else { continue };
+                vehicle.hull.solve_pass(tick.as_ref().expect("a tick under way"), step, pass);
+            }
+            for touching in &mut self.touching {
+                let Some((placed, other)) = self.vehicles.get_pair_mut(touching.first, touching.second) else { continue };
+                let (Some(body), Some(other_body)) = (placed.body(), other.body()) else { continue };
+                hold_apart(touching, body, other_body, step);
+            }
+        }
+
+        // 6. Each moves.
+        for (_, placed) in self.vehicles.iter_mut() {
+            let Some(step) = placed.step.take() else { continue };
+            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), &step);
+        }
+
     }
 
     /// Warn about the vehicles that moved further in a step than their speed allows, or
@@ -354,17 +478,15 @@ impl World {
     /// in each other after the step.
     fn report_jumps(&self, dt: f32) {
 
-        for (key, placed) in self.vehicles.iter() {
-            let obb = placed.vehicle.hull.obb();
-            for (_, other) in self.vehicles.iter().skip_while(|&(other_key, _)| other_key != key).skip(1) {
-                let depth = match obb.separation(&other.vehicle.hull.obb()) {
-                    Some((_, depth)) => depth,
-                    None => continue,
-                };
-                if depth > 0.05 {
+        for solid in &self.solids {
+            for other in self.solids.iter().skip_while(|other| other.key != solid.key).skip(1) {
+                let Some(depth) = solid.depth_in(other) else { continue };
+                let first = &self.vehicles.get(solid.key).expect("a vehicle of the world").vehicle.hull;
+                let second = &self.vehicles.get(other.key).expect("a vehicle of the world").vehicle.hull;
+                if depth > 0.1 {
                     warn!(
-                        first = ?placed.vehicle.hull.position,
-                        second = ?other.vehicle.hull.position,
+                        first = ?first.position,
+                        second = ?second.position,
                         depth,
                         "Left two vehicles in each other after a step",
                     );
@@ -429,15 +551,6 @@ impl Vehicle {
         }
     }
 
-    /// Advance by `dt` seconds in its space, within the map's bounds if any: the hull
-    /// moves, see [`Hull::advance`], then the turret turns on it. Returns whether the
-    /// hull moved or turned.
-    pub fn step(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
-        let moved = self.hull.advance(dt, space, bounds, rubble);
-        self.turret.step(dt, &self.hull);
-        moved
-    }
-
     /// Where its chassis, hull, turret and gun are in the world, as transforms from
     /// each part's frame, the hull sitting at `hull_position` on the chassis.
     pub fn part_transforms(&self, hull_position: Vec3) -> [Affine3A; 4] {
@@ -454,7 +567,7 @@ impl Vehicle {
 }
 
 /// A vehicle's hull, moving as the client drives it: a rigid body, held up by its
-/// suspension, see [`Self::integrate`]. Its motion is kept both on the ground plane and
+/// suspension, see [`Self::begin_step`]. Its motion is kept both on the ground plane and
 /// in 3D, see "Two views of the same motion" in the module's documentation.
 #[derive(Debug, Clone)]
 pub struct Hull {
@@ -473,12 +586,12 @@ pub struct Hull {
     pub yaw_rate: f32,
     /// Each of its tracks' speed, a pair by `drive::Side`, in m/s, positive forward: its
     /// belts', rolling with the ground under them, or spinning where they slip or touch
-    /// nothing, see [`Self::integrate`].
+    /// nothing, see [`Self::solve_pass`].
     pub tracks: [f32; 2],
     /// The turning speed its steering pushes it toward, in rad/s, positive to the right,
     /// see [`Self::drive`].
     steer: f32,
-    /// The velocity of its centre of mass, in m/s: its body's, see [`Self::integrate`].
+    /// The velocity of its centre of mass, in m/s: its body's, see [`Self::begin_step`].
     pub linear_velocity: Vec3,
     /// How fast it turns, about each axis of the world, in rad/s: its body's.
     pub angular_velocity: Vec3,
@@ -491,7 +604,7 @@ pub struct Hull {
     still: u8,
     /// How deep each of its contacts was in the ground at the end of the last step of
     /// its body, NaN where none was found: their dampers resist how fast they sink, see
-    /// [`Self::integrate`].
+    /// [`Self::begin_step`].
     depths: [f32; MAX_CONTACTS],
     /// Where its suspension and its body touch the ground, in its own frame, made once
     /// from its mobility, see [`contacts::contacts_of`].
@@ -526,52 +639,72 @@ impl Hull {
 
     // -- Its tick --
 
-    /// Advance by `dt` seconds in its space. Returns whether the hull moved or turned.
-    ///
-    /// ```text
-    ///   drive(ground under it)     the drive model: how hard its engine, brakes and
-    ///        ▼                     steering push it
-    ///   (still? it rests)          nothing below happens
-    ///        ▼
-    ///   ram                        the destructibles it is about to get into, damaged,
-    ///        ▼                     broken ones out of its way, speed lost to them
-    ///   speeds_to_body             its body takes the speeds hits and rams left it
-    ///        ▼
-    ///   integrate                  the body and its tracks move: gravity, its
-    ///        ▼                     suspension, its tracks gripping the ground, walls
-    ///   keep_within(bounds)        inside the map, speed into the edge lost
-    /// ```
-    ///
-    /// A hull still on the ground for [`REST_TICKS`] rests: it isn't moved until its
-    /// controls or a hit move it again.
+    /// Advance by `dt` seconds in its space alone, within the map's `bounds` if any, as a
+    /// world of it alone does, see [`World::step`], what it breaks in `rubble`: the tests'
+    /// and the drive harness's way to move one. Returns whether it moved, not resting.
+    #[cfg(test)]
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
+        self.advance_on(dt, space, bounds, rubble, None)
+    }
 
-        // 1. The drive model says how hard its engine, its brakes and its steering push
-        //    it, for its tracks to pass on where they grip.
-        let drive = self.drive(dt, ground_at(&space.terrain, self.position));
+    /// Advance by `dt` seconds alone, see [`Self::advance`], on this `ground` if any,
+    /// whatever the terrain's. Its turret, which it doesn't have, is a Chieftain's.
+    #[cfg(test)]
+    pub fn advance_on(
+        &mut self,
+        dt: f32,
+        space: &Space,
+        bounds: Option<(Vec2, Vec2)>,
+        rubble: &mut Rubble,
+        ground: Option<Ground>,
+    ) -> bool {
+        let mut world = World::new(space, bounds);
+        std::mem::swap(&mut world.rubble, rubble);
+        let id = world.add(Vehicle {
+            hull: self.clone(),
+            turret: Turret::new(fixtures::chieftain_aiming()),
+        });
+        world.step_on(dt, ground);
+        std::mem::swap(&mut world.rubble, rubble);
+        *self = world.remove(id).expect("a vehicle of the world").hull;
+        self.still <= REST_TICKS
+    }
 
-        // 2. Still on the ground long enough, it rests: nothing to move, nothing to send.
+    /// The start of a tick of `dt` seconds, on this `ground`: the drive model says how
+    /// hard its engine, its brakes and its steering push it, for its tracks to pass on
+    /// where they grip, and what holds of its body over the tick.
+    pub fn start(&mut self, dt: f32, ground: Ground) -> Tick {
+        let drive = self.drive(dt, ground);
+        self.tick(dt, drive)
+    }
+
+    /// Whether it rests this tick, still on the ground long enough: nothing to move,
+    /// nothing to send.
+    pub fn rests(&mut self) -> bool {
         self.still = if self.is_still() { self.still.saturating_add(1) } else { 0 };
-        if self.still > REST_TICKS {
-            return false;
-        }
+        self.still > REST_TICKS
+    }
 
-        // 3. What it is about to ram: damaged, and broken out of its way before it moves,
-        //    or stopping it as walls do.
+    /// Wake it from rest: another vehicle may push it.
+    pub fn wake(&mut self) {
+        self.still = 0;
+    }
+
+    /// Set off for a tick of `dt` seconds: what it is about to ram damaged, and broken out
+    /// of its way before it moves, or stopping it as walls do; then its body takes what
+    /// hits and rams left on the ground plane since its last tick.
+    pub fn set_off(&mut self, dt: f32, space: &Space, rubble: &mut Rubble) {
         self.ram(dt, space, rubble);
-
-        // 4. Its body takes what hits and rams left on the ground plane since its last
-        //    tick, then it moves, its tracks pushing it where they grip, walls holding it.
         self.speeds_to_body();
-        self.integrate(dt, space, rubble, &drive);
+    }
 
-        // 5. The map's edge.
+    /// The end of a tick: its speeds on the ground plane read back from its body, and
+    /// the map's edge.
+    pub fn finish(&mut self, bounds: Option<(Vec2, Vec2)>) {
+        self.speeds_from_body();
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
-
-        true
-
     }
 
     /// Whether it is still on the ground, its controls released: no speed or turning
@@ -586,18 +719,6 @@ impl Hull {
             && self.tracks.iter().all(|track| track.abs() < REST_SPEED)
             && self.linear_velocity.length() < REST_SPEED
             && self.angular_velocity.length() < REST_SPIN
-    }
-
-    /// Put it back where the map holds it after it was shoved by another vehicle: out of
-    /// the static models and within the map's bounds, as the end of [`Self::advance`]
-    /// does. A vehicle is never shoved through a wall or off the map, but can be off a
-    /// ledge: its suspension finds out on the next tick.
-    pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
-        self.still = 0;
-        self.push_out(space, rubble);
-        if let Some(bounds) = bounds {
-            self.keep_within(bounds);
-        }
     }
 
     // -- Its orientation --
@@ -656,24 +777,7 @@ impl Hull {
         self.velocity().xz() + Vec2::new(arm.y, -arm.x) * self.yaw_rate
     }
 
-    /// Its inertia against turning on the ground plane, in kg·m²: that of a box of its
-    /// weight over its collision box's width and length.
-    fn yaw_inertia(&self) -> f32 {
-        let [min, max] = self.mobility.bounds;
-        let size = max.xz() - min.xz();
-        self.mobility.weight * size.length_squared() / 12.0
-    }
-
-    /// Take an impulse, in kg·m/s, at `arm` from its middle on the ground plane: its
-    /// velocity and its spin change. What walls and other vehicles do to it.
-    fn hit(&mut self, impulse: Vec2, arm: Vec2, mass: f32, inertia: f32) {
-        let velocity = self.velocity() + Vec3::new(impulse.x, 0.0, impulse.y) / mass;
-        self.set_velocity(velocity);
-        self.yaw_rate -= arm.perp_dot(impulse) / inertia;
-    }
-
-    /// Its collision box on the ground plane, upright: where it touches walls,
-    /// destructibles and other vehicles.
+    /// Its collision box on the ground plane, upright: where it touches destructibles.
     fn footprint(&self) -> Footprint {
         let (sin, cos) = self.yaw().sin_cos();
         let heading = Vec2::new(sin, cos);

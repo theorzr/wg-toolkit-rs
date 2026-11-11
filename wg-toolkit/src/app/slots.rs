@@ -59,6 +59,16 @@ impl<T> Slots<T> {
             .and_then(|slot| slot.value.as_mut())
     }
 
+    /// Two values at once, by their keys: none if either was removed, or if they are
+    /// the same.
+    pub fn get_pair_mut(&mut self, first: SlotKey, second: SlotKey) -> Option<(&mut T, &mut T)> {
+        let [first_slot, second_slot] = self.slots.get_disjoint_mut([first.index as usize, second.index as usize]).ok()?;
+        if first_slot.generation != first.generation || second_slot.generation != second.generation {
+            return None;
+        }
+        Some((first_slot.value.as_mut()?, second_slot.value.as_mut()?))
+    }
+
     /// Every value, with its key.
     pub fn iter(&self) -> impl Iterator<Item = (SlotKey, &T)> {
         self.slots.iter().enumerate()

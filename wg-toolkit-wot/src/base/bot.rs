@@ -62,9 +62,11 @@ impl Bot {
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use wgtk::space::Space;
 
-    use crate::base::physics::Rubble;
+    use crate::base::physics::World;
 
     use super::*;
 
@@ -72,13 +74,14 @@ mod tests {
     fn closes_in_then_faces_its_enemy() {
         let mobility = crate::base::physics::fixtures::chieftain_mobility();
         let aiming = crate::base::physics::fixtures::chieftain_aiming();
-        let mut vehicle = Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming);
+        let mut world = World::new(Arc::new(Space::default()), None);
+        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, mobility, aiming));
         let enemy = Vec3::new(300.0, 0.0, 300.0);
         for _ in 0..1000 {
-            Bot.drive(&mut vehicle, Some(enemy), true);
-            vehicle.step(0.1, &Space::default(), None, &mut Rubble::default());
+            Bot.drive(world.vehicle_mut(id), Some(enemy), true);
+            world.step(0.1);
         }
-        let hull = &vehicle.hull;
+        let hull = &world.vehicle(id).hull;
         let to = enemy - hull.position;
         let distance = to.x.hypot(to.z);
         assert!(distance <= ENGAGE_RANGE && distance > ENGAGE_RANGE - 20.0, "stopped {distance} m away");
