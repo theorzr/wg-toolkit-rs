@@ -42,7 +42,11 @@ impl Hull {
         let position = self.position + self.velocity() * dt;
         let orientation = (Quat::from_rotation_y(self.yaw_rate * dt) * self.orientation).normalize();
         let cuboid = self.hull_box(position, orientation);
-        let keep = |triangle: &StaticTriangle| triangle.kind == BodyKind::Destructible && rubble.standing(&space.statics, triangle).is_some();
+        let keep = |triangle: &StaticTriangle| {
+            !triangle.vehicles_pass
+                && triangle.kind == BodyKind::Destructible
+                && rubble.standing(&space.statics, triangle).is_some()
+        };
         space.cuboid(&cuboid, reach, &keep)
             .into_iter()
             .filter_map(|contact| match contact.surface {

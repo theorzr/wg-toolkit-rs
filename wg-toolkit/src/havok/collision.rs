@@ -41,6 +41,9 @@ impl CollisionBody {
     /// [`Self::shells_pass`].
     pub const SHELLS_PASS: u32 = 1 << 1;
 
+    /// The collision flag of a body vehicles drive through, see [`Self::vehicles_pass`].
+    pub const VEHICLES_PASS: u32 = 1 << 0;
+
     /// Whether shells fly through it untouched, by its flags. No game source says so;
     /// it is inferred from the game's fences. A light fence's breakable body (`n_wood0`,
     /// 1 health) has this flag, while a stone fence's has 0. The invisible `s_wall` and
@@ -48,6 +51,17 @@ impl CollisionBody {
     /// (14 in all).
     pub fn shells_pass(&self) -> bool {
         self.flags & Self::SHELLS_PASS != 0
+    }
+
+    /// Whether vehicles drive through it, by its flags. No game source says so either;
+    /// it is inferred from the bodies that have this flag. A debris pile's detailed mesh
+    /// (`s_nd1` of `hd_env_UNI_014_Debris`) has it, under a smooth `s_ramp_0` that it
+    /// doesn't have, and the real T110E4 drove over that ramp on Ruinberg where the mesh
+    /// caught ours. A tree's grille has it, flat on the ground. Bodies that both shells
+    /// and vehicles pass, 3, keep only the camera out: `no_camera_box`, and the
+    /// `s_wall_` bodies inside some houses.
+    pub fn vehicles_pass(&self) -> bool {
+        self.flags & Self::VEHICLES_PASS != 0
     }
 
 }

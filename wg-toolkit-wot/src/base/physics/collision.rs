@@ -76,7 +76,7 @@ use super::Hull;
 /// in metres: crossed edges of near-parallel boxes give noisy axes. Our choice.
 const EDGE_AXIS_BIAS: f32 = 0.05;
 /// How much two vehicles rubbing hold each other back, as a share of how hard they are
-/// pressed together: steel on steel. Our choice.
+/// pressed together. From the game: `CONTACT_FRICTION_VEHICLES` in `physics_shared.py`.
 const VEHICLE_FRICTION: f32 = 0.3;
 
 /// A vehicle's body where its step starts, for the others to touch: its boxes and its

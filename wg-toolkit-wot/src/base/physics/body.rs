@@ -268,6 +268,12 @@ const SCRAPE_FRICTION: f32 = 0.6;
 /// as this share. At the ground, two tanks driving into each other reared up to 42°, and
 /// one pushing a parked one tipped both, pushing high on each other.
 const FRICTION_HEIGHT: f32 = 0.7;
+/// How steep, in radians, what a track's end touches may be for it to take it as flat,
+/// and be lifted up it rather than held back: 35°. From the game:
+/// `ROLLER_HORIZONTAL_SURFACE_ANGLE` in `physics_shared.py`, which its native physics
+/// takes; that it means this is our reading. A debris pile's ramp on Ruinberg, its foot
+/// 26 to 32° steep, stopped the T110E4 dead from 8 m/s, where the real one climbed it.
+const ROLLER_FLAT: f32 = 35.0 * std::f32::consts::PI / 180.0;
 
 impl Hull {
 
@@ -600,35 +606,43 @@ impl Hull {
                 .map(|(index, _)| index);
             for (index, touch) in touched.iter().enumerate() {
 
-                // A track's end gives as its road wheels do, up its hull: as much of its
-                // travel as what it touches faces up its hull, none against a wall or with
-                // the hull on its side. Its deepest touch pushes as a spring, as far as it
-                // gives; each is stopped past it. Its boxes don't give.
+                // A track's end on what is flat enough takes it as flat, as the game's
+                // rollers do: it is lifted up it, not held back, as deep as it is in it
+                // straight down.
                 let arm = touch.point - mass_center;
+                let (normal, depth) = match contact.shape {
+                    Shape::Sphere { .. } if touch.normal.y >= ROLLER_FLAT.cos() => (Vec3::Y, touch.depth / touch.normal.y),
+                    _ => (touch.normal, touch.depth),
+                };
+
+                // It gives as its road wheels do, up its hull: as much of its travel as
+                // what it touches faces up its hull, none against a wall or with the hull
+                // on its side. Its deepest touch pushes as a spring, as far as it gives;
+                // each is stopped past it. Its boxes don't give.
                 let travel = match contact.shape {
-                    Shape::Sphere { .. } => SUSPENSION_TRAVEL * touch.normal.dot(-down).max(0.0),
+                    Shape::Sphere { .. } => SUSPENSION_TRAVEL * normal.dot(-down).max(0.0),
                     _ => 0.0,
                 };
                 let mut load = 0.0;
-                if Some(index) == deepest && touch.depth > 0.0 && travel > 0.0 {
+                if Some(index) == deepest && depth > 0.0 && travel > 0.0 {
                     let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
-                    let sinking = -velocity.dot(touch.normal);
-                    let push = (suspension.stiffness * touch.depth.min(travel) + suspension.damping * sinking).max(0.0);
-                    loads.force += touch.normal * push;
-                    loads.torque += arm.cross(touch.normal * push);
+                    let sinking = -velocity.dot(normal);
+                    let push = (suspension.stiffness * depth.min(travel) + suspension.damping * sinking).max(0.0);
+                    loads.force += normal * push;
+                    loads.torque += arm.cross(normal * push);
                     load = push * step;
                 }
 
-                loads.tracks_touching |= contact.side.is_some() && touch.depth > 0.0;
+                loads.tracks_touching |= contact.side.is_some() && depth > 0.0;
                 loads.touches.push(Touch {
                     arm,
-                    normal: touch.normal,
+                    normal,
                     side: contact.side,
                     load,
                     hold: Hold::Out {
-                        depth: touch.depth - travel,
+                        depth: depth - travel,
                     },
-                    sliding: sliding(motion, arm, heading, touch.normal),
+                    sliding: sliding(motion, arm, heading, normal),
                 });
 
             }
@@ -981,9 +995,12 @@ impl Hull {
 
 }
 
-/// What its destructibles stop of a space: all but those down, see `Rubble::blocks`.
+/// What of a space stops a vehicle: all but what vehicles drive through, and the
+/// destructibles down, see `Rubble::blocks`.
 pub fn blocking<'a>(space: &'a Space, rubble: &'a Rubble) -> impl Fn(&StaticTriangle) -> bool + 'a {
-    |triangle: &StaticTriangle| triangle.kind != BodyKind::Destructible || rubble.blocks(&space.statics, triangle)
+    |triangle: &StaticTriangle| {
+        !triangle.vehicles_pass && (triangle.kind != BodyKind::Destructible || rubble.blocks(&space.statics, triangle))
+    }
 }
 
 /// What holds of a hull's body over a tick, see [`Hull::tick`]: its mass, its centre

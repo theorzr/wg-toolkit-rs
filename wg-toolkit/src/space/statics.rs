@@ -21,7 +21,8 @@
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
 //!
 //! ```text
-//!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass }
+//!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass,
+//!                    vehicles_pass }
 //!          │                                       │          │           │
 //!          │ found through grids[kind]             │          │           └─ BodyKind
 //!          │ by the cells a box covers             ▼          │
@@ -53,6 +54,9 @@
 //! Apart from its kind, a body's collision flags can mark it as one shells fly through
 //! untouched ([`StaticTriangle::shells_pass`]). The light fences have that mark, and so
 //! do the invisible helper walls and ramps on a fence; a vehicle still hits them all.
+//! They can mark it as one vehicles drive through ([`StaticTriangle::vehicles_pass`]): a
+//! debris pile's detailed mesh, under the smooth ramp they drive over, and walls that
+//! only keep the camera out.
 //!
 //! # Finding triangles
 //!
@@ -142,6 +146,10 @@ pub struct StaticTriangle {
     /// [`CollisionBody::shells_pass`](crate::havok::collision::CollisionBody::shells_pass).
     /// False unless set.
     pub shells_pass: bool,
+    /// Whether vehicles drive through it, as its body's flags say, see
+    /// [`CollisionBody::vehicles_pass`](crate::havok::collision::CollisionBody::vehicles_pass).
+    /// False unless set.
+    pub vehicles_pass: bool,
 }
 
 /// What a static model's body is to what drives into it.
@@ -189,6 +197,7 @@ impl StaticTriangle {
             material_kind,
             kind,
             shells_pass: false,
+            vehicles_pass: false,
         }
     }
 
@@ -253,6 +262,7 @@ impl Statics {
                     let vertices = triangle.map(|vertex| instance.transform.transform_point3(vertex));
                     triangles.push(StaticTriangle {
                         shells_pass: body.shells_pass(),
+                        vehicles_pass: body.vehicles_pass(),
                         ..StaticTriangle::new(vertices, index as u32, body.material_kind, kind)
                     });
                 }
