@@ -60,7 +60,7 @@ use crate::game::item_prices::ItemPrices;
 
 use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering};
 use garage::player::{AccountIds, Player};
-use garage::account::{self, AccountData};
+use garage::account::{self, Garage};
 use ballistics::gun::Gun;
 use garage::shop::Shop;
 pub use advertise::AdvertiseRule;
@@ -124,7 +124,7 @@ impl BaseThread {
         };
         info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
             bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
-        let account = AccountData::new(&fs, &vehicles)
+        let account = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
             info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, "Gave the account a vehicle: {}", vehicle.name);
@@ -190,7 +190,7 @@ pub struct BaseThread {
     /// Each player name's account id, until accounts are stored.
     account_ids: AccountIds,
     /// Every player's garage, until accounts are stored.
-    account: AccountData,
+    account: Garage,
     shop: Shop,
     /// The client version required, the client's own.
     required_version: String,
@@ -214,7 +214,7 @@ pub struct BaseThread {
     /// Clients told to switch base app for their battle, by the session key they will
     /// log in again with, with the IP they will come from, their blowfish key, their
     /// player and vehicle, and their battle's id.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleConfig, u32)>,
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleLoadout, u32)>,
     /// Clients told to switch base app back to their account, leaving their battle, by
     /// the session key they will log in with, likewise.
     pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>, Player)>,
@@ -232,7 +232,7 @@ struct BattleClient {
     /// Its battle's id.
     battle: u32,
     /// Its vehicle's configuration.
-    config: VehicleConfig,
+    config: VehicleLoadout,
     /// Its avatar, once created.
     avatar: Option<EntityKey<Avatar>>,
 }
@@ -454,12 +454,12 @@ impl BaseThread {
 
     /// The configuration of the vehicle of the given inventory id: its descriptor, crew
     /// and setups from the account, the rest from the game's definitions.
-    fn vehicle_config(&self, vehicle_id: i64) -> io::Result<VehicleConfig> {
+    fn vehicle_config(&self, vehicle_id: i64) -> io::Result<VehicleLoadout> {
         let vehicle = self.account.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
         let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
         info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
-        Ok(VehicleConfig {
+        Ok(VehicleLoadout {
             descr: vehicle.descr.encode(),
             max_health: def.max_health,
             crew: vehicle.crew.iter().map(TankmanDescr::encode).collect(),
@@ -909,12 +909,12 @@ impl BaseThread {
 /// The configuration of the vehicle a client went to battle with: what the battle tells
 /// about it, and what the server simulates it with.
 #[derive(Debug, Clone)]
-pub struct VehicleConfig {
+pub struct VehicleLoadout {
     descr: Vec<u8>,
     max_health: u32,
     /// Its crew's compact descriptors, in crew order.
     crew: Vec<Vec<u8>>,
-    /// Its loadouts and the selected ones, see `account::Vehicle::setups`.
+    /// Its loadouts and the selected ones, see `account::GarageVehicle::setups`.
     setups: pickle::Value,
     setup_indexes: pickle::Value,
     mobility: MobilityDef,
@@ -1130,7 +1130,7 @@ fn space_properties(space_id: u32) -> impl Iterator<Item = Vec<u8>> {
 
 /// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and
 /// dispersion factors from its definitions, without the crew's and equipment's bonuses.
-fn targeting_info(config: &VehicleConfig) -> TargetingInfo {
+fn targeting_info(config: &VehicleLoadout) -> TargetingInfo {
     let aiming = &config.aiming;
     TargetingInfo {
         turretYaw: 0.0,

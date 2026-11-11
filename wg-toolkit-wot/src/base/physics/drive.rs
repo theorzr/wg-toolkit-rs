@@ -15,16 +15,16 @@
 //!
 //!   flags ─▶ Controls: the speed asked,    the hull's speed v along its heading
 //!            the way it turns, handbrake      │
-//!         ─▶ steer: its turning goal,         ▼  Drive::along(v)
+//!         ─▶ steer: its turning goal,         ▼  DriveForces::along(v)
 //!            from its turning, ramped      a target, and the range of force to push with
-//!         ─▶ Drive: target, forces, steer     │
-//!                                             ▼  drive_tracks
+//!         ─▶ DriveForces: target, forces,     │
+//!            steer                            ▼  drive_tracks
 //!                                          a push along and a torque, within its grip
 //! ```
 //!
 //! # Along its heading
 //!
-//! [`Drive::along`] gives, at the hull's speed `v` along its heading, a speed to push it
+//! [`DriveForces::along`] gives, at the hull's speed `v` along its heading, a speed to push it
 //! toward and the range of force the push may take, `[low, high]`, in N along its
 //! heading. Its body pushes toward the target as hard as that range allows, never past
 //! the target in a step: a force bound with a goal, so the engine drives up to the
@@ -100,7 +100,7 @@
 //! Each track has its own speed, its belt's, which the client animates and its engine
 //! sound follows. It drives nothing: its body sets it after each step, rolling with the
 //! ground under it, at rest blocked, and spinning toward what the drive asks of it,
-//! [`Drive::track_goal`], where it slips or touches nothing:
+//! [`DriveForces::track_goal`], where it slips or touches nothing:
 //!
 //! ```text
 //!   track goal = target − steer · x        x its offset to the right: turning right,
@@ -193,9 +193,9 @@ const PIVOT_RADIUS: f32 = 2.5;
 impl Hull {
 
     /// The drive model, for `dt` seconds on this ground: how hard its engine and brakes
-    /// push it and its steering turns it, see [`Drive`]. It moves nothing:
+    /// push it and its steering turns it, see [`DriveForces`]. It moves nothing:
     /// [`Self::integrate`] does, its tracks passing the pushes on as they grip.
-    pub fn drive(&mut self, dt: f32, ground: Ground) -> Drive {
+    pub fn drive(&mut self, dt: f32, ground: Ground) -> DriveForces {
 
         // 1. What the flags ask, and how fast it turns on this ground.
         let ground = ground_index(ground);
@@ -220,7 +220,7 @@ impl Hull {
             }
         }
 
-        Drive {
+        DriveForces {
             target: if controls.handbrake { controls.pivot } else { controls.target },
             top: if controls.target < 0.0 { mobility.speed_backward } else { mobility.speed_forward },
             blocked,
@@ -382,7 +382,7 @@ impl Side {
 /// [`Hull::drive`]: forces, which its body's tracks pass on to the ground as they grip
 /// it, see [`Self::along`].
 #[derive(Debug, Clone, Copy)]
-pub struct Drive {
+pub struct DriveForces {
     /// The speed asked along its heading, in m/s, signed: on its handbrake, the speed it
     /// pivots at, else none.
     pub target: f32,
@@ -412,7 +412,7 @@ pub struct Drive {
     pub rolling: f32,
 }
 
-impl Drive {
+impl DriveForces {
 
     /// Whether its tracks are blocked, either: it is on its handbrake.
     pub fn handbrake(&self) -> bool {

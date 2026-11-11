@@ -48,9 +48,9 @@ use crate::game::schema::{
     Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, ShotResult, VehicleCell,
 };
 use crate::base::{
-    avatar_cell_data, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
+    avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
-use crate::base::ballistics::gun::{HitTarget, Landing, Obstacles, Shot};
+use crate::base::ballistics::gun::{Landing, Obstacles, Shot, ShotTarget};
 use crate::game::item_defs::{ShellKind, VehicleDef};
 use crate::base::ballistics::armor::{self, Outcome};
 use crate::base::physics::{Vehicle, World};
@@ -86,7 +86,7 @@ pub struct Battle {
     shells: Shells,
     areas: Areas,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
-    targets: Vec<HitTarget>,
+    targets: Vec<ShotTarget>,
     /// Whether a client has its vehicle: it runs from then on.
     running: bool,
 }
@@ -123,7 +123,7 @@ pub struct Arrival {
     pub client: ClientKey,
     pub avatar: EntityKey<Avatar>,
     pub player: Player,
-    pub config: VehicleConfig,
+    pub config: VehicleLoadout,
 }
 
 /// A battle waiting for its clients to enter before it is made, as the base app gathers
@@ -311,7 +311,7 @@ impl Battle {
     }
 
     /// The vehicles the shells of `shooter` can hit: every one alive but its own.
-    fn shell_targets(&self, shooter: EntityId) -> Vec<HitTarget> {
+    fn shell_targets(&self, shooter: EntityId) -> Vec<ShotTarget> {
         let mut targets = Vec::with_capacity(self.vehicles.len());
         fill_targets(&mut targets, &self.vehicles, &self.world, shooter);
         targets
@@ -776,7 +776,7 @@ fn nearest_enemy(vehicles: &[BattleVehicle], world: &World, index: usize) -> Opt
 
 /// Replace `targets` with the vehicles the shells of `shooter` can hit, as
 /// [`Battle::shell_targets`], reusing its memory.
-fn fill_targets(targets: &mut Vec<HitTarget>, vehicles: &[BattleVehicle], world: &World, shooter: EntityId) {
+fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world: &World, shooter: EntityId) {
     targets.clear();
     targets.extend(vehicles.iter()
         .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)

@@ -9,7 +9,7 @@ use wgtk::app::entity::{ComponentKey, EntityKey};
 use wgtk::app::base::{self, ClientKey};
 
 use crate::game::schema::{Avatar, AvatarVehiclesInfo};
-use crate::base::{VehicleConfig, TICK};
+use crate::base::{VehicleLoadout, TICK};
 use crate::base::physics::World;
 
 use super::vehicle::BattleVehicle;
@@ -23,7 +23,7 @@ pub struct Participant {
     pub client: ClientKey,
     pub avatar: EntityKey<Avatar>,
     /// Its vehicle's configuration, and its vehicle, by its index among the battle's.
-    pub config: VehicleConfig,
+    pub config: VehicleLoadout,
     pub vehicle: usize,
     /// The arena's vehicles, on its own info entity.
     pub vehicles_info: ComponentKey<AvatarVehiclesInfo>,
@@ -39,7 +39,7 @@ impl Participant {
     pub fn new(
         client: ClientKey,
         avatar: EntityKey<Avatar>,
-        config: VehicleConfig,
+        config: VehicleLoadout,
         vehicle: usize,
         vehicles_info: ComponentKey<AvatarVehiclesInfo>,
         vehicles: usize,

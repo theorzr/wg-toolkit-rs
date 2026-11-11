@@ -416,7 +416,7 @@ script_dict! {
     #[derive(Debug, Clone)]
     pub struct HitPoint {
         pub networkID: u32,
-        /// Encoded over the hit part's bounds, see `VehicleHit::encode_segment`.
+        /// Encoded over the hit part's bounds, see `VehicleIntersection::encode_segment`.
         pub segment: u64,
         pub params: u32,
     }

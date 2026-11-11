@@ -52,14 +52,14 @@ pub struct ArmorGroup {
     pub material_kind: u32,
     /// What it is made of, as the vehicle's definitions give it, see
     /// [`super::item_defs::VehicleDef::load`]: none for a group they don't armour.
-    pub material: Option<Material>,
+    pub material: Option<ArmorMaterial>,
     pub triangles: Vec<[Vec3; 3]>,
 }
 
 /// What an armour group is made of: a material of the game's common `materials`, as
 /// the vehicle's part sets it, see `_readArmor`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Material {
+pub struct ArmorMaterial {
     /// Its thickness, in millimetres.
     pub armor: f32,
     /// The share of a piercing shell's damage the vehicle takes behind it: 0 for
@@ -76,7 +76,7 @@ pub struct Material {
     pub collide_once_only: bool,
 }
 
-impl Material {
+impl ArmorMaterial {
 
     /// Whether the vehicle takes damage behind it: its main armour, not a screen.
     pub fn is_main_armor(&self) -> bool {
@@ -87,7 +87,7 @@ impl Material {
 
 /// Where a segment first hits a model.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModelHit {
+pub struct ModelIntersection {
     /// The fraction of the segment it goes before hitting.
     pub fraction: f32,
     /// The index of the group hit.
@@ -98,7 +98,7 @@ pub struct ModelHit {
 
 /// Where a segment hits a vehicle.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VehicleHit {
+pub struct VehicleIntersection {
     pub fraction: f32,
     /// How far along the segment, in metres.
     pub distance: f32,
@@ -106,7 +106,7 @@ pub struct VehicleHit {
     /// The index of the group hit in its part's model.
     pub group: usize,
     pub material_kind: u32,
-    pub material: Option<Material>,
+    pub material: Option<ArmorMaterial>,
     /// Where it hits, in the part's frame.
     pub local_point: Vec3,
     /// The way the segment goes, in the part's frame.
@@ -136,7 +136,7 @@ impl CollisionModel {
 
     /// Everywhere a segment, in the model's frame, crosses one of its triangles, in no
     /// order.
-    pub fn hits(&self, from: Vec3, to: Vec3) -> impl Iterator<Item = ModelHit> + '_ {
+    pub fn hits(&self, from: Vec3, to: Vec3) -> impl Iterator<Item = ModelIntersection> + '_ {
         let delta = to - from;
         // Whether the segment passes the bounding sphere at all.
         let closest = from + delta * (-from.dot(delta) / delta.length_squared()).clamp(0.0, 1.0);
@@ -145,7 +145,7 @@ impl CollisionModel {
             .filter(move |_| near)
             .flat_map(move |(index, group)| group.triangles.iter()
                 .filter_map(move |triangle| segment_triangle(from, delta, triangle))
-                .map(move |(fraction, normal)| ModelHit { fraction, group: index, normal }))
+                .map(move |(fraction, normal)| ModelIntersection { fraction, group: index, normal }))
     }
 
     /// The point of its groups that `filter` keeps closest to `point`, in the model's
@@ -167,17 +167,17 @@ impl VehicleCollision {
 
     /// Where a segment first hits the vehicle, its parts placed in the world by
     /// `transforms`, in [`VehiclePart`] order.
-    pub fn first_hit(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Option<VehicleHit> {
+    pub fn first_hit(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Option<VehicleIntersection> {
         self.unordered_hits(transforms, from, to).min_by(|a, b| a.fraction.total_cmp(&b.fraction))
     }
 
     /// Everywhere a segment crosses the vehicle, nearest first, as [`Self::first_hit`]
     /// finds the first: what a shell meets on its way through. A crossing through the
     /// edge two triangles of a group share is one, see [`SAME_HIT`].
-    pub fn hits(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Vec<VehicleHit> {
+    pub fn hits(&self, transforms: &[Affine3A; 4], from: Vec3, to: Vec3) -> Vec<VehicleIntersection> {
         let mut hits: Vec<_> = self.unordered_hits(transforms, from, to).collect();
         hits.sort_by(|a, b| a.fraction.total_cmp(&b.fraction));
-        let mut unique: Vec<VehicleHit> = Vec::with_capacity(hits.len());
+        let mut unique: Vec<VehicleIntersection> = Vec::with_capacity(hits.len());
         for hit in hits {
             let same = unique.iter().rev()
                 .take_while(|seen| hit.distance - seen.distance < SAME_HIT)
@@ -202,7 +202,7 @@ impl VehicleCollision {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
-    fn unordered_hits<'a>(&'a self, transforms: &'a [Affine3A; 4], from: Vec3, to: Vec3) -> impl Iterator<Item = VehicleHit> + 'a {
+    fn unordered_hits<'a>(&'a self, transforms: &'a [Affine3A; 4], from: Vec3, to: Vec3) -> impl Iterator<Item = VehicleIntersection> + 'a {
         const PARTS: [VehiclePart; 4] = [VehiclePart::Chassis, VehiclePart::Hull, VehiclePart::Turret, VehiclePart::Gun];
         let length = from.distance(to);
         PARTS.into_iter()
@@ -214,7 +214,7 @@ impl VehicleCollision {
                 let local_to = inverse.transform_point3(to);
                 model.hits(local_from, local_to).map(move |hit| {
                     let group = &model.groups[hit.group];
-                    VehicleHit {
+                    VehicleIntersection {
                         fraction: hit.fraction,
                         distance: hit.fraction * length,
                         part,
@@ -231,7 +231,7 @@ impl VehicleCollision {
 
 }
 
-impl VehicleHit {
+impl VehicleIntersection {
 
     /// The hit as a `VEHICLE_HIT_POINT`'s `segment`, see `encodeSegment` in the client's
     /// `helpers_common`: the line of the shell through the hit point, clipped to the
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn encodes_a_hit_as_the_client_decodes_it() {
-        let hit = VehicleHit {
+        let hit = VehicleIntersection {
             fraction: 0.5,
             distance: 1.0,
             part: VehiclePart::Hull,

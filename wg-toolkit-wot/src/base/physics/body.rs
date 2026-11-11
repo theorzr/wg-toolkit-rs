@@ -86,7 +86,7 @@
 //!   before the passes   rolling friction at each contact of its tracks: against its
 //!                       motion along them, within rolling friction · its load
 //!                       its drive's target and force range, at its speed at p,
-//!                       see Drive::along
+//!                       see DriveForces::along
 //!   each pass:        its tracks together, first:
 //!                       1. along: pushed at p toward the target, within the force
 //!                          range · h and what of their grip turning leaves
@@ -153,7 +153,7 @@
 //! After the passes, each belt's speed is set: blocked, 0; gripping, if the grip didn't
 //! cut the push along, the ground's speed under it, the middle of its contacts'; else
 //! it spins, from the ground's speed if it touches it, toward what its drive asks of it
-//! ([`Drive::track_goal`]), as hard as half the engine's torque, or of its brakes, can
+//! ([`DriveForces::track_goal`]), as hard as half the engine's torque, or of its brakes, can
 //! spin [`TRACK_MASS`] of the vehicle's weight.
 //!
 //! A track's end meeting a step or a rock face head on climbs it, its belt gripping
@@ -188,7 +188,7 @@ use wgtk::space::Space;
 
 use super::contacts::{Contact, Shape, MAX_CONTACTS};
 use super::collision::Solid;
-use super::drive::{Drive, Side};
+use super::drive::{DriveForces, Side};
 use super::{approach, Hull, Rubble, GRAVITY};
 
 
@@ -302,7 +302,7 @@ impl Hull {
 
     /// What holds of its body over a tick of `dt` seconds, its tracks pushed by `drive`,
     /// see [`Tick`].
-    pub fn tick(&self, dt: f32, drive: Drive) -> Tick {
+    pub fn tick(&self, dt: f32, drive: DriveForces) -> Tick {
         Tick {
             mass: self.mobility.weight,
             center: self.center_of_mass(),
@@ -661,7 +661,7 @@ impl Hull {
 
     /// How its tracks hold the ground in a step, see [`Traction`]: as `drive` pushes
     /// them, if `gripping` at all, on the ground's plane under them, its `normal`.
-    fn traction(&self, drive: &Drive, gripping: bool, normal: Vec3) -> Traction {
+    fn traction(&self, drive: &DriveForces, gripping: bool, normal: Vec3) -> Traction {
         Traction {
             drive: *drive,
             gripping,
@@ -852,7 +852,7 @@ impl Hull {
     }
 
     /// One pass of its tracks pushing it along and turning it, as its drive says: along
-    /// its heading toward `target` within the force `low` to `high`, see [`Drive::along`],
+    /// its heading toward `target` within the force `low` to `high`, see [`DriveForces::along`],
     /// under its centre of mass where they touch the ground, so that it squats as it
     /// speeds up; and about the ground's `normal` toward its steering, as a torque, as the
     /// game's "gimlet" does. Their pushes so far are `pushed`.
@@ -868,7 +868,7 @@ impl Hull {
         touches: &[Touch],
         stops: &[f32],
         (target, low, high): (f32, f32, f32),
-        drive: &Drive,
+        drive: &DriveForces,
         (along, across): (Vec3, Vec3),
         normal: Vec3,
         body: &Mass,
@@ -964,7 +964,7 @@ impl Hull {
     /// they gripped without slipping, on its ground's rolling friction, its body following
     /// them on the ground plane, turning as its steering says. Gripping so, they take its
     /// motion first: what hits and walls gave it.
-    fn drive_unheld(&mut self, drive: &Drive, mass_center: Vec3, step: f32) {
+    fn drive_unheld(&mut self, drive: &DriveForces, mass_center: Vec3, step: f32) {
 
         let mass = self.mobility.weight;
         let (heading, _) = self.axes();
@@ -1042,7 +1042,7 @@ pub struct Tick {
     center: Vec3,
     inertia: Vec3,
     suspension: Suspension,
-    drive: Drive,
+    drive: DriveForces,
     pub step: f32,
 }
 
@@ -1190,7 +1190,7 @@ impl Hold {
 /// ground's normal under them, and each track's mass.
 #[derive(Debug, Clone, Copy)]
 struct Traction {
-    drive: Drive,
+    drive: DriveForces,
     gripping: bool,
     heading: Vec3,
     normal: Vec3,

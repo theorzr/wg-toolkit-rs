@@ -1,6 +1,6 @@
 //! The players, standing in for their stored accounts: each name logging in has an
 //! account id of its own, given at its first login and kept until the server stops.
-//! They all have the same garage, see `AccountData`.
+//! They all have the same garage, see `Garage`.
 
 use std::collections::HashMap;
 

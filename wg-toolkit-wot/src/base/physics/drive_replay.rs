@@ -117,7 +117,7 @@ struct OtherTrack {
 }
 
 /// A drive, see the module's documentation.
-struct Drive {
+struct CapturedDrive {
     descr: Vec<u8>,
     space: Option<String>,
     setup: CapturedSetup,
@@ -165,8 +165,8 @@ impl Other<'_> {
 
 }
 
-fn parse(csv: &str) -> Drive {
-    let mut drive = Drive {
+fn parse(csv: &str) -> CapturedDrive {
+    let mut drive = CapturedDrive {
         descr: Vec::new(),
         space: None,
         setup: CapturedSetup::STOCK,
@@ -303,7 +303,7 @@ impl Errors {
 /// Replay the drive in windows of `window` seconds, each from the real state, through
 /// the hull of this mobility, in its space and within its map's bounds, colliding with
 /// the other vehicles.
-fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Other], space: &Arc<Space>, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
+fn replay(drive: &CapturedDrive, mobility: MobilityDef, aiming: &AimingDef, others: &[Other], space: &Arc<Space>, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
@@ -390,7 +390,7 @@ fn rotation_of(direction: Vec3) -> Quat {
 /// How far the hull, left to rest on its suspension for [`REST_TIME`] where the real
 /// vehicle was, tilts from it: the median and 90th percentile pitch and roll errors, in
 /// degrees, over every tenth position, those on the ground.
-fn tilt_errors(drive: &Drive, mobility: MobilityDef, space: &Space) -> [(f32, f32); 2] {
+fn tilt_errors(drive: &CapturedDrive, mobility: MobilityDef, space: &Space) -> [(f32, f32); 2] {
     let mut pitch = Vec::new();
     let mut roll = Vec::new();
     for update in drive.updates.iter().step_by(10) {

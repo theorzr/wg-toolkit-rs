@@ -34,15 +34,15 @@ const VEHICLE_SETTINGS: i64 = 14;
 
 /// A player's account, standing in for its stored one.
 #[derive(Debug, Clone)]
-pub struct AccountData {
+pub struct Garage {
     /// Its vehicles, whose inventory ids are their indices from 1.
-    pub vehicles: Vec<Vehicle>,
+    pub vehicles: Vec<GarageVehicle>,
 }
 
 /// A vehicle of the account, as bought: the default modules and ammunition, no
 /// equipment, and a new crew trained for it (full role experience, no skills).
 #[derive(Debug, Clone)]
-pub struct Vehicle {
+pub struct GarageVehicle {
     pub descr: VehicleDescr,
     /// Its crew, in crew order, whose inventory ids follow those of the crews of the
     /// vehicles before.
@@ -51,7 +51,7 @@ pub struct Vehicle {
     pub shells: Vec<(IntCompactDescr, u32)>,
 }
 
-impl AccountData {
+impl Garage {
 
     /// An account with the given vehicles.
     pub fn new(fs: &ResFilesystem, defs: &[VehicleDef]) -> io::Result<Self> {
@@ -79,18 +79,18 @@ impl AccountData {
                 free_xp: 0,
                 dossier: Vec::new(),
             }).collect();
-            vehicles.push(Vehicle { descr: def.descr.clone(), crew, shells: def.default_ammo() });
+            vehicles.push(GarageVehicle { descr: def.descr.clone(), crew, shells: def.default_ammo() });
         }
         Ok(Self { vehicles })
     }
 
     /// A vehicle, by inventory id.
-    pub fn vehicle(&self, vehicle_id: i64) -> Option<&Vehicle> {
+    pub fn vehicle(&self, vehicle_id: i64) -> Option<&GarageVehicle> {
         self.vehicles.get(usize::try_from(vehicle_id).ok()?.checked_sub(1)?)
     }
 
     /// Each vehicle with its inventory id and its crew's.
-    fn vehicles(&self) -> impl Iterator<Item = (i64, Vec<i64>, &Vehicle)> {
+    fn vehicles(&self) -> impl Iterator<Item = (i64, Vec<i64>, &GarageVehicle)> {
         let mut next_tankman_id = 1;
         self.vehicles.iter().zip(1..).map(move |(vehicle, id)| {
             let crew = (next_tankman_id..).take(vehicle.crew.len()).collect();
@@ -225,7 +225,7 @@ impl AccountData {
 
 }
 
-impl Vehicle {
+impl GarageVehicle {
 
     /// The vehicle's setups, as the battle gives them to its vehicle: its loadouts of
     /// shells, equipment, optional devices and boosters, only of shells for now.

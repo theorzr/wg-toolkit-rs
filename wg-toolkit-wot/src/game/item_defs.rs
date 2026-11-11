@@ -15,7 +15,7 @@ use tracing::warn;
 use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
 
-use super::collision::{CollisionModel, Material, VehicleCollision};
+use super::collision::{ArmorMaterial, CollisionModel, VehicleCollision};
 use super::items::{item_type, IntCompactDescr, VehicleDescr};
 
 
@@ -679,7 +679,7 @@ impl VehicleDef {
 /// A part's armour section, by material name, each over the game's default for it, as
 /// `_readArmor` reads it: a thickness, with the material's parameters it overrides as
 /// children. A material without a default isn't one a vehicle uses.
-fn read_armor(materials: &Element, armor: &Element) -> HashMap<String, Material> {
+fn read_armor(materials: &Element, armor: &Element) -> HashMap<String, ArmorMaterial> {
     armor.iter_children_all()
         .filter_map(|(name, value)| {
             let default = materials.get_child_element(name)?;
@@ -690,7 +690,7 @@ fn read_armor(materials: &Element, armor: &Element) -> HashMap<String, Material>
             let flag = |param: &str| overrides.and_then(|o| o.get_child_boolean(param))
                 .or_else(|| default.get_child_boolean(param))
                 .unwrap_or(false);
-            let material = Material {
+            let material = ArmorMaterial {
                 armor: thickness,
                 vehicle_damage_factor: overrides.and_then(|o| o.get_child_float("vehicleDamageFactor"))
                     .or_else(|| default.get_child_float("vehicleDamageFactor"))

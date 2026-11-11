@@ -4,7 +4,7 @@
 use glam::Vec3;
 
 use crate::base::ballistics::armor::{Explosion, Impact, Outcome};
-use crate::game::collision::VehicleHit;
+use crate::game::collision::VehicleIntersection;
 use crate::base::ballistics::gun::Shot;
 use crate::game::schema::HitPoint;
 
@@ -14,7 +14,7 @@ use crate::game::schema::HitPoint;
 pub struct ShellHit {
     /// Where it hits: where it pierces, stops or ricochets, or where its explosion beside
     /// the vehicle reaches its armour.
-    pub hit: VehicleHit,
+    pub hit: VehicleIntersection,
     /// Whether it exploded beside the vehicle, not on it.
     pub beside: bool,
     /// The `VEHICLE_HIT_EFFECT` of the point it hits.

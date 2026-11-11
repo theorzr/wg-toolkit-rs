@@ -17,12 +17,12 @@ use crate::game::schema::{
     GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, VehicleInfo, VehicleSyncAttrs,
 };
 use crate::base::{
-    ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, VehicleConfig,
+    ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, VehicleLoadout,
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
 use crate::game::collision::{VehicleCollision, VehiclePart};
-use crate::base::ballistics::gun::{Gun, HitTarget, Shot};
+use crate::base::ballistics::gun::{Gun, Shot, ShotTarget};
 use crate::base::physics::{Vehicle, VehicleId, World};
 use crate::base::garage::player::Player;
 use crate::game::item_defs::VehicleDef;
@@ -96,7 +96,7 @@ impl BattleVehicle {
         client: ClientKey,
         avatar: EntityKey<Avatar>,
         space: SpaceKey,
-        config: &VehicleConfig,
+        config: &VehicleLoadout,
         player: Player,
         team: u8,
         start: Start,
@@ -234,9 +234,9 @@ impl BattleVehicle {
     }
 
     /// It as shells hit it: its collision models where its parts are.
-    pub fn hit_target(&self, world: &World) -> HitTarget {
+    pub fn hit_target(&self, world: &World) -> ShotTarget {
         let collision = self.collision.clone();
-        HitTarget {
+        ShotTarget {
             entity_id: self.entity.id().0,
             transforms: world.vehicle(self.id).part_transforms(collision.hull_position),
             collision,
@@ -246,7 +246,7 @@ impl BattleVehicle {
     /// Its client has it, of the given configuration: from there on it drives it. Then its
     /// `OwnVehicle` component: the client only turns its turret once it knows how fast it
     /// can. Its `GunMarkerComponent` too, for the client's server reticle.
-    pub fn enter(&mut self, app: &mut base::App, config: &VehicleConfig) -> io::Result<()> {
+    pub fn enter(&mut self, app: &mut base::App, config: &VehicleLoadout) -> io::Result<()> {
 
         let Controller::Client(driver) = &mut self.controller else { return Ok(()) };
         let entity_id = self.entity.id();

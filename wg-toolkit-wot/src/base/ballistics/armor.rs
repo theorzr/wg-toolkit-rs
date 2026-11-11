@@ -10,7 +10,7 @@ use std::f32::consts::FRAC_PI_2;
 use glam::{Affine3A, Vec3};
 use rand::Rng;
 
-use crate::game::collision::{VehicleCollision, VehicleHit, VehiclePart};
+use crate::game::collision::{VehicleCollision, VehicleIntersection, VehiclePart};
 use crate::game::item_defs::{ShellKind, ShotDef};
 
 
@@ -53,7 +53,7 @@ pub struct GroundMaterial {
 pub struct Impact {
     pub outcome: Outcome,
     /// Where the outcome happens: the armour it pierces, stops on or ricochets off.
-    pub hit: VehicleHit,
+    pub hit: VehicleIntersection,
     /// The damage it deals, before its spread: the shell's when it pierces, its
     /// explosion's for an HE shell that doesn't.
     pub damage: f32,
@@ -79,7 +79,7 @@ pub enum Outcome {
 pub struct Explosion {
     pub damage: f32,
     /// Where it reaches the vehicle's main armour.
-    pub hit: VehicleHit,
+    pub hit: VehicleIntersection,
     /// How far from the main armour it explodes, in metres.
     pub distance: f32,
 }
@@ -193,7 +193,7 @@ pub fn reflect(velocity: Vec3, normal: Vec3) -> Vec3 {
 /// Follow a shell of this penetration through the armour it meets along `direction`,
 /// `hits`, nearest first, as `__shotResultDefault` does: the outcome, and the index in
 /// `hits` where it happens. None when it meets no armour.
-fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleHit]) -> Option<(Outcome, usize)> {
+fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleIntersection]) -> Option<(Outcome, usize)> {
 
     let kind = shot.kind();
     let mut seen = HashSet::<(VehiclePart, usize)>::new();
@@ -298,7 +298,7 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
-    use crate::game::collision::{ArmorGroup, CollisionModel, Material};
+    use crate::game::collision::{ArmorGroup, ArmorMaterial, CollisionModel};
     use crate::game::items::{item_type, IntCompactDescr};
 
     fn shot(kind: ShellKind, caliber: f32, pen: f32) -> ShotDef {
@@ -326,8 +326,8 @@ mod tests {
         }
     }
 
-    fn material(armor: f32, main: bool) -> Material {
-        Material {
+    fn material(armor: f32, main: bool) -> ArmorMaterial {
+        ArmorMaterial {
             armor,
             vehicle_damage_factor: if main { 1.0 } else { 0.0 },
             use_hit_angle: true,
@@ -339,7 +339,7 @@ mod tests {
     }
 
     /// A square plate across `z`, 4 m wide, in a group of its own.
-    fn plate(z: f32, material: Material) -> ArmorGroup {
+    fn plate(z: f32, material: ArmorMaterial) -> ArmorGroup {
         let a = Vec3::new(-2.0, -2.0, z);
         let b = Vec3::new(2.0, -2.0, z);
         let c = Vec3::new(2.0, 2.0, z);
