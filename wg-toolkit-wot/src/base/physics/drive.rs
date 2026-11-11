@@ -34,7 +34,9 @@
 //! ```text
 //!   case                         target            force range
 //!   handbrake (BLOCK_TRACKS)     its pivot, or 0   ± its tracks sliding: SLIDE_GRIP · how hard
-//!                                                    they press on the ground (body module)
+//!                                                    they press on the ground (body module);
+//!                                                    asked against its way, ± BRAKING · m at
+//!                                                    least, its free track braking
 //!   released (no way asked)      0                 ± COASTING · m
 //!   going against the way        the speed asked   ± BRAKING · m: through a standstill, then
 //!                                                    the engine
@@ -83,6 +85,10 @@
 //!   drift   = rotation_speed · HANDBRAKE_ROTATION · (1 − e^(−sliding / HANDBRAKE_ROTATION_SPEED))
 //!   rise    = HANDBRAKE_ROTATION_RISE, over min(1, (sliding / HANDBRAKE_SWING_SPEED)²) drifting
 //! ```
+//!
+//! Sliding on it, it swings the way it goes, not the way it is asked: asked to back up
+//! as it still slides forward, it swings on as it did, and backs up, swinging back, once
+//! it goes backward along its hull, as the real Type 64 did.
 //!
 //! Driven into a turn on it, it pivots on its blocked inner track: its outer one carries
 //! it round at `pivoting = rotation_speed · ROTATION_ON_MOVE`, which moves its middle at
@@ -156,10 +162,11 @@ const SPEED_WHILE_TURNING: f32 = 0.91;
 /// fit above uses between turning on the spot and moving.
 const ON_SPOT_SPEED: f32 = 0.5;
 /// How long its steering takes to grow from nothing to its turning speed on the spot,
-/// and to fall back, in seconds. Fitted: turning from rest, the T110E4 (26.8°/s) and the
-/// Type 64 (49.3°/s) both get there in about 0.3 s; released, the Type 64 stops in about
-/// 0.2 s, the T110E4 within two ticks.
-const ROTATION_RISE: f32 = 0.3;
+/// and to fall back, in seconds. Fitted: the median turn the Type 64 starts driving
+/// turns at 17, 39 and 42°/s over its first ticks, of 41.9°/s while moving; the drives'
+/// errors are least from 0.2 to 0.25 s. Released, the Type 64 stops in about 0.2 s, the
+/// T110E4 within two ticks.
+const ROTATION_RISE: f32 = 0.2;
 const ROTATION_FALL: f32 = 0.2;
 /// How fast the vehicle swings with its tracks blocked: this many times its turning
 /// speed on the spot, the less it slides, `1 - e^(-v / HANDBRAKE_ROTATION_SPEED)`.
@@ -243,8 +250,14 @@ impl Hull {
             ROTATE_RIGHT => 1.0,
             _ => 0.0,
         };
-        // Backing up steers like a car: left swings the rear to the left.
-        if self.flags & BACKWARD != 0 {
+        // Backing up steers like a car: left swings the rear to the left. On its
+        // handbrake, sliding, it backs up as it goes, whatever it is asked.
+        let backing = if handbrake && self.speed.abs() >= ON_SPOT_SPEED {
+            self.speed < 0.0
+        } else {
+            self.flags & BACKWARD != 0
+        };
+        if backing {
             turn = -turn;
         }
 
@@ -416,7 +429,9 @@ impl Drive {
         let way = target.signum();
 
         if self.handbrake() {
-            return (target, -sliding, sliding);
+            // Asked against its way, its free track brakes it, as its blocked ones slide.
+            let force = if speed * way < -REST_SPEED { sliding.max(self.braking) } else { sliding };
+            return (target, -force, force);
         }
         if target == 0.0 {
             return (0.0, -self.coasting, self.coasting);
@@ -490,6 +505,8 @@ mod tests {
     use glam::Vec3;
 
     use wgtk::space::Space;
+
+    use crate::wot::item_defs::MobilityDef;
 
     use super::super::fixtures::{chieftain, chieftain_mobility, slope, tick};
     use super::super::{Rubble, GRAVITY};
@@ -598,6 +615,50 @@ mod tests {
         }
         assert!(hull.yaw() < -5f32.to_radians(), "{}°", hull.yaw().to_degrees());
         assert_eq!(hull.tracks[0], 0.0);
+    }
+
+    #[test]
+    fn drifts_round_its_velocity_on_its_handbrake() {
+        // At 15 m/s on its handbrake turning left, its hull swings left while it goes on
+        // its way: in 2 s, it slides at an angle to its hull, as the real Type 64 did. A Chieftain turning as fast as the
+        // Type 64: one slower to turn swings slower than its tracks can turn its way.
+        let space = slope(0.0);
+        let mobility = MobilityDef {
+            rotation_speed: [56f32.to_radians(); 3],
+            ..chieftain_mobility()
+        };
+        let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, mobility);
+        hull.speed = 15.0;
+        hull.match_tracks();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        let drift = hull.slide.atan2(hull.speed);
+        assert!(drift > 15f32.to_radians(), "{}°", drift.to_degrees());
+        // Let off, its tracks grip at once, and its slide is gone within half a second.
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..5 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        assert!(hull.slide.abs() < 0.5, "{} m/s", hull.slide);
+        // Asked to back up as it slides on, its free track brakes it, and it swings on the
+        // way it did.
+        let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, mobility);
+        hull.speed = 15.0;
+        hull.match_tracks();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;
+        for _ in 0..5 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        let speed = hull.velocity().length();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT | movement_flag::BACKWARD;
+        for _ in 0..3 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        let slowed = (speed - hull.velocity().length()) / 0.3;
+        assert!(slowed > 10.0, "{slowed} m/s²");
+        assert!(hull.yaw_rate < 0.0, "{}°/s", hull.yaw_rate.to_degrees());
     }
 
     #[test]

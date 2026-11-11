@@ -143,12 +143,12 @@
 //! it as the game's are, [`FRICTION_HEIGHT`]: the hull squats a little as it speeds up
 //! and leans a little out of turns, and pushing another vehicle it doesn't rear up.
 //!
-//! A contact's side grip is [`TRACK_GRIP`] while it rolls, and [`SIDE_GRIP`], less,
-//! once it slides across faster than [`SLIDE_SPEED`] as the step starts: a turning hull
-//! holds its line, and a drifting one slides on. On its handbrake, its blocked tracks
-//! slide along the ground rather than roll: the force range along is their sliding grip,
-//! [`SLIDE_GRIP`] of how hard they press, and the grips aren't shared, its steering
-//! swinging it as it slides.
+//! A contact's side grip is [`TRACK_GRIP`], and [`SIDE_GRIP`], less, on its handbrake:
+//! a turning hull holds its line, and a drifting one slides on, its velocity kept as
+//! its hull swings round it, as the real ones did; let off, its tracks grip again at
+//! once. On its handbrake, its blocked tracks slide along the ground rather than roll:
+//! the force range along is their sliding grip, [`SLIDE_GRIP`] of how hard they press,
+//! and the grips aren't shared, its steering swinging it as it slides.
 //!
 //! After the passes, each belt's speed is set: blocked, 0; gripping, if the grip didn't
 //! cut the push along, the ground's speed under it, the middle of its contacts'; else
@@ -244,15 +244,13 @@ const TRACKS_UPRIGHT: f32 = 0.5;
 /// push on to the hull. Fitted loosely in part 2a, when its tracks pushed it toward the
 /// drive model's motion: the drive model asks up to 1.4 g of them, braking at 14 m/s².
 const TRACK_GRIP: f32 = 2.5;
-/// How much its tracks hold the ground across them sliding on it, as a share of how hard
-/// each contact presses on it: 11 m/s². Fitted, as `SIDE_FRICTION` was before its tracks
-/// were driven: on the Type 64's two drifts at 20 and 16.7 m/s, its slide across its
-/// tracks slowed by 9.5 to 12 m/s². Not sliding, they hold it as much as along them,
-/// [`TRACK_GRIP`]: turning at 20 m/s, the Type 64 holds 14.6 m/s² across.
+/// How much its tracks hold the ground across them on its handbrake, sliding on it, as a
+/// share of how hard each contact presses on it: 11 m/s². Fitted, as `SIDE_FRICTION` was
+/// before its tracks were driven: on the Type 64's two drifts at 20 and 16.7 m/s, its
+/// slide across its tracks slowed by 9.5 to 12 m/s². Off it, they hold it as much as
+/// along them, [`TRACK_GRIP`]: turning at 20 m/s, the Type 64 holds 14.6 m/s² across,
+/// and let off its handbrake mid-drift, about 17 m/s², its slide gone in 0.4 s.
 const SIDE_GRIP: f32 = 11.0 / GRAVITY;
-/// How fast a contact of its tracks must slide across them, in m/s, as a step starts, to
-/// be held by [`SIDE_GRIP`] only. Our choice.
-const SLIDE_SPEED: f32 = 0.5;
 /// How much a blocked track holds the ground along it, sliding on it, as a share of how
 /// hard each contact presses on it: 3 m/s². Fitted, as `HANDBRAKE_FRICTION` was: on the
 /// same drifts, its slide along its tracks slowed by 2 to 3.5 m/s².
@@ -483,9 +481,7 @@ impl Hull {
             touches: SmallVec::new(),
             reactions: SmallVec::new(),
         };
-        let heading = self.orientation * Vec3::Z;
         let down = self.orientation * Vec3::NEG_Y;
-        let motion = (self.linear_velocity, self.angular_velocity);
 
         // 1. Its springs' rays, down its hull from each road wheel's centre, to what is
         //    under it, no further than its spring would reach: the space, or another
@@ -583,7 +579,6 @@ impl Hull {
                 side: contact.side,
                 load: push * step,
                 hold,
-                sliding: sliding(motion, arm, heading, normal),
             });
             if let Some(other) = hit.on {
                 loads.reactions.push(Reaction {
@@ -655,8 +650,7 @@ impl Hull {
                     hold: Hold::Out {
                         depth: depth - travel,
                     },
-                    sliding: sliding(motion, arm, heading, normal),
-                });
+                    });
 
             }
         }
@@ -767,7 +761,7 @@ impl Hull {
             if touch.side.is_some() && gripping {
                 let used = if drive.handbrake() { 0.0 } else { pushed.used() };
                 let left = pressed * (1.0 - used * used).max(0.0).sqrt();
-                self.hold_across(touch, *axes, &body, left, &mut holds[index]);
+                self.hold_across(touch, drive.handbrake(), *axes, &body, left, &mut holds[index]);
                 if let Hold::Out { .. } = touch.hold {
                     self.climb(touch, heading, &body, stops[index], &mut climbs[index]);
                 }
@@ -816,12 +810,13 @@ impl Hull {
     /// plane `axes`, along the track then across it, pressed on it with `pressed`, less
     /// what pushing along takes of its grip: where the track passes under the centre of
     /// mass, so that it holds what slides the hull, not what turns it, which its steering
-    /// does. Its impulse so far is `so_far`. Rolling, it holds as much as its tracks grip
-    /// along, [`TRACK_GRIP`]; sliding, [`SIDE_GRIP`]; both falling with the ground's slope
-    /// across, as the game's slope grip says.
+    /// does. Its impulse so far is `so_far`. It holds as much as its tracks grip along,
+    /// [`TRACK_GRIP`]; `blocked`, on its handbrake, sliding, [`SIDE_GRIP`]; both falling
+    /// with the ground's slope across, as the game's slope grip says.
     fn hold_across(
         &mut self,
         touch: &Touch,
+        blocked: bool,
         (along, across): (Vec3, Vec3),
         body: &Mass,
         pressed: f32,
@@ -829,7 +824,7 @@ impl Hull {
     ) {
         let under = raised(touch.arm - along * touch.arm.dot(along), along.cross(across));
         let slip = (self.linear_velocity + self.angular_velocity.cross(under)).dot(across);
-        let side_grip = if touch.sliding { SIDE_GRIP } else { TRACK_GRIP };
+        let side_grip = if blocked { SIDE_GRIP } else { TRACK_GRIP };
         let limit = side_grip * grip(across.y.asin(), SLOPE_GRIP_ACROSS) * pressed;
         let held = (*so_far - slip / body.per_impulse(under, across)).clamp(-limit, limit);
         let impulse = across * (held - *so_far);
@@ -1141,8 +1136,7 @@ struct Loads {
 /// A [`Contact`] touching the space in a step, see [`Hull::solve_pass`]: where it is from the
 /// hull's centre of mass, the normal of what it touches, its springs' together for a
 /// spring, which track it is of, if any, how hard its spring pushed it out in the step,
-/// as an impulse, how it is held off what it touches, and whether it slides across its
-/// track as the step starts.
+/// as an impulse, and how it is held off what it touches.
 #[derive(Debug, Clone, Copy)]
 struct Touch {
     arm: Vec3,
@@ -1150,7 +1144,6 @@ struct Touch {
     side: Option<Side>,
     load: f32,
     hold: Hold,
-    sliding: bool,
 }
 
 /// How a [`Touch`] is held off what it touches.
@@ -1245,15 +1238,6 @@ impl Mass {
         1.0 / self.mass + lever.dot(self.inverse_inertia * lever)
     }
 
-}
-
-/// Whether a hull's contact at `arm` from its centre of mass slides across its tracks,
-/// running `heading` on a ground of this `normal`, faster than [`SLIDE_SPEED`], the
-/// hull's body moving at its velocity and spin: where they pass under its centre of mass.
-fn sliding((velocity, spin): (Vec3, Vec3), arm: Vec3, heading: Vec3, normal: Vec3) -> bool {
-    let (along, across) = ground_axes(heading, normal);
-    let under = arm - along * arm.dot(along);
-    (velocity + spin.cross(under)).dot(across).abs() > SLIDE_SPEED
 }
 
 /// Where a hull's tracks push it, from its centre of mass, with its contacts `stops` so

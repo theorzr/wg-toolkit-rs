@@ -37,9 +37,13 @@ use super::TICK;
 
 
 /// How long after the client sends its controls the server's positions follow them, in
-/// seconds. Fitted: the delay the sweep in the test's report finds best, 0 to 0.05 s
-/// within a few centimetres, below the capture's tick.
-const CONTROL_DELAY: f64 = 0.05;
+/// seconds, from the position a tick starts from: negative, a tick already moves as the
+/// controls sent up to this long after its first position say. The capture has both as
+/// the client got and sent them, so a tick's position reaches it a round trip after
+/// controls the server moved it by. Fitted: the delay the sweep in the test's report
+/// finds best on every drive, −0.06 s; at +0.05 s, the turns started and stopped a tick
+/// late, and the median errors over 1 s were half as large again.
+const CONTROL_DELAY: f64 = -0.06;
 
 /// The seconds between two positions: the server sends one each tick, which reach the
 /// capture irregularly, bunched up after a stall, so always one tick. Measured: counted
@@ -455,7 +459,7 @@ fn hull_follows_the_real_server() {
                 }
             })
             .collect::<Vec<_>>();
-        for delay in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] {
+        for delay in [-0.1, -0.08, -0.06, -0.04, -0.02, 0.0] {
             replay(&drive, mobility, &def.aiming, &others, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
         }
         if !others.is_empty() {
@@ -478,3 +482,4 @@ fn hull_follows_the_real_server() {
     }
 
 }
+
