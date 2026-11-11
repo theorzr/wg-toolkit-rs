@@ -1,0 +1,14 @@
+[
+    {
+        "type": "Layout",
+        "id": "R.mods.wgtk_servers.views.ServersButton",
+        "path": "coui://gui/gameface/mods/wgtk_servers/ServersButton/ServersButton.html",
+        "parameters": {"entrance": "ServersButton", "impl": "gameface"}
+    },
+    {
+        "type": "Layout",
+        "id": "R.mods.wgtk_servers.views.ServersEditor",
+        "path": "coui://gui/gameface/mods/wgtk_servers/ServersEditor/ServersEditor.html",
+        "parameters": {"entrance": "ServersEditor", "impl": "gameface"}
+    }
+]

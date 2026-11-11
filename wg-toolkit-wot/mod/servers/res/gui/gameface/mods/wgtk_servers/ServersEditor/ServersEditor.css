@@ -1,0 +1,134 @@
+/* Sizes are in rem: the client sets the root font size to the screen's scale. The page
+   has a width of its own, and the height of what it shows, which the client measures its
+   window to: as wide as the window otherwise, it would never settle on one. */
+html, body {
+    width: 560rem;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+/* The element the client measures the page by, as its own pages render into. */
+#root {
+    width: 560rem;
+}
+
+#editor {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 16rem;
+    border: 1rem solid rgba(255, 255, 255, 0.3);
+    border-radius: 6rem;
+    background: rgba(18, 18, 18, 0.94);
+    color: #e9e2bf;
+    font-size: 14rem;
+}
+
+#title {
+    margin-bottom: 10rem;
+    font-size: 20rem;
+}
+
+#list {
+    max-height: 180rem;
+    overflow-y: auto;
+    margin-bottom: 8rem;
+}
+
+.server {
+    display: flex;
+    justify-content: space-between;
+    padding: 6rem 8rem;
+    border-radius: 3rem;
+    cursor: pointer;
+}
+
+.server:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.server.selected {
+    background: rgba(255, 220, 140, 0.18);
+}
+
+.address {
+    color: #9c9681;
+}
+
+.empty {
+    padding: 6rem 8rem;
+    color: #9c9681;
+}
+
+#form {
+    margin-top: 10rem;
+}
+
+label {
+    display: block;
+    margin-top: 8rem;
+    color: #9c9681;
+}
+
+/* Fields side by side, sharing the width. */
+.row {
+    display: flex;
+}
+
+.row label {
+    flex: 1;
+}
+
+.row label + label {
+    margin-left: 10rem;
+}
+
+input, textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 3rem;
+    padding: 5rem 7rem;
+    border: 1rem solid rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.5);
+    color: #e9e2bf;
+    font-size: 14rem;
+}
+
+textarea {
+    height: 110rem;
+    font-size: 11rem;
+}
+
+#actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12rem;
+}
+
+button {
+    margin-left: 8rem;
+    padding: 6rem 14rem;
+    border: 1rem solid rgba(255, 255, 255, 0.35);
+    border-radius: 3rem;
+    background: rgba(40, 40, 40, 0.9);
+    color: #e9e2bf;
+    font-size: 14rem;
+    cursor: pointer;
+}
+
+button:hover {
+    border-color: rgba(255, 220, 140, 0.7);
+}
+
+#new {
+    margin-left: 0;
+}
+
+/* Not to be pressed, the form being for a new server already. */
+button.disabled,
+button.disabled:hover {
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #6e6a5c;
+    cursor: default;
+}

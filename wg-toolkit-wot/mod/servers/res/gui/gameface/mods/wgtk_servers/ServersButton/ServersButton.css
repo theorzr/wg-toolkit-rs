@@ -1,0 +1,32 @@
+/* Sizes are in rem: the client sets the root font size to the screen's scale. The page
+   has a size of its own, which the client measures its window to: as wide as the window
+   otherwise, it would never settle on one. */
+html, body {
+    width: 140rem;
+    height: 40rem;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+/* The element the client measures the page by, as its own pages render into. */
+#root {
+    width: 140rem;
+    height: 40rem;
+}
+
+#servers {
+    width: 140rem;
+    height: 40rem;
+    border: 1rem solid rgba(255, 255, 255, 0.35);
+    border-radius: 4rem;
+    background: rgba(20, 20, 20, 0.8);
+    color: #e9e2bf;
+    font-size: 15rem;
+    cursor: pointer;
+}
+
+#servers:hover {
+    background: rgba(60, 55, 40, 0.9);
+    border-color: rgba(255, 220, 140, 0.7);
+}

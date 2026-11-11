@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- The servers' editor, on the login screen, see the mod's `ui`: the servers listed,
+     one picked to change or remove, or a new one, with its name, address and key. -->
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="../../../styles/default.css">
+    <link rel="stylesheet" href="ServersEditor.css">
+</head>
+<body>
+    <div id="root">
+        <div id="editor">
+            <div id="title">Servers</div>
+            <div id="list"></div>
+            <button id="new">New server</button>
+            <div id="form">
+                <div class="row">
+                    <label>Short name <input id="shortName" type="text" placeholder="the address"></label>
+                    <label>Name <input id="name" type="text" placeholder="the short name"></label>
+                </div>
+                <label>Address <input id="address" type="text" placeholder="host:port"></label>
+                <label>Public key <textarea id="key" placeholder="-----BEGIN PUBLIC KEY----- (none: the login is not encrypted)"></textarea></label>
+                <div id="actions">
+                    <button id="save">Save</button>
+                    <button id="remove">Remove</button>
+                    <button id="close">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="ServersEditor.js"></script>
+</body>
+</html>
