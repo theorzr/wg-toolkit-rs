@@ -33,12 +33,13 @@
 //! its box will be in by the end of the tick, as its speeds take it, grown by
 //! [`RAM_REACH`], so that one it presses against counts. Its body's walls would stop
 //! it against a house's module before it could see how fast it hit it. For each piece
-//! it is closing on, or its controls drive it into, its damage grows by, with `w` the
-//! hull's weight in units of [`UNIT_VEHICLE_MASS`] and `v` the speed of its point of
-//! contact, turning included:
+//! it is closing on, or its controls drive it into, its damage grows by, with `m` the
+//! hull's weight in kg, `w` the same in units of [`UNIT_VEHICLE_MASS`], and `v` the
+//! speed of its point of contact, turning included:
 //!
 //! ```text
-//!   damage += RAM_DAMAGE · ½ · w · v²         the energy of the hit
+//!   damage += KINETIC_DAMAGE · ½ · m · v²     the energy of the hit, as the game's
+//!                                             client reckons it
 //!           + RAM_PRESS · w · dt              pressing, so a stopped hull still breaks it
 //! ```
 //!
@@ -84,20 +85,22 @@ use super::{Footprint, Hull};
 
 
 /// How much a ram damages a destructible: this share of the vehicle's kinetic energy as
-/// it closes on it, `½ · w · v²` of its weight `w` in [`UNIT_VEHICLE_MASS`] and its
-/// speed in m/s, adding up from a tick to the next; it breaks once that reaches its
-/// health, and keeps the energy left. Fitted on the captured drives: the Type 64, 0.66
-/// such units, drove through a house's modules of 50 health at 13 m/s, 55; the Pershing,
-/// 1.23, felled a lamp post of 10 at 5.5 m/s, 19, and broke a barrel of 10 pushing it at
-/// 2.7 m/s, 4.5 a tick; the Type 64 drove through two houses' modules of 35 at
-/// 15.8 m/s, 82.
-const RAM_DAMAGE: f32 = 1.0;
+/// it closes on it, `½ · m · v²` of its weight in kg and its speed in m/s, adding up
+/// from a tick to the next; it breaks once that reaches its health, and keeps the
+/// energy left. From the game's client, which reckons so whether a vehicle's hit may
+/// break one (`Vehicle._isDestructibleMayBeBroken`): a house's module against its
+/// health, anything else first scaled by the vehicle's weight against
+/// [`UNIT_VEHICLE_MASS`] to the power of its `kineticDamageCorrection`, 0 unless set,
+/// and no destructible sets it. A 15 t light tank breaks a house's module of 50 health
+/// at 6.7 m/s. The captured drives' breaks are all well past it: the Type 64, 23 t,
+/// drove through modules of 50 health at 13 m/s, 290.
+const KINETIC_DAMAGE: f32 = 0.00015;
 /// How much of its energy breaking a destructible costs the vehicle, as a share of the
 /// health it took. Fitted: the real Type 64 drove through four house modules of 35
 /// health at 15.6 m/s, all but keeping its speed.
 const RAM_COST: f32 = 0.05;
 /// How much a vehicle damages a destructible it presses against, its tracks driving it
-/// in, per second, of its weight in [`UNIT_VEHICLE_MASS`], on top of [`RAM_DAMAGE`]: one
+/// in, per second, of its weight in [`UNIT_VEHICLE_MASS`], on top of [`KINETIC_DAMAGE`]: one
 /// stopped by a house's wall breaks it in time, a module of 50 health in 2 s at 35 t.
 /// Our choice, by feel.
 const RAM_PRESS: f32 = 25.0;
@@ -111,10 +114,10 @@ const UNIT_VEHICLE_MASS: f32 = 35_000.0;
 
 impl Hull {
 
-    /// Damage the destructibles it is about to drive into, in a tick of `dt` seconds, see
-    /// [`RAM_DAMAGE`], and break those whose health it took: it goes on through, less the
-    /// speed their health took; those still standing stop it as walls do, see the `walls`
-    /// module. Its damage adds up from a tick to the next, so a crawl through a fence
+    /// Damage the destructibles it is about to drive into, in a tick of `dt` seconds,
+    /// see [`KINETIC_DAMAGE`], and break those whose health it took: it goes on through,
+    /// less the speed their health took; those still standing stop it as walls do, see
+    /// the `walls` module. Its damage adds up from a tick to the next, so a crawl through a fence
     /// takes a few, and so does pressing against one, see [`RAM_PRESS`].
     pub fn ram(&mut self, dt: f32, space: &Space, rubble: &mut Rubble) {
 
@@ -153,7 +156,7 @@ impl Hull {
             // 3. Damaged by the energy of the hit and by its pressing. Grazing one breaks
             //    it too: the real T110E4 drove on along a fence.
             let speed = point.length();
-            let energy = RAM_DAMAGE * weight * speed * speed / 2.0;
+            let energy = KINETIC_DAMAGE * self.mobility.weight * speed * speed / 2.0;
             let Some((health, done)) = rubble.damage(destructible, piece, energy + RAM_PRESS * weight * dt) else { continue };
             if done < health {
                 continue;

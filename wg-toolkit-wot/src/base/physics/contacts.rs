@@ -18,10 +18,11 @@
 //! ```
 //!
 //! Its tracks' spheres meet what its road wheels would run into: a rock, a step, a
-//! kerb, which lift its nose as its track's front climbs onto them. Its hull's boxes
-//! leave its tracks' ends to them: its belly, between its road wheels, is as high as
-//! its tracks' ends reach down, and its nose and its tail are over them, so that they
-//! touch the ground only when the hull rolls, or on what is higher than its tracks.
+//! kerb, which lift its nose as its track's front climbs onto them, giving as its road
+//! wheels do. Its hull's boxes leave its tracks' ends to them: its belly, between its
+//! road wheels, is as high as its tracks' ends reach down, and its nose and its tail are
+//! over them, so that they touch the ground only when the hull rolls, or on what is
+//! higher than its tracks.
 
 use smallvec::SmallVec;
 use glam::Vec3;
@@ -55,7 +56,7 @@ pub type Contacts = SmallVec<[Contact; MAX_CONTACTS]>;
 /// Where a hull touches the space, in its own frame, for its mobility: they never
 /// change, and its body keeps how deep each spring was from a step to the next, by its
 /// place in them. Its springs first, see [`wheel_contacts`], else, its wheels unknown,
-/// [`SPRINGS_PER_TRACK`] along each track, see [`even_contacts`]. Then its boxes.
+/// [`SPRINGS_PER_TRACK`] along each track, see [`even_wheel_contacts`]. Then its boxes.
 pub fn contacts_of(mobility: &MobilityDef) -> Contacts {
 
     let mut contacts = SmallVec::new();
@@ -102,11 +103,12 @@ struct HullShape {
 
 /// Its tracks' contacts on its wheels, and what of its hull they leave to its boxes:
 /// its belly as high as its tracks' ends' wheels reach down, between its road wheels,
-/// and over them from as high as their centres. Under each of its road wheels, a spring, its ray down from the wheel's
-/// centre to where its track rests on the ground. Around each wheel at its tracks'
-/// ends, its idlers and sprockets, which have no spring, a sphere as wide as the wheel
-/// and its track around it, and [`END_SPHERES`] less one between it and the road wheel
-/// nearest it, along the track's slope from one to the other.
+/// and over them from as high as their centres. Under each of its road wheels, a
+/// spring, its ray down from the wheel's centre to where its track rests on the ground.
+/// Around each wheel at its tracks' ends, its idlers and sprockets, which have no spring
+/// of their own, a sphere as wide as the wheel and its track around it, and
+/// [`END_SPHERES`] less one between it and the road wheel nearest it, along the track's
+/// slope from one to the other: they give as the road wheels' springs do.
 ///
 /// ```text
 ///   around the idler, front to the right:
@@ -215,12 +217,13 @@ pub enum Shape {
         point: Vec3,
         height: f32,
     },
-    /// Rigid, around a wheel at its track's end, or between it and a road wheel.
+    /// Around a wheel at its track's end, or between it and a road wheel: it gives up its
+    /// hull as the road wheels' springs do, see the `body` module.
     Sphere {
         center: Vec3,
         radius: f32,
     },
-    /// Rigid, its hull's or its turret's.
+    /// Rigid: its hull's or its turret's.
     Box {
         center: Vec3,
         half: Vec3,

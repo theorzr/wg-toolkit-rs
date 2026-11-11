@@ -10,8 +10,8 @@
 //!   for each step:
 //!     1. its weight, at its centre of mass
 //!     2. where its contacts touch the space, its terrain and its static models alike
-//!          (see the contacts module): its springs push it up, those past their travel
-//!          are stopped; its rigid parts are held off what they touch
+//!          (see the contacts module): its springs and its tracks' ends push it up,
+//!          those past their travel are stopped; its boxes are held off what they touch
 //!     3. gravity and the springs accelerate it, against its mass and inertia
 //!     4. its contacts touching the space are held, as impulses (solve): no deeper,
 //!          its tracks hold it across and pass its drive's push and turning on to the
@@ -25,14 +25,17 @@
 //! Its suspension pushes it up under each of its road wheels: a spring and a damper at
 //! each, sharing its weight, sinking `SAG` at rest so that its origin is on the ground.
 //! Each spring finds what is under it by a ray down its hull from its wheel's centre,
-//! the space's terrain and static models alike. Its idlers and sprockets, at its tracks'
-//! ends, have no spring: the track around them is rigid, spheres down to the nearest
-//! road wheel, and stops the hull as soon as it touches anything, a rock or a step
-//! meeting the track's front before its first road wheel. The rest of it is rigid too:
-//! its hull's boxes and its turret's, which stop it on what is higher than its tracks,
-//! and on the ground when it rolls over. See the `contacts` module for their shapes. The
-//! pushes' torques roll and pitch it, and its spin carries on from a step to the next:
-//! it bounces, rocks, and tips.
+//! the space's terrain and static models alike. Its tracks' ends, around its idlers and
+//! sprockets, give too: spheres down to the nearest road wheel, which meet a rock or a
+//! step before its first road wheel does. Each pushes as a spring from where it is
+//! deepest in what it touches, along its normal, and gives as the road wheels do, up
+//! its hull: as much of their travel as what it touches faces up its hull. A bump the
+//! track's front meets lifts it softly, as the game's sprung road wheels do, rather than
+//! throwing it up; a wall, facing across its hull, gets no give and stops it at once.
+//! The rest of it is rigid: its hull's boxes and its turret's, which stop it on what is
+//! higher than its tracks, and on the ground when it rolls over. See the `contacts`
+//! module for their shapes. The pushes' torques roll and pitch it, and its spin carries
+//! on from a step to the next: it bounces, rocks, and tips.
 //!
 //! ```text
 //!   back                                           front
@@ -43,18 +46,24 @@
 //!        #\     o     o     o     o     o     o     /#         o   road wheels
 //!          #\___*_____*_____*_____*_____*_____*___/#           *   where it pushes: the track
 //!     ===================================================          on the ground under it
-//!                          ground                             (O)  sprocket, idler, no spring
-//!                                                              #   rigid, on the track
+//!                          ground                             (O)  sprocket, idler
+//!                                                              #   the track around them,
+//!                                                                  sprung up the hull
 //!
 //!   for a spring, its ray down from its wheel's centre, h above *, hitting at distance r:
 //!                 depth = h + SAG - r                    (no hit: it is in the air)
 //!                 push  = k * depth + d * (how fast depth grows), up, at the hit
 //!                 SAG   = g / w^2,  w = 2 pi * SUSPENSION_FREQUENCY
+//!
+//!   for a track's end, deepest d in what it touches, of normal n, the hull's up u:
+//!                 travel = SUSPENSION_TRAVEL * max(n . u, 0)
+//!                 push   = k * min(d, travel) + d * (how fast it sinks along n), along n
 //! ```
 //!
 //! A spring gives [`SUSPENSION_TRAVEL`] past where it rests, then stops hard: its contact
 //! sinks no deeper, an impulse stopping it as the ground does, and a hull landing from a
-//! ledge stops on its tracks rather than going into the ground. What sank past is moved
+//! ledge stops on its tracks rather than going into the ground. A track's end stops hard
+//! past its travel too, along its normal. What sank past is moved
 //! back out without the hull keeping any speed from it (a split impulse, see
 //! `Hull::solve`), or it would be thrown up.
 //!
@@ -81,7 +90,7 @@
 //!                     then at each contact, back and forth, so that nothing pushes it
 //!                     into what it touches last:
 //!                       3. held off: a spring past its travel sinks no further, up; a
-//!                          rigid part gets no deeper along its normal
+//!                          track's end or a box gets no deeper along its normal
 //!                       4. a track's: held across, at under, within its side grip
 //!                          any other: scrapes, within SCRAPE_FRICTION · how hard pressed
 //!                       5. in what it touches: moved back out, split
@@ -177,15 +186,16 @@ const SUBSTEPS: usize = 10;
 const SUSPENSION_FREQUENCY: f32 = 1.5;
 const SUSPENSION_DAMPING: f32 = 0.7;
 /// How much further than at rest a contact's spring gives, in metres, before it stops
-/// hard: past it, the contact sinks no deeper, the hull's body stopped there as if
-/// rigid. Our choice: a real track's road wheels travel about a quarter of a metre,
-/// 11 cm of it sunk at rest.
-pub const SUSPENSION_TRAVEL: f32 = 0.15;
+/// hard, and a track's end from where it touches, on what faces up its hull: past it,
+/// the contact sinks no deeper, the hull's body stopped there as if rigid. Our choice:
+/// the game's client springs give about as much before they harden, half their length
+/// (`hardRatio`), and less, 15 cm, felt stiff, small bumps throwing a light tank up.
+pub const SUSPENSION_TRAVEL: f32 = 0.25;
 /// How far, in metres, a contact's depth in the ground may change in a step of a hull's
 /// body for its damper to take it as the contact sinking: more is the ground jumping
 /// under it, off an edge or onto a step. 5 m/s.
 const DEPTH_JUMP: f32 = 0.05;
-/// How near the space, in metres, a hull's rigid parts touch it already, at a negative
+/// How near the space, in metres, a hull's tracks' ends and boxes touch it already, at a negative
 /// depth: they close no more than the gap in a step, so they stop on what they meet
 /// rather than in it. Our choice.
 const CONTACT_MARGIN: f32 = 0.05;
@@ -278,9 +288,9 @@ impl Hull {
     /// The springs share its weight, so at rest each sinks `SAG = g / ω²` and its origin
     /// is on the ground; `ω` is [`SUSPENSION_FREQUENCY`]'s. A spring gives
     /// [`SUSPENSION_TRAVEL`] more at most: past it, its contact is stopped, see
-    /// [`Self::solve`]. Its rigid parts, its tracks' ends and its boxes, are held off
-    /// what they touch, the terrain and the static models alike: a step met by its
-    /// tracks' front lifts its nose, and it climbs it.
+    /// [`Self::solve`]. Its tracks' ends and its boxes are held off what they touch, the
+    /// terrain and the static models alike, its tracks' ends giving as its springs do,
+    /// up its hull: a step met by its tracks' front lifts its nose, and it climbs it.
     ///
     /// Upright, on the ground, its tracks grip; with its tracks off the ground, or on its
     /// side or its roof ([`TRACKS_UPRIGHT`]), it is `airborne`, its tracks run free, and
@@ -308,8 +318,8 @@ impl Hull {
             let rotation = self.orientation;
             let mass_center = self.position + rotation * center;
 
-            // 2. Its weight, and where its contacts touch the space: its springs' pushes,
-            //    and how its rigid parts are held off it.
+            // 2. Its weight, and where its contacts touch the space: its springs' and its
+            //    tracks' ends' pushes, and how they and its boxes are held off it.
             let loads = self.loads(space, &keep, &suspension, mass_center, step);
             let world_inertia = Mat3::from_quat(rotation) * Mat3::from_diagonal(inertia) * Mat3::from_quat(rotation.inverse());
             let inverse_inertia = world_inertia.inverse();
@@ -361,8 +371,9 @@ impl Hull {
 
     /// The forces on its body in a step, and where its contacts touch the space, see
     /// [`Loads`]: its weight, at its centre of mass; its springs' rays down to what
-    /// `keep` keeps of the space, and the pushes of those in it; and its rigid parts'
-    /// contacts with it. Each spring's depth is kept for the next step, its damper
+    /// `keep` keeps of the space, and the pushes of those in it; and its tracks' ends'
+    /// and its boxes' contacts with it, its tracks' ends pushing as springs as far as
+    /// they give. Each spring's depth is kept for the next step, its damper
     /// resisting how fast it sinks.
     fn loads(
         &mut self,
@@ -463,8 +474,8 @@ impl Hull {
 
         }
 
-        // 5. Its rigid parts: held off what they touch along its normal, its tracks'
-        //    gripping it too.
+        // 5. Its tracks' ends and its boxes: held off what they touch along its normal,
+        //    its tracks' gripping it too.
         for contact in &self.contacts {
             let touched = match contact.shape {
                 Shape::Spring { .. } => continue,
@@ -480,19 +491,43 @@ impl Hull {
                     space.cuboid(&cuboid, CONTACT_MARGIN, keep)
                 }
             };
-            for touch in touched {
+            let deepest = touched.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.depth.total_cmp(&b.depth))
+                .map(|(index, _)| index);
+            for (index, touch) in touched.iter().enumerate() {
+
+                // A track's end gives as its road wheels do, up its hull: as much of its
+                // travel as what it touches faces up its hull, none against a wall or with
+                // the hull on its side. Its deepest touch pushes as a spring, as far as it
+                // gives; each is stopped past it. Its boxes don't give.
                 let arm = touch.point - mass_center;
+                let travel = match contact.shape {
+                    Shape::Sphere { .. } => SUSPENSION_TRAVEL * touch.normal.dot(-down).max(0.0),
+                    _ => 0.0,
+                };
+                let mut load = 0.0;
+                if Some(index) == deepest && touch.depth > 0.0 && travel > 0.0 {
+                    let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
+                    let sinking = -velocity.dot(touch.normal);
+                    let push = (suspension.stiffness * touch.depth.min(travel) + suspension.damping * sinking).max(0.0);
+                    loads.force += touch.normal * push;
+                    loads.torque += arm.cross(touch.normal * push);
+                    load = push * step;
+                }
+
                 loads.tracks_touching |= contact.side.is_some() && touch.depth > 0.0;
                 loads.touches.push(Touch {
                     arm,
                     normal: touch.normal,
                     side: contact.side,
-                    load: 0.0,
+                    load,
                     hold: Hold::Out {
-                        depth: touch.depth,
+                        depth: touch.depth - travel,
                     },
                     sliding: sliding(motion, arm, heading, touch.normal),
                 });
+
             }
         }
 
@@ -516,7 +551,7 @@ impl Hull {
     /// [`CONTACT_PASSES`] times each, those held moving the others, as impulses.
     ///
     /// At each contact, an impulse holding it off what it touches, up for a spring past
-    /// its travel, along the normal for a rigid part; one along what it touches; and
+    /// its travel, along the normal for a track's end past its own or a box; one along what it touches; and
     /// where it is in it, one moving it out, split. Never a pull: a contact leaving goes.
     /// The first stops it; the last only moves it back out, as fast as [`STOP_RECOVERY`]
     /// says, for this step: pushed out, the hull keeps no speed from it, which would
@@ -534,7 +569,8 @@ impl Hull {
     ///           impulse = short / (1/m + (arm × Y) · I⁻¹ (arm × Y))
     ///           rising  = min(how fast its ground rises under it, STOP_SPEED)
     ///   off     impulse = −(max(−d, 0) / h + (v + ω × arm) · n) / k(arm, n), its sum ≥ 0
-    ///           d its depth, negative short of it: it closes no more than its gap
+    ///           d its depth past its give, negative short of it: it closes no more
+    ///           than its gap
     ///   out     wanted  = min(STOP_RECOVERY · past / step, STOP_SPEED)
     /// ```
     fn solve(&mut self, touches: &[Touch], traction: &Traction, body: &Mass, step: f32) -> (Vec3, Vec3) {
@@ -588,7 +624,8 @@ impl Hull {
                 let effective = body.per_impulse(arm, out);
 
                 // 1. Held off: a spring past its travel sinks no further, rising with its
-                //    ground; a rigid part gets no deeper, closing no more than its gap.
+                //    ground; a track's end or a box gets no deeper past what it gives,
+                //    closing no more than its gap.
                 let velocity = self.linear_velocity + self.angular_velocity.cross(arm);
                 let held = match touch.hold {
                     Hold::Free => 0.0,
@@ -924,8 +961,8 @@ enum Hold {
         rising: f32,
         past: f32,
     },
-    /// A rigid part, this deep in what it touches, negative short of it: it gets no
-    /// deeper, along its normal.
+    /// A track's end or a box, this deep in what it touches past what it gives, negative
+    /// short of it: it gets no deeper, along its normal.
     Out {
         depth: f32,
     },

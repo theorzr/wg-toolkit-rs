@@ -98,7 +98,7 @@ pub mod destructibles;
 
 use std::io;
 
-use glam::{Quat, Vec3, Vec3Swizzles};
+use glam::{Mat3, Quat, Vec3, Vec3Swizzles};
 use smallvec::SmallVec;
 
 use crate::res::fs::ResFilesystem;
@@ -329,24 +329,30 @@ impl Space {
     /// out of them, `MANIFOLD` points at most, see the module's documentation.
     pub fn cuboid<'a>(&'a self, cuboid: &Cuboid, margin: f32, keep: &impl Fn(&StaticTriangle) -> bool) -> Contacts<'a> {
 
-        // Every point of every surface it is in.
-        let reach = Vec3::splat(cuboid.half.length() + margin);
-        let mut points = Contacts::new();
+        // Every point of every surface it is in, of those within its bounds: each world
+        // axis reaches as far as its own axes do along it. A triangle's points all go
+        // one way out, grouped with those going the same way.
+        let axes = Mat3::from_quat(cuboid.rotation);
+        let reach = Vec3::splat(margin) + Vec3::new(
+            cuboid.half.dot(axes.row(0).abs()),
+            cuboid.half.dot(axes.row(1).abs()),
+            cuboid.half.dot(axes.row(2).abs()),
+        );
+        let mut ways: Vec<Contacts<'a>> = Vec::new();
         self.surfaces_in(cuboid.center - reach, cuboid.center + reach, keep, |triangle, normal, surface| {
+            let mut points = Contacts::new();
             box_triangle(cuboid, margin, triangle, normal, surface, &mut points);
+            let Some(first) = points.first() else { return };
+            match ways.iter_mut().find(|way| way[0].same_way(first)) {
+                Some(way) => way.extend(points),
+                None => ways.push(points),
+            }
         });
 
         // For each way out, the points spanning the most of them.
         let mut contacts = Contacts::new();
-        for (index, contact) in points.iter().enumerate() {
-            if points[..index].iter().any(|done| done.same_way(contact)) {
-                continue;
-            }
-            let same: SmallVec<[Contact<'a>; 16]> = points.iter()
-                .filter(|other| other.same_way(contact))
-                .copied()
-                .collect();
-            contacts.extend(spanning(&same));
+        for way in &ways {
+            contacts.extend(spanning(way));
         }
         contacts
 
