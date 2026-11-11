@@ -20,8 +20,8 @@
 //!
 //! What a piece still standing does depends on its kind:
 //!
-//! - A **house's module** blocks like a wall ([`Rubble::blocks`], in `push_out`) until
-//!   it breaks.
+//! - A **house's module** blocks like a wall ([`Rubble::blocks`], see the `walls`
+//!   module) until it breaks.
 //! - A **fence, post or barrel** never blocks. The hull drives into it, damaging it on
 //!   each tick it overlaps it, until it breaks.
 //! - A destructible body of a model the client doesn't number is ignored altogether.
@@ -29,10 +29,13 @@
 //!
 //! # Ramming
 //!
-//! [`Hull::ram`] runs right after its body moved and before `push_out`, so it sees the
-//! hull's speed before a wall takes it away. For each standing piece the box overlaps
-//! and is closing on, its damage grows by, with `w` the hull's weight in units of
-//! [`UNIT_VEHICLE_MASS`] and `v` the speed of its point of contact, turning included:
+//! [`Hull::ram`] runs before its body moves, looking ahead: the pieces it rams are those
+//! its box will be in by the end of the tick, as its speeds take it, grown by
+//! [`RAM_REACH`], so that one it presses against counts. Its body's walls would stop
+//! it against a house's module before it could see how fast it hit it. For each piece
+//! it is closing on, or its controls drive it into, its damage grows by, with `w` the
+//! hull's weight in units of [`UNIT_VEHICLE_MASS`] and `v` the speed of its point of
+//! contact, turning included:
 //!
 //! ```text
 //!   damage += RAM_DAMAGE · ½ · w · v²         the energy of the hit
@@ -43,8 +46,8 @@
 //! health, the piece breaks: it goes into `rubble.broken` with the modules it brings
 //! down ([`Module::depends`](wgtk::space::destructibles::Module::depends)), and into
 //! `rubble.fresh` for the battle to tell its clients. The hull keeps its speed, less
-//! [`RAM_COST`] of the health it took. Since the broken module no longer blocks,
-//! `push_out` lets the hull through in the same tick.
+//! [`RAM_COST`] of the health it took. Since the broken module no longer blocks, its
+//! body drives on through it in the same tick.
 //!
 //! # Shells
 //!
@@ -73,6 +76,7 @@ use glam::{Vec2, Vec3Swizzles};
 use smallvec::SmallVec;
 
 use wgtk::space::statics::{PlacedDestructible, Statics, StaticTriangle};
+use wgtk::space::Space;
 use wgtk::space::destructibles::DestructibleKind;
 
 use super::walls::wall_contact;
@@ -97,44 +101,51 @@ const RAM_COST: f32 = 0.05;
 /// stopped by a house's wall breaks it in time, a module of 50 health in 2 s at 35 t.
 /// Our choice, by feel.
 const RAM_PRESS: f32 = 25.0;
+/// How much further than its collision box a hull rams, in metres: one pressing
+/// against a piece, stopped by it, still damages it. Our choice, as far as a wall
+/// touches it from, `WALL_MARGIN`.
+const RAM_REACH: f32 = 0.05;
 /// The weight of a vehicle that destructibles' health is measured against, in kg:
 /// `unitVehicleMass` in the game's `scripts/destructibles.xml`.
 const UNIT_VEHICLE_MASS: f32 = 35_000.0;
 
 impl Hull {
 
-    /// Damage the destructibles it drives into, see [`RAM_DAMAGE`], and break those
-    /// whose health it took: it goes on through, less the speed their health took; those
-    /// still standing stop it as walls do, see [`Self::push_out`]. Its damage adds up
-    /// from a tick to the next, so a crawl through a fence takes a few, and so does
-    /// pressing against one, see [`RAM_PRESS`].
-    pub fn ram(&mut self, dt: f32, statics: &Statics, rubble: &mut Rubble) {
+    /// Damage the destructibles it is about to drive into, in a tick of `dt` seconds, see
+    /// [`RAM_DAMAGE`], and break those whose health it took: it goes on through, less the
+    /// speed their health took; those still standing stop it as walls do, see the `walls`
+    /// module. Its damage adds up from a tick to the next, so a crawl through a fence
+    /// takes a few, and so does pressing against one, see [`RAM_PRESS`].
+    pub fn ram(&mut self, dt: f32, space: &Space, rubble: &mut Rubble) {
 
-        // 1. The pieces it overlaps, each once, its first triangle telling the way into
-        //    it: against its push out, else, a small one it drove onto within a tick
-        //    having no way out of it, the way from its middle to the triangle's.
+        // 1. The pieces it will be in, each once, its first triangle telling the way into
+        //    it, else, a small one it drives onto within the tick having no way out of
+        //    it, the way from its middle to the triangle's.
         let footprint = self.footprint();
         let middle = footprint.middle;
         let mut hits: SmallVec<[(Piece, &PlacedDestructible, Vec2, Vec2); 8]> = SmallVec::new();
-        for (triangle, push) in self.standing_overlaps(statics, rubble) {
+        let statics = &space.statics;
+        for (triangle, against) in self.rammed(dt, RAM_REACH, space, rubble) {
             let Some((piece, destructible)) = rubble.standing(statics, triangle) else { continue };
             let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]).xz() / 3.0;
             if !hits.iter().any(|&(hit, _, _, _)| hit == piece) {
-                hits.push((piece, destructible, -push, center - middle));
+                hits.push((piece, destructible, against, center - middle));
             }
         }
 
         let weight = self.mobility.weight / UNIT_VEHICLE_MASS;
+        let (heading, _) = self.axes();
+        let asked = heading.xz() * self.target_speed();
         for (piece, destructible, against, center) in hits {
 
             // 2. How fast it hits it where it touches it, turning on the spot swinging it
-            //    in too: nothing if it isn't closing on it.
+            //    in too: nothing if it isn't closing on it, nor driven into it, pressing.
             let velocity = self.velocity();
             let arm = ram_contact(&footprint, against, center);
             let point = self.point_velocity(arm);
             let closing = [against, center].into_iter()
                 .filter_map(Vec2::try_normalize)
-                .any(|toward| point.dot(toward) > 0.0);
+                .any(|toward| point.dot(toward) > 0.0 || asked.dot(toward) > 0.0);
             if !closing {
                 continue;
             }
@@ -304,7 +315,7 @@ mod tests {
     use wgtk::space::statics::BodyKind;
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, wall};
+    use super::super::fixtures::{chieftain, nose, wall};
     use super::super::movement_flag;
     use super::*;
 
@@ -384,8 +395,8 @@ mod tests {
         for _ in 0..30 {
             hull.advance(0.1, &space, None, &mut rubble);
         }
-        let front = hull.position.z + hull.mobility.bounds[1].z;
-        assert!((front - 10.0).abs() < 1e-3 && rubble.fresh.is_empty(), "front at {front}");
+        let front = nose(&hull);
+        assert!((front - 10.0).abs() < 2e-3 && rubble.fresh.is_empty(), "front at {front}");
         // One it starts against, stopped, it presses until it breaks it.
         let space = fence(50.0, true);
         let mut rubble = Rubble::default();

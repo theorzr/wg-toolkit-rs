@@ -23,15 +23,16 @@
 //!   │
 //!   ├─ 2. for every vehicle: Vehicle::step
 //!   │     ├─ Hull::advance                                                   (here)
-//!   │     │    ├─ speeds_to_body   its body takes what hits and walls left it  body
 //!   │     │    ├─ drive            the drive model: how hard its engine,       drive
-//!   │     │    │                   brakes and steering push it
+//!   │     │    │                   brakes and steering push it                ground
 //!   │     │    ├─ (still for long enough: it rests, and the rest is skipped)
+//!   │     │    ├─ ram              damage and break the destructibles it is   rubble
+//!   │     │    │                   about to get into
+//!   │     │    ├─ speeds_to_body   its body takes what hits and rams left it  body
 //!   │     │    ├─ integrate        the rigid body, 10 steps: gravity, its      body
-//!   │     │    │                   suspension at its contacts, its tracks      contacts
-//!   │     │    │                   driven, gripping where they touch ground    ground
-//!   │     │    ├─ ram              damage and break destructibles             rubble
-//!   │     │    ├─ push_out         stop against walls                         walls
+//!   │     │    │                   suspension, its tracks driven, all it      contacts
+//!   │     │    │                   touches of the terrain and static models   (wgtk::space)
+//!   │     │    │                   holding it off
 //!   │     │    └─ keep_within      stop at the map's edge                     walls
 //!   │     └─ Turret::step          turn toward the aim, update the dispersion  turret
 //!   │
@@ -55,10 +56,11 @@
 //!               the steps of its tick, its motion on the ground plane
 //!   drive       the drive model: how hard its engine, brakes and steering push it
 //!   body        its rigid body: gravity, suspension, its tracks gripping the ground
-//!   contacts    where its body touches the ground: wheels, track ends, hull, turret
-//!   ground      what is ground under a point, and what is a wall
+//!   ground      the kind of ground under it, firm, medium or soft
 //!   rubble      destructibles: what it rams and breaks, what shells break
-//!   walls       the static models and the map's edge, which stop it
+//!   contacts    where its body touches the space: its springs, its tracks' ends,
+//!               its hull's boxes and its turret's
+//!   walls       the map's edge, shoves out of the static models, what it rams
 //!   collision   two vehicles' boxes, where they first touch, the impulse between
 //!   turret      the turret and its gun: turning, aiming, dispersion
 //!   client      what the client is told beyond positions: engine and tracks
@@ -139,11 +141,14 @@
 //!
 //! # What isn't modelled
 //!
-//! Walls and vehicles still hit it on the ground plane, not in 3D: that is next. It takes
-//! no damage from a fall, doesn't float or sink in water, and can't climb what is more
-//! than `STEP_HEIGHT` above its contacts. Its tracks don't scrub sideways as it turns:
-//! its steering turns it as the game's turning speeds say, and holds back a hull spun by
-//! a push off its middle only as fast as it would stop turning. Vehicles have no friction between them and
+//! Vehicles still hit each other on the ground plane, not in 3D: that is next. Its
+//! collision shapes are boxes, not its hull's mesh: a rock catches its box's corner
+//! where the real hull is narrower. A house's floor, not one of its destructible modules,
+//! stays when it breaks, and the hull drives up onto it, where the real one went on
+//! below it on Live Oaks. It takes no damage from a fall, and doesn't float or sink in
+//! water. Its tracks don't scrub sideways as it turns: its steering turns it as the
+//! game's turning speeds say, and holds back a hull spun by a push off its middle only
+//! as fast as it would stop turning. Vehicles have no friction between them and
 //! take no damage from ramming, each other or destructibles. Trees don't fall: the
 //! client numbers them among the speed trees, which aren't decoded. What a destroyed
 //! module leaves (`BodyKind::Remains`) is never collided with. Shells are flown in
@@ -524,16 +529,16 @@ impl Hull {
     /// Advance by `dt` seconds in its space. Returns whether the hull moved or turned.
     ///
     /// ```text
-    ///   speeds_to_body             its body takes the speeds hits and walls left it
-    ///        ▼
     ///   drive(ground under it)     the drive model: how hard its engine, brakes and
     ///        ▼                     steering push it
     ///   (still? it rests)          nothing below happens
     ///        ▼
+    ///   ram                        the destructibles it is about to get into, damaged,
+    ///        ▼                     broken ones out of its way, speed lost to them
+    ///   speeds_to_body             its body takes the speeds hits and rams left it
+    ///        ▼
     ///   integrate                  the body and its tracks move: gravity, its
-    ///        ▼                     suspension, its tracks gripping the ground
-    ///   ram, push_out              into destructibles, out of the solid static models,
-    ///        ▼                     speed into them lost
+    ///        ▼                     suspension, its tracks gripping the ground, walls
     ///   keep_within(bounds)        inside the map, speed into the edge lost
     /// ```
     ///
@@ -541,27 +546,26 @@ impl Hull {
     /// controls or a hit move it again.
     pub fn advance(&mut self, dt: f32, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &mut Rubble) -> bool {
 
-        // 1. Its body takes what hits and walls left on the ground plane since its last
-        //    tick.
-        self.speeds_to_body();
-
-        // 2. The drive model says how hard its engine, its brakes and its steering push
+        // 1. The drive model says how hard its engine, its brakes and its steering push
         //    it, for its tracks to pass on where they grip.
         let drive = self.drive(dt, ground_at(&space.terrain, self.position));
 
-        // 3. Still on the ground long enough, it rests: nothing to move, nothing to send.
+        // 2. Still on the ground long enough, it rests: nothing to move, nothing to send.
         self.still = if self.is_still() { self.still.saturating_add(1) } else { 0 };
         if self.still > REST_TICKS {
             return false;
         }
 
-        // 4. Its body and its tracks move, its tracks pushing it where they grip.
-        self.integrate(dt, space, &drive);
+        // 3. What it is about to ram: damaged, and broken out of its way before it moves,
+        //    or stopping it as walls do.
+        self.ram(dt, space, rubble);
 
-        // 5. What it got into: destructibles first, which see its speed before a wall
-        //    takes it, then the walls, then the map's edge.
-        self.ram(dt, &space.statics, rubble);
-        self.push_out(&space.statics, rubble);
+        // 4. Its body takes what hits and rams left on the ground plane since its last
+        //    tick, then it moves, its tracks pushing it where they grip, walls holding it.
+        self.speeds_to_body();
+        self.integrate(dt, space, rubble, &drive);
+
+        // 5. The map's edge.
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
@@ -590,7 +594,7 @@ impl Hull {
     /// ledge: its suspension finds out on the next tick.
     pub fn keep_on_map(&mut self, space: &Space, bounds: Option<(Vec2, Vec2)>, rubble: &Rubble) {
         self.still = 0;
-        self.push_out(&space.statics, rubble);
+        self.push_out(space, rubble);
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }

@@ -8,7 +8,7 @@ use std::io::{self, Cursor, Read};
 
 use byteorder::{LittleEndian as LE, ReadBytesExt};
 use flate2::read::ZlibDecoder;
-use glam::Vec3;
+use glam::{IVec2, Vec2, Vec3};
 
 use crate::res::fs::ResFilesystem;
 use crate::res::package::PackageReader;
@@ -90,6 +90,35 @@ impl HeightMap {
 
     }
 
+    /// The spacing of its samples in a chunk of this size, in metres.
+    fn spacing(&self, chunk_size: f32) -> Vec2 {
+        Vec2::new(
+            chunk_size / (self.width - VISIBLE_OFFSET * 2 - 1) as f32,
+            chunk_size / (self.height - VISIBLE_OFFSET * 2 - 1) as f32,
+        )
+    }
+
+    /// The two triangles of a cell, `x` and `z` its first sample's, in a chunk of this
+    /// size whose corner is at `corner`, as the client renders them and
+    /// [`Self::height_at`] reads them: neighbouring cells have opposite diagonals. Each is
+    /// wound counter-clockwise seen from above, its normal up.
+    fn cell_triangles(&self, x: usize, z: usize, chunk_size: f32, corner: Vec2) -> [[Vec3; 3]; 2] {
+        let spacing = self.spacing(chunk_size);
+        let at = |x: usize, z: usize| {
+            let flat = corner + Vec2::new(x as f32 - VISIBLE_OFFSET as f32, z as f32 - VISIBLE_OFFSET as f32) * spacing;
+            Vec3::new(flat.x, self.get(x, z), flat.y)
+        };
+        let h00 = at(x, z);
+        let h10 = at(x + 1, z);
+        let h01 = at(x, z + 1);
+        let h11 = at(x + 1, z + 1);
+        if (x ^ z) & 1 != 0 {
+            [[h00, h01, h10], [h11, h10, h01]]
+        } else {
+            [[h00, h11, h10], [h00, h01, h11]]
+        }
+    }
+
     fn get(&self, x: usize, z: usize) -> f32 {
         self.heights[z.min(self.height - 1) * self.width + x.min(self.width - 1)]
     }
@@ -98,10 +127,9 @@ impl HeightMap {
     /// client renders, see `TerrainHeightMap2::heightAt`.
     pub fn height_at(&self, x: f32, z: f32, chunk_size: f32) -> f32 {
 
-        let spacing_x = chunk_size / (self.width - VISIBLE_OFFSET * 2 - 1) as f32;
-        let spacing_z = chunk_size / (self.height - VISIBLE_OFFSET * 2 - 1) as f32;
-        let xs = (x / spacing_x + VISIBLE_OFFSET as f32).max(0.0);
-        let zs = (z / spacing_z + VISIBLE_OFFSET as f32).max(0.0);
+        let spacing = self.spacing(chunk_size);
+        let xs = (x / spacing.x + VISIBLE_OFFSET as f32).max(0.0);
+        let zs = (z / spacing.y + VISIBLE_OFFSET as f32).max(0.0);
         let xf = xs.fract();
         let zf = zs.fract();
         let x0 = xs as usize;
@@ -287,6 +315,59 @@ impl Terrain {
         Some(chunk.grounds.as_ref()?.ground_at(x, z, self.chunk_size))
     }
 
+    /// The triangles of its cells that a box of the ground plane overlaps, minimum then
+    /// maximum, each once, as the client renders them: wound counter-clockwise seen from
+    /// above, their normals up. None where it has no chunk. Read from its heights as
+    /// they are asked for, never kept: what the space's contact queries walk, see
+    /// "Contacts" in the `space` module's documentation.
+    pub(crate) fn triangles_in(&self, min: Vec2, max: Vec2, mut each: impl FnMut([Vec3; 3])) {
+        let first = (min / self.chunk_size).floor();
+        let last = (max / self.chunk_size).floor();
+        for cx in first.x as i32..=last.x as i32 {
+            for cz in first.y as i32..=last.y as i32 {
+                let Some(chunk) = self.chunks.get(&(cx as i16, cz as i16)) else { continue };
+                let heights = &chunk.heights;
+                let corner = Vec2::new(cx as f32, cz as f32) * self.chunk_size;
+                let spacing = heights.spacing(self.chunk_size);
+                // Its own cells only, not the border it shares with its neighbours.
+                let cells = IVec2::new(
+                    (heights.width - VISIBLE_OFFSET * 2 - 1) as i32,
+                    (heights.height - VISIBLE_OFFSET * 2 - 1) as i32,
+                );
+                let low = ((min - corner) / spacing).floor().as_ivec2().max(IVec2::ZERO);
+                let high = ((max - corner) / spacing).floor().as_ivec2().min(cells - 1);
+                for x in low.x..=high.x {
+                    for z in low.y..=high.y {
+                        let x = x as usize + VISIBLE_OFFSET;
+                        let z = z as usize + VISIBLE_OFFSET;
+                        let cell = heights.cell_triangles(x, z, self.chunk_size, corner);
+                        for triangle in cell {
+                            each(triangle);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A terrain of one chunk at the origin, 100 m, flat at this height: for tests.
+    #[cfg(test)]
+    pub(crate) fn flat(height: f32) -> Self {
+        let size = 64 + VISIBLE_OFFSET * 2 + 1;
+        let chunk = Chunk {
+            heights: HeightMap {
+                width: size,
+                height: size,
+                heights: vec![height; size * size],
+            },
+            grounds: None,
+        };
+        Self {
+            chunk_size: 100.0,
+            chunks: HashMap::from([((0, 0), chunk)]),
+        }
+    }
+
     /// The chunk at a world position, and the position relative to its corner.
     fn chunk_at(&self, x: f32, z: f32) -> Option<(&Chunk, f32, f32)> {
         let cx = (x / self.chunk_size).floor();
@@ -360,6 +441,29 @@ mod tests {
         assert_eq!(map.ground_at(10.0, 60.0, 100.0), Ground::Medium);
         assert_eq!(map.ground_at(100.0, 100.0, 100.0), Ground::None);
 
+    }
+
+    #[test]
+    fn cells_are_the_heights_triangles() {
+        // Rising 1 m per sample along x, and 0.5 m along z.
+        let size = 64 + VISIBLE_OFFSET * 2 + 1;
+        let heights = (0..size * size).map(|i| (i % size) as f32 + (i / size) as f32 * 0.5).collect();
+        let chunk = Chunk { heights: HeightMap { width: size, height: size, heights }, grounds: None };
+        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), chunk)]) };
+        // A box of 3 by 2 metres covers 3 by 2 cells of 1.5625 m, 2 triangles each, each
+        // up, and on the heights: their middles are where the terrain is.
+        let mut triangles = Vec::new();
+        terrain.triangles_in(Vec2::new(30.0, 40.0), Vec2::new(33.0, 42.0), |triangle| triangles.push(triangle));
+        assert_eq!(triangles.len(), 3 * 2 * 2);
+        for [a, b, c] in triangles {
+            assert!((b - a).cross(c - a).y > 0.0);
+            let middle = (a + b + c) / 3.0;
+            assert!((terrain.height_at(middle.x, middle.z).unwrap() - middle.y).abs() < 1e-3, "{middle}");
+        }
+        // None out of its chunks.
+        let mut count = 0;
+        terrain.triangles_in(Vec2::splat(-50.0), Vec2::splat(-10.0), |_| count += 1);
+        assert_eq!(count, 0);
     }
 
     #[test]

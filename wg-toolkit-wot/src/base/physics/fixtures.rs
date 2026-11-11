@@ -8,7 +8,8 @@ use wgtk::space::Space;
 
 use crate::wot::item_defs::{AimingDef, MobilityDef, PitchCurve, WheelDef, Wheels};
 
-use super::Hull;
+use super::contacts::Shape;
+use super::{Hull, Rubble};
 
 
 /// How high the test gun is above the vehicle's origin.
@@ -98,19 +99,21 @@ pub fn chieftain() -> Hull {
 pub fn tick(hull: &mut Hull, dt: f32, ground: Ground) {
     hull.speeds_to_body();
     let drive = hull.drive(dt, ground);
-    hull.integrate(dt, &Space::default(), &drive);
+    hull.integrate(dt, &Space::default(), &Rubble::default(), &drive);
 }
 
-/// A wall across the way at z = 10, `height` high, as two triangles.
+/// A wall across the way at z = 10, `height` high, as two triangles, on flat ground from
+/// z = −50 to 100.
 pub fn wall(height: f32) -> Space {
     let low_left = Vec3::new(-20.0, -1.0, 10.0);
     let low_right = Vec3::new(20.0, -1.0, 10.0);
     let high_left = Vec3::new(-20.0, height, 10.0);
     let high_right = Vec3::new(20.0, height, 10.0);
-    let triangles = vec![
+    let mut triangles = vec![
         StaticTriangle::new([low_left, low_right, high_right], 0, 0, BodyKind::Solid),
         StaticTriangle::new([low_left, high_right, high_left], 0, 0, BodyKind::Solid),
     ];
+    quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
     Space {
         statics: Statics::from_triangles(triangles),
         ..Space::default()
@@ -172,4 +175,22 @@ pub fn quad(triangles: &mut Vec<StaticTriangle>, near: f32, far: f32, near_y: f3
     let far_right = Vec3::new(5.0, far_y, far);
     triangles.push(StaticTriangle::new([near_left, far_right, near_right], 0, 0, BodyKind::Solid));
     triangles.push(StaticTriangle::new([near_left, far_left, far_right], 0, 0, BodyKind::Solid));
+}
+
+/// How far forward along z a hull's boxes reach, as it is turned: its nose, wherever
+/// it leans.
+pub fn nose(hull: &Hull) -> f32 {
+    hull.contacts.iter()
+        .filter_map(|contact| match contact.shape {
+            Shape::Box { center, half } => Some((center, half)),
+            _ => None,
+        })
+        .take(2)
+        .flat_map(|(center, half)| {
+            [-1.0, 1.0].into_iter().flat_map(move |x| {
+                [-1.0, 1.0].into_iter().flat_map(move |y| [-1.0, 1.0].map(|z| center + half * Vec3::new(x, y, z)))
+            })
+        })
+        .map(|corner| (hull.position + hull.orientation * corner).z)
+        .fold(f32::NEG_INFINITY, f32::max)
 }
