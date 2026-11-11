@@ -650,7 +650,7 @@ impl Hull {
                     hold: Hold::Out {
                         depth: depth - travel,
                     },
-                    });
+                });
 
             }
         }

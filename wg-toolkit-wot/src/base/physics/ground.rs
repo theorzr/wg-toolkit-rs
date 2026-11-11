@@ -8,10 +8,10 @@ use glam::Vec3;
 use wgtk::space::terrain::{Ground, Terrain};
 
 
-/// The ground the vehicle drives on where the terrain gives none, or off it. Our choice:
-/// unpainted cells are mostly beyond the battle's bounds, and medium is most of the
-/// painted ones.
-const DEFAULT_GROUND: Ground = Ground::Medium;
+/// The ground the vehicle drives on where the terrain gives none, or off it. Measured:
+/// on Graf Zeppelin's unpainted cells, a third of its drive, the Pershing turned 1.18
+/// times as fast as on its medium ones, its firm ground's ratio to medium.
+const DEFAULT_GROUND: Ground = Ground::Firm;
 
 /// The kind of ground at a position on the terrain, else [`DEFAULT_GROUND`]: how it
 /// holds the vehicle back and how fast it turns there.

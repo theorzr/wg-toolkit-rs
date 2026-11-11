@@ -9,7 +9,7 @@
 //! `flags,<vehicle_moveWith flags>` the client sent, or `pos,x,y,z,roll,pitch,yaw` the
 //! server gave the vehicle. Its header, lines starting with `#`, gives:
 //! - `# descr,<bytes>`: the vehicle's compact descriptor;
-//! - `# space,<name>`: the map it drove on, whose grounds the hull is given, medium
+//! - `# space,<name>`: the map it drove on, whose grounds the hull is given, firm
 //!   without;
 //! - `# setup,<equipment kg>,<driver>,<medium ground>,<top speed m/s>`: how the vehicle
 //!   was set up, see [`CapturedSetup`], stock without;
