@@ -6,7 +6,7 @@ mod proxy;
 mod cluster;
 mod replay;
 mod link;
-mod wot;
+mod game;
 
 use std::net::{SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};

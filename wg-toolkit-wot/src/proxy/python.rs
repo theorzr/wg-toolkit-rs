@@ -1,14 +1,14 @@
 //! The Python-level view of a session: what the account commands, tokens and resource
 //! streams carried inside entity method calls mean.
 //!
-//! See [`crate::wot::account_commands`] for the protocol and the names used here.
+//! See [`crate::game::account_commands`] for the protocol and the names used here.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use wgtk::script::Value;
 
-use crate::wot::account_commands::{self as ac, token_type};
+use crate::game::account_commands::{self as ac, token_type};
 
 
 /// A request waiting for its answer.

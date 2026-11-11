@@ -506,7 +506,7 @@ mod tests {
 
     use wgtk::space::Space;
 
-    use crate::wot::item_defs::MobilityDef;
+    use crate::game::item_defs::MobilityDef;
 
     use super::super::fixtures::{chieftain, chieftain_mobility, slope, tick};
     use super::super::{Rubble, GRAVITY};

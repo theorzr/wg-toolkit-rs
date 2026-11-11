@@ -14,7 +14,7 @@
 
 use glam::Vec3;
 
-use super::physics::{movement_flag, wrap_angle, Vehicle, VehicleId, World};
+use crate::base::physics::{movement_flag, wrap_angle, Vehicle, VehicleId, World};
 
 
 /// How close to its enemy the bot drives, in metres on the ground plane.

@@ -12,24 +12,25 @@ use wgtk::app::entity::{Audience, Bytes, ComponentKey, Entity, EntityId, EntityK
 use wgtk::app::base::{self, ClientKey, EntityInit, SpaceKey, Visibility};
 use wgtk::pickle::Value as PickleValue;
 
-use crate::wot::schema::{
+use crate::game::schema::{
     self, Avatar, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag, DogTagComponent, Fire, GunMarker,
     GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, VehicleInfo, VehicleSyncAttrs,
 };
 use crate::base::{
-    ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, Player, VehicleConfig,
+    ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, VehicleConfig,
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
-use crate::wot::collision::{VehicleCollision, VehiclePart};
+use crate::game::collision::{VehicleCollision, VehiclePart};
+use crate::base::ballistics::gun::{Gun, HitTarget, Shot};
 use crate::base::physics::{Vehicle, VehicleId, World};
-use crate::base::gun::{Gun, HitTarget, Shot};
-use crate::wot::item_defs::VehicleDef;
-use crate::base::bot::Bot;
+use crate::base::garage::player::Player;
+use crate::game::item_defs::VehicleDef;
 
 use super::hit::ShellHit;
 use super::spawn::Start;
 use super::VIEW_RANGE;
+use super::bot::Bot;
 
 
 /// A vehicle of a battle, whoever drives it, with its entry in `vehiclesInfo`.

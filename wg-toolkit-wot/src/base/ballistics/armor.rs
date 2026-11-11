@@ -10,8 +10,8 @@ use std::f32::consts::FRAC_PI_2;
 use glam::{Affine3A, Vec3};
 use rand::Rng;
 
-use crate::wot::collision::{VehicleCollision, VehicleHit, VehiclePart};
-use crate::wot::item_defs::{ShellKind, ShotDef};
+use crate::game::collision::{VehicleCollision, VehicleHit, VehiclePart};
+use crate::game::item_defs::{ShellKind, ShotDef};
 
 
 /// How far before the point a shell first hits a vehicle, and past it, its way through
@@ -298,8 +298,8 @@ mod tests {
     use rand::rngs::StdRng;
 
     use super::*;
-    use crate::wot::collision::{ArmorGroup, CollisionModel, Material};
-    use crate::wot::items::{item_type, IntCompactDescr};
+    use crate::game::collision::{ArmorGroup, CollisionModel, Material};
+    use crate::game::items::{item_type, IntCompactDescr};
 
     fn shot(kind: ShellKind, caliber: f32, pen: f32) -> ShotDef {
         let ap = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr | ShellKind::ArmorPiercingHe);
@@ -434,7 +434,7 @@ mod tests {
     /// Chieftain's front, and the Chieftain's shells against the Pz. I, from 100 m.
     #[test]
     fn real_vehicles_against_each_other() {
-        use crate::wot::item_defs::VehicleDef;
+        use crate::game::item_defs::VehicleDef;
         use wgtk::res::fs::ResFilesystem;
         let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
         let fs = ResFilesystem::new(res).unwrap();

@@ -6,8 +6,8 @@ use std::io;
 use wgtk::app::entity::{EntityId, EntityKey};
 use wgtk::app::base;
 
-use crate::base::gun::{Shot, ShotPiece};
-use crate::wot::schema::{self, Avatar};
+use crate::base::ballistics::gun::{Shot, ShotPiece};
+use crate::game::schema::{self, Avatar};
 use crate::base::NO_PREFAB_EFFECTS;
 
 

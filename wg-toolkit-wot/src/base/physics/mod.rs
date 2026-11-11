@@ -180,6 +180,8 @@ mod turret;
 mod client;
 #[cfg(test)]
 pub mod fixtures;
+#[cfg(test)]
+mod drive_replay;
 
 use std::vec::Drain;
 use std::sync::Arc;
@@ -192,7 +194,7 @@ use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
-use crate::wot::item_defs::{AimingDef, MobilityDef};
+use crate::game::item_defs::{AimingDef, MobilityDef};
 
 use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};

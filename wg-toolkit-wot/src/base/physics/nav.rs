@@ -352,8 +352,8 @@ mod tests {
 
     use wgtk::res::fs::ResFilesystem;
 
-    use crate::wot::arena_defs::{self, ArenaTypeDef, Spawn, STANDARD_GAMEPLAY};
-    use crate::wot::item_defs;
+    use crate::game::arena_defs::{self, ArenaTypeDef, Spawn, STANDARD_GAMEPLAY};
+    use crate::game::item_defs;
 
     use super::super::body::blocking;
     use super::super::Rubble;

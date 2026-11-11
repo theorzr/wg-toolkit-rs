@@ -6,7 +6,7 @@ use wgtk::space::statics::{BodyKind, Statics, StaticTriangle};
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
-use crate::wot::item_defs::{AimingDef, MobilityDef, PitchCurve, WheelDef, Wheels};
+use crate::game::item_defs::{AimingDef, MobilityDef, PitchCurve, WheelDef, Wheels};
 
 use super::contacts::Shape;
 use super::{Hull, Rubble};

@@ -9,8 +9,8 @@ use std::io;
 
 use wgtk::pickle::{Global, Value};
 
-use crate::wot::item_prices::ItemPrices;
-use crate::wot::item_defs::NATIONS;
+use crate::game::item_prices::ItemPrices;
+use crate::game::item_defs::NATIONS;
 
 use super::account;
 

@@ -11,7 +11,7 @@
 
 use glam::{Quat, Vec3};
 
-use crate::wot::item_defs::AimingDef;
+use crate::game::item_defs::AimingDef;
 
 use super::{wrap_angle, Hull};
 

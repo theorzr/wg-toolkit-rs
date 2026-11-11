@@ -27,7 +27,7 @@
 use smallvec::SmallVec;
 use glam::Vec3;
 
-use crate::wot::item_defs::{MobilityDef, Wheels, MAX_ROAD_WHEELS, MAX_TRACK_ENDS};
+use crate::game::item_defs::{MobilityDef, Wheels, MAX_ROAD_WHEELS, MAX_TRACK_ENDS};
 
 use super::drive::Side;
 

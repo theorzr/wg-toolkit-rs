@@ -11,10 +11,10 @@ use rand::Rng;
 use wgtk::space::statics::BodyKind;
 use wgtk::space::Space;
 
-use crate::wot::collision::{segment_triangle, VehicleCollision, VehicleHit};
-use crate::wot::item_defs::{MagazineDef, ShellKind, ShotDef};
+use crate::game::collision::{segment_triangle, VehicleCollision, VehicleHit};
+use crate::game::item_defs::{MagazineDef, ShellKind, ShotDef};
 
-use super::physics::{Piece, Rubble};
+use crate::base::physics::{Piece, Rubble};
 
 
 /// The flight is followed in steps of this many seconds.
@@ -713,8 +713,8 @@ mod tests {
     use wgtk::space::destructibles::{DestructibleKind, Module, PenetrationLoss};
     use wgtk::space::statics::{PlacedDestructible, Statics, StaticTriangle};
 
-    use crate::wot::collision::{ArmorGroup, CollisionModel, VehiclePart};
-    use crate::wot::items::{item_type, IntCompactDescr};
+    use crate::game::collision::{ArmorGroup, CollisionModel, VehiclePart};
+    use crate::game::items::{item_type, IntCompactDescr};
     use crate::base::physics::World;
 
     use super::*;

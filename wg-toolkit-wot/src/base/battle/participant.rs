@@ -8,7 +8,7 @@ use tracing::info;
 use wgtk::app::entity::{ComponentKey, EntityKey};
 use wgtk::app::base::{self, ClientKey};
 
-use crate::wot::schema::{Avatar, AvatarVehiclesInfo};
+use crate::game::schema::{Avatar, AvatarVehiclesInfo};
 use crate::base::{VehicleConfig, TICK};
 use crate::base::physics::World;
 

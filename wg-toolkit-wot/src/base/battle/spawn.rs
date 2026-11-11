@@ -7,7 +7,7 @@ use glam::{Vec2, Vec3};
 
 use wgtk::space::terrain::Terrain;
 
-use crate::wot::arena_defs::{ArenaTypeDef, Spawn};
+use crate::game::arena_defs::{ArenaTypeDef, Spawn};
 
 
 /// Where a vehicle starts.

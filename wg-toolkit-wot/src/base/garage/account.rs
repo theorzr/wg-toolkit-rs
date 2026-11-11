@@ -18,8 +18,8 @@ use wgtk::pickle::{self, Value};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::pxml::Element;
 
-use crate::wot::items::{item_type, IntCompactDescr, TankmanDescr, VehicleDescr};
-use crate::wot::item_defs::{self, VehicleDef, NATIONS};
+use crate::game::items::{item_type, IntCompactDescr, TankmanDescr, VehicleDescr};
+use crate::game::item_defs::{self, VehicleDef, NATIONS};
 
 
 /// The money of every account, until accounts are stored.

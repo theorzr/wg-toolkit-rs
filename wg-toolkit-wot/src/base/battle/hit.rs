@@ -3,10 +3,10 @@
 
 use glam::Vec3;
 
-use crate::base::armor::{Explosion, Impact, Outcome};
-use crate::wot::collision::VehicleHit;
-use crate::wot::schema::HitPoint;
-use crate::base::gun::Shot;
+use crate::base::ballistics::armor::{Explosion, Impact, Outcome};
+use crate::game::collision::VehicleHit;
+use crate::base::ballistics::gun::Shot;
+use crate::game::schema::HitPoint;
 
 
 /// What a shell does to a vehicle, see the module's documentation.

@@ -14,7 +14,7 @@ use wgtk::space::statics::Statics;
 use wgtk::app::entity::EntityKey;
 
 use crate::base::physics::{wrap_angle, Breakage, Piece};
-use crate::wot::schema::AreaDestructibles;
+use crate::game::schema::AreaDestructibles;
 
 
 /// The destructibles' entities of a battle's chunks, see the module's documentation.

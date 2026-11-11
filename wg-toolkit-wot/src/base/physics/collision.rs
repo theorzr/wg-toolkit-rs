@@ -542,7 +542,7 @@ mod tests {
     use wgtk::app::slots::Slots;
     use wgtk::space::Space;
 
-    use crate::wot::item_defs::MobilityDef;
+    use crate::game::item_defs::MobilityDef;
 
     use super::super::fixtures::{chieftain, chieftain_aiming, chieftain_mobility, slope};
     use super::super::{movement_flag, rotation_of, Rubble, Vehicle, World};

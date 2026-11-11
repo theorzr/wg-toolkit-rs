@@ -28,12 +28,13 @@ use glam::{EulerRot, Quat, Vec2, Vec3};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
 
-use crate::wot::item_defs::{self, AimingDef, MobilityDef, VehicleDef};
-use crate::wot::arena_defs::{self, STANDARD_GAMEPLAY};
-use crate::wot::items::VehicleDescr;
+use crate::game::item_defs::{self, AimingDef, MobilityDef, VehicleDef};
+use crate::game::arena_defs::{self, STANDARD_GAMEPLAY};
+use crate::game::items::VehicleDescr;
 
-use super::physics::{wrap_angle, Hull, Rubble, Vehicle, World};
-use super::TICK;
+use crate::base::TICK;
+
+use super::{wrap_angle, Hull, Rubble, Vehicle, World};
 
 
 /// How long after the client sends its controls the server's positions follow them, in

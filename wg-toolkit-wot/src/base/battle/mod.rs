@@ -10,13 +10,14 @@
 //!
 //! A battle holds all it needs, and only tells its clients what happens through the app
 //! it is given, so that an app may run several, a thread of its own each, say. The base
-//! app only finds a client's battle, see [`BaseThread::battle_tick`].
+//! app only finds a client's battle, see [`crate::base`].
 //!
 //! ```text
 //!   (here)       a battle: made, its tick, its shells landing, its clients' calls
 //!   participant  a client in it: its avatar, its vehicle, what it sees
 //!   period       waiting, counting down, fighting
 //!   vehicle      a vehicle of it, a player's or a bot's: shown, its gun, damaged
+//!   bot          the server driving a vehicle: its way, its aim, when it fires
 //!   shells       its shells in flight, and their tracers
 //!   hit          what a shell does to a vehicle, as the clients are told
 //!   areas        what broke of its destructibles, by chunk
@@ -26,13 +27,13 @@
 mod participant;
 mod period;
 mod vehicle;
+mod bot;
 mod shells;
 mod hit;
 mod areas;
 mod spawn;
 
 use std::time::{Duration, Instant};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::io;
 
@@ -41,24 +42,20 @@ use glam::{Affine3A, Vec2, Vec3};
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::entity::{AnyEntity, Audience, EntityId, EntityKey};
-use wgtk::app::dispatch::MethodCall;
-use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
 
-use crate::wot::schema::{
+use crate::game::schema::{
     Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, ShotResult, VehicleCell,
 };
-use crate::wot::item_defs::{ShellKind, VehicleDef};
-use crate::wot::arena_defs::ArenaTypeDef;
-use crate::wot::items::VehicleDescr;
-
-use super::{
-    avatar_cell_data, invalid_data, space_properties, BaseThread, Player, VehicleConfig, EXPLOSION_STEP,
-    GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
+use crate::base::{
+    avatar_cell_data, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
-use super::gun::{HitTarget, Landing, Obstacles, Shot};
-use super::physics::{Vehicle, World};
-use super::armor::{self, Outcome};
+use crate::base::ballistics::gun::{HitTarget, Landing, Obstacles, Shot};
+use crate::game::item_defs::{ShellKind, VehicleDef};
+use crate::base::ballistics::armor::{self, Outcome};
+use crate::base::physics::{Vehicle, World};
+use crate::game::arena_defs::ArenaTypeDef;
+use crate::base::garage::player::Player;
 
 use vehicle::{hold_gun, BattleVehicle, Controller};
 use shells::{show_shot, show_tracer, Shells};
@@ -129,13 +126,13 @@ pub struct Arrival {
     pub config: VehicleConfig,
 }
 
-/// A battle waiting for its clients to enter before it is made, see
-/// [`BaseThread::gather`].
+/// A battle waiting for its clients to enter before it is made, as the base app gathers
+/// them, see [`crate::base`].
 #[derive(Debug)]
 pub struct Gathering {
     /// How many clients were switched into it, and those that entered.
-    expected: usize,
-    arrivals: Vec<Arrival>,
+    pub expected: usize,
+    pub arrivals: Vec<Arrival>,
     since: Instant,
 }
 
@@ -152,7 +149,7 @@ impl Gathering {
 
     /// Whether the battle is made now: all its clients entered, or those that did after
     /// [`GATHER_WAIT`].
-    fn due(&self) -> bool {
+    pub fn due(&self) -> bool {
         self.arrivals.len() >= self.expected || self.since.elapsed() >= GATHER_WAIT
     }
 
@@ -784,151 +781,6 @@ fn fill_targets(targets: &mut Vec<HitTarget>, vehicles: &[BattleVehicle], world:
     targets.extend(vehicles.iter()
         .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
         .map(|vehicle| vehicle.hit_target(world)));
-}
-
-impl BaseThread {
-
-    /// A client switched into a battle entered it, with its avatar: the battle gathers it,
-    /// and is made once due, see [`Self::make_battles`]. One coming after its battle was
-    /// made is sent back to its account.
-    pub fn gather(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, player: Player) -> io::Result<()> {
-
-        let Some(battle_client) = self.battle_clients.get(&client) else { return Ok(()) };
-        let (id, config) = (battle_client.battle, battle_client.config.clone());
-        let Some(gathering) = self.gatherings.get_mut(&id) else {
-            warn!(%client, battle = id, "Sent a client back: its battle was made without it");
-            return self.leave_battle(client);
-        };
-        gathering.arrivals.push(Arrival {
-            client,
-            avatar,
-            player,
-            config,
-        });
-        info!(%client, battle = id, entered = gathering.arrivals.len(), expected = gathering.expected, "Gathered a client for its battle");
-        self.make_battles();
-        Ok(())
-
-    }
-
-    /// Make the battles due, see [`Gathering::due`]: each in a space of its own with the
-    /// map, see [`Battle::new`].
-    fn make_battles(&mut self) {
-        let due: Vec<u32> = self.gatherings.iter()
-            .filter(|(_, gathering)| gathering.due())
-            .map(|(&id, _)| id)
-            .collect();
-        for id in due {
-            let Some(gathering) = self.gatherings.remove(&id) else { continue };
-            if gathering.arrivals.is_empty() {
-                warn!(battle = id, expected = gathering.expected, "Dropped a battle: none of its clients entered it");
-                continue;
-            }
-            if let Err(e) = self.make_battle(id, gathering.arrivals) {
-                warn!(battle = id, "Failed to make a battle: {e}");
-            }
-        }
-    }
-
-    /// Make a battle for these clients, in a space of its own with the map.
-    fn make_battle(&mut self, id: u32, arrivals: Vec<Arrival>) -> io::Result<()> {
-
-        // No `SetCellAppExtAddress`, which the captured server sends: given one, the
-        // client opens a direct connection to the cell app and waits for a cell login we
-        // can't answer yet, holding back its cell traffic. Without one, everything
-        // comes through this base app. No arena updates either, which the client
-        // defaults to, see the capture.
-        let space = self.app.create_space();
-        for data in space_properties(space.id()) {
-            self.app.set_space_property(space, data)?;
-        }
-        let SocketAddr::V4(entry_id) = self.app.addr()? else {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
-        };
-        self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
-
-        let own_def = match (self.battle_options.bot_vehicles.is_empty(), arrivals.first()) {
-            (true, Some(first)) => {
-                let decoded = VehicleDescr::decode(&first.config.descr).map_err(|e| invalid_data(&e.to_string()))?;
-                Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
-            }
-            _ => None,
-        };
-        let setup = BattleSetup {
-            map: &self.map,
-            space: self.space.clone(),
-            options: self.battle_options.clone(),
-            own_def,
-        };
-        let clients = arrivals.len();
-        let battle = Battle::new(&mut self.app, setup, space, id, arrivals)?;
-        self.battles.insert(id, battle);
-        info!(battle = id, clients, %space, "Made a battle: {}", self.map.geometry);
-        Ok(())
-
-    }
-
-    /// A client of a battle is ready, see [`Battle::ready`].
-    pub fn client_ready(&mut self, client: ClientKey) -> io::Result<()> {
-        let Self { app, battle_clients, battles, .. } = self;
-        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
-        battle.ready(app, client)
-    }
-
-    /// Take a client out of its battle, or of the one gathering it, see [`Battle::leave`]:
-    /// a battle left without clients is gone, with its space.
-    pub fn quit_battle(&mut self, client: ClientKey) {
-        let Some(id) = self.battle_clients.get(&client).map(|c| c.battle) else { return };
-        if let Some(gathering) = self.gatherings.get_mut(&id) {
-            let before = gathering.arrivals.len();
-            gathering.arrivals.retain(|arrival| arrival.client != client);
-            gathering.expected -= before - gathering.arrivals.len();
-        }
-        let Some(battle) = self.battles.get_mut(&id) else { return };
-        battle.leave(client);
-        if battle.is_empty() {
-            let space = battle.space();
-            self.battles.remove(&id);
-            self.app.destroy_space(space);
-            info!(battle = id, "Ended a battle: its last client left");
-        }
-    }
-
-    /// An entity of its battle was created on the client.
-    pub fn entity_entered(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>) {
-        let Self { app, battle_clients, battles, .. } = self;
-        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return };
-        if let Err(e) = battle.entity_entered(app, client, entity) {
-            warn!(%client, "Failed to drive the vehicle: {e}");
-        }
-    }
-
-    /// The client called a cell method.
-    pub fn cell_method(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>, call: &MethodCall) {
-        let Self { app, battle_clients, battles, .. } = self;
-        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else {
-            debug!(%client, %entity, "Ignored a cell method call out of a battle: {call:?}");
-            return;
-        };
-        if let Some((_, call)) = app.decode::<AvatarCell>(entity, call) {
-            battle.avatar_call(app, client, call);
-        } else if let Some((_, call)) = app.decode::<VehicleCell>(entity, call) {
-            battle.vehicle_call(client, call);
-        } else {
-            debug!(%client, %entity, "Ignored a cell method call: {call:?}");
-        }
-    }
-
-    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], then
-    /// give the clients what changed.
-    pub fn battle_tick(&mut self) {
-        self.make_battles();
-        for battle in self.battles.values_mut() {
-            battle.tick(&mut self.app);
-        }
-        self.app.end_tick();
-    }
-
 }
 
 

@@ -357,7 +357,7 @@ pub fn segment_triangle(from: Vec3, delta: Vec3, [a, b, c]: &[Vec3; 3]) -> Optio
 mod tests {
 
     use super::*;
-    use crate::wot::item_defs::VehicleDef;
+    use crate::game::item_defs::VehicleDef;
 
     #[test]
     fn encodes_a_hit_as_the_client_decodes_it() {
