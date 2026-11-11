@@ -23,7 +23,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use std::fs;
 
-use glam::{Quat, Vec2, Vec3};
+use glam::{EulerRot, Quat, Vec2, Vec3};
 
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
@@ -330,6 +330,9 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         hull.slide = velocity.dot(right);
         hull.linear_velocity = velocity;
         hull.match_tracks();
+        // It rolls and pitches as it did over its last tick: without, a hull starting as
+        // it rears up onto a rise comes up late, and its belly meets it.
+        hull.angular_velocity = (rotation_of(from.direction) * rotation_of(before.direction).inverse()).to_scaled_axis() / dt;
         let controls_at = |t: f64| drive.controls.iter().rev()
             .find(|&&(at, _)| at + delay <= t)
             .map_or(0, |&(_, flags)| flags);
@@ -371,6 +374,12 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
     }
     errors
 
+}
+
+/// The orientation of a roll, pitch and yaw, as the server gives them: yaw about Y, then
+/// pitch about X, then roll about Z.
+fn rotation_of(direction: Vec3) -> Quat {
+    Quat::from_euler(EulerRot::YXZ, direction.z, direction.y, direction.x)
 }
 
 /// How far the hull, left to rest on its suspension for [`REST_TIME`] where the real
