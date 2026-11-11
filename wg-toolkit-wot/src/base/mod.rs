@@ -2,6 +2,7 @@
 //! implementation. Its battles are in [`battle`].
 
 mod account;
+mod advertise;
 mod armor;
 mod battle;
 mod bot;
@@ -54,6 +55,8 @@ use crate::wot::item_prices::ItemPrices;
 use crate::wot::items::TankmanDescr;
 
 use gun::Gun;
+pub use advertise::AdvertiseRule;
+
 use battle::{Battle, BattleOptions};
 use player::{AccountIds, Player};
 use account::AccountData;
@@ -134,9 +137,14 @@ impl BaseThread {
         info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
         let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
 
+        if !args.advertise.is_empty() {
+            info!(rules = ?args.advertise, "Set up the addresses told to clients");
+        }
+
         Ok(Self {
             app,
             addr,
+            advertise: args.advertise.clone(),
             link,
             load: None,
             login_clients: HashMap::new(),
@@ -163,7 +171,10 @@ impl BaseThread {
 #[derive(Debug)]
 pub struct BaseThread {
     app: base::App,
+    /// Where it is bound, and what address it tells its clients, see the `advertise`
+    /// module.
     addr: SocketAddrV4,
+    advertise: Vec<AdvertiseRule>,
     link: LinkStream,
     /// The load last told to the login app, none when it should be told again.
     load: Option<u32>,
@@ -286,7 +297,8 @@ impl BaseThread {
                 LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
                     let player = self.account_ids.player(&client.name);
                     let hosted = login_client(&client, player).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
-                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(self.addr) };
+                    let base_app = advertise::advertised(&self.advertise, self.addr, client.addr);
+                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(base_app) };
                     if let Err(e) = self.link.send(&message) {
                         warn!(addr = %client.addr, "Failed to answer the login app: {e}");
                     }
@@ -388,9 +400,7 @@ impl BaseThread {
 
         self.app.entity(account)?.onArenaCreated()?;
 
-        let SocketAddr::V4(base_app) = self.app.addr()? else {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
-        };
+        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
         self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config));
         self.app.switch_base_app(client, base_app, true)?;
         self.accounts.remove(&client);
@@ -464,9 +474,7 @@ impl BaseThread {
         let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
             return Ok(());
         };
-        let SocketAddr::V4(base_app) = self.app.addr()? else {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
-        };
+        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
         self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
         if let Some(battle) = self.battle_clients.remove(&client).and_then(|c| c.battle) {
             self.app.destroy_space(battle.space());

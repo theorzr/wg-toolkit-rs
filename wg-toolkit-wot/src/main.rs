@@ -26,6 +26,8 @@ use clap::{Args, Parser, Subcommand};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::script::{self, Script};
 
+use crate::base::AdvertiseRule;
+
 
 /// World of Tanks server tools.
 ///
@@ -256,6 +258,13 @@ pub struct BaseArgs {
     /// yaw in degrees (0 north, 90 east), on the ground: its allies line up behind.
     #[arg(long, allow_hyphen_values = true, value_parser = parse_spawn)]
     pub spawn: Option<(f32, f32, f32)>,
+    /// Tell the clients of a network to reach the base app at this address, as
+    /// `<network>/<prefix>=<ip>[:<port>]` (`192.168.1.0/24=192.168.1.10:20017`), the port
+    /// the base app's if none. The most specific rule matching a client's address wins,
+    /// else it is told the base app's own address: the one its traffic comes in on, bound
+    /// to `0.0.0.0`. Can be repeated.
+    #[arg(long, value_name = "NETWORK/PREFIX=IP[:PORT]")]
+    pub advertise: Vec<AdvertiseRule>,
 }
 
 /// Parse a `--spawn` value, `<x>,<z>,<yaw>`.
