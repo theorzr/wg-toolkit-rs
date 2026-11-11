@@ -773,7 +773,7 @@ impl BaseThread {
 /// The configuration of the vehicle a client went to battle with: what the battle tells
 /// about it, and what the server simulates it with.
 #[derive(Debug, Clone)]
-struct VehicleConfig {
+pub struct VehicleConfig {
     descr: Vec<u8>,
     max_health: u32,
     /// Its crew's compact descriptors, in crew order.
