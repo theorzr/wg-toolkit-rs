@@ -1,6 +1,6 @@
 //! The battles of the server: each in a space of its own, with two teams of its clients'
 //! vehicles and bots, see [`BattleOptions`]: every vehicle the same, but who drives it,
-//! see [`Controller`].
+//! see [`Driver`].
 //!
 //! A battle gathers the clients the queue switched into it, waiting for them to enter,
 //! see [`Gathering`], then is made with them all at once: their vehicles, each one's own
@@ -50,20 +50,20 @@ use crate::game::schema::{
 use crate::base::{
     avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
-use crate::base::ballistics::gun::{Landing, Obstacles, Shot, ShotTarget};
+use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
 use crate::game::item_defs::{ShellKind, VehicleDef};
 use crate::base::ballistics::armor::{self, Outcome};
 use crate::base::physics::{Vehicle, World};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
-use vehicle::{hold_gun, BattleVehicle, Controller};
+use areas::{explosion_obstacle, DestructibleAreas};
+use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
 use hit::{ShellHit, HIT_FLAG_VEHICLE_KILLED};
-use areas::{explosion_obstacle, Areas};
 use participant::Participant;
-use period::Period;
-use spawn::Start;
+use period::ArenaPeriod;
+use spawn::TeamStart;
 
 
 /// A battle, with its clients, see the module's documentation.
@@ -78,13 +78,13 @@ pub struct Battle {
     options: BattleOptions,
     /// Its clients, each driving one of its vehicles.
     participants: Vec<Participant>,
-    period: Period,
+    period: ArenaPeriod,
     /// Its vehicles, its clients' first, then the bots on either side, and the world
     /// they move in.
     vehicles: Vec<BattleVehicle>,
     world: World,
     shells: Shells,
-    areas: Areas,
+    areas: DestructibleAreas,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
     targets: Vec<ShotTarget>,
     /// Whether a client has its vehicle: it runs from then on.
@@ -123,7 +123,7 @@ pub struct Arrival {
     pub client: ClientKey,
     pub avatar: EntityKey<Avatar>,
     pub player: Player,
-    pub config: VehicleLoadout,
+    pub loadout: VehicleLoadout,
 }
 
 /// A battle waiting for its clients to enter before it is made, as the base app gathers
@@ -172,28 +172,28 @@ impl Battle {
         // first of the team stands then: the first team's where the options spawn it, the
         // second's in front of it if the options say so.
         let first_start = match options.spawn {
-            Some((at, yaw)) => Start::at(at, yaw, terrain),
-            None => Start::team(map, terrain, TEAMS[0]),
+            Some((at, yaw)) => TeamStart::at(at, yaw, terrain),
+            None => TeamStart::team(map, terrain, TEAMS[0]),
         };
         let second_start = match options.enemy_distance {
             Some(distance) => first_start.facing(distance, terrain),
-            None => Start::team(map, terrain, TEAMS[1]),
+            None => TeamStart::team(map, terrain, TEAMS[1]),
         };
         let mut starts = [first_start, second_start];
         let mut team_sizes = [0; 2];
         let mut vehicles = Vec::new();
         for (index, arrival) in arrivals.iter().enumerate() {
 
-            let Arrival { client, avatar, player, config } = arrival;
+            let Arrival { client, avatar, player, loadout } = arrival;
             let side = index % 2;
             let slot = team_sizes[side];
             let at = starts[side].slot(slot, terrain);
             let info_index = vehicles.len() as u32;
-            let vehicle = BattleVehicle::player(app, &mut world, *client, *avatar, space, config, player.clone(), TEAMS[side], at, info_index)?;
+            let vehicle = BattleVehicle::player(app, &mut world, *client, *avatar, space, loadout, player.clone(), TEAMS[side], at, info_index)?;
 
             if slot == 0 {
                 let hull = &world.vehicle(vehicle.id).hull;
-                starts[side] = Start {
+                starts[side] = TeamStart {
                     position: hull.position,
                     direction: hull.direction(),
                 };
@@ -226,7 +226,7 @@ impl Battle {
         let bots = (0..2).flat_map(|side| (team_sizes[side]..options.team_size).map(move |slot| (side, slot)));
         for (index, (side, slot)) in bots.enumerate() {
             let (def, descr) = match (&own_def, arrivals.first()) {
-                (Some(def), Some(first)) => (def, first.config.descr.clone()),
+                (Some(def), Some(first)) => (def, first.loadout.descr.clone()),
                 _ => {
                     let def = &options.bot_vehicles[index % options.bot_vehicles.len()];
                     (def, def.descr.encode())
@@ -243,7 +243,7 @@ impl Battle {
         // Each client's arena info entity, its own only, created right away as entities
         // without an alias are, with the vehicles.
         let mut participants = Vec::with_capacity(arrivals.len());
-        for (index, Arrival { client, avatar, config, .. }) in arrivals.into_iter().enumerate() {
+        for (index, Arrival { client, avatar, loadout, .. }) in arrivals.into_iter().enumerate() {
             let info = app.create_entity::<AvatarInfo>(space, EntityInit {
                 controlled_by: Some(avatar.any()),
                 visibility: Visibility::Interest,
@@ -254,10 +254,10 @@ impl Battle {
             let mut vehicles_info = entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?;
             vehicles_info.set_vehiclesInfo(vehicles.iter().map(|vehicle| vehicle.info.clone()).collect())?;
             info!(battle = id, %client, entity_id = %info.id(), "Created the arena info");
-            participants.push(Participant::new(client, avatar, config, index, vehicles_info.key(), vehicles.len()));
+            participants.push(Participant::new(client, avatar, loadout, index, vehicles_info.key(), vehicles.len()));
         }
 
-        let areas = Areas::new(app, space, &world.space().statics)?;
+        let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
 
         Ok(Self {
@@ -266,7 +266,7 @@ impl Battle {
             clock: Instant::now(),
             options,
             participants,
-            period: Period::new(),
+            period: ArenaPeriod::new(),
             vehicles,
             world,
             shells: Shells::default(),
@@ -333,7 +333,7 @@ impl Battle {
         let Some(at) = self.participants.iter().position(|participant| participant.client == client) else { return };
         let participant = self.participants.remove(at);
         let vehicle = &mut self.vehicles[participant.vehicle];
-        vehicle.controller = Controller::Nobody;
+        vehicle.driver = Driver::Nobody;
         self.world.vehicle_mut(vehicle.id).hull.flags = 0;
         info!(battle = self.id, %client, left = self.participants.len(), "Left a battle");
     }
@@ -347,7 +347,7 @@ impl Battle {
         if own.entity.any() != entity {
             return Ok(());
         }
-        own.enter(app, &participant.config)?;
+        own.enter(app, &participant.loadout)?;
         self.running = true;
         Ok(())
     }
@@ -422,7 +422,7 @@ impl Battle {
         let own = &mut vehicles[own];
         let driven = world.vehicle(own.id);
         let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
-        let obstacles = Obstacles {
+        let obstacles = ShotObstacles {
             space: world.space(),
             rubble: world.rubble(),
         };
@@ -488,7 +488,7 @@ impl Battle {
 
     }
 
-    /// Step it by a tick: every vehicle moves as its controller drives it, a wreck or one
+    /// Step it by a tick: every vehicle moves as its driver drives it, a wreck or one
     /// nobody drives stopping where it was shoved, and those that ran into each other are
     /// pushed apart, see [`World::step`]. Then each client is shown the vehicles its own
     /// spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
@@ -508,10 +508,10 @@ impl Battle {
             let enemy = nearest_enemy(vehicles, world, index);
             let vehicle = &mut vehicles[index];
             let alive = vehicle.alive();
-            match (&mut vehicle.controller, alive) {
+            match (&mut vehicle.driver, alive) {
                 (_, false) => world.vehicle_mut(vehicle.id).hull.flags = 0,
-                (Controller::Bot(bot), true) => bot.drive(world, vehicle.id, enemy, drives),
-                (Controller::Client(_) | Controller::Nobody, true) => {}
+                (Driver::Bot(bot), true) => bot.drive(world, vehicle.id, enemy, drives),
+                (Driver::Client(_) | Driver::Nobody, true) => {}
             }
         }
         world.step(TICK.as_secs_f32());
@@ -525,7 +525,7 @@ impl Battle {
             let enemy = nearest_enemy(vehicles, world, index);
 
             let shoved = &world.vehicle(vehicles[index].id).hull;
-            if matches!(vehicles[index].controller, Controller::Bot(_)) && (shoved.speed != 0.0 || shoved.slide != 0.0) {
+            if matches!(vehicles[index].driver, Driver::Bot(_)) && (shoved.speed != 0.0 || shoved.slide != 0.0) {
                 debug!(
                     battle = id,
                     entity_id = %vehicles[index].entity.id(),
@@ -548,14 +548,14 @@ impl Battle {
             vehicle.put_out_fire(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
-            let obstacles = Some(Obstacles {
+            let obstacles = Some(ShotObstacles {
                 space: world.space(),
                 rubble: world.rubble(),
             });
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
             let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, obstacles, targets);
-            if let (None, Controller::Bot(bot), Some(enemy), true) = (&shot, &vehicle.controller, enemy, bots_fire) {
+            if let (None, Driver::Bot(bot), Some(enemy), true) = (&shot, &vehicle.driver, enemy, bots_fire) {
                 if bot.on_target(driven, enemy) {
                     shot = vehicle.gun.fire(now, position, velocity, dispersion, obstacles, targets);
                 }
@@ -591,7 +591,7 @@ impl Battle {
 
         // What a destructible hit breaks the clients break as the shell explodes.
         let mut damaged = Vec::new();
-        if let Landing::Static { piece: Some(hit), .. } = shot.landing {
+        if let ShotLanding::Static { piece: Some(hit), .. } = shot.landing {
             let yaw = shot.end_velocity.x.atan2(shot.end_velocity.z);
             let damage = shot.def.damage_at(shot.distance());
             let broken = self.world.shoot(hit.instance, hit.piece, damage, yaw);
@@ -613,7 +613,7 @@ impl Battle {
         }
 
         match shot.landing {
-            Landing::Vehicle { entity_id, hit, transforms } => {
+            ShotLanding::Vehicle { entity_id, hit, transforms } => {
                 let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id().0 == entity_id);
                 let Some(collision) = vehicle.map(|vehicle| vehicle.collision.clone()) else { return Ok(()) };
                 let Some(impact) = armor::hit(def, shot.distance(), shot.pen_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
@@ -630,8 +630,8 @@ impl Battle {
                 }
                 Ok(())
             }
-            Landing::Terrain | Landing::Static { .. } => {
-                if let Landing::Static { normal, .. } = shot.landing {
+            ShotLanding::Terrain | ShotLanding::Static { .. } => {
+                if let ShotLanding::Static { normal, .. } = shot.landing {
                     debug!(battle = id, shot = shot.id, "Hit a static model at {:?}, facing {normal:?}", shot.end);
                 }
                 // EXPERIMENT: the explosion comes for a shot the client does not know, so
@@ -653,7 +653,7 @@ impl Battle {
                 }
                 // Off the ground only: a static model stops a shell whole.
                 let skims = match shot.landing {
-                    Landing::Terrain => {
+                    ShotLanding::Terrain => {
                         let normal = self.world.space().terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
                         armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND).then_some(normal)
                     }
@@ -667,7 +667,7 @@ impl Battle {
                 }
                 Ok(())
             }
-            Landing::Range => Ok(()),
+            ShotLanding::Range => Ok(()),
         }
 
     }
@@ -694,7 +694,7 @@ impl Battle {
                 vehicle.transforms = transforms;
             }
         }
-        let obstacles = Obstacles {
+        let obstacles = ShotObstacles {
             space: self.world.space(),
             rubble: self.world.rubble(),
         };
@@ -734,7 +734,7 @@ impl Battle {
         let vehicles_infos: Vec<_> = self.participants.iter().map(|participant| participant.vehicles_info).collect();
         let shooter_avatar = self.vehicles.iter()
             .find(|vehicle| vehicle.entity.id() == shooter)
-            .and_then(|vehicle| vehicle.driver())
+            .and_then(|vehicle| vehicle.client_driver())
             .map(|driver| driver.avatar());
         let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
             return Ok(());
@@ -764,7 +764,7 @@ impl Battle {
 /// fights. None for a vehicle no bot drives.
 fn nearest_enemy(vehicles: &[BattleVehicle], world: &World, index: usize) -> Option<Vec3> {
     let vehicle = &vehicles[index];
-    if !matches!(vehicle.controller, Controller::Bot(_)) {
+    if !matches!(vehicle.driver, Driver::Bot(_)) {
         return None;
     }
     let position = world.vehicle(vehicle.id).hull.position;
@@ -780,7 +780,7 @@ fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world
     targets.clear();
     targets.extend(vehicles.iter()
         .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
-        .map(|vehicle| vehicle.hit_target(world)));
+        .map(|vehicle| vehicle.shot_target(world)));
 }
 
 

@@ -1,7 +1,7 @@
 //! A vehicle's gun as the server runs it: its ammunition, the shell loaded, its magazine
 //! and bursts, the reload, and each shot's flight until it hits a vehicle, the terrain,
 //! a static model, or runs out of range, and on off what it ricochets off. Vehicles are
-//! hit on their collision models, static models on theirs, see [`Obstacles`].
+//! hit on their collision models, static models on theirs, see [`ShotObstacles`].
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use wgtk::space::Space;
 use crate::game::collision::{segment_triangle, VehicleCollision, VehicleIntersection};
 use crate::game::item_defs::{MagazineDef, ShellKind, ShotDef};
 
-use crate::base::physics::{Piece, Rubble};
+use crate::base::physics::{DestructiblePiece, Rubble};
 
 
 /// The flight is followed in steps of this many seconds.
@@ -28,7 +28,7 @@ const RICOCHET_STANDOFF: f32 = 0.001;
 
 
 #[derive(Debug, Clone)]
-pub struct Gun {
+pub struct GunLoader {
     /// Each shell the gun fires, and how many are left of it, those in the gun included
     /// until fired.
     pub ammo: Vec<(ShotDef, u32)>,
@@ -100,7 +100,7 @@ pub struct Shot {
     pub end_velocity: Vec3,
     /// When it gets to `end`, in seconds after firing.
     pub flight_time: f32,
-    pub landing: Landing,
+    pub landing: ShotLanding,
     /// The destructibles it flies through on its way to `end`, in order: each breaks as
     /// it gets there, see [`super::physics::World::break_shot`].
     pub through: Vec<ShotPiece>,
@@ -112,7 +112,7 @@ pub struct Shot {
 
 /// What a shell ends its flight on.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Landing {
+pub enum ShotLanding {
     /// A vehicle, placed by `transforms` as it was then, see [`ShotTarget`].
     Vehicle { entity_id: u32, hit: VehicleIntersection, transforms: [Affine3A; 4] },
     Terrain,
@@ -128,8 +128,8 @@ pub enum Landing {
 /// A destructible a shell meets. One of no more health than
 /// [`Destructibles::shoot_through_health`] is flown through, breaking, the shell losing
 /// some of its penetration, see [`Destructibles::shoot_through_loss`]; a stronger one
-/// stops it, see [`Landing::Static`]. An HE or HESH shell explodes on whatever it meets,
-/// and flies through nothing.
+/// stops it, see [`ShotLanding::Static`]. An HE or HESH shell explodes on whatever it
+/// meets, and flies through nothing.
 ///
 /// [`Destructibles::shoot_through_health`]: wgtk::space::destructibles::Destructibles::shoot_through_health
 /// [`Destructibles::shoot_through_loss`]: wgtk::space::destructibles::Destructibles::shoot_through_loss
@@ -137,7 +137,7 @@ pub enum Landing {
 pub struct ShotPiece {
     /// The placed model of the triangle it met, its index in `BSMI`.
     pub instance: u32,
-    pub piece: Piece,
+    pub piece: DestructiblePiece,
     /// When the shell gets there, in seconds after its start, as [`Shot::flight_time`].
     pub time: f32,
 }
@@ -145,7 +145,7 @@ pub struct ShotPiece {
 /// What of a map a shell can hit besides vehicles: its terrain and its static models,
 /// but for what broke of them.
 #[derive(Debug, Clone, Copy)]
-pub struct Obstacles<'a> {
+pub struct ShotObstacles<'a> {
     pub space: &'a Space,
     pub rubble: &'a Rubble,
 }
@@ -159,7 +159,7 @@ pub struct ShotTarget {
     pub transforms: [Affine3A; 4],
 }
 
-impl Gun {
+impl GunLoader {
 
     /// A gun with these shells and no magazine, loaded with the first one there is, then
     /// loading it again, ready to fire.
@@ -209,7 +209,7 @@ impl Gun {
     /// else reloads whole with its next shell, or another one once there is none of it
     /// left. That reload starts now, the burst's other shells in it, for the client to
     /// know when it can fire again as soon as it fires.
-    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         self.settle(now);
         if self.burst_shells.is_some() || !self.is_loaded(now) || self.magazine_shells == 0 {
@@ -234,7 +234,7 @@ impl Gun {
     /// Fire the next shell of the burst going on, if it is due by game time `now`, as
     /// [`Self::fire`] does, whose reload goes on. Once the burst empties the magazine,
     /// the gun loads its next shell.
-    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         let (left, at) = self.burst_shells.filter(|&(_, at)| now >= at)?;
         let Some(shot) = self.shoot(start, direction, dispersion, obstacles, vehicles) else {
@@ -380,7 +380,7 @@ impl Gun {
     }
 
     /// Fire a shell of the magazine, without waiting or reloading.
-    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<Obstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         if self.magazine_shells == 0 {
             return None;
@@ -467,7 +467,7 @@ impl Shot {
     /// same speed, as the server shows ricochets, for the rest of its range, keeping
     /// `pen_factor` of its penetration. None once it ricocheted [`MAX_RICOCHETS`] times,
     /// or out of range.
-    pub fn ricochet(&self, direction: Vec3, pen_factor: f32, obstacles: Option<Obstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    pub fn ricochet(&self, direction: Vec3, pen_factor: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
         if self.ricochets >= MAX_RICOCHETS {
             return None;
         }
@@ -541,7 +541,7 @@ struct Flight {
     end_velocity: Vec3,
     /// When it gets to `end`, in seconds after its start.
     flight_time: f32,
-    landing: Landing,
+    landing: ShotLanding,
     /// What it flew through, in order.
     through: Vec<ShotPiece>,
     /// The share of its shell's penetration it kept, what it flew through taken.
@@ -552,7 +552,7 @@ struct Flight {
 /// terrain, a static model, or its range. Each step is a segment that is tested against
 /// all of them, the nearest along it winning. Destructibles weak enough are flown
 /// through, see [`ShotPiece`].
-fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[ShotTarget]) -> Flight {
+fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Flight {
 
     let Launch { start, velocity, flown, range, mut pen_factor } = launch;
     let mut position = start;
@@ -567,11 +567,11 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[
         let next_velocity = velocity - Vec3::Y * def.gravity * FLIGHT_STEP;
 
         // The first thing the step meets, as a share of it, and what it lands on.
-        let mut first: Option<(f32, Landing)> = vehicles.iter()
+        let mut first: Option<(f32, ShotLanding)> = vehicles.iter()
             .filter_map(|vehicle| Some((vehicle, vehicle.collision.first_hit(&vehicle.transforms, position, next)?)))
             .min_by(|a, b| a.1.fraction.total_cmp(&b.1.fraction))
             .map(|(vehicle, hit)| {
-                let landing = Landing::Vehicle {
+                let landing = ShotLanding::Vehicle {
                     entity_id: vehicle.entity_id,
                     hit,
                     transforms: vehicle.transforms,
@@ -583,7 +583,7 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[
         if let Some(obstacles) = obstacles {
             let statics = meet_statics(obstacles, def, position, next, time, &mut crossed);
             let terrain = cross_terrain(obstacles, position, next)
-                .map(|t| (t, Landing::Terrain));
+                .map(|t| (t, ShotLanding::Terrain));
             for candidate in [statics, terrain].into_iter().flatten() {
                 if first.as_ref().is_none_or(|(t, _)| candidate.0 < *t) {
                     first = Some(candidate);
@@ -621,7 +621,7 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[
                 end: next,
                 end_velocity: next_velocity,
                 flight_time: time + FLIGHT_STEP,
-                landing: Landing::Range,
+                landing: ShotLanding::Range,
                 through,
                 pen_factor,
             };
@@ -643,19 +643,19 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<Obstacles>, vehicles: &[
 ///
 /// [`StaticTriangle::shells_pass`]: wgtk::space::statics::StaticTriangle::shells_pass
 fn meet_statics(
-    obstacles: Obstacles,
+    obstacles: ShotObstacles,
     def: &ShotDef,
     from: Vec3,
     to: Vec3,
     time: f32,
     crossed: &mut Vec<(f32, ShotPiece)>,
-) -> Option<(f32, Landing)> {
+) -> Option<(f32, ShotLanding)> {
 
-    let Obstacles { space, rubble } = obstacles;
+    let ShotObstacles { space, rubble } = obstacles;
     let statics = &space.statics;
     let min = from.min(to);
     let max = from.max(to);
-    let mut stop: Option<(f32, Landing)> = None;
+    let mut stop: Option<(f32, ShotLanding)> = None;
     let explodes = matches!(def.kind(), ShellKind::HighExplosive | ShellKind::ArmorPiercingHe);
 
     for kind in [BodyKind::Solid, BodyKind::Ramp, BodyKind::Destructible] {
@@ -680,7 +680,7 @@ fn meet_statics(
                 met = Some(piece_met);
             }
             if stop.as_ref().is_none_or(|(first, _)| t < *first) {
-                let landing = Landing::Static {
+                let landing = ShotLanding::Static {
                     normal,
                     piece: met,
                 };
@@ -695,7 +695,7 @@ fn meet_statics(
 
 /// Where a step from `from` to `to` goes into the terrain, as a share of it: the ground
 /// taken as flat between the two ends.
-fn cross_terrain(obstacles: Obstacles, from: Vec3, to: Vec3) -> Option<f32> {
+fn cross_terrain(obstacles: ShotObstacles, from: Vec3, to: Vec3) -> Option<f32> {
     let terrain = &obstacles.space.terrain;
     let ground = terrain.height_at(to.x, to.z)?;
     if to.y > ground {
@@ -744,10 +744,10 @@ mod tests {
 
     #[test]
     fn fires_then_reloads() {
-        let mut gun = Gun::new(vec![(shell(), 2)], 10.0);
+        let mut gun = GunLoader::new(vec![(shell(), 2)], 10.0);
         let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert_eq!(shot.velocity, Vec3::Z * 800.0);
-        assert_eq!(shot.landing, Landing::Range);
+        assert_eq!(shot.landing, ShotLanding::Range);
         assert!((shot.end.length() - 720.0).abs() < 5.0);
         assert!(gun.fire(5.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
         assert!(!gun.take_loaded(5.0));
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn ricochets_at_the_same_speed_for_the_rest_of_its_range() {
-        let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
+        let mut gun = GunLoader::new(vec![(shell(), 1)], 10.0);
         let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         // As if it hit something 100 m on.
         shot.end = Vec3::Z * 100.0;
@@ -771,7 +771,7 @@ mod tests {
         assert!((off.velocity - Vec3::X * 800.0).length() < 1e-3, "{}", off.velocity);
         assert!((off.range - 620.0).abs() < 0.1, "{}", off.range);
         assert_eq!(off.pen_factor, 0.75);
-        assert_eq!(off.landing, Landing::Range);
+        assert_eq!(off.landing, ShotLanding::Range);
         // Out of range where it ends, else at most `MAX_RICOCHETS` times.
         assert!(off.ricochet(-Vec3::X, 1.0, None, &[]).is_none());
         let mut last = off;
@@ -787,14 +787,14 @@ mod tests {
         ShotDef { compact_descr: IntCompactDescr { item_type: item_type::SHELL, nation: 5, id }, ..shell() }
     }
 
-    fn loaded_ids(gun: &Gun) -> (u16, u16) {
+    fn loaded_ids(gun: &GunLoader) -> (u16, u16) {
         let (loaded, next) = gun.shells();
         (loaded.unwrap().compact_descr.id, next.unwrap().compact_descr.id)
     }
 
     #[test]
     fn loads_the_next_shell_after_firing() {
-        let mut gun = Gun::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
+        let mut gun = GunLoader::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
         assert!(gun.select_next(shell_of(2).compact_descr.to_int()));
         assert_eq!(loaded_ids(&gun), (1, 2));
         assert_eq!(gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap().def.compact_descr.id, 1);
@@ -806,14 +806,14 @@ mod tests {
 
     #[test]
     fn next_shell_falls_back_once_out() {
-        let mut gun = Gun::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
+        let mut gun = GunLoader::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
         gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
         assert_eq!(loaded_ids(&gun), (2, 2));
     }
 
     #[test]
     fn changes_the_loaded_shell_quickly_once_loaded() {
-        let mut gun = Gun::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_quick_change_factor(0.25);
+        let mut gun = GunLoader::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_quick_change_factor(0.25);
         let second = shell_of(2).compact_descr.to_int();
         assert!(gun.change_loaded(0.0, second));
         assert_eq!(loaded_ids(&gun), (2, 2));
@@ -832,17 +832,17 @@ mod tests {
         MagazineDef { size, interval: 2.0, burst_size, burst_interval: 0.5 }
     }
 
-    fn fire(gun: &mut Gun, now: f64) -> Option<Shot> {
+    fn fire(gun: &mut GunLoader, now: f64) -> Option<Shot> {
         gun.fire(now, Vec3::ZERO, Vec3::Z, 0.0, None, &[])
     }
 
-    fn magazine_shells(gun: &Gun) -> Vec<u32> {
+    fn magazine_shells(gun: &GunLoader) -> Vec<u32> {
         gun.ammo_state().map(|(_, _, magazine_shells)| magazine_shells).collect()
     }
 
     #[test]
     fn empties_its_magazine_then_reloads_it_whole() {
-        let mut gun = Gun::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_magazine(magazine(3, 1));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 5), (shell_of(2), 5)], 10.0).with_magazine(magazine(3, 1));
         assert_eq!(magazine_shells(&gun), [3, 0]);
         assert_eq!(fire(&mut gun, 0.0).unwrap().burst, Some(1));
         // The magazine's interval, as a reload of its own for the client to fire again.
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn fills_its_magazine_with_what_is_left() {
-        let mut gun = Gun::new(vec![(shell_of(1), 2)], 10.0).with_magazine(magazine(3, 1));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 2)], 10.0).with_magazine(magazine(3, 1));
         assert_eq!(magazine_shells(&gun), [2]);
         fire(&mut gun, 0.0).unwrap();
         fire(&mut gun, 2.0).unwrap();
@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn fires_a_burst_then_waits_its_magazine_interval() {
-        let mut gun = Gun::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(6, 3));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(6, 3));
         let first = fire(&mut gun, 0.0).unwrap();
         assert_eq!(first.burst, Some(3));
         // The burst's other shells, then the magazine's interval.
@@ -894,7 +894,7 @@ mod tests {
 
     #[test]
     fn holds_a_burst_without_a_magazine() {
-        let mut gun = Gun::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(1, 2));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(1, 2));
         assert_eq!(magazine_shells(&gun), [2]);
         assert_eq!(fire(&mut gun, 0.0).unwrap().burst, Some(2));
         gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn reloads_a_partial_magazine() {
-        let mut gun = Gun::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1));
         // Full, of the next shell.
         assert!(!gun.reload_magazine(0.0));
         fire(&mut gun, 0.0).unwrap();
@@ -916,7 +916,7 @@ mod tests {
         assert!(fire(&mut gun, 11.0).is_some());
         assert_eq!(magazine_shells(&gun), [2, 0]);
         // A full magazine of another shell than the next.
-        let mut gun = Gun::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1));
+        let mut gun = GunLoader::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1));
         gun.select_next(shell_of(2).compact_descr.to_int());
         assert!(gun.reload_magazine(0.0));
         assert_eq!(loaded_ids(&gun), (2, 2));
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn changes_shells_quickly_only_with_a_full_magazine() {
         let factor = 0.25;
-        let mut gun = Gun::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1)).with_quick_change_factor(factor);
+        let mut gun = GunLoader::new(vec![(shell_of(1), 10), (shell_of(2), 10)], 10.0).with_magazine(magazine(3, 1)).with_quick_change_factor(factor);
         fire(&mut gun, 0.0).unwrap();
         assert!(gun.take_loaded(2.0));
         assert!(gun.change_loaded(2.0, shell_of(2).compact_descr.to_int()));
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn hits_a_vehicle_in_its_way() {
-        let mut gun = Gun::new(vec![(shell(), 1)], 10.0);
+        let mut gun = GunLoader::new(vec![(shell(), 1)], 10.0);
         // A plate 3 m in front of the hull's origin, the hull 100 m ahead.
         let plate = |triangles| CollisionModel { groups: vec![ArmorGroup { name: "armor_1".into(), material_kind: 1, material: None, triangles }], radius: 5.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
         let a = Vec3::new(-2.0, -1.0, -3.0);
@@ -952,7 +952,7 @@ mod tests {
         let hull = Affine3A::from_translation(Vec3::new(0.0, 0.0, 100.0));
         let target = ShotTarget { entity_id: 7, collision: Arc::new(collision), transforms: [hull; 4] };
         let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[target]).unwrap();
-        let Landing::Vehicle { entity_id: 7, hit, .. } = shot.landing else { panic!("missed: {:?}", shot.landing) };
+        let ShotLanding::Vehicle { entity_id: 7, hit, .. } = shot.landing else { panic!("missed: {:?}", shot.landing) };
         assert_eq!(hit.part, VehiclePart::Hull);
         assert_eq!(hit.material_kind, 1);
         assert_eq!(hit.normal, -Vec3::Z);
@@ -1005,8 +1005,8 @@ mod tests {
 
     /// Fire a shell at a space straight along +Z.
     fn fire_at(space: &Space, rubble: &Rubble, def: ShotDef) -> Shot {
-        let mut gun = Gun::new(vec![(def, 1)], 10.0);
-        let obstacles = Obstacles {
+        let mut gun = GunLoader::new(vec![(def, 1)], 10.0);
+        let obstacles = ShotObstacles {
             space,
             rubble,
         };
@@ -1019,7 +1019,7 @@ mod tests {
         // A wall, or a ramp, stops it where it meets it, facing it.
         for kind in [BodyKind::Solid, BodyKind::Ramp] {
             let shot = fire_at(&wall(kind, 0.0, false, false), &rubble, shell());
-            let landing = Landing::Static {
+            let landing = ShotLanding::Static {
                 normal: -Vec3::Z,
                 piece: None,
             };
@@ -1030,7 +1030,7 @@ mod tests {
         // A fence of 10 health it flies through, breaking it, 25 mm of its penetration
         // lost.
         let shot = fire_at(&wall(BodyKind::Destructible, 10.0, false, false), &rubble, shell());
-        assert_eq!(shot.landing, Landing::Range);
+        assert_eq!(shot.landing, ShotLanding::Range);
         assert_eq!(shot.through.len(), 1);
         assert_eq!((shot.through[0].instance, shot.through[0].piece.index), (0, 1));
         // When it gets there, not when it lands.
@@ -1044,19 +1044,19 @@ mod tests {
             ..shell()
         };
         let shot = fire_at(&wall(BodyKind::Destructible, 10.0, false, false), &rubble, he.clone());
-        let Landing::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
+        let ShotLanding::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
         assert_eq!(hit.piece.index, 1);
         assert!(shot.through.is_empty());
         // A light fence shells pass, neither stops nor breaks, whatever the shell.
         let light = wall(BodyKind::Destructible, 1.0, false, true);
         for def in [shell(), he] {
             let shot = fire_at(&light, &rubble, def);
-            assert_eq!(shot.landing, Landing::Range);
+            assert_eq!(shot.landing, ShotLanding::Range);
             assert!(shot.through.is_empty());
         }
         // A house's module of 50 health stops it, hit.
         let shot = fire_at(&wall(BodyKind::Destructible, 50.0, true, false), &rubble, shell());
-        let Landing::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
+        let ShotLanding::Static { piece: Some(hit), .. } = shot.landing else { panic!("{:?}", shot.landing) };
         assert_eq!((hit.instance, hit.piece.module), (0, Some(73)));
         assert!(shot.through.is_empty());
         // Shells' damage adds up on it: 30 then 30 of its 50 break it, once.
@@ -1067,7 +1067,7 @@ mod tests {
         assert!(world.shoot(0, hit.piece, 30.0, 0.0).is_empty());
         // Once broken, it isn't there.
         let shot = fire_at(world.space(), world.rubble(), shell());
-        assert_eq!(shot.landing, Landing::Range);
+        assert_eq!(shot.landing, ShotLanding::Range);
         assert_eq!(world.take_breakages().count(), 1);
     }
 

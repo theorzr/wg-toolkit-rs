@@ -13,13 +13,13 @@ use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::statics::Statics;
 use wgtk::app::entity::EntityKey;
 
-use crate::base::physics::{wrap_angle, Breakage, Piece};
+use crate::base::physics::{wrap_angle, Breakage, DestructiblePiece};
 use crate::game::schema::AreaDestructibles;
 
 
 /// The destructibles' entities of a battle's chunks, see the module's documentation.
 #[derive(Debug)]
-pub struct Areas {
+pub struct DestructibleAreas {
     /// Each chunk's, by its id.
     areas: HashMap<u16, Area>,
 }
@@ -33,7 +33,7 @@ struct Area {
     columns: Vec<[u8; 3]>,
 }
 
-impl Areas {
+impl DestructibleAreas {
 
     /// The destructibles' entity of each chunk of a battle's space that has some, created
     /// right away, as the real server does.
@@ -131,7 +131,7 @@ impl Area {
 
 /// A piece as an explosion lists it, see `explodeProjectile`: none of an index the code
 /// has no room for.
-pub fn explosion_obstacle(piece: Piece) -> Option<u32> {
+pub fn explosion_obstacle(piece: DestructiblePiece) -> Option<u32> {
     let index = u8::try_from(piece.index).ok()?;
     Some(u32::from(piece.chunk_id) << 16 | u32::from(index) << 8 | u32::from(piece.module.unwrap_or(0)))
 }

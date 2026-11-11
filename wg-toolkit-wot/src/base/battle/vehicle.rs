@@ -21,14 +21,14 @@ use crate::base::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
+use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
 use crate::game::collision::{VehicleCollision, VehiclePart};
-use crate::base::ballistics::gun::{Gun, Shot, ShotTarget};
 use crate::base::physics::{Vehicle, VehicleId, World};
 use crate::base::garage::player::Player;
 use crate::game::item_defs::VehicleDef;
 
+use super::spawn::TeamStart;
 use super::hit::ShellHit;
-use super::spawn::Start;
 use super::VIEW_RANGE;
 use super::bot::Bot;
 
@@ -42,11 +42,11 @@ pub struct BattleVehicle {
     pub info: VehicleInfo,
     pub info_index: u32,
     /// Who drives it.
-    pub controller: Controller,
+    pub driver: Driver,
     /// The vehicle the server simulates, in the battle's world, its gun and its collision
     /// models.
     pub id: VehicleId,
-    pub gun: Gun,
+    pub gun: GunLoader,
     pub collision: Arc<VehicleCollision>,
     pub health: i64,
     pub max_health: i64,
@@ -62,7 +62,7 @@ pub struct BattleVehicle {
 
 /// Who drives a vehicle: its controls and its aim.
 #[derive(Debug)]
-pub enum Controller {
+pub enum Driver {
     /// A client of the battle, through its avatar's and the vehicle's cell methods.
     Client(ClientDriver),
     /// The server, see [`Bot`].
@@ -96,14 +96,14 @@ impl BattleVehicle {
         client: ClientKey,
         avatar: EntityKey<Avatar>,
         space: SpaceKey,
-        config: &VehicleLoadout,
+        loadout: &VehicleLoadout,
         player: Player,
         team: u8,
-        start: Start,
+        start: TeamStart,
         info_index: u32,
     ) -> io::Result<Self> {
 
-        let public = public_info(player.name, &config.descr, team, config.max_health as u16, config.crew.len());
+        let public = public_info(player.name, &loadout.descr, team, loadout.max_health as u16, loadout.crew.len());
         let vehicle = app.create_entity::<schema::Vehicle>(space, EntityInit {
             position: start.position,
             direction: start.direction,
@@ -114,7 +114,7 @@ impl BattleVehicle {
         })?;
         info!(%avatar, entity_id = %vehicle.id(), "Created the vehicle, at {:?}", start.position);
 
-        let driven = Vehicle::new(start.position, start.direction, config.mobility, config.aiming.clone());
+        let driven = Vehicle::new(start.position, start.direction, loadout.mobility, loadout.aiming.clone());
         let info = vehicle_info(vehicle.id(), &public, player.id);
         let mut entity = app.entity(vehicle)?;
         init_vehicle(&mut entity, avatar.id(), public, driven.turret.gun_angles_packed())?;
@@ -125,21 +125,21 @@ impl BattleVehicle {
         entity.set_perkEffects(PerkEffects::default())?;
         entity.set_perks(Vec::new())?;
         entity.set_perksRibbonNotify(Vec::new())?;
-        entity.set_crewCompactDescrs(config.crew.iter().cloned().map(Bytes).collect())?;
+        entity.set_crewCompactDescrs(loadout.crew.iter().cloned().map(Bytes).collect())?;
         entity.set_enhancements(empty_dict())?;
-        entity.set_setups(Pickle(config.setups.clone()))?;
-        entity.set_setupsIndexes(Pickle(config.setup_indexes.clone()))?;
+        entity.set_setups(Pickle(loadout.setups.clone()))?;
+        entity.set_setupsIndexes(Pickle(loadout.setup_indexes.clone()))?;
         entity.set_vehPerks(empty_dict())?;
         entity.set_disabledSwitches(Vec::new())?;
         entity.set_ownVehiclePosition(None)?;
 
-        let ammo = config.shots.iter().cloned().zip(config.ammo.iter().map(|&(_, count)| count)).collect();
+        let ammo = loadout.shots.iter().cloned().zip(loadout.ammo.iter().map(|&(_, count)| count)).collect();
         Ok(Self {
             entity: vehicle,
             team,
             info,
             info_index,
-            controller: Controller::Client(ClientDriver {
+            driver: Driver::Client(ClientDriver {
                 client,
                 avatar,
                 own_vehicle: None,
@@ -147,12 +147,12 @@ impl BattleVehicle {
                 engine_gear: None,
             }),
             id: world.add(driven),
-            gun: Gun::new(ammo, config.aiming.reload_time)
-                .with_magazine(config.magazine)
+            gun: GunLoader::new(ammo, loadout.aiming.reload_time)
+                .with_magazine(loadout.magazine)
                 .with_quick_change_factor(QUICK_SHELL_CHANGER_FACTOR),
-            collision: config.collision.clone(),
-            health: config.max_health.into(),
-            max_health: config.max_health.into(),
+            collision: loadout.collision.clone(),
+            health: loadout.max_health.into(),
+            max_health: loadout.max_health.into(),
             engine_mode: None,
             strafing: false,
             damage_stickers: Vec::new(),
@@ -173,14 +173,14 @@ impl BattleVehicle {
         compact_descr: &[u8],
         team: u8,
         name: String,
-        start: Start,
+        start: TeamStart,
         info_index: u32,
         index: i32,
     ) -> io::Result<Self> {
 
-        let Start { position, direction } = start;
+        let TeamStart { position, direction } = start;
         let ammo = def.shots.iter().cloned().zip(def.default_ammo().into_iter().map(|(_, count)| count)).collect();
-        let gun = Gun::new(ammo, def.aiming.reload_time).with_magazine(def.magazine).with_shot_ids_from(BOT_FIRST_SHOT_ID * (index + 1));
+        let gun = GunLoader::new(ammo, def.aiming.reload_time).with_magazine(def.magazine).with_shot_ids_from(BOT_FIRST_SHOT_ID * (index + 1));
         let driven = Vehicle::new(position, direction, def.mobility, def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
 
@@ -202,7 +202,7 @@ impl BattleVehicle {
             team,
             info,
             info_index,
-            controller: Controller::Bot(Bot::default()),
+            driver: Driver::Bot(Bot::default()),
             id: world.add(driven),
             gun,
             collision: def.collision.clone(),
@@ -221,10 +221,10 @@ impl BattleVehicle {
     }
 
     /// What its client has of it, if a client drives it.
-    pub fn driver(&self) -> Option<&ClientDriver> {
-        match &self.controller {
-            Controller::Client(driver) => Some(driver),
-            Controller::Bot(_) | Controller::Nobody => None,
+    pub fn client_driver(&self) -> Option<&ClientDriver> {
+        match &self.driver {
+            Driver::Client(driver) => Some(driver),
+            Driver::Bot(_) | Driver::Nobody => None,
         }
     }
 
@@ -234,7 +234,7 @@ impl BattleVehicle {
     }
 
     /// It as shells hit it: its collision models where its parts are.
-    pub fn hit_target(&self, world: &World) -> ShotTarget {
+    pub fn shot_target(&self, world: &World) -> ShotTarget {
         let collision = self.collision.clone();
         ShotTarget {
             entity_id: self.entity.id().0,
@@ -246,20 +246,20 @@ impl BattleVehicle {
     /// Its client has it, of the given configuration: from there on it drives it. Then its
     /// `OwnVehicle` component: the client only turns its turret once it knows how fast it
     /// can. Its `GunMarkerComponent` too, for the client's server reticle.
-    pub fn enter(&mut self, app: &mut base::App, config: &VehicleLoadout) -> io::Result<()> {
+    pub fn enter(&mut self, app: &mut base::App, loadout: &VehicleLoadout) -> io::Result<()> {
 
-        let Controller::Client(driver) = &mut self.controller else { return Ok(()) };
+        let Driver::Client(driver) = &mut self.driver else { return Ok(()) };
         let entity_id = self.entity.id();
         let mut entity = app.entity(self.entity)?;
         let mut own_vehicle = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
         // No crew or equipment bonus: the view range all vehicles have here.
         own_vehicle.set_syncVehicleAttrs(VehicleSyncAttrs { circularVisionRadius: VIEW_RANGE as u16, gunPiercing: 1.0, gunShotsSpeed: 1.0 })?;
-        own_vehicle.set_targetingInfo(Some(targeting_info(config)))?;
+        own_vehicle.set_targetingInfo(Some(targeting_info(loadout)))?;
         // What the real server sends right after, as updates: the ammunition, the
         // shells loaded, the reload and the health.
         own_vehicle.set_vehicleAmmoList(gun_ammo_list(&self.gun))?;
         own_vehicle.set_vehicleSettings(vehicle_settings(entity_id, &self.gun))?;
-        own_vehicle.set_vehicleGunReloadTime(gun_reload_time(config.aiming.reload_time, 0.0, 0.0))?;
+        own_vehicle.set_vehicleGunReloadTime(gun_reload_time(loadout.aiming.reload_time, 0.0, 0.0))?;
         own_vehicle.set_vehicleHealthInfo(vehicle_health_info(entity_id, self.health))?;
         let own_vehicle = own_vehicle.key();
         let mut marker = entity.add_component::<GunMarkerComponent>(Audience::OwnClient)?;
@@ -317,7 +317,7 @@ impl BattleVehicle {
     /// the shells first, as it expects.
     pub fn show_loaded(&mut self, app: &mut base::App, now: f64) -> io::Result<()> {
         let loaded = self.gun.take_loaded(now);
-        if let (Some(own_vehicle), true) = (self.driver().and_then(|driver| driver.own_vehicle), loaded) {
+        if let (Some(own_vehicle), true) = (self.client_driver().and_then(|driver| driver.own_vehicle), loaded) {
             let mut own_vehicle = app.component(own_vehicle)?;
             if self.gun.has_magazine() {
                 own_vehicle.set_vehicleAmmoList(gun_ammo_list(&self.gun))?;
@@ -328,9 +328,9 @@ impl BattleVehicle {
     }
 
     /// Its gun fired the rest of a burst: its client is told its shells and their
-    /// settings, its reload having started with the burst, see `Gun::fire`.
+    /// settings, its reload having started with the burst, see `GunLoader::fire`.
     pub fn show_burst(&self, app: &mut base::App) -> io::Result<()> {
-        if let Some(own_vehicle) = self.driver().and_then(|driver| driver.own_vehicle) {
+        if let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) {
             let mut own_vehicle = app.component(own_vehicle)?;
             own_vehicle.set_vehicleAmmoList(gun_ammo_list(&self.gun))?;
             own_vehicle.set_vehicleSettings(vehicle_settings(self.entity.id(), &self.gun))?;
@@ -340,7 +340,7 @@ impl BattleVehicle {
 
     /// Give its client its gun as it is at game time `now`, if a client drives it.
     pub fn show_gun(&self, app: &mut base::App, now: f64) -> io::Result<()> {
-        match self.driver().and_then(|driver| driver.own_vehicle) {
+        match self.client_driver().and_then(|driver| driver.own_vehicle) {
             Some(own_vehicle) => show_gun(app, own_vehicle, self.entity.id(), &self.gun, now),
             None => Ok(()),
         }
@@ -349,9 +349,9 @@ impl BattleVehicle {
     /// Give its client, if a client drives it, what only it knows of it, `driven` in the
     /// world, its gun's marker as given, see [`ClientDriver::show`].
     pub fn show_own(&mut self, app: &mut base::App, driven: &Vehicle, marker: (Vec3, Vec3, f32)) -> io::Result<()> {
-        match &mut self.controller {
-            Controller::Client(driver) => driver.show(app, driven, marker),
-            Controller::Bot(_) | Controller::Nobody => Ok(()),
+        match &mut self.driver {
+            Driver::Client(driver) => driver.show(app, driven, marker),
+            Driver::Bot(_) | Driver::Nobody => Ok(()),
         }
     }
 
@@ -389,7 +389,7 @@ impl BattleVehicle {
             }
         };
 
-        let Some(own_vehicle) = self.driver().and_then(|driver| driver.own_vehicle) else { return Ok(()) };
+        let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) else { return Ok(()) };
         if reloads {
             show_gun(app, own_vehicle, self.entity.id(), &self.gun, now)
         } else {
@@ -421,7 +421,7 @@ impl BattleVehicle {
         let bounds = self.collision.parts[shell_hit.hit.part as usize].bounds;
         if amount > 0 {
             info!(battle, %entity_id, %shooter, "Damaged a vehicle: {amount}, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
-            if let Some(own_vehicle) = self.driver().and_then(|driver| driver.own_vehicle) {
+            if let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) {
                 app.component(own_vehicle)?.set_vehicleHealthInfo(vehicle_health_info(entity_id, new_health))?;
             }
         }
@@ -627,7 +627,7 @@ fn default_dog_tag() -> DogTag {
 
 /// Give the client its gun as it is: its shells and how many are left, in its magazine
 /// too, the shells it loads, and its reload if any.
-fn show_gun(app: &mut base::App, own: ComponentKey<OwnVehicle>, entity_id: EntityId, gun: &Gun, now: f64) -> io::Result<()> {
+fn show_gun(app: &mut base::App, own: ComponentKey<OwnVehicle>, entity_id: EntityId, gun: &GunLoader, now: f64) -> io::Result<()> {
     let mut own = app.component(own)?;
     own.set_vehicleAmmoList(gun_ammo_list(gun))?;
     own.set_vehicleSettings(vehicle_settings(entity_id, gun))?;
@@ -638,7 +638,7 @@ fn show_gun(app: &mut base::App, own: ComponentKey<OwnVehicle>, entity_id: Entit
 }
 
 /// The `vehicleAmmoList` of a gun.
-fn gun_ammo_list(gun: &Gun) -> Vec<schema::VehicleAmmo> {
+fn gun_ammo_list(gun: &GunLoader) -> Vec<schema::VehicleAmmo> {
     ammo_list(gun.ammo_state().map(|(def, count, in_magazine)| (def.compact_descr.to_int(), count, in_magazine)))
 }
 
@@ -646,7 +646,7 @@ fn gun_ammo_list(gun: &Gun) -> Vec<schema::VehicleAmmo> {
 /// its whole reload's length once loaded. The real server gives a quick shell change as
 /// a whole reload first, then as its share, and back on loaded; the share alone is
 /// enough here.
-fn reload_time(gun: &Gun, now: f64) -> schema::GunReloadTime {
+fn reload_time(gun: &GunLoader, now: f64) -> schema::GunReloadTime {
     match gun.reload() {
         Some(reload) => {
             // Just started, exactly its length, as the client checks it.

@@ -13,7 +13,7 @@ use wgtk::app::entity::Bytes;
 
 /// See the module's documentation.
 #[derive(Debug, Clone, Copy)]
-pub enum Period {
+pub enum ArenaPeriod {
     /// Waiting for its clients to be ready, since when.
     Waiting(Instant),
     /// Counting down, until when.
@@ -22,7 +22,7 @@ pub enum Period {
     Battle(Instant),
 }
 
-impl Period {
+impl ArenaPeriod {
 
     /// Waiting from now.
     pub fn new() -> Self {

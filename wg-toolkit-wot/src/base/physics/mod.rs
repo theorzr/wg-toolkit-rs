@@ -202,7 +202,7 @@ use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::ground::ground_at;
 use self::nav::NavGrid;
 
-pub use self::rubble::{Breakage, Piece, Rubble};
+pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
 pub use self::turret::Turret;
 
 
@@ -549,12 +549,12 @@ impl<S: Deref<Target = Space>> World<S> {
     // -- What breaks --
 
     /// Break a piece a shell flew through, see [`Rubble::break_shot`].
-    pub fn break_shot(&mut self, instance: u32, piece: Piece, yaw: f32) {
+    pub fn break_shot(&mut self, instance: u32, piece: DestructiblePiece, yaw: f32) {
         self.rubble.break_shot(&self.space.statics, instance, piece, yaw);
     }
 
     /// Damage a piece a shell hit and stopped on, see [`Rubble::shoot`]. What broke.
-    pub fn shoot(&mut self, instance: u32, piece: Piece, damage: f32, yaw: f32) -> &[Breakage] {
+    pub fn shoot(&mut self, instance: u32, piece: DestructiblePiece, damage: f32, yaw: f32) -> &[Breakage] {
         self.rubble.shoot(&self.space.statics, instance, piece, damage, yaw)
     }
 

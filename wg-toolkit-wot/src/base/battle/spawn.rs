@@ -12,13 +12,13 @@ use crate::game::arena_defs::{ArenaTypeDef, Spawn};
 
 /// Where a vehicle starts.
 #[derive(Debug, Clone, Copy)]
-pub struct Start {
+pub struct TeamStart {
     pub position: Vec3,
     /// Roll, pitch and yaw.
     pub direction: Vec3,
 }
 
-impl Start {
+impl TeamStart {
 
     /// Where a team's vehicle starts on a map: at its spawn point, else
     /// [`SPAWN_BEHIND_BASE`] behind its base, facing the enemy's spawn, inside the map and

@@ -61,7 +61,7 @@ use crate::game::item_prices::ItemPrices;
 use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering};
 use garage::player::{AccountIds, Player};
 use garage::account::{self, Garage};
-use ballistics::gun::Gun;
+use ballistics::gun::GunLoader;
 use garage::shop::Shop;
 pub use advertise::AdvertiseRule;
 
@@ -124,7 +124,7 @@ impl BaseThread {
         };
         info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
             bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
-        let account = Garage::new(&fs, &vehicles)
+        let garage = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
             info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, "Gave the account a vehicle: {}", vehicle.name);
@@ -151,7 +151,7 @@ impl BaseThread {
             load: None,
             login_clients: HashMap::new(),
             account_ids: AccountIds::default(),
-            account,
+            garage,
             shop,
             required_version,
             game_dir: game_dir.to_path_buf(),
@@ -190,7 +190,7 @@ pub struct BaseThread {
     /// Each player name's account id, until accounts are stored.
     account_ids: AccountIds,
     /// Every player's garage, until accounts are stored.
-    account: Garage,
+    garage: Garage,
     shop: Shop,
     /// The client version required, the client's own.
     required_version: String,
@@ -232,7 +232,7 @@ struct BattleClient {
     /// Its battle's id.
     battle: u32,
     /// Its vehicle's configuration.
-    config: VehicleLoadout,
+    loadout: VehicleLoadout,
     /// Its avatar, once created.
     avatar: Option<EntityKey<Avatar>>,
 }
@@ -431,8 +431,8 @@ impl BaseThread {
             return Ok(false);
         };
         let player = player.clone();
-        let config = match self.vehicle_config(vehicle_id) {
-            Ok(config) => config,
+        let loadout = match self.vehicle_loadout(vehicle_id) {
+            Ok(loadout) => loadout,
             Err(e) => {
                 warn!(%client, vehicle_id, "Failed to read the vehicle: {e}");
                 return Ok(false);
@@ -442,7 +442,7 @@ impl BaseThread {
         self.app.entity(account)?.onArenaCreated()?;
 
         let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
-        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config, battle));
+        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, loadout, battle));
         self.app.switch_base_app(client, base_app, true)?;
         self.accounts.remove(&client);
         self.players.remove(&client);
@@ -454,8 +454,8 @@ impl BaseThread {
 
     /// The configuration of the vehicle of the given inventory id: its descriptor, crew
     /// and setups from the account, the rest from the game's definitions.
-    fn vehicle_config(&self, vehicle_id: i64) -> io::Result<VehicleLoadout> {
-        let vehicle = self.account.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
+    fn vehicle_loadout(&self, vehicle_id: i64) -> io::Result<VehicleLoadout> {
+        let vehicle = self.garage.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
         let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
         info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
@@ -539,7 +539,7 @@ impl BaseThread {
                     .ok_or_else(|| invalid_data("Syncing the account of no player"))?
                     .revision;
                 if revision == 0 {
-                    let data = account::compress(&self.account.data(current))?;
+                    let data = account::compress(&self.garage.data(current))?;
                     self.stream(client, account, request_id, &data)?;
                 } else {
                     let ext = pickle_dict([("prevRev", PickleValue::from(revision)), ("rev", PickleValue::from(current))]);
@@ -669,7 +669,7 @@ impl BaseThread {
                     }
 
                     // A client coming back for its battle, see `start_battle`.
-                    if let Some((ip, blowfish, player, config, battle)) = self.pending_switches.remove(&login.login_key) {
+                    if let Some((ip, blowfish, player, loadout, battle)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid address after the switch");
                             continue;
@@ -680,7 +680,7 @@ impl BaseThread {
                             self.players.insert(client, player);
                             self.battle_clients.insert(client, BattleClient {
                                 battle,
-                                config,
+                                loadout,
                                 avatar: None,
                             });
                         }
@@ -769,7 +769,7 @@ impl BaseThread {
     fn gather(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, player: Player) -> io::Result<()> {
 
         let Some(battle_client) = self.battle_clients.get(&client) else { return Ok(()) };
-        let (id, config) = (battle_client.battle, battle_client.config.clone());
+        let (id, loadout) = (battle_client.battle, battle_client.loadout.clone());
         let Some(gathering) = self.gatherings.get_mut(&id) else {
             warn!(%client, battle = id, "Sent a client back: its battle was made without it");
             return self.leave_battle(client);
@@ -778,7 +778,7 @@ impl BaseThread {
             client,
             avatar,
             player,
-            config,
+            loadout,
         });
         info!(%client, battle = id, entered = gathering.arrivals.len(), expected = gathering.expected, "Gathered a client for its battle");
         self.make_battles();
@@ -824,7 +824,7 @@ impl BaseThread {
 
         let own_def = match (self.battle_options.bot_vehicles.is_empty(), arrivals.first()) {
             (true, Some(first)) => {
-                let decoded = VehicleDescr::decode(&first.config.descr).map_err(|e| invalid_data(&e.to_string()))?;
+                let decoded = VehicleDescr::decode(&first.loadout.descr).map_err(|e| invalid_data(&e.to_string()))?;
                 Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
             }
             _ => None,
@@ -1130,8 +1130,8 @@ fn space_properties(space_id: u32) -> impl Iterator<Item = Vec<u8>> {
 
 /// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and
 /// dispersion factors from its definitions, without the crew's and equipment's bonuses.
-fn targeting_info(config: &VehicleLoadout) -> TargetingInfo {
-    let aiming = &config.aiming;
+fn targeting_info(loadout: &VehicleLoadout) -> TargetingInfo {
+    let aiming = &loadout.aiming;
     TargetingInfo {
         turretYaw: 0.0,
         gunPitch: 0.0,
@@ -1156,7 +1156,7 @@ const SETTING_RELOAD_PARTIAL_CLIP: u8 = 17;
 const SETTING_RESET_FULL_CLIP: u8 = 18;
 
 /// The `vehicleSettings` of a vehicle with this gun: its shell loaded, then the next one.
-fn vehicle_settings(entity_id: EntityId, gun: &Gun) -> Vec<VehicleSetting> {
+fn vehicle_settings(entity_id: EntityId, gun: &GunLoader) -> Vec<VehicleSetting> {
     let (loaded, next) = gun.shells();
     [(SETTING_CURRENT_SHELLS, loaded), (SETTING_NEXT_SHELLS, next)].into_iter()
         .map(|(code, shell)| VehicleSetting { code, value: shell.map_or(0, |def| def.compact_descr.to_int() as i32), vehicleID: entity_id })

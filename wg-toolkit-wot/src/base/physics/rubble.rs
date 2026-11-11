@@ -2,10 +2,10 @@
 //! ([`Rubble::shoot`]), and what of them still stands ([`Rubble`]).
 //!
 //! The [`Statics`] is the map as built and never changes. What broke during the
-//! battle is the world's [`Rubble`]. A [`Piece`] is what the client numbers: a
-//! destructible by its chunk's id and its index there, and for a house, which module,
-//! by its material kind. A house can be placed as several models, all of them the same
-//! piece, so breaking one breaks the others with it.
+//! battle is the world's [`Rubble`]. A [`DestructiblePiece`] is what the client
+//! numbers: a destructible by its chunk's id and its index there, and for a house, which
+//! module, by its material kind. A house can be placed as several models, all of them
+//! the same piece, so breaking one breaks the others with it.
 //!
 //! ```text
 //!   a triangle the hull touches, of kind Destructible
@@ -14,8 +14,8 @@
 //!   statics.destructible(instance) ──▶ PlacedDestructible { chunk_id, index, kind, … }
 //!     │                                   │ a house: its module by triangle.material_kind
 //!     ▼                                   ▼
-//!   Piece { chunk_id, index, module } ──▶ in rubble.broken?  yes: it is gone, ignored
-//!                                                            no:  it stands
+//!   DestructiblePiece                 ──▶ in rubble.broken?  yes: it is gone, ignored
+//!     { chunk_id, index, module }                            no:  it stands
 //! ```
 //!
 //! What a piece still standing does depends on its kind:
@@ -126,7 +126,7 @@ impl Hull {
         //    it, the way from its middle to the triangle's.
         let footprint = self.footprint();
         let middle = footprint.middle;
-        let mut hits: SmallVec<[(Piece, &PlacedDestructible, Vec2, Vec2); 8]> = SmallVec::new();
+        let mut hits: SmallVec<[(DestructiblePiece, &PlacedDestructible, Vec2, Vec2); 8]> = SmallVec::new();
         let statics = &space.statics;
         for (triangle, against) in self.rammed(dt, RAM_REACH, space, rubble) {
             let Some((piece, destructible)) = rubble.standing(statics, triangle) else { continue };
@@ -194,7 +194,7 @@ fn ram_contact(footprint: &Footprint, against: Vec2, center: Vec2) -> Vec2 {
 /// structure's modules by its material kind. A destructible can be placed as several
 /// models, a house's walls and roof say, each a piece of it alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Piece {
+pub struct DestructiblePiece {
     /// Its chunk's id and its index in it, see [`PlacedDestructible`].
     pub chunk_id: u16,
     pub index: u16,
@@ -204,7 +204,7 @@ pub struct Piece {
 /// A destructible a vehicle or a shell broke, as its clients are told of it.
 #[derive(Debug, Clone, Copy)]
 pub struct Breakage {
-    pub piece: Piece,
+    pub piece: DestructiblePiece,
     pub kind: DestructibleKind,
     /// Which way it falls, the yaw the vehicle or the shell went, in radians.
     pub yaw: f32,
@@ -218,21 +218,21 @@ pub struct Breakage {
 /// damage those still standing took.
 #[derive(Debug, Default)]
 pub struct Rubble {
-    broken: HashSet<Piece>,
+    broken: HashSet<DestructiblePiece>,
     fresh: Vec<Breakage>,
-    damage: HashMap<Piece, f32>,
+    damage: HashMap<DestructiblePiece, f32>,
 }
 
 impl Rubble {
 
     /// The piece a static triangle is of, if it is destructible and still stands.
-    pub fn standing<'a>(&self, statics: &'a Statics, triangle: &StaticTriangle) -> Option<(Piece, &'a PlacedDestructible)> {
+    pub fn standing<'a>(&self, statics: &'a Statics, triangle: &StaticTriangle) -> Option<(DestructiblePiece, &'a PlacedDestructible)> {
         let destructible = statics.destructible(triangle.instance)?;
         let module = match destructible.kind {
             DestructibleKind::Structure => Some(destructible.module(triangle.material_kind as u8)?.material_kind),
             _ => None,
         };
-        let piece = Piece {
+        let piece = DestructiblePiece {
             chunk_id: destructible.chunk_id,
             index: destructible.index,
             module,
@@ -248,7 +248,7 @@ impl Rubble {
     }
 
     /// Damage a piece: its health, and the damage it took in all.
-    fn damage(&mut self, destructible: &PlacedDestructible, piece: Piece, damage: f32) -> Option<(f32, f32)> {
+    fn damage(&mut self, destructible: &PlacedDestructible, piece: DestructiblePiece, damage: f32) -> Option<(f32, f32)> {
         let health = destructible.health_of(piece.module)?;
         let done = self.damage.entry(piece).or_default();
         *done += damage;
@@ -256,12 +256,12 @@ impl Rubble {
     }
 
     /// Break a piece, a module the others it brings down with it, each told of.
-    fn break_piece(&mut self, destructible: &PlacedDestructible, piece: Piece, yaw: f32, speed: f32, shot: bool) {
+    fn break_piece(&mut self, destructible: &PlacedDestructible, piece: DestructiblePiece, yaw: f32, speed: f32, shot: bool) {
         let depends = piece.module
             .and_then(|module| destructible.module(module))
             .map(|module| module.depends.as_slice())
             .unwrap_or_default();
-        let brought = depends.iter().map(|&module| Piece {
+        let brought = depends.iter().map(|&module| DestructiblePiece {
             module: Some(module),
             ..piece
         });
@@ -281,7 +281,7 @@ impl Rubble {
     /// Break a piece a shell flew through, with the modules it brings down, the shell
     /// going `yaw`: its placed model by its index in `BSMI`, of the triangle it met.
     /// Nothing if it is already broken.
-    pub fn break_shot(&mut self, statics: &Statics, instance: u32, piece: Piece, yaw: f32) {
+    pub fn break_shot(&mut self, statics: &Statics, instance: u32, piece: DestructiblePiece, yaw: f32) {
         let Some(destructible) = statics.destructible(instance) else { return };
         self.break_piece(destructible, piece, yaw, 0.0, true);
     }
@@ -289,7 +289,7 @@ impl Rubble {
     /// Damage a piece a shell hit and stopped on, a house's module say, the shell going
     /// `yaw`: it breaks once the damage of all the shells that hit it is its health,
     /// with the modules it brings down. What broke.
-    pub fn shoot(&mut self, statics: &Statics, instance: u32, piece: Piece, damage: f32, yaw: f32) -> &[Breakage] {
+    pub fn shoot(&mut self, statics: &Statics, instance: u32, piece: DestructiblePiece, damage: f32, yaw: f32) -> &[Breakage] {
         let fresh = self.fresh.len();
         if let Some(destructible) = statics.destructible(instance)
             && !self.broken.contains(&piece)

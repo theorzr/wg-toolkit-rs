@@ -13,7 +13,7 @@ use crate::base::{VehicleLoadout, TICK};
 use crate::base::physics::World;
 
 use super::vehicle::BattleVehicle;
-use super::period::Period;
+use super::period::ArenaPeriod;
 use super::VIEW_RANGE;
 
 
@@ -23,7 +23,7 @@ pub struct Participant {
     pub client: ClientKey,
     pub avatar: EntityKey<Avatar>,
     /// Its vehicle's configuration, and its vehicle, by its index among the battle's.
-    pub config: VehicleLoadout,
+    pub loadout: VehicleLoadout,
     pub vehicle: usize,
     /// The arena's vehicles, on its own info entity.
     pub vehicles_info: ComponentKey<AvatarVehiclesInfo>,
@@ -39,7 +39,7 @@ impl Participant {
     pub fn new(
         client: ClientKey,
         avatar: EntityKey<Avatar>,
-        config: VehicleLoadout,
+        loadout: VehicleLoadout,
         vehicle: usize,
         vehicles_info: ComponentKey<AvatarVehiclesInfo>,
         vehicles: usize,
@@ -47,7 +47,7 @@ impl Participant {
         Self {
             client,
             avatar,
-            config,
+            loadout,
             vehicle,
             vehicles_info,
             spotted: vec![false; vehicles],
@@ -82,7 +82,7 @@ impl Participant {
 
     /// Tell its client the battle's period, as long as is left of it: its game time is
     /// the ticks it got.
-    pub fn show_period(&self, app: &mut base::App, period: Period) -> io::Result<()> {
+    pub fn show_period(&self, app: &mut base::App, period: ArenaPeriod) -> io::Result<()> {
         let game_time = f64::from(app.ticks(self.client).unwrap_or(0)) * TICK.as_secs_f64();
         let Some((kind, data)) = period.arena_update(game_time)? else { return Ok(()) };
         app.entity(self.avatar)?.updateArena(kind, data)?;
