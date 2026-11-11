@@ -96,7 +96,8 @@
 //!                     into what it touches last:
 //!                       3. held off: a spring past its travel sinks no further, up; a
 //!                          track's end or a box gets no deeper along its normal
-//!                       4. a track's: held across, at under, within its side grip
+//!                       4. a track's: held across, at under, within its side grip;
+//!                          its end, climbing what it meets, see below
 //!                          any other: scrapes, within SCRAPE_FRICTION · how hard pressed
 //!                       5. in what it touches: moved back out, split
 //!   after the passes    its belts (see the end of this section)
@@ -154,6 +155,11 @@
 //! it spins, from the ground's speed if it touches it, toward what its drive asks of it
 //! ([`Drive::track_goal`]), as hard as half the engine's torque, or of its brakes, can
 //! spin [`TRACK_MASS`] of the vehicle's weight.
+//!
+//! A track's end meeting a step or a rock face head on climbs it, its belt gripping
+//! the face: pushed up it, along the hull's heading, toward the belt's speed, within
+//! [`CLIMB_GRIP`] of how hard it is held off it. Only held off, the hull would lose its
+//! speed to every step its tracks' fronts meet, where the game's ride up.
 //!
 //! Its tracks lie on the ground under all of their contacts: their normal `n`, which
 //! their springs push along too, is theirs together, so that a bump shorter than they
@@ -274,6 +280,12 @@ const FRICTION_HEIGHT: f32 = 0.7;
 /// takes; that it means this is our reading. A debris pile's ramp on Ruinberg, its foot
 /// 26 to 32° steep, stopped the T110E4 dead from 8 m/s, where the real one climbed it.
 const ROLLER_FLAT: f32 = 35.0 * std::f32::consts::PI / 180.0;
+/// How much a track's end climbs what it meets head on, as a share of how hard it is
+/// held off it: its belt, gripping the face, pulls it up. From the game:
+/// `ROLLER_FRICTION_GAIN_MAX` in `physics_shared.py`, read as this share. At 1, a Type 64
+/// meeting a house's step on Live Oaks at 15 m/s rolled over; at 0.25, the T110E4 climbs
+/// the Ruinberg debris it lost a third of its speed to.
+const CLIMB_GRIP: f32 = 0.25;
 
 impl Hull {
 
@@ -380,6 +392,7 @@ impl Hull {
             stops: SmallVec::from_elem(0.0, loads.touches.len()),
             scrapes: SmallVec::from_elem(Vec3::ZERO, loads.touches.len()),
             holds: SmallVec::from_elem(0.0, loads.touches.len()),
+            climbs: SmallVec::from_elem(0.0, loads.touches.len()),
             touches: loads.touches,
             pushed: Pushed::default(),
             push_velocity: Vec3::ZERO,
@@ -704,6 +717,7 @@ impl Hull {
             stops,
             scrapes,
             holds,
+            climbs,
             pushed,
             push_velocity,
             push_spin,
@@ -754,6 +768,9 @@ impl Hull {
                 let used = if drive.handbrake() { 0.0 } else { pushed.used() };
                 let left = pressed * (1.0 - used * used).max(0.0).sqrt();
                 self.hold_across(touch, *axes, &body, left, &mut holds[index]);
+                if let Hold::Out { .. } = touch.hold {
+                    self.climb(touch, heading, &body, stops[index], &mut climbs[index]);
+                }
             } else {
                 let (along, across) = ground_axes(heading, touch.normal);
                 let velocity = self.velocity_at(arm);
@@ -819,6 +836,24 @@ impl Hull {
         *so_far = held;
         self.linear_velocity += impulse / body.mass;
         self.angular_velocity += body.inverse_inertia * under.cross(impulse);
+    }
+
+    /// One pass of a track's end climbing what it meets head on, its belt gripping it: up
+    /// what it touches, along its `heading`, toward its belt's speed, within
+    /// [`CLIMB_GRIP`] of how hard it is held off it, `held`. Its impulse so far is
+    /// `so_far`. Without, a track's end meeting a step would only be held back off it.
+    fn climb(&mut self, touch: &Touch, heading: Vec3, body: &Mass, held: f32, so_far: &mut f32) {
+        let Some(side) = touch.side else { return };
+        let up = (heading - touch.normal * heading.dot(touch.normal)).normalize_or_zero();
+        if heading.dot(touch.normal) >= 0.0 || up.y <= 0.0 {
+            return;
+        }
+        let belt = self.tracks[side.index()].max(0.0);
+        let short = belt - self.velocity_at(touch.arm).dot(up);
+        let limit = CLIMB_GRIP * held;
+        let climbed = (*so_far + short / body.per_impulse(touch.arm, up)).clamp(-limit, limit);
+        self.take(up * (climbed - *so_far), touch.arm, body);
+        *so_far = climbed;
     }
 
     /// One pass of its tracks pushing it along and turning it, as its drive says: along
@@ -1035,6 +1070,7 @@ pub struct Step {
     stops: SmallVec<[f32; MAX_TOUCHES]>,
     scrapes: SmallVec<[Vec3; MAX_TOUCHES]>,
     holds: SmallVec<[f32; MAX_TOUCHES]>,
+    climbs: SmallVec<[f32; MAX_TOUCHES]>,
     pushed: Pushed,
     pub push_velocity: Vec3,
     pub push_spin: Vec3,
