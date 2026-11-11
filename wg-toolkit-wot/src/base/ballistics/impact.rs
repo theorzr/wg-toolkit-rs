@@ -1,5 +1,6 @@
-//! What a shell does to the vehicle it meets: whether it pierces its armour, stops or
-//! ricochets, and its damage. AP, APCR and HEAT shells follow the client's own rules,
+//! What a shell does to what it meets: to a vehicle, whether it pierces its armour, stops
+//! or ricochets, and its damage, and off the ground, whether it skims, see
+//! [`GroundMaterial`]. AP, APCR and HEAT shells follow the client's own rules,
 //! `_CrosshairShotResults` in `gun_marker_ctrl.py`. HE shells follow the legacy rules
 //! instead: they explode on the armour they don't pierce, and on the ground near a
 //! vehicle, damaging it by the explosion's distance and the armour it goes through.
@@ -51,7 +52,7 @@ pub struct GroundMaterial {
 /// What a shell does when it hits a vehicle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Impact {
-    pub outcome: Outcome,
+    pub outcome: ImpactOutcome,
     /// Where the outcome happens: the armour it pierces, stops on or ricochets off.
     pub hit: VehicleIntersection,
     /// The damage it deals, before its spread: the shell's when it pierces, its
@@ -63,7 +64,7 @@ pub struct Impact {
 
 /// How a shell meets a vehicle's armour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub enum ImpactOutcome {
     /// Through its main armour: the vehicle takes its damage.
     Pierced,
     /// Stopped by its armour, a screen's or the main armour's.
@@ -106,11 +107,11 @@ pub fn hit(
     let hit = hits[index];
 
     let damage = match outcome {
-        Outcome::Pierced => shot.damage_at(distance) * hit.material.map_or(1.0, |material| material.vehicle_damage_factor),
+        ImpactOutcome::Pierced => shot.damage_at(distance) * hit.material.map_or(1.0, |material| material.vehicle_damage_factor),
         _ => 0.0,
     };
     let impact = Impact { outcome, hit, damage, exploded: false };
-    if shot.kind() != ShellKind::HighExplosive || outcome == Outcome::Pierced {
+    if shot.kind() != ShellKind::HighExplosive || outcome == ImpactOutcome::Pierced {
         return Some(impact);
     }
 
@@ -193,7 +194,7 @@ pub fn reflect(velocity: Vec3, normal: Vec3) -> Vec3 {
 /// Follow a shell of this penetration through the armour it meets along `direction`,
 /// `hits`, nearest first, as `__shotResultDefault` does: the outcome, and the index in
 /// `hits` where it happens. None when it meets no armour.
-fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleIntersection]) -> Option<(Outcome, usize)> {
+fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleIntersection]) -> Option<(ImpactOutcome, usize)> {
 
     let kind = shot.kind();
     let mut seen = HashSet::<(VehiclePart, usize)>::new();
@@ -219,15 +220,15 @@ fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleInter
 
         let hit_angle_cos = if material.use_hit_angle { (-direction).dot(hit.normal).clamp(0.0, 1.0) } else { 1.0 };
         if jet.is_none() && ricochets(shot, kind, hit_angle_cos, material.armor, material.may_ricochet, material.check_caliber_for_ricochet) {
-            return Some((Outcome::Ricochet, index));
+            return Some((ImpactOutcome::Ricochet, index));
         }
 
         pen -= penetration_armor(shot, kind, hit_angle_cos, material.armor, material.use_hit_angle, material.check_caliber_for_hit_angle_norm);
         if pen < 0.0 {
-            return Some((Outcome::NotPierced, index));
+            return Some((ImpactOutcome::NotPierced, index));
         }
         if material.is_main_armor() {
-            return Some((Outcome::Pierced, index));
+            return Some((ImpactOutcome::Pierced, index));
         }
         if kind == ShellKind::HollowCharge && jet.is_none() {
             jet = Some(hit.distance);
@@ -235,7 +236,7 @@ fn penetrate(shot: &ShotDef, mut pen: f32, direction: Vec3, hits: &[VehicleInter
 
     }
 
-    last.map(|index| (Outcome::Screens, index))
+    last.map(|index| (ImpactOutcome::Screens, index))
 
 }
 
@@ -370,9 +371,9 @@ mod tests {
     fn pierces_thinner_armour_and_stops_on_thicker() {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
         let pierced = impact(&ap, 0.0, 1.0, vec![plate(1.0, material(150.0, true))]).unwrap();
-        assert_eq!((pierced.outcome, pierced.damage), (Outcome::Pierced, 400.0));
+        assert_eq!((pierced.outcome, pierced.damage), (ImpactOutcome::Pierced, 400.0));
         let stopped = impact(&ap, 0.0, 1.0, vec![plate(1.0, material(250.0, true))]).unwrap();
-        assert_eq!((stopped.outcome, stopped.damage), (Outcome::NotPierced, 0.0));
+        assert_eq!((stopped.outcome, stopped.damage), (ImpactOutcome::NotPierced, 0.0));
     }
 
     #[test]
@@ -380,7 +381,7 @@ mod tests {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
         // 120 mm at 60°, 55° once normalized: about 209 mm.
         let impact = impact(&ap, 60.0, 1.0, vec![plate(1.0, material(120.0, true))]).unwrap();
-        assert_eq!(impact.outcome, Outcome::NotPierced);
+        assert_eq!(impact.outcome, ImpactOutcome::NotPierced);
         assert!((penetration_armor(&ap, ShellKind::ArmorPiercing, 60f32.to_radians().cos(), 120.0, true, true) - 209.2).abs() < 0.5);
     }
 
@@ -388,14 +389,14 @@ mod tests {
     fn ricochets_unless_it_overmatches() {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 400.0);
         let off = impact(&ap, 75.0, 1.0, vec![plate(1.0, material(50.0, true))]).unwrap();
-        assert_eq!(off.outcome, Outcome::Ricochet);
+        assert_eq!(off.outcome, ImpactOutcome::Ricochet);
         // A caliber of more than 3 times the armour; exactly 3 times still ricochets.
-        assert_eq!(impact(&ap, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, Outcome::Ricochet);
+        assert_eq!(impact(&ap, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, ImpactOutcome::Ricochet);
         let overmatched = impact(&ap, 75.0, 1.0, vec![plate(1.0, material(39.0, true))]).unwrap();
-        assert_eq!(overmatched.outcome, Outcome::Pierced);
+        assert_eq!(overmatched.outcome, ImpactOutcome::Pierced);
         // HEAT checks no caliber.
         let heat = shot(ShellKind::HollowCharge, 120.0, 400.0);
-        assert_eq!(impact(&heat, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, Outcome::Ricochet);
+        assert_eq!(impact(&heat, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, ImpactOutcome::Ricochet);
     }
 
     #[test]
@@ -403,17 +404,17 @@ mod tests {
         let heat = shot(ShellKind::HollowCharge, 120.0, 200.0);
         // A 10 mm screen, then 150 mm of main armour 1 m behind: half its penetration is lost.
         let plates = vec![plate(2.0, material(10.0, false)), plate(1.0, material(150.0, true))];
-        assert_eq!(impact(&heat, 0.0, 2.0, plates.clone()).unwrap().outcome, Outcome::NotPierced);
+        assert_eq!(impact(&heat, 0.0, 2.0, plates.clone()).unwrap().outcome, ImpactOutcome::NotPierced);
         // An AP shell loses nothing.
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
-        assert_eq!(impact(&ap, 0.0, 2.0, plates).unwrap().outcome, Outcome::Pierced);
+        assert_eq!(impact(&ap, 0.0, 2.0, plates).unwrap().outcome, ImpactOutcome::Pierced);
     }
 
     #[test]
     fn misses_the_main_armour_through_screens() {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
         let impact = impact(&ap, 0.0, 1.0, vec![plate(1.0, material(10.0, false))]).unwrap();
-        assert_eq!((impact.outcome, impact.damage), (Outcome::Screens, 0.0));
+        assert_eq!((impact.outcome, impact.damage), (ImpactOutcome::Screens, 0.0));
     }
 
     #[test]
@@ -421,13 +422,13 @@ mod tests {
         let he = shot(ShellKind::HighExplosive, 152.0, 40.0);
         // Half its damage, less 1.3 per millimetre of the 100 mm it stops on.
         let impact = impact(&he, 0.0, 1.0, vec![plate(1.0, material(100.0, true))]).unwrap();
-        assert_eq!(impact.outcome, Outcome::NotPierced);
+        assert_eq!(impact.outcome, ImpactOutcome::NotPierced);
         assert!(impact.exploded);
         let falloff = 1.0 - 0.95 * EXPLOSION_STANDOFF / he.explosion_radius;
         assert!((impact.damage - (200.0 * falloff - 130.0)).abs() < 0.1, "{}", impact.damage);
         // Pierced, the whole damage.
         let pierced = super::tests::impact(&he, 0.0, 1.0, vec![plate(1.0, material(30.0, true))]).unwrap();
-        assert_eq!((pierced.outcome, pierced.damage), (Outcome::Pierced, 400.0));
+        assert_eq!((pierced.outcome, pierced.damage), (ImpactOutcome::Pierced, 400.0));
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: the Pz. I's 20 mm against the
@@ -453,7 +454,7 @@ mod tests {
         };
         for shot in &pz1.shots {
             let impact = fire(shot, &chieftain, 1.2);
-            assert_ne!(impact.outcome, Outcome::Pierced, "{shot:?}: {impact:?}");
+            assert_ne!(impact.outcome, ImpactOutcome::Pierced, "{shot:?}: {impact:?}");
             assert_eq!(impact.damage, 0.0, "{shot:?}: {impact:?}");
         }
         for shot in &chieftain.shots {
@@ -467,10 +468,10 @@ mod tests {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 180.0);
         let (collision, transforms) = vehicle(vec![plate(1.0, material(150.0, true))]);
         let fire = |pen_factor| hit(&ap, 100.0, pen_factor, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap();
-        assert_eq!((fire(1.0).outcome, fire(1.0).damage), (Outcome::Pierced, 400.0));
+        assert_eq!((fire(1.0).outcome, fire(1.0).damage), (ImpactOutcome::Pierced, 400.0));
         // Off one ricochet, 135 mm.
         assert_eq!(ricochet_pen_factor(&ap), 0.75);
-        assert_eq!(fire(ricochet_pen_factor(&ap)).outcome, Outcome::NotPierced);
+        assert_eq!(fire(ricochet_pen_factor(&ap)).outcome, ImpactOutcome::NotPierced);
         assert_eq!(ricochet_pen_factor(&shot(ShellKind::HollowCharge, 120.0, 180.0)), 1.0);
     }
 

@@ -92,7 +92,7 @@ pub struct Shot {
     /// The times it ricocheted.
     pub ricochets: u32,
     /// The share of its shell's penetration it kept, 1 until it ricochets, see
-    /// [`armor::ricochet_pen_factor`](super::armor::ricochet_pen_factor), or flies
+    /// [`impact::ricochet_pen_factor`](super::impact::ricochet_pen_factor), or flies
     /// through a destructible, see [`ShotPiece`].
     pub pen_factor: f32,
     pub end: Vec3,

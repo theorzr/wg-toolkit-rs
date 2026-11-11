@@ -3,7 +3,7 @@
 
 use glam::Vec3;
 
-use crate::base::ballistics::armor::{Explosion, Impact, Outcome};
+use crate::base::ballistics::impact::{Impact, Explosion, ImpactOutcome};
 use crate::game::collision::VehicleIntersection;
 use crate::base::ballistics::gun::Shot;
 use crate::game::schema::HitPoint;
@@ -31,10 +31,10 @@ impl ShellHit {
     pub fn of_impact(impact: &Impact) -> Self {
         let main = impact.hit.material.is_some_and(|material| material.is_main_armor());
         let (effect, flags) = match impact.outcome {
-            Outcome::Pierced => (HIT_EFFECT_ARMOR_PIERCED, HIT_FLAGS_PIERCED),
-            Outcome::Ricochet => (HIT_EFFECT_FINAL_RICOCHET, HIT_FLAG_DIRECT | HIT_FLAG_RICOCHET),
-            Outcome::Screens => (HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE, HIT_FLAG_DIRECT | HIT_FLAG_SCREEN_PIERCED),
-            Outcome::NotPierced => {
+            ImpactOutcome::Pierced => (HIT_EFFECT_ARMOR_PIERCED, HIT_FLAGS_PIERCED),
+            ImpactOutcome::Ricochet => (HIT_EFFECT_FINAL_RICOCHET, HIT_FLAG_DIRECT | HIT_FLAG_RICOCHET),
+            ImpactOutcome::Screens => (HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE, HIT_FLAG_DIRECT | HIT_FLAG_SCREEN_PIERCED),
+            ImpactOutcome::NotPierced => {
                 let stopped = if main { HIT_FLAG_ARMOR_NOT_PIERCED } else { HIT_FLAG_SCREEN_NOT_PIERCED };
                 let exploded = if impact.damage > 0.0 { HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION } else { 0 };
                 (HIT_EFFECT_ARMOR_NOT_PIERCED, HIT_FLAG_DIRECT | stopped | exploded)

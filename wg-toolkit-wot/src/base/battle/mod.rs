@@ -51,8 +51,8 @@ use crate::base::{
     avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
 use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
+use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::base::ballistics::armor::{self, Outcome};
 use crate::base::physics::{Vehicle, World};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
@@ -579,9 +579,9 @@ impl Battle {
 
     /// A shell gets to its end, at game time `at` (what it flew through broke as it got
     /// there, see [`Shot::through`]): what it does to the vehicle it hits, by its armour,
-    /// see [`armor::hit`], or it explodes on the ground or a static model, a destructible
+    /// see [`impact::hit`], or it explodes on the ground or a static model, a destructible
     /// one taking its damage, see [`World::shoot`], and an HE shell damaging the vehicles
-    /// in its explosion's reach, see [`armor::explosion`]. A shell ricocheting off a
+    /// in its explosion's reach, see [`impact::explosion`]. A shell ricocheting off a
     /// vehicle or the ground goes on, see [`Self::ricochet`]; a static model stops it
     /// whole.
     fn land(&mut self, app: &mut base::App, at: f64, shooter: EntityId, shot: &Shot) -> io::Result<()> {
@@ -616,7 +616,7 @@ impl Battle {
             ShotLanding::Vehicle { entity_id, hit, transforms } => {
                 let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id().0 == entity_id);
                 let Some(collision) = vehicle.map(|vehicle| vehicle.collision.clone()) else { return Ok(()) };
-                let Some(impact) = armor::hit(def, shot.distance(), shot.pen_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
+                let Some(impact) = impact::hit(def, shot.distance(), shot.pen_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
                     debug!(battle = id, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
                     return Ok(());
                 };
@@ -624,8 +624,8 @@ impl Battle {
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
-                if impact.outcome == Outcome::Ricochet {
-                    let direction = armor::reflect(shot.end_velocity, impact.hit.normal);
+                if impact.outcome == ImpactOutcome::Ricochet {
+                    let direction = impact::reflect(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, direction, Some((entity_id, transforms)))?;
                 }
                 Ok(())
@@ -655,12 +655,12 @@ impl Battle {
                 let skims = match shot.landing {
                     ShotLanding::Terrain => {
                         let normal = self.world.space().terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
-                        armor::ricochets_off_ground(def, shot.end_velocity, normal, &armor::GROUND).then_some(normal)
+                        impact::ricochets_off_ground(def, shot.end_velocity, normal, &impact::GROUND).then_some(normal)
                     }
                     _ => None,
                 };
                 if let Some(normal) = skims {
-                    let direction = armor::reflect(shot.end_velocity, normal);
+                    let direction = impact::reflect(shot.end_velocity, normal);
                     self.ricochet(app, at, shooter, shot, direction, None)?;
                 } else if def.kind() == ShellKind::HighExplosive {
                     self.splash(app, shooter, shot)?;
@@ -673,10 +673,10 @@ impl Battle {
     }
 
     /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
-    /// losing penetration as [`armor::ricochet_pen`] says, see [`Shot::ricochet`]: the
-    /// players see it go on, as the server shows it, with a tracer of the same shot.
-    /// `landed` is the vehicle it ricochets off, placed as it hit it, which it leaves
-    /// from.
+    /// losing penetration as [`impact::ricochet_pen_factor`] says, see
+    /// [`Shot::ricochet`]: the players see it go on, as the server shows it, with a tracer
+    /// of the same shot. `landed` is the vehicle it ricochets off, placed as it hit it,
+    /// which it leaves from.
     fn ricochet(
         &mut self,
         app: &mut base::App,
@@ -698,7 +698,7 @@ impl Battle {
             space: self.world.space(),
             rubble: self.world.rubble(),
         };
-        let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(obstacles), &vehicles) else {
+        let Some(next) = shot.ricochet(direction, impact::ricochet_pen_factor(&shot.def), Some(obstacles), &vehicles) else {
             debug!(battle = id, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
@@ -715,7 +715,7 @@ impl Battle {
     /// but the shooter's own.
     fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<()> {
         let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
-            .filter_map(|target| Some((target.entity_id, armor::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?)))
+            .filter_map(|target| Some((target.entity_id, impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?)))
             .collect();
         for (entity_id, explosion) in explosions {
             info!(battle = self.id, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
