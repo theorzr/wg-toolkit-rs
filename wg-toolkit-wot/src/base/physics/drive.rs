@@ -1,49 +1,105 @@
-//! The drive model: what a hull's tracks drive it to, its speeds on the ground plane and
-//! its turning, from its controls, its ground and its slope ([`Hull::drive`]). It doesn't
-//! move the hull: its body does, its tracks pushing it toward these speeds where they
-//! touch the ground, see the `body` module.
+//! The drive model: what a hull's controls ask of its engine, its brakes and its
+//! steering, as forces and a turning goal, once a tick ([`Hull::drive`]). It moves
+//! nothing: in each step of its body, its tracks pass them on to the ground, as much as
+//! they grip it, see the `body` module. Off the ground, on its roof or in the air, they
+//! pass nothing.
 //!
-//! A hull has two speeds on the ground plane, along its heading (`speed`) and across it
-//! (`slide`), so its velocity is `heading · speed + right · slide`. The tracks hold
-//! `slide` at zero (at [`SIDE_FRICTION`]) unless the handbrake is on.
-//!
-//! # Its speed along its heading
-//!
-//! It follows the flags, in one of four cases:
+//! This is how the game's own model works (`physics_shared.py`, whose tuning is the
+//! server's): the engine pushes the whole hull along its heading, from its power, and
+//! a torque about the vertical, the game's "gimlet", turns it toward a turning speed. It
+//! has no speed for each track to reach: a tank's two tracks aren't simulated as each
+//! steering the hull.
 //!
 //! ```text
-//!   handbrake (BLOCK_TRACKS) ──▶ slows toward 0 (or the pivot speed) at HANDBRAKE_FRICTION
-//!   no direction asked ───────▶ slows toward 0 at COASTING
-//!   going against the way ────▶ slows toward 0 at BRAKING            (then reverses)
-//!   going the way asked ──────▶ the engine accelerates it, capped at the target speed:
+//!   once a tick, Hull::drive               in each step of its body (body module)
 //!
-//!        power      = POWER_FACTOR · P / m
-//!        drive      = min( power / |v| , MAX_ACCELERATION ) · grip_along
-//!        resistance = μ(ground) · g + (TURNING_RESISTANCE while turning)
-//!        a          = drive − resistance + g · sin(pitch) · way
-//!        |v|′       = min( |v| + a · dt , target )
+//!   flags ─▶ Controls: the speed asked,    the hull's speed v along its heading
+//!            the way it turns, handbrake      │
+//!         ─▶ steer: its turning goal,         ▼  Drive::along(v)
+//!            from its turning, ramped      a target, and the range of force to push with
+//!         ─▶ Drive: target, forces, steer     │
+//!                                             ▼  drive_tracks
+//!                                          a push along and a torque, within its grip
+//! ```
+//!
+//! # Along its heading
+//!
+//! [`Drive::along`] gives, at the hull's speed `v` along its heading, a speed to push it
+//! toward and the range of force the push may take, `[low, high]`, in N along its
+//! heading. Its body pushes toward the target as hard as that range allows, never past
+//! the target in a step: a force bound with a goal, so the engine drives up to the
+//! speed asked and holds it there, and the brakes stop it and hold it stopped. The
+//! first case that holds, `m` its weight:
+//!
+//! ```text
+//!   case                         target            force range
+//!   handbrake (BLOCK_TRACKS)     its pivot, or 0   ± its tracks sliding: SLIDE_GRIP · how hard
+//!                                                    they press on the ground (body module)
+//!   released (no way asked)      0                 ± COASTING · m
+//!   going against the way        the speed asked   ± BRAKING · m: through a standstill, then
+//!                                                    the engine
+//!   faster than the speed asked  the speed asked   ± BRAKING · m, below its top speed;
+//!                                                    past it, ± OVERSPEED_RESIST · m · g · over,
+//!                                                    over = (|v| − top) / top, BRAKING · m at most
+//!   the way asked                the speed asked   from 0 to F, the way asked:
+//!
+//!     F = min(POWER_FACTOR · P / |v|, MAX_ACCELERATION · m) − (TURNING_RESISTANCE · m, turning)
 //! ```
 //!
 //! so the engine pushes hard from a standstill (the cap), less and less as the speed
-//! rises (`power / |v|`), and stalls on a slope too steep for its power. `grip_along`
-//! and `grip_across` fall from 1 to 0.1 as a slope steepens ([`SLOPE_GRIP_ALONG`]): the
-//! tracks hold less, and gravity wins.
+//! rises (`power / |v|`), and stalls on a slope too steep for its power. Short of the
+//! resistance, `F < 0`, the push is `F`: turning slows a vehicle its engine barely holds.
+//! Downhill past its top speed, the engine pushes no more and gravity speeds it up until
+//! the resistance holds it, as the game's `overspeedResistBaseFactor` does: a soft
+//! limit. Below its top speed, past a speed asked lower (cruise control, turning), the
+//! brakes take it down to it.
+//!
+//! Against the way, the target is the speed asked, not 0: braked to a standstill on a
+//! slope, gravity would take the hull back down faster than [`REST_SPEED`] each step,
+//! and its brakes would hold it at 0 for good.
 //!
 //! # Its turning
 //!
-//! The turning speed follows a goal with a rise and a fall time, so it doesn't jump:
+//! Once a tick, its steering's goal `steer` moves from the turning speed the hull has
+//! toward the one the flags ask, `goal`, no faster than a rate:
 //!
 //! ```text
-//!   goal       = turn · rotation_speed(ground) · (ROTATION_ON_MOVE if moving)
-//!   yaw_rate  →  goal   at   rotation_speed / ROTATION_RISE   (or ROTATION_FALL)
-//!   spin      →  0      at   what its tracks' friction leaves it (track_friction)
+//!   goal   = turn · rotation_speed(ground) · (ROTATION_ON_MOVE if moving, else 1)
+//!   steer  = approach(yaw_rate, goal, rotation_speed / time · dt)
+//!   time   = ROTATION_RISE growing the same way, ROTATION_FALL slowing or reversing
 //! ```
 //!
-//! `spin` is turning that hits gave the hull: unlike `yaw_rate` the tracks don't drive
-//! it, they only hold it. To turn, a hull skids its tracks sideways, against the friction
-//! that also holds its slide ([`SIDE_FRICTION`], about 1.1 g), which the two share: a
-//! hull sliding sideways turns freely, as a rammed one does, and one at rest holds the
-//! turn a weak push would give it, see [`Hull::track_friction`].
+//! In each step, its body pushes its turning toward `steer` with a torque, within its
+//! tracks' grip. Starting from the turning the hull has, rather than from its last
+//! goal, `steer` never runs away from it: a hull its tracks can't turn (a slope, a wall,
+//! a hit) is steered from where it is, and one a hit spun is brought back no faster
+//! than it would stop turning.
+//!
+//! On its handbrake, it swings the faster the faster it slides, as the real drifts did:
+//!
+//! ```text
+//!   sliding = max(0, |velocity| − |pivot|), its speed past what its pivot carries it at
+//!   goal    = turn · max(drift, pivoting)
+//!   drift   = rotation_speed · HANDBRAKE_ROTATION · (1 − e^(−sliding / HANDBRAKE_ROTATION_SPEED))
+//!   rise    = HANDBRAKE_ROTATION_RISE, over min(1, (sliding / HANDBRAKE_SWING_SPEED)²) drifting
+//! ```
+//!
+//! Driven into a turn on it, it pivots on its blocked inner track: its outer one carries
+//! it round at `pivoting = rotation_speed · ROTATION_ON_MOVE`, which moves its middle at
+//! `pivot = pivoting · PIVOT_RADIUS`, the target along its heading. Blocked are both its
+//! tracks, or, turning, its inner one.
+//!
+//! # Its tracks
+//!
+//! Each track has its own speed, its belt's, which the client animates and its engine
+//! sound follows. It drives nothing: its body sets it after each step, rolling with the
+//! ground under it, at rest blocked, and spinning toward what the drive asks of it,
+//! [`Drive::track_goal`], where it slips or touches nothing:
+//!
+//! ```text
+//!   track goal = target − steer · x        x its offset to the right: turning right,
+//!                                          its left one is faster
+//! ```
 //!
 //! # Where the numbers come from
 //!
@@ -51,8 +107,6 @@
 //! the real server the hull is fitted on (a T110E4, 950 hp for 66 t, on Ruinberg's mostly
 //! firm ground, captured with its setup; a stock Type 64, 528 hp for 23 t, on Live Oaks'
 //! mostly medium ground), or our own choice.
-
-use glam::Vec3Swizzles;
 
 use wgtk::space::terrain::Ground;
 
@@ -67,18 +121,29 @@ use super::{approach, movement_flag, Hull, GRAVITY, REST_SPEED};
 /// (1040). Fitting the friction too trades it against the power (1.2 to 1.36 for 1.25 to
 /// 1.3 times the friction), so the game's friction is kept.
 const POWER_FACTOR: f32 = 1.13;
-/// The most the tracks accelerate the vehicle, in m/s²: the engine's power, over the
-/// speed, would be endless from a standstill. Fitted: the drives' errors are lowest from
-/// 10 to 14, both vehicles starting up to about 6 m/s² in the captured ticks.
-const MAX_ACCELERATION: f32 = 10.0;
-/// How fast the vehicle slows down without controls, and brakes against them, in m/s²,
-/// whatever the vehicle and its ground. Measured: released from forward, both vehicles
-/// lose 1.2 to 1.6 m/s a tick (the T110E4 9.8, 8.7, 7.1, 5.7; the Type 64 11.6, 10.0,
-/// 8.6, 7.0 on medium ground, 17.0, 15.8, 14.3, 12.7 on soft), and reversing slows them
-/// as fast. The drives' errors keep falling up to 20, beyond what they show, so make up
-/// for something else.
+/// The most the engine accelerates the vehicle, in m/s²: its power, over the speed,
+/// would be endless from a standstill. Fitted: the drives' errors fall up to 16 and
+/// hardly after, though both vehicles start up to about 6 m/s² in the captured ticks, so
+/// it makes up for something else.
+const MAX_ACCELERATION: f32 = 16.0;
+/// How hard its brakes slow the vehicle when released, and against its controls or past
+/// the speed asked, in m/s², whatever the vehicle and its ground. Measured: released from
+/// forward, both vehicles lose 1.2 to 1.6 m/s a tick (the T110E4 9.8, 8.7, 7.1, 5.7; the
+/// Type 64 11.6, 10.0, 8.6, 7.0 on medium ground, 17.0, 15.8, 14.3, 12.7 on soft), and
+/// reversing slows them as fast. The drives' errors keep falling up to 20, beyond what
+/// they show, so make up for something else.
 const COASTING: f32 = 14.0;
 const BRAKING: f32 = 14.0;
+/// How hard the vehicle is held back past its top speed, downhill, as a share of its
+/// weight for its share of its top speed it goes over it: at 15% over, 0.075 g. From the
+/// game: `overspeedResistBaseFactor`, the default of `physics_shared.py`, over the top
+/// speed; that it is a share of the weight is our reading. The real Type 64 ran 15% past
+/// its top speed down Live Oaks' slopes.
+const OVERSPEED_RESIST: f32 = 0.5;
+/// How much turning while moving slows the vehicle on top of its ground's resistance, in
+/// m/s². Fitted: the power its acceleration shows while turning falls short of driving
+/// straight by about 0.45 to 1 m/s², on both drives and at every speed.
+const TURNING_RESISTANCE: f32 = 0.8;
 /// The share of its turning speed on the spot it turns at while moving. Fitted: the
 /// T110E4 turns at 26.8°/s on the spot and 22.8°/s while moving, medians, and the Type
 /// 64 at 49.3°/s and 41.9°/s on medium ground.
@@ -87,42 +152,21 @@ const ROTATION_ON_MOVE: f32 = 0.85;
 /// speed while turning against straight, 9.0 and 9.9 m/s for the T110E4, 18.1 and
 /// 20.0 m/s for the Type 64, 0.91 both.
 const SPEED_WHILE_TURNING: f32 = 0.91;
-/// How much turning while moving slows the vehicle on top of its ground's resistance, in
-/// m/s². Fitted: the power its acceleration shows while turning falls short of driving
-/// straight by about 0.45 to 1 m/s², on both drives and at every speed.
-const TURNING_RESISTANCE: f32 = 0.8;
 /// Under this speed, in m/s, the vehicle turns as on the spot. Our choice, the split the
 /// fit above uses between turning on the spot and moving.
 const ON_SPOT_SPEED: f32 = 0.5;
-/// How long its turning speed takes to grow from nothing to its turning speed on the
-/// spot, and to fall back, in seconds: the faster it turns, the faster it gets there.
-/// Fitted: turning from rest, the T110E4 (26.8°/s) and the Type 64 (49.3°/s) both get
-/// there in about 0.3 s; released, the Type 64 stops in about 0.2 s, the T110E4 within
-/// two ticks.
+/// How long its steering takes to grow from nothing to its turning speed on the spot,
+/// and to fall back, in seconds. Fitted: turning from rest, the T110E4 (26.8°/s) and the
+/// Type 64 (49.3°/s) both get there in about 0.3 s; released, the Type 64 stops in about
+/// 0.2 s, the T110E4 within two ticks.
 const ROTATION_RISE: f32 = 0.3;
 const ROTATION_FALL: f32 = 0.2;
-/// How fast its blocked tracks slow the vehicle sliding along them, and its tracks
-/// sideways, in m/s². Fitted: on the Type 64's two drifts at 20 and 16.7 m/s, its
-/// velocity kept in the world as its hull swings under it, slowed by each separately,
-/// follows the real one within 0.2 to 0.8 m/s for 2 to 3.5 along, 9.5 to 12 across; a
-/// friction on the whole velocity, weighed by the slip angle, fits twice as badly.
-const HANDBRAKE_FRICTION: f32 = 3.0;
-const SIDE_FRICTION: f32 = 11.0;
-/// The share of the torque its tracks would hold, skidding sideways about their middle,
-/// that holds a hull against a hit's spin, see [`Hull::track_friction`]. Our choice, by
-/// feel: in full, a steady push off its middle never turned the pusher, and one 30 km/h
-/// ram in a side turned it 13°; at 0.3, the pusher turns 9° in 5 s and the ram 22°.
-const SPIN_GRIP: f32 = 0.3;
-/// How fast the vehicle turns with its tracks blocked: this many times its turning speed
-/// on the spot, the less it slides, `1 - e^(-v / HANDBRAKE_ROTATION_SPEED)`. Fitted: the
-/// Type 64 (49.3°/s on the spot) drifts up to 124°/s, then turns at 121, 115, 101, 90,
-/// 74 and 35°/s as it slides at 10, 7.6, 5, 3.8, 2.7 and 1 m/s.
+/// How fast the vehicle swings with its tracks blocked: this many times its turning
+/// speed on the spot, the less it slides, `1 - e^(-v / HANDBRAKE_ROTATION_SPEED)`.
+/// Fitted: the Type 64 (49.3°/s on the spot) drifts up to 124°/s, then turns at 121,
+/// 115, 101, 90, 74 and 35°/s as it slides at 10, 7.6, 5, 3.8, 2.7 and 1 m/s.
 const HANDBRAKE_ROTATION: f32 = 2.5;
 const HANDBRAKE_ROTATION_SPEED: f32 = 3.0;
-/// How far from its centre the vehicle pivots, in metres, on its blocked inner track as
-/// its outer one drives it. Fitted: backing up into a turn on its handbrake, the Type 64
-/// settles at 1.8 m/s turning at its 41.9°/s while moving, on medium ground.
-const PIVOT_RADIUS: f32 = 2.5;
 /// How long its turning speed takes to grow by its turning speed on the spot with its
 /// tracks blocked, in seconds. Fitted: the Type 64's drifts turn 72°/s faster each
 /// second.
@@ -134,59 +178,60 @@ const HANDBRAKE_ROTATION_RISE: f32 = 0.7;
 /// swing grows 1.3 to 1.5 rad/s² whether it slides at 13 or 20 m/s, and it turns 0.07 rad
 /// in its first second at 1.85 m/s; the square is our choice between.
 const HANDBRAKE_SWING_SPEED: f32 = 6.0;
-/// How its tracks grip the terrain the steeper it is, along them and across: fully up to
-/// the first angle, in degrees, least, the share given, from the second, in between as the
-/// cosines go. From the game: `slopeGripLngTerrain` and `slopeGripSdwTerrain`, the
-/// defaults of `physics_shared.py`, which the server's vehicle sections may override.
-const SLOPE_GRIP_ALONG: (f32, f32, f32) = (27.5, 32.0, 0.1);
-const SLOPE_GRIP_ACROSS: (f32, f32, f32) = (24.5, 29.0, 0.1);
+/// How far from its centre the vehicle pivots, in metres, on its blocked inner track as
+/// its outer one drives it. Fitted: backing up into a turn on its handbrake, the Type 64
+/// settles at 1.8 m/s turning at its 41.9°/s while moving, on medium ground.
+const PIVOT_RADIUS: f32 = 2.5;
 
 impl Hull {
 
-    /// The drive model, for `dt` seconds on this ground: the speeds and turning its
-    /// tracks drive it to. It only changes `speed`, `slide`, `yaw_rate` and `spin`:
-    /// [`Self::integrate`] moves it, its tracks pushing it toward them as they grip.
-    ///
-    /// Driving its way, the engine's power accelerates it, as much as it is slow, up to
-    /// [`MAX_ACCELERATION`], against the ground's resistance and the slope, up to the
-    /// speed the flags ask for. Without controls it stops at [`COASTING`], and against
-    /// them it brakes at [`BRAKING`]. It turns at its ground's turning speed on the spot,
-    /// less while moving, reaching it in [`ROTATION_RISE`].
-    ///
-    /// With its tracks blocked, it slides where it was going as its hull swings under it,
-    /// slowed by [`HANDBRAKE_FRICTION`] along its tracks and [`SIDE_FRICTION`] across
-    /// them, and turns faster the faster it slides, see [`HANDBRAKE_ROTATION`]. Driven
-    /// into a turn, it pivots on its blocked inner track, see [`PIVOT_RADIUS`].
-    pub fn drive(&mut self, dt: f32, ground: Ground) {
+    /// The drive model, for `dt` seconds on this ground: how hard its engine and brakes
+    /// push it and its steering turns it, see [`Drive`]. It moves nothing:
+    /// [`Self::integrate`] does, its tracks passing the pushes on as they grip.
+    pub fn drive(&mut self, dt: f32, ground: Ground) -> Drive {
 
         // 1. What the flags ask, and how fast it turns on this ground.
         let ground = ground_index(ground);
         let rotation_speed = self.mobility.rotation_speed[ground];
         let controls = self.controls(rotation_speed);
 
-        // 2. Its slope: gravity down it, which its tracks hold against as much as they
-        //    grip it, and the friction they have left across.
-        let slope = self.slope();
-        let (slide_friction, spin_friction) = self.track_friction(slope.grip_across);
-
-        // 3. Its slide: down the slope across, its tracks holding it.
-        self.slide = approach(self.slide - slope.across * dt, 0.0, slide_friction * dt);
-
-        // 4. Its speed along its heading, in one of the four cases.
-        self.speed = self.speed_along(&controls, ground, &slope, dt);
-
-        // 5. Its turning, toward its goal, rising or falling.
-        let (goal, rise) = self.turn_goal(&controls, rotation_speed);
-        let time = if goal.abs() > self.yaw_rate.abs() && goal * self.yaw_rate >= 0.0 { rise } else { ROTATION_FALL };
+        // 2. Its steering, from the turning it has toward its goal, rising or falling.
+        let (goal, rise) = self.steer_goal(&controls, rotation_speed);
+        let turning = self.yaw_rate;
+        let time = if goal.abs() > turning.abs() && goal * turning >= 0.0 { rise } else { ROTATION_FALL };
         let rate = rotation_speed / time;
-        self.yaw_rate = approach(self.yaw_rate, goal, rate * dt);
+        self.steer = approach(turning, goal, rate * dt);
 
-        // 6. Its tracks hold a spin before it turns: one too weak to skid them doesn't.
-        self.spin = approach(self.spin, 0.0, spin_friction * dt);
+        // 3. What its engine and its brakes can do, and which tracks are blocked: on its
+        //    handbrake, both, or, turning, its inner one.
+        let mobility = &self.mobility;
+        let mass = mobility.weight;
+        let mut blocked = [false; 2];
+        if controls.handbrake {
+            for side in Side::BOTH {
+                blocked[side.index()] = controls.turn == 0.0 || side == controls.inner;
+            }
+        }
+
+        Drive {
+            target: if controls.handbrake { controls.pivot } else { controls.target },
+            top: if controls.target < 0.0 { mobility.speed_backward } else { mobility.speed_forward },
+            blocked,
+            turning: controls.turning,
+            steer: self.steer,
+            half_gauge: mobility.carrying_point.x,
+            power: POWER_FACTOR * mobility.engine_power,
+            torque: MAX_ACCELERATION * mass,
+            coasting: COASTING * mass,
+            braking: BRAKING * mass,
+            overspeed: OVERSPEED_RESIST * mass * GRAVITY,
+            resistance: TURNING_RESISTANCE * mass,
+            rolling: mobility.rolling_friction[ground],
+        }
 
     }
 
-    /// What its flags ask of its tracks, see [`Controls`].
+    /// What its flags ask of it, see [`Controls`].
     fn controls(&self, rotation_speed: f32) -> Controls {
 
         use movement_flag::*;
@@ -211,16 +256,16 @@ impl Hull {
             _ => 0.0,
         };
         let pivot = drive_way * turn.abs() * rotation_speed * ROTATION_ON_MOVE * PIVOT_RADIUS;
-
-        let target = if handbrake { 0.0 } else { self.target_speed() };
+        // Turning right, backing up or not, its right track is the inner one.
+        let inner = if turn * drive_way > 0.0 || (drive_way == 0.0 && turn > 0.0) { Side::Right } else { Side::Left };
 
         Controls {
             handbrake,
             turn,
             turning: self.flags & (ROTATE_LEFT | ROTATE_RIGHT) != 0,
             pivot,
-            target,
-            way: target.signum(),
+            inner,
+            target: if handbrake { 0.0 } else { self.target_speed() },
         }
 
     }
@@ -250,61 +295,10 @@ impl Hull {
 
     }
 
-    /// Its slope, as its tilt says: pitched positively nose down, rolled positively right
-    /// side up.
-    fn slope(&self) -> Slope {
-        let direction = self.direction();
-        let roll = direction.x;
-        let pitch = direction.y;
-        Slope {
-            grip_along: grip(pitch, SLOPE_GRIP_ALONG),
-            grip_across: grip(roll, SLOPE_GRIP_ACROSS),
-            along: GRAVITY * pitch.sin(),
-            across: GRAVITY * roll.sin(),
-        }
-    }
-
-    /// Its speed along its heading after `dt` seconds of its controls on its slope, see
-    /// the module's documentation for the four cases.
-    fn speed_along(&self, controls: &Controls, ground: usize, slope: &Slope, dt: f32) -> f32 {
-
-        let Controls { handbrake, turning, pivot, target, way, .. } = *controls;
-        let grip_along = slope.grip_along;
-        let rolled = self.speed + slope.along * dt;
-
-        if handbrake {
-            // Its tracks blocked, they slow its slide along them, toward its pivot.
-            approach(rolled, pivot, HANDBRAKE_FRICTION * grip_along * dt)
-        } else if target == 0.0 {
-            // Released, it coasts to a stop.
-            approach(rolled, 0.0, COASTING * grip_along * dt)
-        } else if self.speed * way < -REST_SPEED {
-            // Against its way, not by what its body jitters at rest, it brakes.
-            approach(rolled, 0.0, BRAKING * grip_along * dt)
-        } else {
-            // Along its way: the drive, less the ground's resistance, and the slope.
-            let mobility = &self.mobility;
-            let along = self.speed.abs();
-            let power = POWER_FACTOR * mobility.engine_power / mobility.weight;
-            let drive = (power / along.max(1e-3)).min(MAX_ACCELERATION) * grip_along;
-            let turning = if turning { TURNING_RESISTANCE } else { 0.0 };
-            let resistance = mobility.rolling_friction[ground] * GRAVITY + turning;
-            let along = if along > target.abs() {
-                approach(along, target.abs(), BRAKING * grip_along * dt)
-            } else {
-                // Short of power it stalls, unless the slope takes it back down past
-                // what its tracks hold.
-                let floor = if slope.along * way + BRAKING * grip_along >= 0.0 { 0.0 } else { f32::NEG_INFINITY };
-                (along + (drive - resistance + slope.along * way) * dt).clamp(floor, target.abs())
-            };
-            along * way
-        }
-
-    }
-
     /// The turning speed its controls ask for, and how long it takes to get there from
-    /// rest, in seconds: on its handbrake, faster the faster it slides.
-    fn turn_goal(&self, controls: &Controls, rotation_speed: f32) -> (f32, f32) {
+    /// rest, in seconds: its ground's turning speed on the spot, less while moving; on
+    /// its handbrake, faster the faster it slides, see [`HANDBRAKE_ROTATION`].
+    fn steer_goal(&self, controls: &Controls, rotation_speed: f32) -> (f32, f32) {
 
         let Controls { handbrake, turn, pivot, target, .. } = *controls;
 
@@ -325,49 +319,142 @@ impl Hull {
 
     }
 
-    /// How fast its tracks stop its slide, in m/s², and its spin, in rad/s², as much as
-    /// they grip. Each point of its tracks, `z` along them from their middle, skids
-    /// sideways at `slide + spin · z` against `friction`, [`SIDE_FRICTION`]: the real
-    /// server stops a hull sliding along the map's edge, its tracks free, as fast as one
-    /// drifting on its handbrake, see `stops_at_the_map_edge`.
-    ///
-    /// ```text
-    ///   turning point   z₀ = −slide / spin,   r = |z₀| / (l/2)
-    ///
-    ///   r ≥ 1   all the tracks skid one way:   slide  →  0  at  friction
-    ///   ┃▶▶▶▶▶┃                                 spin   free
-    ///   r < 1   they skid both ways:           slide  →  0  at  friction · r
-    ///   ┃◀◀·▶▶┃                                 spin   →  0  at  spin_max · (1 − r²)
-    ///
-    ///   spin_max = SPIN_GRIP · friction · 3·l / (w² + l²)
-    /// ```
-    ///
-    /// `spin_max` is the torque `μ·m·g·l/4` of tracks of length `l` skidding about their
-    /// middle against its yaw inertia `m (w² + l²) / 12` (see `Hull::yaw_inertia`), of
-    /// which [`SPIN_GRIP`] holds: about 1.1 rad/s² for a Leopard 1. So a hull that slides
-    /// turns freely, as one rammed does, and one at rest holds a weak push's turn a
-    /// little.
-    fn track_friction(&self, grip_across: f32) -> (f32, f32) {
-        let [min, max] = self.mobility.bounds;
-        let size = max.xz() - min.xz();
-        let half_length = size.y / 2.0;
-        let ratio = if self.spin.abs() < 1e-6 { f32::INFINITY } else { self.slide.abs() / (self.spin.abs() * half_length) };
-        let friction = SIDE_FRICTION * grip_across;
-        let spin_max = SPIN_GRIP * friction * 3.0 * size.y / size.length_squared();
-        (friction * ratio.min(1.0), spin_max * (1.0 - ratio * ratio).max(0.0))
-    }
-
-    /// Its tracks holding its spin for `time` seconds, as [`Self::drive`] does: what a
-    /// hull hit by another keeps of it for the rest of a tick.
-    pub fn hold_spin(&mut self, time: f32) {
-        let grip_across = grip(self.direction().x, SLOPE_GRIP_ACROSS);
-        let (_, spin_friction) = self.track_friction(grip_across);
-        self.spin = approach(self.spin, 0.0, spin_friction * time);
+    /// Its tracks rolling with it, as if they gripped, at its speed and turning: what a
+    /// hull given its motion from outside starts with, see `drive_replay.rs`.
+    #[cfg(test)]
+    pub fn match_tracks(&mut self) {
+        let half_gauge = self.mobility.carrying_point.x;
+        self.tracks = Side::BOTH.map(|side| self.speed - self.yaw_rate * side.way() * half_gauge);
+        self.steer = self.yaw_rate;
     }
 
 }
 
-/// What a hull's flags ask of its tracks, for a tick of the drive model.
+/// One of a hull's two tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+
+    /// Both, left then right, the order a pair of anything of theirs is in.
+    pub const BOTH: [Self; 2] = [Self::Left, Self::Right];
+
+    /// Its place in a pair, left then right.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+        }
+    }
+
+    /// Which way it is from the hull's middle, along its right: -1 or 1.
+    pub fn way(self) -> f32 {
+        match self {
+            Self::Left => -1.0,
+            Self::Right => 1.0,
+        }
+    }
+
+    /// The track a point is over, by its offset to the hull's right.
+    pub fn of(x: f32) -> Self {
+        if x < 0.0 { Self::Left } else { Self::Right }
+    }
+
+}
+
+/// How hard a hull's engine and brakes push it in a tick, and its steering turns it, see
+/// [`Hull::drive`]: forces, which its body's tracks pass on to the ground as they grip
+/// it, see [`Self::along`].
+#[derive(Debug, Clone, Copy)]
+pub struct Drive {
+    /// The speed asked along its heading, in m/s, signed: on its handbrake, the speed it
+    /// pivots at, else none.
+    pub target: f32,
+    /// Its top speed the way asked, in m/s, past which it is held back softly.
+    pub top: f32,
+    /// Each track is blocked, on its handbrake: it slides along the ground rather than
+    /// rolls.
+    pub blocked: [bool; 2],
+    /// Turning is asked, which slows it, see [`TURNING_RESISTANCE`].
+    pub turning: bool,
+    /// The turning speed its steering pushes it toward, in rad/s, positive to the right.
+    pub steer: f32,
+    /// How far each track is from its middle, in metres.
+    pub half_gauge: f32,
+    /// Its engine's power, in W, and the most force its torque gives, in N.
+    pub power: f32,
+    pub torque: f32,
+    /// The force its brakes hold it with, released, and against its controls or past the
+    /// speed asked, in N.
+    pub coasting: f32,
+    pub braking: f32,
+    /// How hard it is held back past its top speed, in N, for its top speed over it.
+    pub overspeed: f32,
+    /// How hard turning holds it back, in N.
+    pub resistance: f32,
+    /// The ground's rolling friction, as a share of how hard each track is pressed on it.
+    pub rolling: f32,
+}
+
+impl Drive {
+
+    /// Whether its tracks are blocked, either: it is on its handbrake.
+    pub fn handbrake(&self) -> bool {
+        self.blocked.iter().any(|&blocked| blocked)
+    }
+
+    /// How its engine or its brakes push it along its heading, going at `speed`: the
+    /// speed they push it toward, and the least and the most force, in N, signed along
+    /// its heading, by the cases of "Along its heading" in the module's documentation.
+    /// On its handbrake, its tracks slide, as hard as `sliding`, in N.
+    pub fn along(&self, speed: f32, sliding: f32) -> (f32, f32, f32) {
+
+        let target = self.target;
+        let way = target.signum();
+
+        if self.handbrake() {
+            return (target, -sliding, sliding);
+        }
+        if target == 0.0 {
+            return (0.0, -self.coasting, self.coasting);
+        }
+        if speed * way < -REST_SPEED {
+            // Against its way, not by what its body jitters at rest, it brakes, on through
+            // a standstill: on a slope, gravity takes it back faster than that each step.
+            return (target, -self.braking, self.braking);
+        }
+
+        let along = speed.abs();
+        if along > target.abs() {
+            // Past what is asked, braked to it; past its top speed, softly.
+            let over = (along - self.top).max(0.0) / self.top;
+            let force = if target.abs() < self.top { self.braking } else { (self.overspeed * over).min(self.braking) };
+            return (target, -force, force);
+        }
+
+        // Its engine, less what turning holds it back by: short of it, it slows.
+        let resistance = if self.turning { self.resistance } else { 0.0 };
+        let force = (self.power / along.max(1e-3)).min(self.torque) - resistance;
+        let least = force.min(0.0);
+        if way > 0.0 { (target, least, force) } else { (target, -force, -least) }
+
+    }
+
+    /// The speed it asks of a track, in m/s: the speed asked less its steering's share,
+    /// none if blocked.
+    pub fn track_goal(&self, side: Side) -> f32 {
+        if self.blocked[side.index()] {
+            return 0.0;
+        }
+        self.target - self.steer * side.way() * self.half_gauge
+    }
+
+}
+
+/// What a hull's flags ask of it, for a tick of the drive model.
 #[derive(Debug, Clone, Copy)]
 struct Controls {
     /// Its tracks are blocked.
@@ -376,39 +463,13 @@ struct Controls {
     turn: f32,
     /// Either way of turning is asked, even both at once.
     turning: bool,
-    /// On its handbrake, driving into a turn, the speed its outer track carries it at
-    /// around its blocked inner one, in m/s, signed as it drives.
+    /// On its handbrake, driving into a turn, the speed it pivots at around its blocked
+    /// inner track, in m/s, signed as it drives.
     pivot: f32,
+    /// Its inner track as it turns.
+    inner: Side,
     /// The speed asked, see [`Hull::target_speed`]; none on its handbrake.
     target: f32,
-    /// The way asked, the target's sign: 1 when none is asked.
-    way: f32,
-}
-
-/// The slope a hull is on, by its tilt.
-#[derive(Debug, Clone, Copy)]
-struct Slope {
-    /// How much its tracks grip along it and across it, from 1 to the least
-    /// [`SLOPE_GRIP_ALONG`] and [`SLOPE_GRIP_ACROSS`] give.
-    grip_along: f32,
-    grip_across: f32,
-    /// Gravity down it along its heading, forward, and across it, to the left, in m/s².
-    along: f32,
-    across: f32,
-}
-
-/// How much the tracks grip on a slope of this angle, in radians, by one of the curves
-/// [`SLOPE_GRIP_ALONG`] and [`SLOPE_GRIP_ACROSS`].
-fn grip(angle: f32, (full, least, least_grip): (f32, f32, f32)) -> f32 {
-    let (full, least) = (full.to_radians().cos(), least.to_radians().cos());
-    let cos = angle.cos();
-    if cos >= full {
-        1.0
-    } else if cos <= least {
-        least_grip
-    } else {
-        least_grip + (1.0 - least_grip) * (cos - least) / (full - least)
-    }
 }
 
 /// A ground's index in a vehicle's per-ground mobility, firm, medium then soft.
@@ -424,12 +485,14 @@ fn ground_index(ground: Ground) -> usize {
 #[cfg(test)]
 mod tests {
 
+    use std::f32::consts::FRAC_PI_2;
+
     use glam::Vec3;
 
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, chieftain_mobility, tick};
-    use super::super::Rubble;
+    use super::super::fixtures::{chieftain, chieftain_mobility, slope, tick};
+    use super::super::{Rubble, GRAVITY};
     use super::*;
 
     #[test]
@@ -437,11 +500,21 @@ mod tests {
         let mut hull = chieftain();
         hull.set_direction(Vec3::new(0.0, 0.0, 2.771));
         hull.flags = movement_flag::FORWARD;
-        // Quickly at first, slower as the engine's power spreads over the speed.
+        // Quickly at first, its torque's cap, slower as the engine's power spreads over
+        // the speed, step by step of its body: the ground's rolling friction holds it back
+        // once it rolls, from its second step.
         tick(&mut hull, 0.1, Ground::Firm);
         let first = hull.speed;
-        let resistance = hull.mobility.rolling_friction[0] * GRAVITY;
-        assert!((first - (MAX_ACCELERATION - resistance) * 0.1).abs() < 1e-4, "{first}");
+        let mobility = &hull.mobility;
+        let power = POWER_FACTOR * mobility.engine_power / mobility.weight;
+        let resistance = mobility.rolling_friction[0] * GRAVITY;
+        let mut expected = 0.0;
+        for step in 0..10 {
+            let rolling = if step > 0 { resistance } else { 0.0 };
+            let rolled = expected - rolling * 0.01;
+            expected = rolled + (power / f32::max(rolled, 1e-3)).min(MAX_ACCELERATION) * 0.01;
+        }
+        assert!((first - expected).abs() < 1e-3, "{first} for {expected}");
         for _ in 0..300 {
             tick(&mut hull, 0.1, Ground::Firm);
         }
@@ -467,12 +540,14 @@ mod tests {
         for _ in 0..20 {
             tick(&mut hull, 0.1, Ground::Firm);
         }
-        // Stopped, then turning on the spot at full speed.
-        assert_eq!(hull.speed, 0.0);
+        // Stopped, then turning on the spot at full speed, its tracks going opposite ways.
+        assert!(hull.speed.abs() < 1e-4, "{}", hull.speed);
         assert!((hull.yaw_rate - 28f32.to_radians()).abs() < 1e-4, "{}", hull.yaw_rate);
-        // Slower while driving.
+        assert!(hull.tracks[0] > 0.0 && hull.tracks[1] < 0.0, "{:?}", hull.tracks);
+        // Slower while driving, once at its speed: accelerating, its faster outer track has
+        // less of its engine's power, and it turns less.
         hull.flags = movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
-        for _ in 0..20 {
+        for _ in 0..40 {
             tick(&mut hull, 0.1, Ground::Firm);
         }
         assert!((hull.yaw_rate - 28f32.to_radians() * ROTATION_ON_MOVE).abs() < 1e-4, "{}", hull.yaw_rate);
@@ -494,55 +569,70 @@ mod tests {
     }
 
     #[test]
-    fn drifts_on_its_handbrake() {
+    fn slides_on_its_handbrake() {
+        // At 10 m/s on flat ground, its tracks blocked, it slides on, slowed by its blocked
+        // tracks sliding on the ground, and stops.
+        let space = slope(0.0);
         let mut hull = chieftain();
         hull.speed = 10.0;
-        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;
-        let normal = hull.mobility.rotation_speed[1] * ROTATION_ON_MOVE;
-        let mut fastest: f32 = 0.0;
-        for _ in 0..10 {
-            tick(&mut hull, 0.1, Ground::Medium);
-            fastest = fastest.max(-hull.yaw_rate);
-        }
-        // Turning faster than it would driving, its hull swung left of where it slides.
-        assert!(fastest > normal * 1.5, "{fastest} for {normal}");
-        assert!(hull.slide > 0.2, "{}", hull.slide);
-        // Until its blocked tracks stop it.
+        hull.match_tracks();
+        hull.flags = movement_flag::BLOCK_TRACKS;
+        let mut speeds = Vec::new();
         for _ in 0..50 {
-            tick(&mut hull, 0.1, Ground::Medium);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            speeds.push(hull.speed);
         }
-        assert_eq!((hull.speed, hull.slide), (0.0, 0.0));
+        assert_eq!(hull.tracks, [0.0; 2]);
+        // About 3 m/s², its tracks' sliding grip.
+        let slowed = (speeds[0] - speeds[10]) / 1.0;
+        assert!((2.0..4.5).contains(&slowed), "{slowed} m/s²: {speeds:?}");
+        assert!(hull.speed.abs() < 0.1, "{}", hull.speed);
+        // Turning left, its left track blocked, its right one driving it round, it swings
+        // left.
+        let mut hull = chieftain();
+        hull.speed = 10.0;
+        hull.match_tracks();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        assert!(hull.yaw() < -5f32.to_radians(), "{}°", hull.yaw().to_degrees());
+        assert_eq!(hull.tracks[0], 0.0);
     }
 
     #[test]
     fn holds_on_slopes_it_grips() {
-        // Parked nose down, it holds on 20°, and slides down 35°.
-        assert_eq!(speed_after_3s(20.0, 0), 0.0);
+        // Parked nose down, it holds on 20°, and slides down 35°, its tracks blocked by
+        // their brakes but its grip too little.
+        assert!(speed_after_3s(20.0, 0).abs() < 0.05);
         assert!(speed_after_3s(35.0, 0) > 1.0);
         // Driving up 20°, it crawls as fast as its power holds it against the slope; up
-        // 35°, it slides back.
+        // 35°, it slides back, its tracks spinning.
         let mobility = chieftain_mobility();
+        let angle = 20f32.to_radians();
         let held = POWER_FACTOR * mobility.engine_power / mobility.weight
-            / (mobility.rolling_friction[1] * GRAVITY + GRAVITY * 20f32.to_radians().sin());
+            / (mobility.rolling_friction[1] * GRAVITY * angle.cos() + GRAVITY * angle.sin());
         let up = speed_after_3s(-20.0, movement_flag::FORWARD);
-        assert!((up - held).abs() < 0.05, "{up} for {held}");
+        assert!((up - held).abs() < 0.2, "{up} for {held}");
         assert!(speed_after_3s(-35.0, movement_flag::FORWARD) < -1.0);
-        // Across 35°, it slides down to its left, right side up.
+        // Across 35°, its right side up, it slides down to its left.
+        let space = slope(35.0);
         let mut hull = chieftain();
-        hull.set_direction(Vec3::new(35f32.to_radians(), 0.0, 0.0));
+        hull.set_direction(Vec3::new(35f32.to_radians(), 0.0, FRAC_PI_2));
         for _ in 0..10 {
-            tick(&mut hull, 0.1, Ground::Medium);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         assert!(hull.slide < -1.0, "{}", hull.slide);
     }
 
-    /// Its speed after 3 s pitched this many degrees, on these flags.
+    /// Its speed after 3 s on a slope pitching it this many degrees, on these flags.
     fn speed_after_3s(pitch: f32, flags: u8) -> f32 {
+        let space = slope(pitch);
         let mut hull = chieftain();
         hull.set_direction(Vec3::new(0.0, pitch.to_radians(), 0.0));
         hull.flags = flags;
         for _ in 0..30 {
-            tick(&mut hull, 0.1, Ground::Medium);
+            hull.advance(0.1, &space, None, &mut Rubble::default());
         }
         hull.speed
     }

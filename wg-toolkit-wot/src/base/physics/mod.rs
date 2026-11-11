@@ -24,12 +24,12 @@
 //!   ├─ 2. for every vehicle: Vehicle::step
 //!   │     ├─ Hull::advance                                                   (here)
 //!   │     │    ├─ speeds_to_body   its body takes what hits and walls left it  body
-//!   │     │    ├─ drive            the drive model: engine, ground, slope,     drive
-//!   │     │    │                   turning; what its tracks drive it to
+//!   │     │    ├─ drive            the drive model: how hard its engine,       drive
+//!   │     │    │                   brakes and steering push it
 //!   │     │    ├─ (still for long enough: it rests, and the rest is skipped)
 //!   │     │    ├─ integrate        the rigid body, 10 steps: gravity, its      body
 //!   │     │    │                   suspension at its contacts, its tracks      contacts
-//!   │     │    │                   pushing where they touch the ground         ground
+//!   │     │    │                   driven, gripping where they touch ground    ground
 //!   │     │    ├─ ram              damage and break destructibles             rubble
 //!   │     │    ├─ push_out         stop against walls                         walls
 //!   │     │    └─ keep_within      stop at the map's edge                     walls
@@ -53,8 +53,8 @@
 //!   (here)      the world: the vehicles of a battle, its tick, the passes of
 //!               collisions between them, what breaks; a vehicle; its hull's state,
 //!               the steps of its tick, its motion on the ground plane
-//!   drive       the drive model: the speeds and turning its tracks drive it to
-//!   body        its rigid body: gravity, suspension, its tracks' friction
+//!   drive       the drive model: how hard its engine, brakes and steering push it
+//!   body        its rigid body: gravity, suspension, its tracks gripping the ground
 //!   contacts    where its body touches the ground: wheels, track ends, hull, turret
 //!   ground      what is ground under a point, and what is a wall
 //!   rubble      destructibles: what it rams and breaks, what shells break
@@ -111,8 +111,8 @@
 //! A hull's motion is kept twice, and each tick goes from one to the other:
 //!
 //! ```text
-//!   on the ground plane          speed, slide, yaw_rate, spin       what the drive model,
-//!   (the hull's fields)                                             walls and hits change
+//!   on the ground plane          speed, slide, yaw_rate             what walls and hits
+//!   (the hull's fields)                                             change
 //!            │  speeds_to_body, as a tick starts          ▲
 //!            ▼                                            │  speeds_from_body, as
 //!   in 3D (its body)             linear_velocity,                   integrate ends
@@ -121,9 +121,10 @@
 //! ```
 //!
 //! The ground plane's speeds are its origin's (the middle of its tracks, on the ground),
-//! along its heading (`speed`) and across it (`slide`); `yaw_rate` is the turning its
-//! tracks drive, `spin` what turns it on top, from hits. Its body's are its centre of
-//! mass's, and its spin about each axis of the world.
+//! along its heading (`speed`) and across it (`slide`), and its turning about the
+//! vertical (`yaw_rate`). Its body's are its centre of mass's, and its spin about each
+//! axis of the world. Its tracks have their own speeds besides, `tracks`, its belts',
+//! which the client animates: on the ground they roll with it, off it they run free.
 //!
 //! # Where the numbers come from
 //!
@@ -133,19 +134,20 @@
 //! choice until a capture can fit it. The drive harness replays those captures through
 //! this module in windows, each starting from the real state, and reports the errors:
 //! about 0.25 m median over 1 s windows. Collisions between vehicles were checked on the
-//! Pershing's pushes of its allies, but their model (the tracks' friction against a
-//! spin, the impulse without bounce or friction) is ours.
+//! Pershing's pushes of its allies, but their model (the impulse without bounce or
+//! friction) is ours.
 //!
 //! # What isn't modelled
 //!
-//! Its tracks push it toward the motion the drive model gives it, rather than its engine
-//! driving them: that is next, then walls and vehicles hitting it in 3D. It takes no
-//! damage from a fall, doesn't float or sink in water, and can't climb what is more than
-//! `STEP_HEIGHT` above its contacts. Vehicles have no friction between them and take no
-//! damage from ramming, each other or destructibles. Trees don't fall: the client
-//! numbers them among the speed trees, which aren't decoded. What a destroyed module
-//! leaves (`BodyKind::Remains`) is never collided with. Shells are flown in `gun.rs`,
-//! against the same statics and rubble.
+//! Walls and vehicles still hit it on the ground plane, not in 3D: that is next. It takes
+//! no damage from a fall, doesn't float or sink in water, and can't climb what is more
+//! than `STEP_HEIGHT` above its contacts. Its tracks don't scrub sideways as it turns:
+//! its steering turns it as the game's turning speeds say, and holds back a hull spun by
+//! a push off its middle only as fast as it would stop turning. Vehicles have no friction between them and
+//! take no damage from ramming, each other or destructibles. Trees don't fall: the
+//! client numbers them among the speed trees, which aren't decoded. What a destroyed
+//! module leaves (`BodyKind::Remains`) is never collided with. Shells are flown in
+//! `gun.rs`, against the same statics and rubble.
 
 mod drive;
 mod body;
@@ -462,18 +464,21 @@ pub struct Hull {
     /// Signed speed of its origin across its heading, positive to the right, in m/s, as
     /// `speed` is: it slides with its tracks blocked, then its tracks hold it again.
     pub slide: f32,
-    /// Turning speed its tracks drive it at, in rad/s, positive to the right: the drive
-    /// model's, see [`Self::drive`].
+    /// Turning speed about the vertical, in rad/s, positive to the right, as `speed` is.
     pub yaw_rate: f32,
-    /// Turning speed it has on top, about the vertical, in rad/s, as hits gave it: its
-    /// tracks don't drive it but hold it, see `Hull::track_friction`.
-    pub spin: f32,
+    /// Each of its tracks' speed, a pair by `drive::Side`, in m/s, positive forward: its
+    /// belts', rolling with the ground under them, or spinning where they slip or touch
+    /// nothing, see [`Self::integrate`].
+    pub tracks: [f32; 2],
+    /// The turning speed its steering pushes it toward, in rad/s, positive to the right,
+    /// see [`Self::drive`].
+    steer: f32,
     /// The velocity of its centre of mass, in m/s: its body's, see [`Self::integrate`].
     pub linear_velocity: Vec3,
     /// How fast it turns, about each axis of the world, in rad/s: its body's.
     pub angular_velocity: Vec3,
     /// Whether its tracks don't grip the ground: none of their contacts touches it, or
-    /// it is on its side or its roof, see `body::TRACKS_UPRIGHT`. Nothing drives it then.
+    /// it is on its side or its roof, see `body::TRACKS_UPRIGHT`. They run free then.
     pub airborne: bool,
     /// Whether any of its contacts touches the ground, its body's too: it can rest.
     touching: bool,
@@ -500,7 +505,8 @@ impl Hull {
             speed: 0.0,
             slide: 0.0,
             yaw_rate: 0.0,
-            spin: 0.0,
+            tracks: [0.0; 2],
+            steer: 0.0,
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             airborne: false,
@@ -520,12 +526,12 @@ impl Hull {
     /// ```text
     ///   speeds_to_body             its body takes the speeds hits and walls left it
     ///        ▼
-    ///   drive(ground under it)     the drive model: the speeds and turning its tracks
-    ///        ▼                     drive it to, unless it is in the air
+    ///   drive(ground under it)     the drive model: how hard its engine, brakes and
+    ///        ▼                     steering push it
     ///   (still? it rests)          nothing below happens
     ///        ▼
-    ///   integrate                  the body moves: gravity, its suspension, its tracks
-    ///        ▼                     pushing where they touch the ground
+    ///   integrate                  the body and its tracks move: gravity, its
+    ///        ▼                     suspension, its tracks gripping the ground
     ///   ram, push_out              into destructibles, out of the solid static models,
     ///        ▼                     speed into them lost
     ///   keep_within(bounds)        inside the map, speed into the edge lost
@@ -539,10 +545,9 @@ impl Hull {
         //    tick.
         self.speeds_to_body();
 
-        // 2. The drive model says what its tracks drive it to, if they are on the ground.
-        if !self.airborne {
-            self.drive(dt, ground_at(&space.terrain, self.position));
-        }
+        // 2. The drive model says how hard its engine, its brakes and its steering push
+        //    it, for its tracks to pass on where they grip.
+        let drive = self.drive(dt, ground_at(&space.terrain, self.position));
 
         // 3. Still on the ground long enough, it rests: nothing to move, nothing to send.
         self.still = if self.is_still() { self.still.saturating_add(1) } else { 0 };
@@ -550,8 +555,8 @@ impl Hull {
             return false;
         }
 
-        // 4. Its body moves, its tracks pushing it toward what the drive model said.
-        self.integrate(dt, space);
+        // 4. Its body and its tracks move, its tracks pushing it where they grip.
+        self.integrate(dt, space, &drive);
 
         // 5. What it got into: destructibles first, which see its speed before a wall
         //    takes it, then the walls, then the map's edge.
@@ -573,7 +578,8 @@ impl Hull {
             && self.speed.abs() < REST_SPEED
             && self.slide.abs() < REST_SPEED
             && self.yaw_rate.abs() < REST_SPIN
-            && self.spin.abs() < REST_SPIN
+            && self.steer.abs() < REST_SPIN
+            && self.tracks.iter().all(|track| track.abs() < REST_SPEED)
             && self.linear_velocity.length() < REST_SPEED
             && self.angular_velocity.length() < REST_SPIN
     }
@@ -643,7 +649,7 @@ impl Hull {
     /// How fast the point at `arm` from its middle moves on the ground plane, in m/s: its
     /// velocity and its yaw rate's.
     fn point_velocity(&self, arm: Vec2) -> Vec2 {
-        self.velocity().xz() + Vec2::new(arm.y, -arm.x) * (self.yaw_rate + self.spin)
+        self.velocity().xz() + Vec2::new(arm.y, -arm.x) * self.yaw_rate
     }
 
     /// Its inertia against turning on the ground plane, in kg·m²: that of a box of its
@@ -659,7 +665,7 @@ impl Hull {
     fn hit(&mut self, impulse: Vec2, arm: Vec2, mass: f32, inertia: f32) {
         let velocity = self.velocity() + Vec3::new(impulse.x, 0.0, impulse.y) / mass;
         self.set_velocity(velocity);
-        self.spin -= arm.perp_dot(impulse) / inertia;
+        self.yaw_rate -= arm.perp_dot(impulse) / inertia;
     }
 
     /// Its collision box on the ground plane, upright: where it touches walls,

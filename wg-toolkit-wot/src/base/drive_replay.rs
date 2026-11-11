@@ -23,7 +23,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use std::fs;
 
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
@@ -319,10 +319,15 @@ fn replay(drive: &Drive, mobility: MobilityDef, aiming: &AimingDef, others: &[Ot
         let hull = &mut world.vehicle_mut(me).hull;
         let heading = Vec3::new(from.direction.z.sin(), 0.0, from.direction.z.cos());
         let right = Vec3::new(from.direction.z.cos(), 0.0, -from.direction.z.sin());
-        hull.speed = (from.position - before.position).dot(heading) / dt;
-        hull.slide = (from.position - before.position).dot(right) / dt;
+        // Its velocity is its last tick's chord's, turned as it turned over half of it:
+        // the chord lags its heading so, which would make it slide.
         hull.yaw_rate = wrap_angle(from.direction.z - before.direction.z) / dt;
-        hull.linear_velocity = (from.position - before.position) / dt;
+        let chord = (from.position - before.position) / dt;
+        let velocity = Quat::from_rotation_y(hull.yaw_rate * dt / 2.0) * chord;
+        hull.speed = velocity.dot(heading);
+        hull.slide = velocity.dot(right);
+        hull.linear_velocity = velocity;
+        hull.match_tracks();
         let controls_at = |t: f64| drive.controls.iter().rev()
             .find(|&&(at, _)| at + delay <= t)
             .map_or(0, |&(_, flags)| flags);

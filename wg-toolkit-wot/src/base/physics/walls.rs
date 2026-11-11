@@ -304,9 +304,7 @@ mod tests {
 
     use glam::Vec3;
 
-    use wgtk::space::Space;
-
-    use super::super::fixtures::{chieftain, wall};
+    use super::super::fixtures::{chieftain, slope, wall};
     use super::super::movement_flag;
     use super::*;
 
@@ -334,25 +332,27 @@ mod tests {
 
     #[test]
     fn stops_at_the_map_edge() {
-        let space = Space::default();
+        let space = slope(0.0);
         let bounds = Some((Vec2::splat(-100.0), Vec2::splat(100.0)));
         let edge = 100.0 - BOUNDS_MARGIN;
         // Square on at full speed, it stops dead, still pushing.
         let mut hull = chieftain();
         hull.position.z = 90.0;
         hull.speed = 40.0 / 3.6;
+        hull.match_tracks();
         hull.flags = movement_flag::FORWARD;
         for _ in 0..20 {
             hull.advance(0.1, &space, bounds, &mut Rubble::default());
         }
         assert_eq!(hull.position.z, edge);
         assert!(hull.speed.abs() < 1e-4 && hull.position.x.abs() < 1e-4, "{} {}", hull.speed, hull.position.x);
-        // At 30°, it drags along it, slower and slower: the real server's went 2.6, 1.8,
-        // 0.7 then 0.2 m/s once against it.
+        // At 30°, it drags along it, slower and slower, then crawls as its tracks push it
+        // on: the real server's went 2.6, 1.8, 0.7 then 0.2 m/s once against it.
         let mut hull = chieftain();
         hull.position.z = edge;
         hull.set_direction(Vec3::new(0.0, 0.0, -30f32.to_radians()));
         hull.speed = 40.0 / 3.6;
+        hull.match_tracks();
         hull.flags = movement_flag::FORWARD;
         let mut along = Vec::new();
         for _ in 0..6 {
@@ -361,7 +361,8 @@ mod tests {
             along.push((x - hull.position.x) / 0.1);
         }
         assert_eq!(hull.position.z, edge);
-        assert!(along.windows(2).all(|pair| pair[1] <= pair[0]) && (2.0..3.0).contains(&along[1]) && along[4] < 1.0, "{along:?}");
+        let slowing = along[..5].windows(2).all(|pair| pair[1] <= pair[0]);
+        assert!(slowing && (2.0..3.0).contains(&along[1]) && along[4] < 1.0 && along[5] < 0.5, "{along:?}");
     }
 
 }

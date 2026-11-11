@@ -2,7 +2,7 @@
 //! RPM, which its engine sound and its tracks' scroll follow, and the aux physics data
 //! its own client aims from and animates its tracks with.
 
-use super::{movement_flag, Hull};
+use super::Hull;
 
 
 /// The engine's relative RPM at idle, and just after shifting up. Captured: the RPM
@@ -20,13 +20,13 @@ const GEAR_SHIFTS: [f32; 3] = [0.27, 0.52, 0.8];
 impl Hull {
 
     /// The vehicle's `engineMode`, which the client's track scroll follows: idle (1)
-    /// without flags, accelerating (3) until at the speed the flags ask for, then
-    /// cruising (2), and the flags themselves.
+    /// without flags, accelerating (3) until its tracks are at the speed the flags ask
+    /// for, then cruising (2), and the flags themselves.
     pub fn engine_mode(&self) -> [u8; 2] {
 
         let mode = if self.flags == 0 {
             1
-        } else if (self.target_speed() - self.speed).abs() > 0.01 {
+        } else if (self.target_speed() - self.track_speed()).abs() > 0.01 {
             3
         } else {
             2
@@ -37,16 +37,21 @@ impl Hull {
     }
 
     /// The engine's gear and its RPM relative to its maximum, which the client's engine
-    /// sound follows. As the captured server does: in neutral (gear 0) at idle RPM when
-    /// still, else the speed's share of the top speed picks one of [`GEAR_SHIFTS`]'s
-    /// gears, the RPM going from [`SHIFT_RPM`] to 1 across it; turning in place, the RPM
-    /// follows the turn rate in first gear, against its fastest, on firm ground.
+    /// sound follows, by its tracks' speeds: off the ground they run free and it revs, and
+    /// landing pulls them to the ground's speed, as the captured server does. In neutral
+    /// (gear 0) at idle RPM when still, else the speed's share of the top speed picks one
+    /// of [`GEAR_SHIFTS`]'s gears, the RPM going from [`SHIFT_RPM`] to 1 across it;
+    /// turning in place, the RPM follows the turn rate in first gear, against its
+    /// fastest, on firm ground.
     pub fn engine(&self) -> (u8, f32) {
 
         // Still, or turning in place.
-        let top_speed = if self.speed < 0.0 { self.mobility.speed_backward } else { self.mobility.speed_forward };
-        let share = (self.speed.abs() / top_speed.max(0.1)).min(1.0);
-        let turn_share = (self.yaw_rate.abs() / self.mobility.rotation_speed[0].max(0.01)).min(1.0);
+        let speed = self.track_speed();
+        let [left, right] = self.tracks;
+        let turning = (left - right) / (2.0 * self.mobility.carrying_point.x.max(1e-3));
+        let top_speed = if speed < 0.0 { self.mobility.speed_backward } else { self.mobility.speed_forward };
+        let share = (speed.abs() / top_speed.max(0.1)).min(1.0);
+        let turn_share = (turning.abs() / self.mobility.rotation_speed[0].max(0.01)).min(1.0);
         if share < 0.02 {
             if turn_share < 0.02 {
                 return (0, IDLE_RPM);
@@ -63,6 +68,12 @@ impl Hull {
 
     }
 
+    /// How fast its tracks go together, the middle of their speeds, in m/s.
+    fn track_speed(&self) -> f32 {
+        let [left, right] = self.tracks;
+        (left + right) / 2.0
+    }
+
     /// The hull's orientation and its tracks' speeds, as the avatar's
     /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
     /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
@@ -72,22 +83,8 @@ impl Hull {
     pub fn aux_physics_data(&self) -> u64 {
 
         use std::f32::consts::FRAC_PI_2;
-        use movement_flag::*;
 
-        let (left, right) = if self.flags & BLOCK_TRACKS != 0 {
-            // On its handbrake, its inner track blocked and its outer one carrying it as
-            // fast as it slides, as the real server's show; both blocked going straight.
-            let outer = self.speed.hypot(self.slide);
-            match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
-                ROTATE_LEFT => (0.0, outer),
-                ROTATE_RIGHT => (outer, 0.0),
-                _ => (0.0, 0.0),
-            }
-        } else {
-            // The inner track goes slower, the outer one faster.
-            let turning = self.yaw_rate * self.mobility.carrying_point.x;
-            (self.speed + turning, self.speed - turning)
-        };
+        let [left, right] = self.tracks;
 
         let direction = self.direction();
         let roll = direction.x;
@@ -135,9 +132,9 @@ mod tests {
         let mut last = (0, 0.0);
         // Below 2% of the top speed, it counts as still.
         for step in 2..=100 {
-            hull.speed = top * step as f32 / 100.0;
+            hull.tracks = [top * step as f32 / 100.0; 2];
             let (gear, rpm) = hull.engine();
-            assert!(gear >= last.0 && (SHIFT_RPM..=1.0).contains(&rpm), "{gear} {rpm} at {}", hull.speed);
+            assert!(gear >= last.0 && (SHIFT_RPM..=1.0).contains(&rpm), "{gear} {rpm} at {:?}", hull.tracks);
             // The RPM drops only when shifting up.
             assert!(rpm >= last.1 || gear > last.0);
             last = (gear, rpm);
@@ -152,7 +149,7 @@ mod tests {
         let captured: u64 = 0xaf5f5f813c00f875;
         let mut hull = chieftain();
         hull.set_direction(Vec3::new(0.0299, 0.0012, 2.7713));
-        hull.speed = 1.76;
+        hull.tracks = [1.76; 2];
         // Without the RPM, which depends on the engine model.
         assert_eq!(hull.aux_physics_data() & 0x00ff_ffff_ffff_ffff, captured & 0x00ff_ffff_ffff_ffff);
     }

@@ -97,8 +97,8 @@ pub fn chieftain() -> Hull {
 /// then its body moving, as [`Hull::advance`] does but for the map.
 pub fn tick(hull: &mut Hull, dt: f32, ground: Ground) {
     hull.speeds_to_body();
-    hull.drive(dt, ground);
-    hull.integrate(dt, &Space::default());
+    let drive = hull.drive(dt, ground);
+    hull.integrate(dt, &Space::default(), &drive);
 }
 
 /// A wall across the way at z = 10, `height` high, as two triangles.
@@ -140,6 +140,24 @@ pub fn ground_under(deck: Option<f32>, drop: f32) -> Space {
             quad(&mut triangles, 40.0, 100.0, -drop, -drop);
         }
     }
+    Space {
+        statics: Statics::from_triangles(triangles),
+        ..Space::default()
+    }
+}
+
+/// Ground 300 m square around the origin, sloping down along z by `degrees`, through
+/// the origin: a hull at the origin facing +Z on it is pitched nose down by as much.
+pub fn slope(degrees: f32) -> Space {
+    let rise = 150.0 * degrees.to_radians().tan();
+    let near_left = Vec3::new(-150.0, rise, -150.0);
+    let near_right = Vec3::new(150.0, rise, -150.0);
+    let far_left = Vec3::new(-150.0, -rise, 150.0);
+    let far_right = Vec3::new(150.0, -rise, 150.0);
+    let triangles = vec![
+        StaticTriangle::new([near_left, far_right, near_right], 0, 0, BodyKind::Solid),
+        StaticTriangle::new([near_left, far_left, far_right], 0, 0, BodyKind::Solid),
+    ];
     Space {
         statics: Statics::from_triangles(triangles),
         ..Space::default()

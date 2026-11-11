@@ -5,9 +5,10 @@
 //! box, see the `walls` module. Flatter, it is *ground*, as the terrain is, or a ramp
 //! whatever its slope. The ground under a contact of a hull is the *highest* of the
 //! terrain and of the ground-like triangles *no higher than [`STEP_HEIGHT`] above the
-//! contact*, see [`ground_height`]. The contact is where it is on the tilted hull, so a
-//! nose raised by a rock's face, a step or a ramp finds the ground further up, and the
-//! hull climbs onto it. That bound is also what makes a bridge work from both sides:
+//! contact*, see [`surface_under`], with its normal there, which its contact pushes
+//! along and grips across. The contact is where it is on the tilted hull, so a nose
+//! raised by a rock's face, a step or a ramp finds the ground further up, and the hull
+//! climbs onto it. That bound is also what makes a bridge work from both sides:
 //!
 //! ```text
 //!    height                                         the deck is above the contacts by
@@ -44,24 +45,49 @@ const WALL_ANGLE: f32 = 50.0 * std::f32::consts::PI / 180.0;
 /// painted ones.
 const DEFAULT_GROUND: Ground = Ground::Medium;
 
-/// The height of the ground under a point of the ground plane, no higher than `top`:
-/// the terrain's, or a static model's above it, its solid triangles that aren't walls or
-/// its ramps, the deck of a bridge it drives onto say, not the one it drives under. None
-/// with neither.
-pub fn ground_height(space: &Space, point: Vec2, top: f32) -> Option<f32> {
+/// The ground under a point of the ground plane, no higher than `top`, see
+/// [`Surface`]: the terrain's, or a static model's above it, its solid triangles that
+/// aren't walls or its ramps, the deck of a bridge it drives onto say, not the one it
+/// drives under. None with neither.
+pub fn surface_under(space: &Space, point: Vec2, top: f32) -> Option<Surface> {
 
-    let terrain = space.terrain.height_at(point.x, point.y);
+    let terrain = space.terrain.height_at(point.x, point.y).map(|height| Surface {
+        height,
+        normal: space.terrain.normal_at(point.x, point.y).unwrap_or(Vec3::Y),
+    });
     let statics = [BodyKind::Solid, BodyKind::Ramp].into_iter()
         .flat_map(|kind| space.statics.triangles_at(kind, point))
         .filter(|&(triangle, height)| height <= top && (triangle.kind == BodyKind::Ramp || !is_wall(triangle)))
-        .map(|(_, height)| height)
-        .reduce(f32::max);
+        .map(|(triangle, height)| Surface {
+            height,
+            normal: upward(triangle.normal),
+        })
+        .reduce(|highest, surface| if surface.height > highest.height { surface } else { highest });
 
     match (terrain, statics) {
-        (Some(terrain), Some(statics)) => Some(terrain.max(statics)),
+        (Some(terrain), Some(statics)) => Some(if statics.height > terrain.height { statics } else { terrain }),
         (terrain, statics) => terrain.or(statics),
     }
 
+}
+
+/// The ground under a point: its height, and its normal, upward.
+#[derive(Debug, Clone, Copy)]
+pub struct Surface {
+    pub height: f32,
+    pub normal: Vec3,
+}
+
+/// A triangle's normal, turned upward if its winding has it down, straight up if it is
+/// degenerate.
+fn upward(normal: Vec3) -> Vec3 {
+    if normal == Vec3::ZERO {
+        Vec3::Y
+    } else if normal.y < 0.0 {
+        -normal
+    } else {
+        normal
+    }
 }
 
 /// Whether a static triangle is a wall, within [`WALL_ANGLE`] of vertical, rather than
