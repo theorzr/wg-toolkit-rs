@@ -483,7 +483,7 @@ impl BaseThread {
             team,
             info,
             info_index,
-            controller: Controller::Bot(Bot),
+            controller: Controller::Bot(Bot::default()),
             id: world.add(driven),
             gun,
             collision: def.collision.clone(),
@@ -866,11 +866,11 @@ impl BaseThread {
 
         for index in 0..vehicles.len() {
             let enemy = nearest_enemy(vehicles, world, index);
-            let vehicle = &vehicles[index];
-            let driven = world.vehicle_mut(vehicle.id);
-            match (&vehicle.controller, vehicle.alive()) {
-                (_, false) => driven.hull.flags = 0,
-                (Controller::Bot(bot), true) => bot.drive(driven, enemy, drives),
+            let vehicle = &mut vehicles[index];
+            let alive = vehicle.alive();
+            match (&mut vehicle.controller, alive) {
+                (_, false) => world.vehicle_mut(vehicle.id).hull.flags = 0,
+                (Controller::Bot(bot), true) => bot.drive(world, vehicle.id, enemy, drives),
                 (Controller::Client(_), true) => {}
             }
         }

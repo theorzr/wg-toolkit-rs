@@ -301,6 +301,11 @@ impl Rubble {
         &self.fresh[fresh..]
     }
 
+    /// How many pieces are broken: once more are, what was learnt of the map is stale.
+    pub fn broken_count(&self) -> usize {
+        self.broken.len()
+    }
+
     /// The destructibles broken since last taken, for the battle to tell its clients.
     pub fn take_breakages(&mut self) -> Drain<'_, Breakage> {
         self.fresh.drain(..)

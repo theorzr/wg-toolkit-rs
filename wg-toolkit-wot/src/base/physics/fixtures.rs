@@ -1,6 +1,6 @@
 //! What the physics' tests drive on: a Chieftain-like vehicle and simple maps.
 
-use glam::{Vec2, Vec3};
+use glam::{BVec3, Vec2, Vec3};
 
 use wgtk::space::statics::{BodyKind, Statics, StaticTriangle};
 use wgtk::space::terrain::Ground;
@@ -159,6 +159,34 @@ pub fn slope(degrees: f32) -> Space {
         StaticTriangle::new([near_left, far_right, near_right], 0, 0, BodyKind::Solid),
         StaticTriangle::new([near_left, far_left, far_right], 0, 0, BodyKind::Solid),
     ];
+    Space {
+        statics: Statics::from_triangles(triangles),
+        ..Space::default()
+    }
+}
+
+/// Flat ground 300 m square around the origin, and blocks on it, each from its least
+/// corner to its greatest, as triangles: their tops and sides, each a model of its own.
+pub fn blocks(blocks: &[(Vec3, Vec3)]) -> Space {
+    let mut triangles = vec![
+        StaticTriangle::new([Vec3::new(-150.0, 0.0, -150.0), Vec3::new(150.0, 0.0, 150.0), Vec3::new(150.0, 0.0, -150.0)], 0, 0, BodyKind::Solid),
+        StaticTriangle::new([Vec3::new(-150.0, 0.0, -150.0), Vec3::new(-150.0, 0.0, 150.0), Vec3::new(150.0, 0.0, 150.0)], 0, 0, BodyKind::Solid),
+    ];
+    // Each face's corners, by whether they are at the greatest along each axis.
+    let faces = [
+        [(false, true, false), (false, true, true), (true, true, true), (true, true, false)],
+        [(false, false, false), (true, false, false), (true, true, false), (false, true, false)],
+        [(false, false, true), (false, true, true), (true, true, true), (true, false, true)],
+        [(false, false, false), (false, true, false), (false, true, true), (false, false, true)],
+        [(true, false, false), (true, false, true), (true, true, true), (true, true, false)],
+    ];
+    for (instance, &(min, max)) in blocks.iter().enumerate() {
+        for face in faces {
+            let [a, b, c, d] = face.map(|(x, y, z)| Vec3::select(BVec3::new(x, y, z), max, min));
+            triangles.push(StaticTriangle::new([a, b, c], instance as u32 + 1, 0, BodyKind::Solid));
+            triangles.push(StaticTriangle::new([a, c, d], instance as u32 + 1, 0, BodyKind::Solid));
+        }
+    }
     Space {
         statics: Statics::from_triangles(triangles),
         ..Space::default()

@@ -51,6 +51,10 @@
 //! A vehicle alone, the drive harness's or a test's, moves through a world of it alone,
 //! `Hull::advance`.
 //!
+//! Bots find their way over the world's map with [`World::path`], outside of its tick:
+//! where a tank can drive, asked of its space as their ways look at it, and forgotten
+//! once something breaks, see the `nav` module.
+//!
 //! The modules, in the order a tick uses them:
 //!
 //! ```text
@@ -68,6 +72,8 @@
 //!   walls       the map's edge, what it rams
 //!   turret      the turret and its gun: turning, aiming, dispersion
 //!   client      what the client is told beyond positions: engine and tracks
+//!
+//!   nav         where tanks can drive on the map, and bots' ways over it
 //! ```
 //!
 //! Nothing in a tick allocates, once the world's lists of bodies and of where they touch
@@ -169,6 +175,7 @@ mod ground;
 mod rubble;
 mod walls;
 mod collision;
+mod nav;
 mod turret;
 mod client;
 #[cfg(test)]
@@ -191,6 +198,7 @@ use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS}
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::ground::ground_at;
+use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, Piece, Rubble};
 pub use self::turret::Turret;
@@ -263,6 +271,11 @@ pub struct World<S = Arc<Space>> {
     solids: Vec<Solid>,
     /// Where they touch, in a step.
     touching: Vec<Touching>,
+    /// Where tanks drive within its bounds, see [`Self::path`]; none without bounds.
+    nav: Option<NavGrid>,
+    /// How many pieces its rubble had broken when its way grid last looked: once more
+    /// broke, it forgets what it learnt.
+    nav_broken: usize,
 }
 
 impl<S: Deref<Target = Space>> World<S> {
@@ -275,6 +288,8 @@ impl<S: Deref<Target = Space>> World<S> {
             rubble: Rubble::default(),
             solids: Vec::new(),
             touching: Vec::new(),
+            nav: bounds.map(NavGrid::new),
+            nav_broken: 0,
         }
     }
 
@@ -293,6 +308,19 @@ impl<S: Deref<Target = Space>> World<S> {
     #[allow(dead_code)]
     pub fn rubble_mut(&mut self) -> &mut Rubble {
         &mut self.rubble
+    }
+
+    /// A way for a tank `radius` wide from one point to another over its map, or to as
+    /// near it as it can get: the points it turns at, then its end. None without bounds,
+    /// or starting out of them. See the `nav` module.
+    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32) -> Option<Vec<Vec3>> {
+        let nav = self.nav.as_mut()?;
+        let broken = self.rubble.broken_count();
+        if broken != self.nav_broken {
+            nav.forget();
+            self.nav_broken = broken;
+        }
+        nav.path(from, to, radius, &self.space, &blocking(&self.space, &self.rubble))
     }
 
     // -- Its vehicles --
