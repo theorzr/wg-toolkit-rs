@@ -23,28 +23,6 @@
 //! [`MAX_CLEARANCE`]: a tank fits where its clearance is over its half width, so a way
 //! keeps it off walls and out of gaps narrower than it.
 //!
-//! A way keeps out of the threats' sight too, where it can: a step a threat sees costs
-//! [`DANGER_COST`] times its length more for each that sees it, so a way goes round
-//! behind a house, or a hill, rather than across the open, when it isn't much longer.
-//! Whether a threat sees a cell is asked of the space the first time a way looks at it,
-//! for cells [`SIGHT_CELLS`] wide: a line from its gun to a tank's top in its middle,
-//! within [`SIGHT_RANGE`]. What a threat sees holds while it stays within [`SIGHT_MOVE`]
-//! of where it saw it from, for the next ways to look, whoever's.
-//!
-//! ```text
-//!   seen from above, a threat T behind a house:
-//!
-//!       . . . . . . . . . .     . seen, it costs more
-//!       . . . ┌─────┐ . . .
-//!       . . . │house│ . . .     a way from A to B goes round its shadow
-//!       . . . └─────┘ . . .
-//!       . A─ ─ ─ ─ ─ ─ ─B .     not ─ ─ in its sight
-//!       . .\           /. .
-//!       . . ╲  shadow ╱ . .
-//!             ╲     ╱
-//!               ╲ ╱  ...
-//! ```
-//!
 //! What it learnt holds until something breaks: the world has it forget all, and it asks
 //! the space again as ways look, see [`NavGrid::forget`].
 
@@ -78,28 +56,6 @@ const WALL_MARGIN: f32 = 3.0;
 /// How much more a step costs at a tank's half width from a wall than [`WALL_MARGIN`]
 /// further off. Our choice.
 const WALL_COST: f32 = 2.0;
-/// How much more a step costs for each threat that sees it, as many times its length.
-/// Our choice: a way goes up to as much longer round a threat's sight than across it.
-const DANGER_COST: f32 = 3.0;
-/// How many cells wide a threat's sight is asked for, at once. Our choice: as wide as a
-/// tank, as fine as a house's shadow need be.
-const SIGHT_CELLS: usize = 4;
-/// How far a threat sees, in metres: the most any vehicle sees, as the battle's.
-const SIGHT_RANGE: f32 = 445.0;
-/// How far above a threat's position it sees from, its gun, in metres, of a hull's
-/// middle.
-const EYE_HEIGHT: f32 = 1.0;
-/// How far above a cell's surface a tank on it is seen, in metres: its turret's roof,
-/// about. Our choice.
-const SHOWN_HEIGHT: f32 = 1.5;
-/// How far a threat may move from where it saw from for what it saw to hold, in metres.
-/// Our choice: what a tank drives in a second or two.
-const SIGHT_MOVE: f32 = 8.0;
-/// How long the space's rays along a line of sight are, in metres: a long ray asks it of
-/// all the terrain in its box.
-const SIGHT_STEP: f32 = 8.0;
-/// How many ways a threat's sight is kept for, no way looking at it.
-const SIGHT_KEPT: u32 = 64;
 
 
 /// See the module's documentation.
@@ -121,23 +77,6 @@ pub struct NavGrid {
     /// The cells around a cell within [`MAX_CLEARANCE`], by their offset and distance,
     /// nearest first: where its clearance looks.
     around: Vec<(isize, isize, f32)>,
-    /// How many sight cells it has along x, then along z, of [`SIGHT_CELLS`].
-    sight_size: (usize, usize),
-    /// What threats see, of those ways looked at lately.
-    sights: Vec<Sight>,
-    /// How many ways it looked for, to tell how long ago a sight was looked at.
-    ways: u32,
-}
-
-/// What a threat sees, from where.
-#[derive(Debug, Clone)]
-struct Sight {
-    /// Where it sees from.
-    eye: Vec3,
-    /// Whether it sees each sight cell, row by row along z, none where not asked yet.
-    seen: Vec<Option<bool>>,
-    /// The way that last looked at it, see [`NavGrid::ways`].
-    used: u32,
 }
 
 impl NavGrid {
@@ -160,9 +99,6 @@ impl NavGrid {
             blocked: vec![None; cells],
             clearance: vec![None; cells],
             around,
-            sight_size: (size.0.div_ceil(SIGHT_CELLS), size.1.div_ceil(SIGHT_CELLS)),
-            sights: Vec::new(),
-            ways: 0,
         }
     }
 
@@ -171,27 +107,24 @@ impl NavGrid {
         self.heights.fill(None);
         self.blocked.fill(None);
         self.clearance.fill(None);
-        self.sights.clear();
     }
 
     /// A way for a tank `radius` wide from one point to another, or to as near it as it
-    /// can get, over `space` of what `keep` says stops it, out of the sight of `threats`,
-    /// their positions, where it can: the points it turns at, then its end, see the
-    /// module's documentation. None if it starts off the grid. The way keeps
-    /// [`WALL_MARGIN`] off walls where it can, and leaves a cell too narrow for it, where
-    /// it starts, the shortest way.
+    /// can get, over `space` of what `keep` says stops it: the points it turns at, then
+    /// its end, see the module's documentation. None if it starts off the grid. The way
+    /// keeps [`WALL_MARGIN`] off walls where it can, and leaves a cell too narrow for it,
+    /// where it starts, the shortest way.
     ///
-    /// The cheapest way over the grid, by A* from cell to cell and to their diagonals,
-    /// each step costing its length, more near walls and in sight; then pulled straight:
-    /// from each point, on along the way as far as the line there keeps as far off walls,
-    /// and in as little sight, as the way did, see [`Self::clear`].
-    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32, threats: &[Vec3], space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> Option<Vec<Vec3>> {
+    /// The shortest way over the grid, by A* from cell to cell and to their diagonals,
+    /// each step costing its length, more near walls; then pulled straight: from each
+    /// point, on along the way as far as the line there keeps as far off walls as the way
+    /// did, see [`Self::clear`].
+    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> Option<Vec<Vec3>> {
 
         let start = self.cell_of(from)?;
         let goal = self.nearest_cell(to);
         let (columns, rows) = self.size;
         let index = |(column, row): (usize, usize)| row * columns + column;
-        let sights = self.sights_of(threats);
 
         // 1. A*: each cell's cost from the start, and the cell it was reached from; the
         //    cell nearest the goal reached so far, where the way ends if it can't get
@@ -227,8 +160,7 @@ impl NavGrid {
                     continue;
                 }
                 let near_wall = (radius + WALL_MARGIN - clearance).max(0.0) / WALL_MARGIN;
-                let seen = self.seen_by(next, &sights, space, keep) as f32;
-                let through = here + self.distance(cell, next) * (1.0 + WALL_COST * near_wall + DANGER_COST * seen);
+                let through = here + self.distance(cell, next) * (1.0 + WALL_COST * near_wall);
                 if through >= cost[index(next)] {
                     continue;
                 }
@@ -257,18 +189,15 @@ impl NavGrid {
         cells.reverse();
 
         // 3. Pulled straight: from each point, on along the way as long as the line
-        //    there keeps as far off walls as the way did, up to [`WALL_MARGIN`], and is
-        //    seen by no more threats than it was.
+        //    there keeps as far off walls as the way did, up to [`WALL_MARGIN`].
         let mut points = Vec::new();
         let mut at = 0;
         while at + 1 < cells.len() {
             let mut furthest = at + 1;
             let mut kept = (radius + WALL_MARGIN).min(self.clearance(cells[at], space, keep));
-            let mut seen = self.seen_by(cells[at], &sights, space, keep);
             for next in at + 1..cells.len() {
                 kept = kept.min(self.clearance(cells[next], space, keep));
-                seen = seen.max(self.seen_by(cells[next], &sights, space, keep));
-                if !self.clear(cells[at], cells[next], kept.max(radius), seen, &sights, space, keep) {
+                if !self.clear(cells[at], cells[next], kept.max(radius), space, keep) {
                     break;
                 }
                 furthest = next;
@@ -281,80 +210,14 @@ impl NavGrid {
     }
 
     /// Whether a tank goes straight from one cell to another without leaving those of
-    /// `clearance` at least, seen by `seen` of `sights` at most: every cell on the line
-    /// between them, at half a cell's steps.
-    #[allow(clippy::too_many_arguments)]
-    fn clear(
-        &mut self,
-        from: (usize, usize),
-        to: (usize, usize),
-        clearance: f32,
-        seen: u32,
-        sights: &[usize],
-        space: &Space,
-        keep: &impl Fn(&StaticTriangle) -> bool,
-    ) -> bool {
+    /// `clearance` at least: every cell on the line between them, at half a cell's steps.
+    fn clear(&mut self, from: (usize, usize), to: (usize, usize), clearance: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
         let (from, to) = (cell_vec(from), cell_vec(to));
         let steps = (from.distance(to) * 2.0).ceil().max(1.0) as usize;
         (0..=steps).all(|step| {
             let point = from.lerp(to, step as f32 / steps as f32).round();
-            let cell = (point.x as usize, point.y as usize);
-            self.clearance(cell, space, keep) >= clearance && self.seen_by(cell, sights, space, keep) <= seen
+            self.clearance((point.x as usize, point.y as usize), space, keep) >= clearance
         })
-    }
-
-    /// The sights of threats at these positions, each as an index into its own, the same
-    /// as a way looked at lately if a threat is near where it saw from, else a new one;
-    /// those no way looked at lately forgotten first.
-    fn sights_of(&mut self, threats: &[Vec3]) -> Vec<usize> {
-        self.ways += 1;
-        let ways = self.ways;
-        self.sights.retain(|sight| ways - sight.used < SIGHT_KEPT);
-        let cells = self.sight_size.0 * self.sight_size.1;
-        let mut sights = Vec::with_capacity(threats.len());
-        for &threat in threats {
-            let eye = threat + Vec3::Y * EYE_HEIGHT;
-            let sight = match self.sights.iter().position(|sight| sight.eye.distance(eye) <= SIGHT_MOVE) {
-                Some(sight) => sight,
-                None => {
-                    self.sights.push(Sight {
-                        eye,
-                        seen: vec![None; cells],
-                        used: ways,
-                    });
-                    self.sights.len() - 1
-                }
-            };
-            self.sights[sight].used = ways;
-            sights.push(sight);
-        }
-        sights
-    }
-
-    /// How many of `sights` see a cell, see [`Self::sees`].
-    fn seen_by(&mut self, cell: (usize, usize), sights: &[usize], space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> u32 {
-        sights.iter().filter(|&&sight| self.sees(sight, cell, space, keep)).count() as u32
-    }
-
-    /// Whether a sight sees a cell, asked of the space the first time for the whole sight
-    /// cell it is in: a tank's top, [`SHOWN_HEIGHT`] over its middle cell, within
-    /// [`SIGHT_RANGE`] of where it sees from, and nothing `keep` keeps between them.
-    fn sees(&mut self, sight: usize, (column, row): (usize, usize), space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
-        let (sight_column, sight_row) = (column / SIGHT_CELLS, row / SIGHT_CELLS);
-        let index = sight_row * self.sight_size.0 + sight_column;
-        if let Some(seen) = self.sights[sight].seen[index] {
-            return seen;
-        }
-        let middle = (
-            (sight_column * SIGHT_CELLS + SIGHT_CELLS / 2).min(self.size.0 - 1),
-            (sight_row * SIGHT_CELLS + SIGHT_CELLS / 2).min(self.size.1 - 1),
-        );
-        let height = self.height(middle, space, keep);
-        let shown = self.center_of(middle) + Vec3::Y * SHOWN_HEIGHT;
-        let eye = self.sights[sight].eye;
-        let seen = !height.is_nan() && eye.distance(shown) <= SIGHT_RANGE && in_sight(eye, shown, space, keep);
-        self.sights[sight].seen[index] = Some(seen);
-        seen
     }
 
     /// A cell's clearance, in metres, see the module's documentation: the distance to the
@@ -445,22 +308,6 @@ impl NavGrid {
 
 }
 
-/// Whether nothing `keep` keeps of the space is between two points: along the line, in
-/// rays [`SIGHT_STEP`] long.
-fn in_sight(from: Vec3, to: Vec3, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
-    let length = from.distance(to);
-    let direction = (to - from) / length;
-    let mut along = 0.0;
-    while along < length {
-        let step = SIGHT_STEP.min(length - along);
-        if space.ray(from + direction * along, direction, step, keep).is_some() {
-            return false;
-        }
-        along += step;
-    }
-    true
-}
-
 /// A cell, as a point of the grid's plane, in cells.
 fn cell_vec((column, row): (usize, usize)) -> Vec2 {
     Vec2::new(column as f32, row as f32)
@@ -526,7 +373,7 @@ mod tests {
         let keep = blocking(&space, &rubble);
         let mut grid = NavGrid::new(bounds);
         let start = Instant::now();
-        let way = grid.path(from, to, 2.0, &[], &space, &keep).unwrap();
+        let way = grid.path(from, to, 2.0, &space, &keep).unwrap();
         println!("Found a way of {} points in {:?}", way.len(), start.elapsed());
         // It ends at the other spawn, and keeps its width off walls all the way.
         assert!((*way.last().unwrap() - to).with_y(0.0).length() < 2.0);

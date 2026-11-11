@@ -22,7 +22,7 @@ pub struct LoginThread {
     app: login::App,
     link_listener: LoginLinkListener,
     login_challenges: HashMap<SocketAddr, bool>,
-    /// The name of every player, until accounts are stored.
+    /// The name of the players logging in without a username, by token.
     name: String,
 }
 
@@ -105,7 +105,7 @@ impl LoginThread {
                             login_key: OsRng.next_u32(),
                             addr: login.addr,
                             blowfish_key: login.request.blowfish_key.clone(),
-                            name: self.name.clone(),
+                            name: player_name(&login.request.username, &self.name),
                             real_base_app: None,
                         });
 
@@ -126,4 +126,15 @@ impl LoginThread {
 
     }
 
+}
+
+/// The name a client logging in with this username plays as: its username up to any `@`,
+/// as the game's are e-mails, else the given one, logging in by token.
+fn player_name(username: &str, default: &str) -> String {
+    let name = username.split('@').next().unwrap_or_default().trim();
+    if name.is_empty() {
+        default.to_string()
+    } else {
+        name.to_string()
+    }
 }

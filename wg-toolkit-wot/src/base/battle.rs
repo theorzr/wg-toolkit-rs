@@ -32,7 +32,7 @@ use crate::wot::items::VehicleDescr;
 
 use super::{
     ammo_list, avatar_cell_data, gun_reload_time, invalid_data, targeting_info, vehicle_health_info,
-    vehicle_settings, BaseThread, VehicleConfig, PLAYER_ACCOUNT_DBID, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
+    vehicle_settings, BaseThread, Player, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP, TICK,
 };
@@ -218,14 +218,14 @@ struct ClientDriver {
 impl BaseThread {
 
     /// Get a client's avatar into its battle's space, with its map: create the vehicle of
-    /// the player of the given name, the avatar's cell side on it, then the bots and the
+    /// its player, the avatar's cell side on it, then the bots and the
     /// arena's info entity, which the client gets in that order. It sees its allies and
     /// the enemies its vehicle spots, see [`Self::step`].
-    pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey, name: String) -> io::Result<()> {
+    pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey, player: Player) -> io::Result<()> {
 
         let Some(config) = self.battle_clients.get(&client).map(|c| c.config.clone()) else { return Ok(()) };
         let mut world = World::new(self.space.clone(), Some(self.map.bounds));
-        let own = self.create_player_vehicle(&mut world, avatar, space, &config, name)?;
+        let own = self.create_player_vehicle(&mut world, avatar, space, &config, player)?;
         let own_id = own.entity.id();
         let own_descr = own.info.compDescr.0.clone();
         let hull = &world.vehicle(own.id).hull;
@@ -335,7 +335,7 @@ impl BaseThread {
     }
 
     /// Create the player's vehicle in its battle's space, at its team's start, or where
-    /// the battles' options spawn it, of the given configuration and named as the player:
+    /// the battles' options spawn it, of the given configuration and its player's:
     /// it belongs to the avatar, and the client drives it once it has it, see
     /// [`Self::vehicle_entered`].
     fn create_player_vehicle(
@@ -344,10 +344,10 @@ impl BaseThread {
         avatar: EntityKey<Avatar>,
         space: SpaceKey,
         config: &VehicleConfig,
-        name: String,
+        player: Player,
     ) -> io::Result<BattleVehicle> {
 
-        let public = public_info(name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
+        let public = public_info(player.name, &config.descr, PLAYER_TEAM, config.max_health as u16, config.crew.len());
 
         let start = match self.battle_options.spawn {
             Some((at, yaw)) => spawn_start(at, yaw, &self.space.terrain),
@@ -364,7 +364,7 @@ impl BaseThread {
         info!(%avatar, entity_id = %vehicle.id(), "Created the vehicle, at {:?}", start.position);
 
         let driven = Vehicle::new(start.position, start.direction, config.mobility, config.aiming.clone());
-        let info = vehicle_info(vehicle.id(), &public, PLAYER_ACCOUNT_DBID);
+        let info = vehicle_info(vehicle.id(), &public, player.id);
         let mut entity = self.app.entity(vehicle)?;
         init_vehicle(&mut entity, avatar.id(), public, driven.turret.gun_angles_packed())?;
 

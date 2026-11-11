@@ -35,6 +35,7 @@ entity_schema! {
             fn receiveQueueInfo(info: Pickle);
             fn onEnqueued(queue_type: u8);
             fn onTokenReceived(request_id: u16, token_type: u8, data: Pickle);
+            fn onKickedFromServer(reason: String, kick_reason_type: u8, expiry_time: u32);
         }
         base {
             fn doCmdStr(request_id: i16, cmd: i16, arg: String);
@@ -68,6 +69,7 @@ script_dict! {
 entity_schema! {
     pub Avatar {
         client {
+            fn onKickedFromServer(reason: String, kick_reason_type: u8, expiry_time: u32);
             fn updateArena(update_type: u8, data: Bytes);
             fn showTracer(
                 shooter: EntityId,

@@ -92,8 +92,8 @@ pub struct AppLoginArgs {
     pub real_login_app: Option<SocketAddrV4>,
     #[command(flatten)]
     pub real: RealLoginArgs,
-    /// The name of every player, until accounts are stored: a client logging in with
-    /// a token doesn't give one. Not with `--real-login-app`.
+    /// The name of the players logging in without a username, by token, until
+    /// accounts are stored. Not with `--real-login-app`.
     #[arg(long, default_value = "Player", conflicts_with = "real_login_app")]
     pub name: String,
 }
@@ -145,8 +145,8 @@ pub struct ServerArgs {
     pub login: LoginArgs,
     #[command(flatten)]
     pub base: BaseArgs,
-    /// The name of every player, until accounts are stored: a client logging in with
-    /// a token doesn't give one.
+    /// The name of the players logging in without a username, by token, until
+    /// accounts are stored.
     #[arg(long, default_value = "Player")]
     pub name: String,
 }

@@ -181,7 +181,8 @@ impl App {
 
         loop {
 
-            // Empty the events before.
+            // Empty the events before, those of clients gone quiet among them.
+            self.time_out_clients();
             if let Some(event) = self.events.pop_front() {
                 return event;
             }
@@ -211,6 +212,10 @@ impl App {
                 }
                 Err(error) => return Event::IoError(IoErrorEvent { error, addr: None }),
             };
+
+            if let Some(state) = self.client_keys.get(&addr).and_then(|key| self.clients.get_mut(key.slot)) {
+                state.heard = Instant::now();
+            }
 
             let Ok(mut channel) = self.protocol.accept(packet, addr) else {
                 continue;
@@ -257,7 +262,13 @@ impl App {
                 }
                 Ok(())
             }
-            element::id::DISCONNECT_CLIENT => self.skip::<element::DisconnectClient>(reader),
+            element::id::DISCONNECT_CLIENT => {
+                let disconnect = reader.read_simple::<element::DisconnectClient>()?;
+                if let Some(client) = client {
+                    self.disconnected(client, Disconnection::Client(disconnect.element.reason));
+                }
+                Ok(())
+            }
             element::id::PING_DATACENTER => self.skip::<element::PingDatacenter>(reader),
             element::id::AVATAR_UPDATE_IMPLICIT => {
                 let update = reader.read_simple::<element::AvatarUpdateImplicit>()?.element;
@@ -411,6 +422,10 @@ impl App {
 /// [`App::poll_until`]) lets resends go out while no packet comes in.
 const RESEND_TIMEOUT: Duration = Duration::from_millis(400);
 const RESEND_GIVE_UP: Duration = Duration::from_secs(20);
+/// How long a client may go unheard before it is assumed gone, see
+/// [`Disconnection::Timeout`]. Our choice: a client sends something every few seconds,
+/// even idle in its garage.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Resolves a client-to-cell call's method table from the entity it names, for
 /// [`element::CellEntityMethod`].
@@ -487,6 +502,7 @@ impl App {
             blowfish: Arc::clone(&blowfish),
             player: None,
             witness: None,
+            heard: Instant::now(),
         });
         let key = ClientKey { slot, addr };
         self.client_keys.insert(addr, key);
@@ -617,6 +633,45 @@ impl App {
         self.remove_entities(|_, state| state.client == Some(key));
     }
 
+    /// Forget a client, after sending it what waits for it: told to go, kicked say. Its
+    /// entities are gone, and no [`Event::Disconnected`] comes for it.
+    pub fn disconnect(&mut self, client: ClientKey) -> io::Result<()> {
+        self.client(client)?;
+        let flushed = self.outbox.flush(client.addr, &mut self.protocol, &self.socket);
+        self.forget_client(client);
+        flushed
+    }
+
+    /// Forget the clients unheard for [`CLIENT_TIMEOUT`], each with an
+    /// [`Event::Disconnected`].
+    fn time_out_clients(&mut self) {
+        let now = Instant::now();
+        let gone = self.client_keys.values()
+            .copied()
+            .filter(|key| self.clients.get(key.slot).is_some_and(|state| now.duration_since(state.heard) >= CLIENT_TIMEOUT))
+            .collect::<Vec<_>>();
+        for client in gone {
+            self.disconnected(client, Disconnection::Timeout);
+        }
+    }
+
+    /// Forget a client gone, telling it with an [`Event::Disconnected`].
+    fn disconnected(&mut self, client: ClientKey, reason: Disconnection) {
+        self.forget_client(client);
+        self.events.push_back(Event::Disconnected(DisconnectedEvent {
+            client,
+            reason,
+        }));
+    }
+
+    /// Forget a client and its entities, and its address if still its.
+    fn forget_client(&mut self, key: ClientKey) {
+        if self.client_keys.get(&key.addr) == Some(&key) {
+            self.client_keys.remove(&key.addr);
+        }
+        self.remove_client(key);
+    }
+
     /// A logged in client, if not gone.
     fn client(&self, key: ClientKey) -> io::Result<&ClientState> {
         self.clients.get(key.slot)
@@ -673,6 +728,8 @@ struct ClientState {
     /// What it knows of the space its cell player is in (e.g. its `Avatar` while in a
     /// battle), which its cell calls go to, see [`App::create_cell_player`].
     witness: Option<Witness>,
+    /// When it was last heard from, see [`CLIENT_TIMEOUT`].
+    heard: Instant,
 }
 
 
@@ -1864,6 +1921,7 @@ pub enum Event {
     /// A client reports where its player entity is.
     AvatarUpdate(AvatarUpdateEvent),
     Entered(EnteredEvent),
+    Disconnected(DisconnectedEvent),
 }
 
 /// Some IO error happened internally and optionally related to a client.
@@ -1884,6 +1942,22 @@ pub struct LoginEvent {
     pub login_key: u32,
     /// The attempt number.
     pub attempt_num: u8,
+}
+
+/// A logged in client is gone, forgotten with its entities: its key is stale.
+#[derive(Debug)]
+pub struct DisconnectedEvent {
+    pub client: ClientKey,
+    pub reason: Disconnection,
+}
+
+/// Why a client is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disconnection {
+    /// It said so, with its reason, logging off or quitting the game.
+    Client(u8),
+    /// It wasn't heard from for [`CLIENT_TIMEOUT`].
+    Timeout,
 }
 
 /// A logged in client is ready for entities: the server may now create its player. The

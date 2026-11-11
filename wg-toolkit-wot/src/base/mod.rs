@@ -9,6 +9,7 @@ mod bot;
 mod drive_replay;
 mod gun;
 mod physics;
+mod player;
 mod shop;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -53,8 +54,9 @@ use crate::wot::item_prices::ItemPrices;
 use crate::wot::items::TankmanDescr;
 
 use gun::Gun;
-use account::AccountData;
 use battle::{Battle, BattleOptions};
+use player::{AccountIds, Player};
+use account::AccountData;
 use shop::Shop;
 
 
@@ -138,6 +140,7 @@ impl BaseThread {
             link,
             load: None,
             login_clients: HashMap::new(),
+            account_ids: AccountIds::default(),
             account,
             shop,
             required_version,
@@ -166,7 +169,9 @@ pub struct BaseThread {
     load: Option<u32>,
     /// Clients the login app handed over, by the login key they will log in with.
     login_clients: HashMap<u32, LoginClient>,
-    /// Every player's account, until accounts are stored.
+    /// Each player name's account id, until accounts are stored.
+    account_ids: AccountIds,
+    /// Every player's garage, until accounts are stored.
     account: AccountData,
     shop: Shop,
     /// The client version required, the client's own.
@@ -231,8 +236,10 @@ const ACCOUNT_SESSIONS: u64 = 1000;
 /// The version of the vehicle dossiers, any: the client drops its cached ones when
 /// it differs from theirs.
 const DOSSIERS_VERSION: i32 = 1;
-/// The player's account id, any but 0 which is no account, until accounts are stored.
-const PLAYER_ACCOUNT_DBID: u64 = 1;
+/// Why a client is kicked once its player logs in again from another: what it shows,
+/// and `ACCOUNT_KICK_REASONS.UNKNOWN`, the reason shown as is.
+const KICKED_LOGGED_IN_AGAIN: &str = "Logged in again from another client";
+const KICK_REASON_UNKNOWN: u8 = 0;
 /// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
 const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
 
@@ -247,27 +254,19 @@ struct LoginClient {
     player: Player,
 }
 
-/// The client the login app handed over, if valid.
-fn login_client(client: &ClientHost) -> Option<LoginClient> {
+/// The client the login app handed over, if valid, logging in as the given player.
+fn login_client(client: &ClientHost, player: Player) -> Option<LoginClient> {
     match Blowfish::new_from_slice(&client.blowfish_key) {
         Ok(blowfish) => Some(LoginClient {
             addr: client.addr,
             blowfish: Arc::new(blowfish),
-            player: Player { name: client.name.clone(), revision: 1 },
+            player,
         }),
         Err(_) => {
             warn!(addr = %client.addr, "Refused a client with an invalid blowfish key: {:?}", client.blowfish_key);
             None
         }
     }
-}
-
-/// A client's player, standing in for its stored account.
-#[derive(Debug, Clone)]
-struct Player {
-    name: String,
-    /// The revision of the account's data, which each update brings to the next.
-    revision: i64,
 }
 
 impl BaseThread {
@@ -285,7 +284,8 @@ impl BaseThread {
             match event {
                 LinkEvent::Linked(()) | LinkEvent::Unlinked(()) => self.load = None,
                 LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
-                    let hosted = login_client(&client).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
+                    let player = self.account_ids.player(&client.name);
+                    let hosted = login_client(&client, player).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
                     let message = Message::ClientHosted { request_id, base_app: hosted.then_some(self.addr) };
                     if let Err(e) = self.link.send(&message) {
                         warn!(addr = %client.addr, "Failed to answer the login app: {e}");
@@ -305,12 +305,54 @@ impl BaseThread {
 
     }
 
+    /// Kick the clients playing as this player, logging in again from another: told why,
+    /// then forgotten.
+    fn kick(&mut self, name: &str) {
+        let kicked = self.players.iter()
+            .filter(|(_, player)| player.name == name)
+            .map(|(&client, _)| client)
+            .collect::<Vec<_>>();
+        for client in kicked {
+            if let Err(e) = self.tell_kicked(client) {
+                warn!(%client, "Failed to tell a client it is kicked: {e}");
+            }
+            if let Err(e) = self.app.disconnect(client) {
+                warn!(%client, "Failed to disconnect a client: {e}");
+            }
+            self.forget(client);
+            info!(%client, name, "Kicked a client: its player logged in again");
+        }
+    }
+
+    /// Tell a client it is kicked, through its account or its avatar.
+    fn tell_kicked(&mut self, client: ClientKey) -> io::Result<()> {
+        let reason = KICKED_LOGGED_IN_AGAIN.to_string();
+        if let Some(&account) = self.accounts.get(&client) {
+            self.app.entity(account)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
+        } else if let Some(avatar) = self.battle_clients.get(&client).and_then(|battle| battle.avatar) {
+            self.app.entity(avatar)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Forget a client gone: its player, its account or its battle, its place in the
+    /// queue.
+    fn forget(&mut self, client: ClientKey) {
+        self.players.remove(&client);
+        self.accounts.remove(&client);
+        self.enqueued.remove(&client);
+        if let Some(battle) = self.battle_clients.remove(&client).and_then(|battle| battle.battle) {
+            self.app.destroy_space(battle.space());
+        }
+    }
+
     /// Bring a client that enabled entities to its account, as the captured server did:
     /// the `Account` entity, then `showGUI`.
     fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
 
         let Some(player) = self.players.get(&client) else { return Ok(()) };
 
+        let id = player.id;
         let data = schema::AccountData {
             name: player.name.clone(),
             incarnationID: ACCOUNT_SESSIONS,
@@ -321,7 +363,7 @@ impl BaseThread {
         self.accounts.insert(client, account);
         info!(%client, %account, "Created the account");
 
-        self.app.entity(account)?.showGUI(show_gui_ctx())?;
+        self.app.entity(account)?.showGUI(show_gui_ctx(id))?;
 
         Ok(())
 
@@ -437,9 +479,9 @@ impl BaseThread {
     /// Bring a client that reconnected for its battle to its avatar.
     fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
-        let Some(name) = self.players.get(&client).map(|player| player.name.clone()) else { return Ok(()) };
+        let Some(player) = self.players.get(&client).cloned() else { return Ok(()) };
 
-        let data = avatar_data(name.clone(), self.map.type_id);
+        let data = avatar_data(player.name.clone(), self.map.type_id);
         let avatar = self.app.create_base_player::<Avatar>(client, data)?;
         if let Some(battle) = self.battle_clients.get_mut(&client) {
             battle.avatar = Some(avatar);
@@ -462,7 +504,7 @@ impl BaseThread {
         };
         self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
         info!(%client, %space, "Entered the space: {}", self.map.geometry);
-        self.enter_space(client, avatar, space, name)
+        self.enter_space(client, avatar, space, player)
 
     }
 
@@ -540,7 +582,10 @@ impl BaseThread {
                 }
             }
             AccountBase::RequestToken { request_id, token_type } => {
-                self.app.entity(account)?.onTokenReceived(request_id, token_type, token_data(token_type))?;
+                let id = self.players.get(&client)
+                    .ok_or_else(|| invalid_data("Asking a token for no player"))?
+                    .id;
+                self.app.entity(account)?.onTokenReceived(request_id, token_type, token_data(token_type, id))?;
             }
             // No chat yet, and the captured server answered nothing.
             AccountBase::ChatCommandFromClient { action, .. } => {
@@ -651,8 +696,9 @@ impl BaseThread {
                         continue;
                     }
                     
-                    info!(addr = %login.addr, attempt = login.attempt_num, "Logged in");
+                    info!(addr = %login.addr, attempt = login.attempt_num, name = %client.player.name, "Logged in");
                     let LoginClient { blowfish, player, .. } = client;
+                    self.kick(&player.name);
                     if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                         self.send_update_frequency(client);
                         self.players.insert(client, player);
@@ -700,6 +746,11 @@ impl BaseThread {
                 base::Event::Entered(event) => self.entity_entered(event.client, event.entity),
                 base::Event::AvatarUpdate(event) => {
                     debug!(client = %event.client, vehicle_id = ?event.vehicle_id, "Received an avatar update: {:?}, direction {:?}", event.position, event.direction);
+                }
+                base::Event::Disconnected(event) => {
+                    let name = self.players.get(&event.client).map(|player| player.name.clone());
+                    info!(client = %event.client, reason = ?event.reason, ?name, "Disconnected a client");
+                    self.forget(event.client);
                 }
                 base::Event::Timeout => {}
 
@@ -836,14 +887,14 @@ fn server_settings() -> Pickle {
     }))
 }
 
-/// The `showGUI` context of the player's account: its id, the server's time and the
+/// The `showGUI` context of a player's account, of this id: the server's time and the
 /// session's start, now, and no play time limits nor UI statistics.
-fn show_gui_ctx() -> Pickle {
+fn show_gui_ctx(account_id: u64) -> Pickle {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     Pickle(pickle_dict([
         ("aogasStartedAt", PickleValue::F64(now.as_secs_f64())),
         ("collectUiStats", PickleValue::Bool(false)),
-        ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
+        ("databaseID", PickleValue::I64(account_id as i64)),
         ("isAogasEnabled", PickleValue::Bool(false)),
         ("logUXEvents", PickleValue::Bool(false)),
         ("serverUTC", PickleValue::F64(now.as_secs_f64())),
@@ -860,15 +911,16 @@ fn queue_info() -> Pickle {
     ]))
 }
 
-/// A token of the given type for the player, to log into a web service: there are
-/// none, so it is empty, of the type the client expects, an int for the chat's.
-fn token_data(token_type: u8) -> Pickle {
+/// A token of the given type for the player of this account id, to log into a web
+/// service: there are none, so it is empty, of the type the client expects, an int for
+/// the chat's.
+fn token_data(token_type: u8, account_id: u64) -> Pickle {
     let token = match token_type {
         token_type::XMPPCS => PickleValue::I64(0),
         _ => PickleValue::Bytes(Vec::new()),
     };
     Pickle(pickle_dict([
-        ("databaseID", PickleValue::I64(PLAYER_ACCOUNT_DBID as i64)),
+        ("databaseID", PickleValue::I64(account_id as i64)),
         ("token", token),
     ]))
 }
