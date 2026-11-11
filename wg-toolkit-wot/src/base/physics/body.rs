@@ -400,8 +400,12 @@ impl Hull {
             // Past its travel, or rigid, it is stopped: it sinks no further, rising as fast
             // as the ground rises under it, no faster than STOP_SPEED. Up, not along the
             // ground's normal: meeting a rise, it climbs it rather than being thrown back.
+            // The ground rises as its slope under the contact and the contact's speed across
+            // it say: from how its depth changed instead, a hull rocking over the terrain's
+            // triangles was kicked up, and never rested.
             let past = if spring { depth - suspension.stop } else { depth };
-            let rising = if sank.abs() <= DEPTH_JUMP { sank / step + velocity.y } else { 0.0 };
+            let slope = surface.normal;
+            let rising = -(slope.x * velocity.x + slope.z * velocity.z) / slope.y.max(0.1);
             let stopped = if past > 0.0 { Some((rising.min(STOP_SPEED), past)) } else { None };
 
             // A spring pushes, as far as it sank and as fast as it sinks, never pulling,
@@ -1027,13 +1031,12 @@ mod tests {
         }
         assert!(hull.airborne && (hull.orientation * Vec3::Y).y < -0.9, "{}", hull.direction());
         assert!(hull.linear_velocity.length() < 0.1, "{}", hull.linear_velocity);
-        // Rolled 20° past its side, it tips over onto it, rocks back toward its tracks, and
-        // rests on its side, its tracks holding nothing either. Rolled less far, or dropped
-        // from higher, it rolls on over the edge of its tracks, back onto them: a box this
-        // wide, its centre of mass this low, barely rests on its side.
+        // Laid on its side, it rests there, its tracks holding nothing either. Dropped onto
+        // it, or rolled past it, it rolls on over the edge of its tracks, back onto them: a
+        // box this wide, its centre of mass this low, barely rests on its side.
         let mut hull = chieftain();
-        hull.position.y = 2.3;
-        hull.set_direction(Vec3::new(110f32.to_radians(), 0.0, 0.0));
+        hull.set_direction(Vec3::new(90f32.to_radians(), 0.0, 0.0));
+        hull.position.y = -lowest_contact(&hull) + 0.05;
         for _ in 0..60 {
             hull.advance(0.1, &space, None, &mut Rubble::default());
             let deepest = -lowest_contact(&hull);
