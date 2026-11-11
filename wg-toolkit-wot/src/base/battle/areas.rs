@@ -8,7 +8,7 @@ use std::io;
 use tracing::{info, warn};
 use glam::Vec3;
 
-use wgtk::app::base::{self, ClientKey, EntityInit, SpaceKey, Visibility};
+use wgtk::app::base::{self, EntityInit, SpaceKey, Visibility};
 use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::statics::Statics;
 use wgtk::app::entity::EntityKey;
@@ -65,12 +65,12 @@ impl Areas {
         self.areas.len()
     }
 
-    /// Tell the clients what broke, rammed or shot: each list once, however much of it
-    /// broke, a house bringing down a dozen modules at once.
-    pub fn show(&mut self, app: &mut base::App, client: ClientKey, breakages: impl IntoIterator<Item = Breakage>) -> io::Result<()> {
+    /// Tell the clients of this battle what broke, rammed or shot: each list once,
+    /// however much of it broke, a house bringing down a dozen modules at once.
+    pub fn show(&mut self, app: &mut base::App, battle: u32, breakages: impl IntoIterator<Item = Breakage>) -> io::Result<()> {
         let mut broken = HashSet::new();
         for breakage in breakages {
-            if let Some(list) = self.record(client, breakage) {
+            if let Some(list) = self.record(battle, breakage) {
                 broken.insert(list);
             }
         }
@@ -82,11 +82,11 @@ impl Areas {
 
     /// List a destructible broken in its chunk's entity, encoded as its kind is, see
     /// [`AreaDestructibles`]: the list it changed, by its chunk's id and its kind.
-    fn record(&mut self, client: ClientKey, breakage: Breakage) -> Option<(u16, DestructibleKind)> {
+    fn record(&mut self, battle: u32, breakage: Breakage) -> Option<(u16, DestructibleKind)> {
 
         let Breakage { piece, kind, yaw, speed, shot } = breakage;
         let Some(area) = self.areas.get_mut(&piece.chunk_id) else {
-            warn!(%client, chunk_id = piece.chunk_id, index = piece.index, "Failed to tell of a destructible broken out of the areas");
+            warn!(battle, chunk_id = piece.chunk_id, index = piece.index, "Failed to tell of a destructible broken out of the areas");
             return None;
         };
 
@@ -107,7 +107,7 @@ impl Areas {
             DestructibleKind::Tree => return None,
         }
 
-        info!(%client, chunk_id = piece.chunk_id, index = piece.index, ?kind, module = ?piece.module, shot, "Broke a destructible");
+        info!(battle, chunk_id = piece.chunk_id, index = piece.index, ?kind, module = ?piece.module, shot, "Broke a destructible");
         Some((piece.chunk_id, kind))
 
     }

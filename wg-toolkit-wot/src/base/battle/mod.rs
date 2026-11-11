@@ -1,27 +1,38 @@
-//! The battles of the server: each in a space of its own, with the player's vehicle,
-//! which the client drives, and bots on either side, see [`BattleOptions`]: every vehicle
-//! the same, but who drives it, see [`Controller`].
+//! The battles of the server: each in a space of its own, with two teams of its clients'
+//! vehicles and bots, see [`BattleOptions`]: every vehicle the same, but who drives it,
+//! see [`Controller`].
+//!
+//! A battle gathers the clients the queue switched into it, waiting for them to enter,
+//! see [`Gathering`], then is made with them all at once: their vehicles, each one's own
+//! arena info, and the bots. It counts down once they are all ready, done loading, and
+//! goes on while any client is in it, a vehicle whose client left standing where it
+//! stopped.
 //!
 //! A battle holds all it needs, and only tells its clients what happens through the app
 //! it is given, so that an app may run several, a thread of its own each, say. The base
 //! app only finds a client's battle, see [`BaseThread::battle_tick`].
 //!
 //! ```text
-//!   (here)    a battle: set up, its tick, its shells landing, its client's calls
-//!   vehicle   a vehicle of it, a player's or a bot's: shown, spotted, its gun, damaged
-//!   shells    its shells in flight, and their tracers
-//!   hit       what a shell does to a vehicle, as the clients are told
-//!   areas     what broke of its destructibles, by chunk
-//!   spawn     where its vehicles start
+//!   (here)       a battle: made, its tick, its shells landing, its clients' calls
+//!   participant  a client in it: its avatar, its vehicle, what it sees
+//!   period       waiting, counting down, fighting
+//!   vehicle      a vehicle of it, a player's or a bot's: shown, its gun, damaged
+//!   shells       its shells in flight, and their tracers
+//!   hit          what a shell does to a vehicle, as the clients are told
+//!   areas        what broke of its destructibles, by chunk
+//!   spawn        where its vehicles start
 //! ```
 
+mod participant;
+mod period;
 mod vehicle;
 mod shells;
 mod hit;
 mod areas;
 mod spawn;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::io;
 
@@ -29,7 +40,7 @@ use tracing::{debug, info, warn};
 use glam::{Affine3A, Vec2, Vec3};
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
-use wgtk::app::entity::{AnyEntity, Audience, ComponentKey, EntityId, EntityKey};
+use wgtk::app::entity::{AnyEntity, Audience, EntityId, EntityKey};
 use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
 use wgtk::space::Space;
@@ -42,8 +53,8 @@ use crate::wot::arena_defs::ArenaTypeDef;
 use crate::wot::items::VehicleDescr;
 
 use super::{
-    avatar_cell_data, invalid_data, BaseThread, Player, VehicleConfig, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL,
-    NO_PREFAB_EFFECTS, TICK,
+    avatar_cell_data, invalid_data, space_properties, BaseThread, Player, VehicleConfig, EXPLOSION_STEP,
+    GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
 };
 use super::gun::{HitTarget, Landing, Obstacles, Shot};
 use super::physics::{Vehicle, World};
@@ -53,18 +64,25 @@ use vehicle::{hold_gun, BattleVehicle, Controller};
 use shells::{show_shot, show_tracer, Shells};
 use hit::{ShellHit, HIT_FLAG_VEHICLE_KILLED};
 use areas::{explosion_obstacle, Areas};
+use participant::Participant;
+use period::Period;
 use spawn::Start;
 
 
-/// A battle, with its client, see the module's documentation.
+/// A battle, with its clients, see the module's documentation.
 #[derive(Debug)]
 pub struct Battle {
+    /// Its id, which its clients are switched into it with.
+    id: u32,
     space: SpaceKey,
-    /// When it started, at 0: the battle's clock.
+    /// When it was made, at 0: the battle's clock.
     clock: Instant,
-    /// Who it has besides its client, and what bots do.
+    /// How big its teams are, and what bots do.
     options: BattleOptions,
-    /// Its vehicles, its client's first, then the bots on either side, and the world
+    /// Its clients, each driving one of its vehicles.
+    participants: Vec<Participant>,
+    period: Period,
+    /// Its vehicles, its clients' first, then the bots on either side, and the world
     /// they move in.
     vehicles: Vec<BattleVehicle>,
     world: World,
@@ -72,142 +90,192 @@ pub struct Battle {
     areas: Areas,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
     targets: Vec<HitTarget>,
-    /// Whether its client has its vehicle: it runs from then on.
+    /// Whether a client has its vehicle: it runs from then on.
     running: bool,
-    /// Whether its countdown is over: bots only aim until then.
-    started: bool,
-    /// Its client, its avatar, its vehicle's configuration, and the arena's vehicles on
-    /// its info entity.
-    client: ClientKey,
-    avatar: EntityKey<Avatar>,
-    config: VehicleConfig,
-    vehicles_info: Option<ComponentKey<AvatarVehiclesInfo>>,
 }
 
-/// Who a battle has besides the player, as the server is launched with.
+/// How big a battle's teams are, and what its bots do, as the server is launched with.
 #[derive(Debug, Clone)]
 pub struct BattleOptions {
-    /// The bots on the player's side, and on the other.
-    pub allies: u32,
-    pub enemies: u32,
-    /// The vehicles bots drive, each the next, round: the player's own when none.
+    /// How many vehicles each team has, its clients' then bots.
+    pub team_size: u32,
+    /// The vehicles bots drive, each the next, round: the first client's own when none.
     pub bot_vehicles: Vec<VehicleDef>,
     pub bots_fire: bool,
     pub bots_drive: bool,
-    /// How far in front of the player the enemies start, if not at their spawn.
+    /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
-    /// Where the player starts, if not at its team's start, and its yaw in radians.
+    /// Where the first team starts, if not at its spawn, and its yaw in radians.
     pub spawn: Option<(Vec2, f32)>,
 }
 
-/// What a battle is made of, its client aside.
+/// What a battle is made of, its clients aside.
 #[derive(Debug)]
 pub struct BattleSetup<'a> {
     /// Its map, and the map's space, which its vehicles move in.
     pub map: &'a ArenaTypeDef,
     pub space: Arc<Space>,
     pub options: BattleOptions,
-    /// The vehicle bots drive when the options give none: the player's.
+    /// The vehicle bots drive when the options give none: the first client's.
     pub own_def: Option<VehicleDef>,
+}
+
+/// A client entering a battle, with its avatar.
+#[derive(Debug)]
+pub struct Arrival {
+    pub client: ClientKey,
+    pub avatar: EntityKey<Avatar>,
+    pub player: Player,
+    pub config: VehicleConfig,
+}
+
+/// A battle waiting for its clients to enter before it is made, see
+/// [`BaseThread::gather`].
+#[derive(Debug)]
+pub struct Gathering {
+    /// How many clients were switched into it, and those that entered.
+    expected: usize,
+    arrivals: Vec<Arrival>,
+    since: Instant,
+}
+
+impl Gathering {
+
+    /// A battle's gathering, for this many clients switched into it.
+    pub fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            arrivals: Vec::new(),
+            since: Instant::now(),
+        }
+    }
+
+    /// Whether the battle is made now: all its clients entered, or those that did after
+    /// [`GATHER_WAIT`].
+    fn due(&self) -> bool {
+        self.arrivals.len() >= self.expected || self.since.elapsed() >= GATHER_WAIT
+    }
+
 }
 
 impl Battle {
 
-    /// A battle in its own space, with its map, for a client entering it with its avatar:
-    /// the vehicle of its player, the avatar's cell side on it, then the bots and the
-    /// arena's info entity, which the client gets in that order. It sees its allies and
-    /// the enemies its vehicle spots, see [`Self::tick`].
-    pub fn new(
-        app: &mut base::App,
-        setup: BattleSetup,
-        space: SpaceKey,
-        client: ClientKey,
-        avatar: EntityKey<Avatar>,
-        player: Player,
-        config: VehicleConfig,
-    ) -> io::Result<Self> {
+    /// A battle in its own space, with its map, made for these clients entering it with
+    /// their avatars: their vehicles, on either team in turn, in rows from their team's
+    /// start, their avatars' cell sides on them, then the bots filling each team, and each
+    /// client's arena info entity, which each client gets in that order. Each sees its
+    /// allies and the enemies its vehicle spots, see [`Participant::spot`].
+    pub fn new(app: &mut base::App, setup: BattleSetup, space: SpaceKey, id: u32, arrivals: Vec<Arrival>) -> io::Result<Self> {
 
         let BattleSetup { map, space: map_space, options, own_def } = setup;
         let terrain = &map_space.terrain;
         let mut world = World::new(map_space.clone(), Some(map.bounds));
 
-        let start = match options.spawn {
+        // The clients' vehicles, on either team in turn, from their team's start, where the
+        // first of the team stands then: the first team's where the options spawn it, the
+        // second's in front of it if the options say so.
+        let first_start = match options.spawn {
             Some((at, yaw)) => Start::at(at, yaw, terrain),
-            None => Start::team(map, terrain, PLAYER_TEAM),
+            None => Start::team(map, terrain, TEAMS[0]),
         };
-        let own = BattleVehicle::player(app, &mut world, avatar, space, &config, player, PLAYER_TEAM, start)?;
-        let own_id = own.entity.id();
-        let hull = &world.vehicle(own.id).hull;
-        let start = Start {
-            position: hull.position,
-            direction: hull.direction(),
+        let second_start = match options.enemy_distance {
+            Some(distance) => first_start.facing(distance, terrain),
+            None => Start::team(map, terrain, TEAMS[1]),
         };
+        let mut starts = [first_start, second_start];
+        let mut team_sizes = [0; 2];
+        let mut vehicles = Vec::new();
+        for (index, arrival) in arrivals.iter().enumerate() {
 
-        app.create_cell_player(avatar, space, CellPlayerInit {
-            vehicle_id: own_id.0,
-            position: start.position,
-            direction: start.direction,
-            packed_xz_scale: PACKED_XZ_SCALE,
-            data: avatar_cell_data(PLAYER_TEAM, own_id),
-            components_data: AvatarComponentsData::default(),
-        })?;
-        app.set_interest(client, Interest::Manual)?;
+            let Arrival { client, avatar, player, config } = arrival;
+            let side = index % 2;
+            let slot = team_sizes[side];
+            let at = starts[side].slot(slot, terrain);
+            let info_index = vehicles.len() as u32;
+            let vehicle = BattleVehicle::player(app, &mut world, *client, *avatar, space, config, player.clone(), TEAMS[side], at, info_index)?;
 
-        // The bots, allies then enemies, each team in rows from its start, the player
-        // first in its own. They drive the given vehicles in turn, else the player's.
-        let enemy_start = match options.enemy_distance {
-            Some(distance) => start.facing(distance, terrain),
-            None => Start::team(map, terrain, ENEMY_TEAM),
-        };
-        let sides = (1..=options.allies).map(|slot| (PLAYER_TEAM, start, slot))
-            .chain((0..options.enemies).map(|slot| (ENEMY_TEAM, enemy_start, slot)));
-        let mut vehicles = vec![own];
-        for (index, (team, team_start, slot)) in sides.enumerate() {
-            let (def, descr) = match &own_def {
-                Some(def) => (def, config.descr.clone()),
-                None => {
+            if slot == 0 {
+                let hull = &world.vehicle(vehicle.id).hull;
+                starts[side] = Start {
+                    position: hull.position,
+                    direction: hull.direction(),
+                };
+                if let Some(distance) = options.enemy_distance.filter(|_| side == 0) {
+                    starts[1] = starts[0].facing(distance, terrain);
+                }
+            }
+
+            team_sizes[side] += 1;
+            vehicles.push(vehicle);
+
+        }
+
+        for (vehicle, arrival) in vehicles.iter().zip(&arrivals) {
+            let hull = &world.vehicle(vehicle.id).hull;
+            app.create_cell_player(arrival.avatar, space, CellPlayerInit {
+                vehicle_id: vehicle.entity.id().0,
+                position: hull.position,
+                direction: hull.direction(),
+                packed_xz_scale: PACKED_XZ_SCALE,
+                data: avatar_cell_data(vehicle.team, vehicle.entity.id()),
+                components_data: AvatarComponentsData::default(),
+            })?;
+            app.set_interest(arrival.client, Interest::Manual)?;
+        }
+
+        // The bots filling each team, the first's then the second's, in rows from its
+        // start after its clients. They drive the given vehicles in turn, else the first
+        // client's.
+        let bots = (0..2).flat_map(|side| (team_sizes[side]..options.team_size).map(move |slot| (side, slot)));
+        for (index, (side, slot)) in bots.enumerate() {
+            let (def, descr) = match (&own_def, arrivals.first()) {
+                (Some(def), Some(first)) => (def, first.config.descr.clone()),
+                _ => {
                     let def = &options.bot_vehicles[index % options.bot_vehicles.len()];
                     (def, def.descr.encode())
                 }
             };
-            let start = team_start.slot(slot, terrain);
+            let team = TEAMS[side];
+            let at = starts[side].slot(slot, terrain);
             let name = format!("Bot {}", index + 1);
-            let bot = BattleVehicle::bot(app, &mut world, space, def, &descr, team, name, start, vehicles.len() as u32, index as i32)?;
-            info!(%client, entity_id = %bot.entity.id(), team, "Added a bot to the arena: {}, {}", bot.info.name, def.name);
+            let bot = BattleVehicle::bot(app, &mut world, space, def, &descr, team, name, at, vehicles.len() as u32, index as i32)?;
+            info!(battle = id, entity_id = %bot.entity.id(), team, "Added a bot to the arena: {}, {}", bot.info.name, def.name);
             vehicles.push(bot);
         }
 
-        // The arena's info entity, created right away as entities without an alias are,
-        // with its vehicles.
-        let info = app.create_entity::<AvatarInfo>(space, EntityInit {
-            visibility: Visibility::Always,
-            ..EntityInit::default()
-        })?;
-        let mut entity = app.entity(info)?;
-        entity.set_avatarID(avatar.id())?;
-        let mut vehicles_info = entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?;
-        vehicles_info.set_vehiclesInfo(vehicles.iter().map(|vehicle| vehicle.info.clone()).collect())?;
-        let vehicles_info = Some(vehicles_info.key());
-        info!(%client, entity_id = %info.id(), "Created the arena info");
+        // Each client's arena info entity, its own only, created right away as entities
+        // without an alias are, with the vehicles.
+        let mut participants = Vec::with_capacity(arrivals.len());
+        for (index, Arrival { client, avatar, config, .. }) in arrivals.into_iter().enumerate() {
+            let info = app.create_entity::<AvatarInfo>(space, EntityInit {
+                controlled_by: Some(avatar.any()),
+                visibility: Visibility::Interest,
+                ..EntityInit::default()
+            })?;
+            let mut entity = app.entity(info)?;
+            entity.set_avatarID(avatar.id())?;
+            let mut vehicles_info = entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?;
+            vehicles_info.set_vehiclesInfo(vehicles.iter().map(|vehicle| vehicle.info.clone()).collect())?;
+            info!(battle = id, %client, entity_id = %info.id(), "Created the arena info");
+            participants.push(Participant::new(client, avatar, config, index, vehicles_info.key(), vehicles.len()));
+        }
 
         let areas = Areas::new(app, space, &world.space().statics)?;
-        info!(%client, chunks = areas.len(), "Created the destructibles' areas");
+        info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
 
         Ok(Self {
+            id,
             space,
             clock: Instant::now(),
             options,
+            participants,
+            period: Period::new(),
             vehicles,
             world,
             shells: Shells::default(),
             areas,
             targets: Vec::new(),
             running: false,
-            started: false,
-            client,
-            avatar,
-            config,
-            vehicles_info,
         })
 
     }
@@ -217,9 +285,9 @@ impl Battle {
         self.space
     }
 
-    /// Its countdown is over: the bots drive and fire from now on.
-    pub fn start(&mut self) {
-        self.started = true;
+    /// Whether no client is left in it.
+    pub fn is_empty(&self) -> bool {
+        self.participants.is_empty()
     }
 
     /// Its game time, in seconds.
@@ -227,18 +295,21 @@ impl Battle {
         self.clock.elapsed().as_secs_f64()
     }
 
-    /// The vehicle its client drives.
-    fn own(&self) -> Option<&BattleVehicle> {
-        self.vehicles.iter().find(|vehicle| vehicle.controller.is_client())
+    /// Its clients' avatars, which are shown what happens.
+    fn avatars(&self) -> Vec<EntityKey<Avatar>> {
+        self.participants.iter().map(|participant| participant.avatar).collect()
     }
 
-    fn own_mut(&mut self) -> Option<&mut BattleVehicle> {
-        self.vehicles.iter_mut().find(|vehicle| vehicle.controller.is_client())
+    /// The index of the vehicle a client drives.
+    fn own(&self, client: ClientKey) -> Option<usize> {
+        self.participants.iter()
+            .find(|participant| participant.client == client)
+            .map(|participant| participant.vehicle)
     }
 
-    /// The simulated vehicle its client drives.
-    fn own_vehicle_mut(&mut self) -> Option<&mut Vehicle> {
-        let id = self.own()?.id;
+    /// The simulated vehicle a client drives.
+    fn own_vehicle_mut(&mut self, client: ClientKey) -> Option<&mut Vehicle> {
+        let id = self.vehicles[self.own(client)?].id;
         Some(self.world.vehicle_mut(id))
     }
 
@@ -249,16 +320,159 @@ impl Battle {
         targets
     }
 
+    // -- Its clients --
+
+    /// A client is ready, done loading: once all are, it counts down, see [`Self::tick`].
+    /// One ready once it counted down already is told where it is.
+    pub fn ready(&mut self, app: &mut base::App, client: ClientKey) -> io::Result<()> {
+        let period = self.period;
+        let Some(participant) = self.participants.iter_mut().find(|participant| participant.client == client) else { return Ok(()) };
+        participant.ready = true;
+        participant.show_period(app, period)
+    }
+
+    /// A client leaves it: its vehicle stops, and stands there, nobody driving it.
+    pub fn leave(&mut self, client: ClientKey) {
+        let Some(at) = self.participants.iter().position(|participant| participant.client == client) else { return };
+        let participant = self.participants.remove(at);
+        let vehicle = &mut self.vehicles[participant.vehicle];
+        vehicle.controller = Controller::Nobody;
+        self.world.vehicle_mut(vehicle.id).hull.flags = 0;
+        info!(battle = self.id, %client, left = self.participants.len(), "Left a battle");
+    }
+
+    /// An entity of it was created on a client: its own vehicle, the client drives it
+    /// from there on, see [`BattleVehicle::enter`], and it runs.
+    pub fn entity_entered(&mut self, app: &mut base::App, client: ClientKey, entity: EntityKey<AnyEntity>) -> io::Result<()> {
+        debug!(battle = self.id, %client, %entity, "Created an entity on the client");
+        let Some(participant) = self.participants.iter().find(|participant| participant.client == client) else { return Ok(()) };
+        let own = &mut self.vehicles[participant.vehicle];
+        if own.entity.any() != entity {
+            return Ok(());
+        }
+        own.enter(app, &participant.config)?;
+        self.running = true;
+        Ok(())
+    }
+
+    /// A cell method of its avatar a client called.
+    pub fn avatar_call(&mut self, app: &mut base::App, client: ClientKey, call: AvatarCell) {
+
+        match call {
+            AvatarCell::VehicleShoot {} => {
+                if let Err(e) = self.shoot(app, client) {
+                    warn!(%client, "Failed to shoot: {e}");
+                }
+                return;
+            }
+            AvatarCell::VehicleChangeSetting { code, value } => {
+                if let Err(e) = self.change_setting(app, client, code, value) {
+                    warn!(%client, "Failed to change setting {code} to {value}: {e}");
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let Some(driven) = self.own_vehicle_mut(client) else {
+            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
+            return;
+        };
+
+        match call {
+            AvatarCell::VehicleShoot {} |
+            AvatarCell::VehicleChangeSetting { .. } => unreachable!(),
+            AvatarCell::VehicleMoveWith { flags } => {
+                info!(%client, "Changed the movement flags: {flags:#04x}");
+                driven.hull.flags = flags;
+            }
+            AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
+        }
+
+    }
+
+    /// A cell method of its vehicle a client called.
+    pub fn vehicle_call(&mut self, client: ClientKey, call: VehicleCell) {
+
+        let Some(driven) = self.own_vehicle_mut(client) else {
+            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
+            return;
+        };
+
+        match call {
+            VehicleCell::TrackRelativePointWithGun { point } => {
+                let Vehicle { hull, turret } = driven;
+                debug!(%client, "Tracked a point with the gun: {point:?}, from {:?}", hull.position);
+                turret.track(hull.position + point);
+            }
+            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
+        }
+
+    }
+
+    /// Fire a client's gun, if loaded: the shell's tracer and the gun's effects, of its
+    /// whole burst, then one shell fewer, the shell it loads next and the reload, once
+    /// the burst's other shells are fired too, see [`Self::step`]. Where the shell lands
+    /// follows with [`Self::land`].
+    fn shoot(&mut self, app: &mut base::App, client: ClientKey) -> io::Result<()> {
+
+        let now = self.game_time();
+        let Some(own) = self.own(client).filter(|&own| self.vehicles[own].alive()) else { return Ok(()) };
+        let own_id = self.vehicles[own].entity.id();
+        let targets = self.shell_targets(own_id);
+        let avatars = self.avatars();
+        let Self { vehicles, world, shells, .. } = self;
+        let own = &mut vehicles[own];
+        let driven = world.vehicle(own.id);
+        let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
+        let obstacles = Obstacles {
+            space: world.space(),
+            rubble: world.rubble(),
+        };
+        let Some(shot) = own.gun.fire(now, position, velocity, dispersion, Some(obstacles), &targets) else {
+            debug!(%client, "Refused a shot: not loaded, or out of shells");
+            return Ok(());
+        };
+        info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+        own.show_gun(app, now)?;
+        show_shot(app, &avatars, own.entity, &shot)?;
+        shells.fly(now, own_id, shot);
+        Ok(())
+
+    }
+
+    /// A client changes one of its vehicle's settings, see
+    /// [`BattleVehicle::change_setting`].
+    fn change_setting(&mut self, app: &mut base::App, client: ClientKey, code: u8, value: i32) -> io::Result<()> {
+        let now = self.game_time();
+        let Some(own) = self.own(client) else {
+            warn!(%client, "Ignored a setting without a vehicle: {code} = {value}");
+            return Ok(());
+        };
+        self.vehicles[own].change_setting(app, client, now, code, value)
+    }
+
     // -- Its tick --
 
-    /// End a tick: step it, once its client has its vehicle, break what shells got
-    /// through, land the shells due, then tell what broke.
+    /// End a tick: go to its next period when due, step it, once a client has its
+    /// vehicle, break what shells got through, land the shells due, then tell what broke.
     pub fn tick(&mut self, app: &mut base::App) {
 
-        let client = self.client;
+        let id = self.id;
+        let ready = self.participants.iter().all(|participant| participant.ready);
+        if let Some(period) = self.period.next(ready) {
+            self.period = period;
+            info!(battle = id, ?period, "Changed the battle's period");
+            for participant in self.participants.iter().filter(|participant| participant.ready) {
+                if let Err(e) = participant.show_period(app, period) {
+                    warn!(battle = id, client = %participant.client, "Failed to tell the battle's period: {e}");
+                }
+            }
+        }
+
         if self.running {
             if let Err(e) = self.step(app) {
-                warn!(%client, "Failed to step the battle: {e}");
+                warn!(battle = id, "Failed to step the battle: {e}");
             }
         }
 
@@ -268,28 +482,30 @@ impl Battle {
         }
         for (at, shooter, shot) in self.shells.take_landed(now) {
             if let Err(e) = self.land(app, at, shooter, &shot) {
-                warn!(%client, shot = shot.id, "Failed to land a shot: {e}");
+                warn!(battle = id, shot = shot.id, "Failed to land a shot: {e}");
             }
         }
-        if let Err(e) = self.areas.show(app, client, self.world.take_breakages()) {
-            warn!(%client, "Failed to tell the destructibles broken: {e}");
+        if let Err(e) = self.areas.show(app, id, self.world.take_breakages()) {
+            warn!(battle = id, "Failed to tell the destructibles broken: {e}");
         }
 
     }
 
-    /// Step it by a tick: every vehicle moves as its controller drives it, a wreck
-    /// stopping where it was shoved, and those that ran into each other are pushed apart,
-    /// see [`World::step`]. Then each fires the rest of its burst, a bot once its gun is
-    /// on its enemy too, as its options say, and the client sees each where it is, see
+    /// Step it by a tick: every vehicle moves as its controller drives it, a wreck or one
+    /// nobody drives stopping where it was shoved, and those that ran into each other are
+    /// pushed apart, see [`World::step`]. Then each client is shown the vehicles its own
+    /// spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
+    /// enemy too, as its options say, and the clients see each where it is, see
     /// [`BattleVehicle::show`].
     fn step(&mut self, app: &mut base::App) -> io::Result<()> {
 
-        let client = self.client;
+        let id = self.id;
         let now = self.game_time();
-        let drives = self.started && self.options.bots_drive;
-        let bots_fire = self.started && self.options.bots_fire;
-        let own = self.own().map(|own| (own.team, self.world.vehicle(own.id).hull.position));
-        let Self { avatar, vehicles, world, shells, targets, .. } = self;
+        let fighting = self.period.fighting();
+        let drives = fighting && self.options.bots_drive;
+        let bots_fire = fighting && self.options.bots_fire;
+        let avatars = self.avatars();
+        let Self { participants, vehicles, world, shells, targets, .. } = self;
 
         for index in 0..vehicles.len() {
             let enemy = nearest_enemy(vehicles, world, index);
@@ -298,10 +514,14 @@ impl Battle {
             match (&mut vehicle.controller, alive) {
                 (_, false) => world.vehicle_mut(vehicle.id).hull.flags = 0,
                 (Controller::Bot(bot), true) => bot.drive(world, vehicle.id, enemy, drives),
-                (Controller::Client(_), true) => {}
+                (Controller::Client(_) | Controller::Nobody, true) => {}
             }
         }
         world.step(TICK.as_secs_f32());
+
+        for participant in participants.iter_mut() {
+            participant.spot(app, vehicles, world)?;
+        }
 
         for index in 0..vehicles.len() {
 
@@ -310,7 +530,7 @@ impl Battle {
             let shoved = &world.vehicle(vehicles[index].id).hull;
             if matches!(vehicles[index].controller, Controller::Bot(_)) && (shoved.speed != 0.0 || shoved.slide != 0.0) {
                 debug!(
-                    %client,
+                    battle = id,
                     entity_id = %vehicles[index].entity.id(),
                     position = ?shoved.position,
                     yaw = shoved.yaw(),
@@ -320,7 +540,6 @@ impl Battle {
                 );
             }
 
-            vehicles[index].spot(app, client, world, own)?;
             if !vehicles[index].alive() {
                 vehicles[index].show_wreck(app, world.vehicle(vehicles[index].id))?;
                 continue;
@@ -329,7 +548,7 @@ impl Battle {
             let vehicle = &mut vehicles[index];
             let driven = world.vehicle(vehicle.id);
 
-            vehicle.put_out_fire(app, client, now)?;
+            vehicle.put_out_fire(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
             let obstacles = Some(Obstacles {
@@ -345,14 +564,14 @@ impl Battle {
                 }
             }
             if let Some(shot) = shot {
-                info!(%client, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+                info!(battle = id, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
                 vehicle.show_burst(app)?;
-                show_shot(app, *avatar, vehicle.entity, &shot)?;
+                show_shot(app, &avatars, vehicle.entity, &shot)?;
                 shells.fly(now, vehicle.entity.id(), shot);
             }
 
             vehicle.show(app, driven)?;
-            vehicle.show_own(app, client, *avatar, driven, marker)?;
+            vehicle.show_own(app, driven, marker)?;
 
         }
         Ok(())
@@ -370,16 +589,17 @@ impl Battle {
     /// whole.
     fn land(&mut self, app: &mut base::App, at: f64, shooter: EntityId, shot: &Shot) -> io::Result<()> {
 
-        let client = self.client;
+        let id = self.id;
+        let avatars = self.avatars();
 
-        // What a destructible hit breaks the client breaks as the shell explodes.
+        // What a destructible hit breaks the clients break as the shell explodes.
         let mut damaged = Vec::new();
         if let Landing::Static { piece: Some(hit), .. } = shot.landing {
             let yaw = shot.end_velocity.x.atan2(shot.end_velocity.z);
             let damage = shot.def.damage_at(shot.distance());
             let broken = self.world.shoot(hit.instance, hit.piece, damage, yaw);
             info!(
-                %client,
+                battle = id,
                 shot = shot.id,
                 chunk_id = hit.piece.chunk_id,
                 index = hit.piece.index,
@@ -391,17 +611,19 @@ impl Battle {
         }
 
         let def = &shot.def;
-        app.entity(self.avatar)?.stopTracer(shot.id, shot.end)?;
+        for &avatar in &avatars {
+            app.entity(avatar)?.stopTracer(shot.id, shot.end)?;
+        }
 
         match shot.landing {
             Landing::Vehicle { entity_id, hit, transforms } => {
                 let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id().0 == entity_id);
                 let Some(collision) = vehicle.map(|vehicle| vehicle.collision.clone()) else { return Ok(()) };
                 let Some(impact) = armor::hit(def, shot.distance(), shot.pen_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
-                    debug!(%client, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
+                    debug!(battle = id, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
                     return Ok(());
                 };
-                info!(%client, shot = shot.id, entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
+                info!(battle = id, shot = shot.id, entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
@@ -413,23 +635,25 @@ impl Battle {
             }
             Landing::Terrain | Landing::Static { .. } => {
                 if let Landing::Static { normal, .. } = shot.landing {
-                    debug!(%client, shot = shot.id, "Hit a static model at {:?}, facing {normal:?}", shot.end);
+                    debug!(battle = id, shot = shot.id, "Hit a static model at {:?}, facing {normal:?}", shot.end);
                 }
                 // EXPERIMENT: the explosion comes for a shot the client does not know, so
                 // that it shows it from these arguments alone.
-                app.entity(self.avatar)?.explodeProjectile(
-                    shot.id | 0x4000_0000,
-                    def.effects_index,
-                    def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
-                    GROUND_EFFECT_MATERIAL,
-                    def.kind_index,
-                    def.caliber,
-                    shot.end,
-                    // Its last step: the client projects the crater along it, both ways.
-                    shot.end_velocity * EXPLOSION_STEP,
-                    shot.end_velocity.length(),
-                    damaged,
-                )?;
+                for &avatar in &avatars {
+                    app.entity(avatar)?.explodeProjectile(
+                        shot.id | 0x4000_0000,
+                        def.effects_index,
+                        def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
+                        GROUND_EFFECT_MATERIAL,
+                        def.kind_index,
+                        def.caliber,
+                        shot.end,
+                        // Its last step: the client projects the crater along it, both ways.
+                        shot.end_velocity * EXPLOSION_STEP,
+                        shot.end_velocity.length(),
+                        damaged.clone(),
+                    )?;
+                }
                 // Off the ground only: a static model stops a shell whole.
                 let skims = match shot.landing {
                     Landing::Terrain => {
@@ -453,7 +677,7 @@ impl Battle {
 
     /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
     /// losing penetration as [`armor::ricochet_pen`] says, see [`Shot::ricochet`]: the
-    /// player sees it go on, as the server shows it, with a tracer of the same shot.
+    /// players see it go on, as the server shows it, with a tracer of the same shot.
     /// `landed` is the vehicle it ricochets off, placed as it hit it, which it leaves
     /// from.
     fn ricochet(
@@ -466,7 +690,7 @@ impl Battle {
         landed: Option<(u32, [Affine3A; 4])>,
     ) -> io::Result<()> {
 
-        let client = self.client;
+        let id = self.id;
         let mut vehicles = self.shell_targets(shooter);
         if let Some((entity_id, transforms)) = landed {
             for vehicle in vehicles.iter_mut().filter(|vehicle| vehicle.entity_id == entity_id) {
@@ -478,13 +702,13 @@ impl Battle {
             rubble: self.world.rubble(),
         };
         let Some(next) = shot.ricochet(direction, armor::ricochet_pen_factor(&shot.def), Some(obstacles), &vehicles) else {
-            debug!(%client, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
+            debug!(battle = id, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
-        info!(%client, shot = next.id, ricochets = next.ricochets,
+        info!(battle = id, shot = next.id, ricochets = next.ricochets,
             "Ricocheted a shell off {}, {:.0}% of its penetration left, landing at {:?} in {:.2} s",
             if landed.is_some() { "a vehicle" } else { "the ground" }, next.pen_factor * 100.0, next.end, next.flight_time);
-        show_tracer(app, self.avatar, shooter, &next, true)?;
+        show_tracer(app, &self.avatars(), shooter, &next, true)?;
         self.shells.fly(at, shooter, next);
         Ok(())
 
@@ -497,37 +721,39 @@ impl Battle {
             .filter_map(|target| Some((target.entity_id, armor::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?)))
             .collect();
         for (entity_id, explosion) in explosions {
-            info!(client = %self.client, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
+            info!(battle = self.id, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
             self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
         }
         Ok(())
     }
 
     /// A vehicle of it alive takes a shell's damage, see [`BattleVehicle::take_damage`],
-    /// every client listing it destroyed once killed, and the client learns the hit's
-    /// result when it fired it.
+    /// every client listing it destroyed once killed, and the client that fired it, if
+    /// any, learns the hit's result.
     fn hit(&mut self, app: &mut base::App, shooter: EntityId, entity_id: u32, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
 
-        let (client, avatar, vehicles_info) = (self.client, self.avatar, self.vehicles_info);
+        let id = self.id;
         let now = self.game_time();
-        let by_client = self.vehicles.iter().any(|vehicle| vehicle.entity.id() == shooter && vehicle.controller.is_client());
+        let vehicles_infos: Vec<_> = self.participants.iter().map(|participant| participant.vehicles_info).collect();
+        let shooter_avatar = self.vehicles.iter()
+            .find(|vehicle| vehicle.entity.id() == shooter)
+            .and_then(|vehicle| vehicle.driver())
+            .map(|driver| driver.avatar());
         let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
             return Ok(());
         };
 
-        let killed = vehicle.take_damage(app, client, shooter, shot, shell_hit, now)?;
+        let killed = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
         if killed {
-            vehicle.mark_killed(app, vehicles_info, shooter)?;
+            vehicle.mark_killed(app, &vehicles_infos, shooter)?;
         }
 
-        if !by_client {
-            return Ok(());
-        }
+        let Some(shooter_avatar) = shooter_avatar else { return Ok(()) };
         let mut flags = shell_hit.flags;
         if killed {
             flags |= HIT_FLAG_VEHICLE_KILLED;
         }
-        app.entity(avatar)?.showShotResults(vec![ShotResult {
+        app.entity(shooter_avatar)?.showShotResults(vec![ShotResult {
             gunInstallationIndex: 0,
             hitFlags: flags,
             vehicleID: vehicle.entity.id(),
@@ -535,128 +761,13 @@ impl Battle {
 
     }
 
-    // -- Its client --
-
-    /// An entity of it was created on its client: its own vehicle, the client drives it
-    /// from there on, see [`BattleVehicle::enter`], and it runs.
-    pub fn entity_entered(&mut self, app: &mut base::App, entity: EntityKey<AnyEntity>) -> io::Result<()> {
-        debug!(client = %self.client, %entity, "Created an entity on the client");
-        let Self { vehicles, config, running, .. } = self;
-        let Some(own) = vehicles.iter_mut().find(|vehicle| vehicle.controller.is_client()) else { return Ok(()) };
-        if own.entity.any() != entity {
-            return Ok(());
-        }
-        own.enter(app, config)?;
-        *running = true;
-        Ok(())
-    }
-
-    /// A cell method of its avatar its client called.
-    pub fn avatar_call(&mut self, app: &mut base::App, call: AvatarCell) {
-
-        let client = self.client;
-        match call {
-            AvatarCell::VehicleShoot {} => {
-                if let Err(e) = self.shoot(app) {
-                    warn!(%client, "Failed to shoot: {e}");
-                }
-                return;
-            }
-            AvatarCell::VehicleChangeSetting { code, value } => {
-                if let Err(e) = self.change_setting(app, code, value) {
-                    warn!(%client, "Failed to change setting {code} to {value}: {e}");
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        let Some(driven) = self.own_vehicle_mut() else {
-            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
-            return;
-        };
-
-        match call {
-            AvatarCell::VehicleShoot {} |
-            AvatarCell::VehicleChangeSetting { .. } => unreachable!(),
-            AvatarCell::VehicleMoveWith { flags } => {
-                info!(%client, "Changed the movement flags: {flags:#04x}");
-                driven.hull.flags = flags;
-            }
-            AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
-        }
-
-    }
-
-    /// A cell method of its vehicle its client called.
-    pub fn vehicle_call(&mut self, call: VehicleCell) {
-
-        let client = self.client;
-        let Some(driven) = self.own_vehicle_mut() else {
-            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
-            return;
-        };
-
-        match call {
-            VehicleCell::TrackRelativePointWithGun { point } => {
-                let Vehicle { hull, turret } = driven;
-                debug!(%client, "Tracked a point with the gun: {point:?}, from {:?}", hull.position);
-                turret.track(hull.position + point);
-            }
-            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
-        }
-
-    }
-
-    /// Fire its client's gun, if loaded: the shell's tracer and the gun's effects, of its
-    /// whole burst, then one shell fewer, the shell it loads next and the reload, once
-    /// the burst's other shells are fired too, see [`Self::step`]. Where the shell lands
-    /// follows with [`Self::land`].
-    fn shoot(&mut self, app: &mut base::App) -> io::Result<()> {
-
-        let client = self.client;
-        let now = self.game_time();
-        let Some(own_id) = self.own().filter(|own| own.alive()).map(|own| own.entity.id()) else { return Ok(()) };
-        let targets = self.shell_targets(own_id);
-        let Self { avatar, vehicles, world, shells, .. } = self;
-        let Some(own) = vehicles.iter_mut().find(|vehicle| vehicle.controller.is_client()) else { return Ok(()) };
-        let driven = world.vehicle(own.id);
-        let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
-        let obstacles = Obstacles {
-            space: world.space(),
-            rubble: world.rubble(),
-        };
-        let Some(shot) = own.gun.fire(now, position, velocity, dispersion, Some(obstacles), &targets) else {
-            debug!(%client, "Refused a shot: not loaded, or out of shells");
-            return Ok(());
-        };
-        info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
-        own.show_gun(app, now)?;
-        show_shot(app, *avatar, own.entity, &shot)?;
-        shells.fly(now, own_id, shot);
-        Ok(())
-
-    }
-
-    /// Its client changes one of its vehicle's settings, see
-    /// [`BattleVehicle::change_setting`].
-    fn change_setting(&mut self, app: &mut base::App, code: u8, value: i32) -> io::Result<()> {
-        let client = self.client;
-        let now = self.game_time();
-        let Some(own) = self.own_mut() else {
-            warn!(%client, "Ignored a setting without a vehicle: {code} = {value}");
-            return Ok(());
-        };
-        own.change_setting(app, client, now, code, value)
-    }
-
 }
 
 /// Where the nearest enemy alive of the `index`th vehicle is, its hull's: what a bot
-/// fights. None for a vehicle a client drives.
+/// fights. None for a vehicle no bot drives.
 fn nearest_enemy(vehicles: &[BattleVehicle], world: &World, index: usize) -> Option<Vec3> {
     let vehicle = &vehicles[index];
-    if vehicle.controller.is_client() {
+    if !matches!(vehicle.controller, Controller::Bot(_)) {
         return None;
     }
     let position = world.vehicle(vehicle.id).hull.position;
@@ -677,15 +788,71 @@ fn fill_targets(targets: &mut Vec<HitTarget>, vehicles: &[BattleVehicle], world:
 
 impl BaseThread {
 
-    /// Get a client's avatar into its battle's space, with its map, see [`Battle::new`].
-    pub fn enter_space(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, space: SpaceKey, player: Player) -> io::Result<()> {
+    /// A client switched into a battle entered it, with its avatar: the battle gathers it,
+    /// and is made once due, see [`Self::make_battles`]. One coming after its battle was
+    /// made is sent back to its account.
+    pub fn gather(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, player: Player) -> io::Result<()> {
 
-        let Some(config) = self.battle_clients.get(&client).map(|c| c.config.clone()) else { return Ok(()) };
-        let own_def = if self.battle_options.bot_vehicles.is_empty() {
-            let decoded = VehicleDescr::decode(&config.descr).map_err(|e| invalid_data(&e.to_string()))?;
-            Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
-        } else {
-            None
+        let Some(battle_client) = self.battle_clients.get(&client) else { return Ok(()) };
+        let (id, config) = (battle_client.battle, battle_client.config.clone());
+        let Some(gathering) = self.gatherings.get_mut(&id) else {
+            warn!(%client, battle = id, "Sent a client back: its battle was made without it");
+            return self.leave_battle(client);
+        };
+        gathering.arrivals.push(Arrival {
+            client,
+            avatar,
+            player,
+            config,
+        });
+        info!(%client, battle = id, entered = gathering.arrivals.len(), expected = gathering.expected, "Gathered a client for its battle");
+        self.make_battles();
+        Ok(())
+
+    }
+
+    /// Make the battles due, see [`Gathering::due`]: each in a space of its own with the
+    /// map, see [`Battle::new`].
+    fn make_battles(&mut self) {
+        let due: Vec<u32> = self.gatherings.iter()
+            .filter(|(_, gathering)| gathering.due())
+            .map(|(&id, _)| id)
+            .collect();
+        for id in due {
+            let Some(gathering) = self.gatherings.remove(&id) else { continue };
+            if gathering.arrivals.is_empty() {
+                warn!(battle = id, expected = gathering.expected, "Dropped a battle: none of its clients entered it");
+                continue;
+            }
+            if let Err(e) = self.make_battle(id, gathering.arrivals) {
+                warn!(battle = id, "Failed to make a battle: {e}");
+            }
+        }
+    }
+
+    /// Make a battle for these clients, in a space of its own with the map.
+    fn make_battle(&mut self, id: u32, arrivals: Vec<Arrival>) -> io::Result<()> {
+
+        // No `SetCellAppExtAddress`, which the captured server sends: given one, the
+        // client opens a direct connection to the cell app and waits for a cell login we
+        // can't answer yet, holding back its cell traffic. Without one, everything
+        // comes through this base app. No arena updates either, which the client
+        // defaults to, see the capture.
+        let space = self.app.create_space();
+        for data in space_properties(space.id()) {
+            self.app.set_space_property(space, data)?;
+        }
+        let SocketAddr::V4(entry_id) = self.app.addr()? else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
+        };
+        self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
+
+        let own_def = match (self.battle_options.bot_vehicles.is_empty(), arrivals.first()) {
+            (true, Some(first)) => {
+                let decoded = VehicleDescr::decode(&first.config.descr).map_err(|e| invalid_data(&e.to_string()))?;
+                Some(VehicleDef::load_by_id(&ResFilesystem::new(self.game_dir.join("res"))?, decoded.nation, decoded.type_id)?)
+            }
+            _ => None,
         };
         let setup = BattleSetup {
             map: &self.map,
@@ -693,43 +860,70 @@ impl BaseThread {
             options: self.battle_options.clone(),
             own_def,
         };
-        let battle = Battle::new(&mut self.app, setup, space, client, avatar, player, config)?;
-        if let Some(c) = self.battle_clients.get_mut(&client) {
-            c.battle = Some(battle);
-        }
+        let clients = arrivals.len();
+        let battle = Battle::new(&mut self.app, setup, space, id, arrivals)?;
+        self.battles.insert(id, battle);
+        info!(battle = id, clients, %space, "Made a battle: {}", self.map.geometry);
         Ok(())
 
     }
 
+    /// A client of a battle is ready, see [`Battle::ready`].
+    pub fn client_ready(&mut self, client: ClientKey) -> io::Result<()> {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
+        battle.ready(app, client)
+    }
+
+    /// Take a client out of its battle, or of the one gathering it, see [`Battle::leave`]:
+    /// a battle left without clients is gone, with its space.
+    pub fn quit_battle(&mut self, client: ClientKey) {
+        let Some(id) = self.battle_clients.get(&client).map(|c| c.battle) else { return };
+        if let Some(gathering) = self.gatherings.get_mut(&id) {
+            let before = gathering.arrivals.len();
+            gathering.arrivals.retain(|arrival| arrival.client != client);
+            gathering.expected -= before - gathering.arrivals.len();
+        }
+        let Some(battle) = self.battles.get_mut(&id) else { return };
+        battle.leave(client);
+        if battle.is_empty() {
+            let space = battle.space();
+            self.battles.remove(&id);
+            self.app.destroy_space(space);
+            info!(battle = id, "Ended a battle: its last client left");
+        }
+    }
+
     /// An entity of its battle was created on the client.
     pub fn entity_entered(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>) {
-        let Self { app, battle_clients, .. } = self;
-        let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else { return };
-        if let Err(e) = battle.entity_entered(app, entity) {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return };
+        if let Err(e) = battle.entity_entered(app, client, entity) {
             warn!(%client, "Failed to drive the vehicle: {e}");
         }
     }
 
     /// The client called a cell method.
     pub fn cell_method(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>, call: &MethodCall) {
-        let Self { app, battle_clients, .. } = self;
-        let Some(battle) = battle_clients.get_mut(&client).and_then(|c| c.battle.as_mut()) else {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else {
             debug!(%client, %entity, "Ignored a cell method call out of a battle: {call:?}");
             return;
         };
         if let Some((_, call)) = app.decode::<AvatarCell>(entity, call) {
-            battle.avatar_call(app, call);
+            battle.avatar_call(app, client, call);
         } else if let Some((_, call)) = app.decode::<VehicleCell>(entity, call) {
-            battle.vehicle_call(call);
+            battle.vehicle_call(client, call);
         } else {
             debug!(%client, %entity, "Ignored a cell method call: {call:?}");
         }
     }
 
-    /// End a tick: tick every battle, see [`Battle::tick`], then give the clients what
-    /// changed.
+    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], then
+    /// give the clients what changed.
     pub fn battle_tick(&mut self) {
-        for battle in self.battle_clients.values_mut().filter_map(|c| c.battle.as_mut()) {
+        self.make_battles();
+        for battle in self.battles.values_mut() {
             battle.tick(&mut self.app);
         }
         self.app.end_tick();
@@ -738,14 +932,17 @@ impl BaseThread {
 }
 
 
-/// The player's team, and the other.
-const PLAYER_TEAM: u8 = 1;
-const ENEMY_TEAM: u8 = 2;
+/// The two teams, as the clients know them.
+const TEAMS: [u8; 2] = [1, 2];
 
 /// The scale of the packed horizontal offsets in position updates, as captured: we only
 /// send detailed ones.
 const PACKED_XZ_SCALE: f32 = 0.007644442;
 
-/// How far the player's vehicle spots others, in metres on the ground plane: the most
-/// any vehicle can see, until vehicles have their own.
+/// How far a vehicle spots others, in metres on the ground plane: the most any vehicle
+/// can see, until vehicles have their own.
 const VIEW_RANGE: f32 = 445.0;
+
+/// How long a battle waits for the clients switched into it to enter before it is made
+/// with those that did. Our choice: a client logs in again within a second or two.
+const GATHER_WAIT: Duration = Duration::from_secs(20);

@@ -55,9 +55,10 @@ impl Shells {
 
 }
 
-/// Show a shot to the player: its tracer, and the gun firing on the shooter.
-pub fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityKey<schema::Vehicle>, shot: &Shot) -> io::Result<()> {
-    show_tracer(app, avatar, shooter.id(), shot, false)?;
+/// Show a shot to the players of these avatars: its tracer, and the gun firing on the
+/// shooter.
+pub fn show_shot(app: &mut base::App, avatars: &[EntityKey<Avatar>], shooter: EntityKey<schema::Vehicle>, shot: &Shot) -> io::Result<()> {
+    show_tracer(app, avatars, shooter.id(), shot, false)?;
     // Its whole burst from the only gun, on its first shell.
     match shot.burst {
         Some(burst) => app.entity(shooter)?.showShooting(burst.min(u8::MAX.into()) as u8, 0, shot.def.kind_index),
@@ -65,23 +66,27 @@ pub fn show_shot(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: Entity
     }
 }
 
-/// Show a shell's tracer to the player, flying from its start, off what it ricocheted
-/// off for a ricochet: the client then shows it from there, not from the gun.
-pub fn show_tracer(app: &mut base::App, avatar: EntityKey<Avatar>, shooter: EntityId, shot: &Shot, ricochet: bool) -> io::Result<()> {
+/// Show a shell's tracer to the players of these avatars, flying from its start, off
+/// what it ricocheted off for a ricochet: the client then shows it from there, not from
+/// the gun.
+pub fn show_tracer(app: &mut base::App, avatars: &[EntityKey<Avatar>], shooter: EntityId, shot: &Shot, ricochet: bool) -> io::Result<()> {
     let def = &shot.def;
-    app.entity(avatar)?.showTracer(
-        shooter,
-        shot.id,
-        ricochet.into(),
-        def.effects_index,
-        def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
-        def.kind_index,
-        def.caliber,
-        shot.start,
-        shot.velocity,
-        def.gravity,
-        shot.range,
-        0,
-        0,
-    )
+    for &avatar in avatars {
+        app.entity(avatar)?.showTracer(
+            shooter,
+            shot.id,
+            ricochet.into(),
+            def.effects_index,
+            def.prefab_effects_index.unwrap_or(NO_PREFAB_EFFECTS),
+            def.kind_index,
+            def.caliber,
+            shot.start,
+            shot.velocity,
+            def.gravity,
+            shot.range,
+            0,
+            0,
+        )?;
+    }
+    Ok(())
 }

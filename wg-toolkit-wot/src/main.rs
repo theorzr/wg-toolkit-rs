@@ -234,12 +234,10 @@ pub struct BaseArgs {
     /// The map battles are on, by its name in the game's `scripts/arena_defs/_list_.xml`.
     #[arg(long, default_value = "02_malinovka")]
     pub map: String,
-    /// Bots on the player's side, the player aside.
-    #[arg(long, default_value_t = 0)]
-    pub allies: u32,
-    /// Bots on the other side.
+    /// How many vehicles each of the two teams has: the players split between them, one
+    /// each in turn, and bots fill the rest.
     #[arg(long, default_value_t = 1)]
-    pub enemies: u32,
+    pub team_size: u32,
     /// A vehicle bots drive, as `--give-vehicle` takes it: each bot drives the next,
     /// round, else the player's own. Can be repeated.
     #[arg(long)]
@@ -250,12 +248,13 @@ pub struct BaseArgs {
     /// Whether bots drive toward their enemies, else they stay where they start.
     #[arg(long)]
     pub bots_drive: bool,
-    /// Start the enemies this many metres in front of the player instead of at their
-    /// spawn, facing the player.
+    /// Start the second team this many metres in front of the first instead of at its
+    /// spawn, facing it.
     #[arg(long)]
     pub enemy_distance: Option<f32>,
-    /// Start the player here instead of at its team's spawn, as `<x>,<z>,<yaw>` with the
-    /// yaw in degrees (0 north, 90 east), on the ground: its allies line up behind.
+    /// Start the first team here instead of at its spawn, as `<x>,<z>,<yaw>` with the yaw
+    /// in degrees (0 north, 90 east), on the ground: its vehicles line up beside and
+    /// behind.
     #[arg(long, allow_hyphen_values = true, value_parser = parse_spawn)]
     pub spawn: Option<(f32, f32, f32)>,
     /// Tell the clients of a network to reach the base app at this address, as
@@ -265,6 +264,10 @@ pub struct BaseArgs {
     /// to `0.0.0.0`. Can be repeated.
     #[arg(long, value_name = "NETWORK/PREFIX=IP[:PORT]")]
     pub advertise: Vec<AdvertiseRule>,
+    /// How long the first client in the battle queue waits, in seconds, before everyone
+    /// then queued goes into one battle.
+    #[arg(long, default_value_t = 10)]
+    pub queue_wait: u64,
 }
 
 /// Parse a `--spawn` value, `<x>,<z>,<yaw>`.

@@ -34,11 +34,13 @@ entity_schema! {
             fn receiveServerStats(stats: ServerStats);
             fn receiveQueueInfo(info: Pickle);
             fn onEnqueued(queue_type: u8);
+            fn onDequeued(queue_type: u8);
             fn onTokenReceived(request_id: u16, token_type: u8, data: Pickle);
             fn onKickedFromServer(reason: String, kick_reason_type: u8, expiry_time: u32);
         }
         base {
             fn doCmdStr(request_id: i16, cmd: i16, arg: String);
+            fn doCmdInt(request_id: i16, cmd: i16, arg: i64);
             fn doCmdInt2(request_id: i16, cmd: i16, arg0: i64, arg1: i64);
             fn doCmdInt3(request_id: i16, cmd: i16, arg0: i64, arg1: i64, arg2: i64);
             fn doCmdIntArr(request_id: i16, cmd: i16, args: Vec<i32>);

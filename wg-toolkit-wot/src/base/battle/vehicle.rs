@@ -1,6 +1,6 @@
 //! A vehicle of a battle, whoever drives it: created as a player's or a bot's, shown to
-//! the clients as it moves, spotted, firing and reloading, its settings changed by the
-//! client driving it, and taking damage.
+//! the clients as it moves, firing and reloading, its settings changed by the client
+//! driving it, and taking damage.
 
 use std::sync::Arc;
 use std::io;
@@ -49,9 +49,6 @@ pub struct BattleVehicle {
     pub collision: Arc<VehicleCollision>,
     pub health: i64,
     pub max_health: i64,
-    /// Whether the client sees it, its own aside: its allies always, its enemies while
-    /// its vehicle spots them, see [`VIEW_RANGE`].
-    spotted: bool,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
     /// The `isStrafing` last sent, see [`STRAFING_SLIDE`].
@@ -65,16 +62,20 @@ pub struct BattleVehicle {
 /// Who drives a vehicle: its controls and its aim.
 #[derive(Debug)]
 pub enum Controller {
-    /// The battle's client, through its avatar's and the vehicle's cell methods.
+    /// A client of the battle, through its avatar's and the vehicle's cell methods.
     Client(ClientDriver),
     /// The server, see [`Bot`].
     Bot(Bot),
+    /// Nobody: the client driving it left the battle, and it stands where it stopped.
+    Nobody,
 }
 
-/// What only the client driving a vehicle knows of it, once it has it, see
+/// The client driving a vehicle, and what only it knows of it, once it has it, see
 /// [`BattleVehicle::enter`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientDriver {
+    client: ClientKey,
+    avatar: EntityKey<Avatar>,
     /// The vehicle's components the client has it with.
     own_vehicle: Option<ComponentKey<OwnVehicle>>,
     gun_marker: Option<ComponentKey<GunMarkerComponent>>,
@@ -91,12 +92,14 @@ impl BattleVehicle {
     pub fn player(
         app: &mut base::App,
         world: &mut World,
+        client: ClientKey,
         avatar: EntityKey<Avatar>,
         space: SpaceKey,
         config: &VehicleConfig,
         player: Player,
         team: u8,
         start: Start,
+        info_index: u32,
     ) -> io::Result<Self> {
 
         let public = public_info(player.name, &config.descr, team, config.max_health as u16, config.crew.len());
@@ -134,8 +137,14 @@ impl BattleVehicle {
             entity: vehicle,
             team,
             info,
-            info_index: 0,
-            controller: Controller::Client(ClientDriver::default()),
+            info_index,
+            controller: Controller::Client(ClientDriver {
+                client,
+                avatar,
+                own_vehicle: None,
+                gun_marker: None,
+                engine_gear: None,
+            }),
             id: world.add(driven),
             gun: Gun::new(ammo, config.aiming.reload_time)
                 .with_magazine(config.magazine)
@@ -143,7 +152,6 @@ impl BattleVehicle {
             collision: config.collision.clone(),
             health: config.max_health.into(),
             max_health: config.max_health.into(),
-            spotted: true,
             engine_mode: None,
             strafing: false,
             damage_stickers: Vec::new(),
@@ -199,7 +207,6 @@ impl BattleVehicle {
             collision: def.collision.clone(),
             health: def.max_health.into(),
             max_health: def.max_health.into(),
-            spotted: false,
             engine_mode: None,
             strafing: false,
             damage_stickers: Vec::new(),
@@ -216,7 +223,7 @@ impl BattleVehicle {
     pub fn driver(&self) -> Option<&ClientDriver> {
         match &self.controller {
             Controller::Client(driver) => Some(driver),
-            Controller::Bot(_) => None,
+            Controller::Bot(_) | Controller::Nobody => None,
         }
     }
 
@@ -240,6 +247,7 @@ impl BattleVehicle {
     /// can. Its `GunMarkerComponent` too, for the client's server reticle.
     pub fn enter(&mut self, app: &mut base::App, config: &VehicleConfig) -> io::Result<()> {
 
+        let Controller::Client(driver) = &mut self.controller else { return Ok(()) };
         let entity_id = self.entity.id();
         let mut entity = app.entity(self.entity)?;
         let mut own_vehicle = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
@@ -255,37 +263,10 @@ impl BattleVehicle {
         let own_vehicle = own_vehicle.key();
         let mut marker = entity.add_component::<GunMarkerComponent>(Audience::OwnClient)?;
         marker.set_gunMarker(None)?;
-        let gun_marker = marker.key();
-
-        self.controller = Controller::Client(ClientDriver {
-            own_vehicle: Some(own_vehicle),
-            gun_marker: Some(gun_marker),
-            engine_gear: None,
-        });
+        driver.own_vehicle = Some(own_vehicle);
+        driver.gun_marker = Some(marker.key());
         Ok(())
 
-    }
-
-    /// Show it to the client, or hide it, as its own vehicle spots it, given by its team
-    /// and position: its allies always, its enemies within [`VIEW_RANGE`].
-    pub fn spot(&mut self, app: &mut base::App, client: ClientKey, world: &World, own: Option<(u8, Vec3)>) -> io::Result<()> {
-        let Some((team, position)) = own else { return Ok(()) };
-        if self.controller.is_client() {
-            return Ok(());
-        }
-        let offset = world.vehicle(self.id).hull.position - position;
-        let spotted = self.team == team || offset.x.hypot(offset.z) <= VIEW_RANGE;
-        if spotted == self.spotted {
-            return Ok(());
-        }
-        self.spotted = spotted;
-        if spotted {
-            app.show(client, self.entity)?;
-        } else {
-            app.hide(client, self.entity)?;
-        }
-        info!(%client, entity_id = %self.entity.id(), team = self.team, "{} a vehicle", if spotted { "Spotted" } else { "Lost" });
-        Ok(())
     }
 
     /// Give the clients it as it is, `driven` in the world: where it is, its gun's angles,
@@ -322,11 +303,11 @@ impl BattleVehicle {
         Ok(())
     }
 
-    /// Put out its fire at game time `now`, if it is due to go out.
-    pub fn put_out_fire(&mut self, app: &mut base::App, client: ClientKey, now: f64) -> io::Result<()> {
+    /// Put out its fire at game time `now`, if it is due to go out, in this battle.
+    pub fn put_out_fire(&mut self, app: &mut base::App, battle: u32, now: f64) -> io::Result<()> {
         if let Some((fire, _)) = self.fire.take_if(|&mut (_, until)| until <= now) {
             app.remove_component(fire)?;
-            info!(%client, entity_id = %self.entity.id(), "Put out a vehicle's fire");
+            info!(battle, entity_id = %self.entity.id(), "Put out a vehicle's fire");
         }
         Ok(())
     }
@@ -364,12 +345,12 @@ impl BattleVehicle {
         }
     }
 
-    /// Give its client what only it knows of it, `driven` in the world, its gun's marker
-    /// as given, see [`ClientDriver::show`].
-    pub fn show_own(&mut self, app: &mut base::App, client: ClientKey, avatar: EntityKey<Avatar>, driven: &Vehicle, marker: (Vec3, Vec3, f32)) -> io::Result<()> {
+    /// Give its client, if a client drives it, what only it knows of it, `driven` in the
+    /// world, its gun's marker as given, see [`ClientDriver::show`].
+    pub fn show_own(&mut self, app: &mut base::App, driven: &Vehicle, marker: (Vec3, Vec3, f32)) -> io::Result<()> {
         match &mut self.controller {
-            Controller::Client(driver) => driver.show(app, client, avatar, driven, marker),
-            Controller::Bot(_) => Ok(()),
+            Controller::Client(driver) => driver.show(app, driven, marker),
+            Controller::Bot(_) | Controller::Nobody => Ok(()),
         }
     }
 
@@ -416,14 +397,14 @@ impl BattleVehicle {
 
     }
 
-    /// It takes a shell's damage at game time `now`, varied by up to [`DAMAGE_SPREAD`]
-    /// either way: its health drops, in its `OwnVehicle` too when a client drives it, and
-    /// the clients see the hit, as the captured server shows one. A damaging hit sets it
-    /// on fire, which a kill puts out. Whether it is killed.
+    /// It takes a shell's damage at game time `now`, in this battle, varied by up to
+    /// [`DAMAGE_SPREAD`] either way: its health drops, in its `OwnVehicle` too when a
+    /// client drives it, and the clients see the hit, as the captured server shows one. A
+    /// damaging hit sets it on fire, which a kill puts out. Whether it is killed.
     pub fn take_damage(
         &mut self,
         app: &mut base::App,
-        client: ClientKey,
+        battle: u32,
         shooter: EntityId,
         shot: &Shot,
         shell_hit: &ShellHit,
@@ -438,7 +419,7 @@ impl BattleVehicle {
         let killed = new_health == 0;
         let bounds = self.collision.parts[shell_hit.hit.part as usize].bounds;
         if amount > 0 {
-            info!(%client, %entity_id, %shooter, "Damaged a vehicle: {amount}, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
+            info!(battle, %entity_id, %shooter, "Damaged a vehicle: {amount}, {old_health} -> {new_health}{}", if killed { ", destroyed" } else { "" });
             if let Some(own_vehicle) = self.driver().and_then(|driver| driver.own_vehicle) {
                 app.component(own_vehicle)?.set_vehicleHealthInfo(vehicle_health_info(entity_id, new_health))?;
             }
@@ -467,17 +448,16 @@ impl BattleVehicle {
                 let mut fire = entity.add_component::<Fire>(Audience::AllClients)?;
                 fire.set_fireInfo(None)?;
                 self.fire = Some((fire.key(), now + FIRE_DURATION));
-                info!(%client, %entity_id, "Set a vehicle on fire");
+                info!(battle, %entity_id, "Set a vehicle on fire");
             }
         }
         Ok(killed)
 
     }
 
-    /// Every client lists it destroyed, by whom, in its `vehiclesInfo` entry: the
-    /// entry's changes apply once its generation changes too.
-    pub fn mark_killed(&mut self, app: &mut base::App, vehicles_info: Option<ComponentKey<AvatarVehiclesInfo>>, killer: EntityId) -> io::Result<()> {
-        let Some(vehicles_info) = vehicles_info else { return Ok(()) };
+    /// Every client lists it destroyed, by whom, in its `vehiclesInfo` entry, on each
+    /// of these: the entry's changes apply once its generation changes too.
+    pub fn mark_killed(&mut self, app: &mut base::App, vehicles_infos: &[ComponentKey<AvatarVehiclesInfo>], killer: EntityId) -> io::Result<()> {
         let info = &mut self.info;
         let death = DeathInfo {
             victimID: info.vehicleID,
@@ -490,35 +470,29 @@ impl BattleVehicle {
         info.isAlive = false;
         info.__generation += 1;
         let index = self.info_index;
-        let mut vehicles_info = app.component(vehicles_info)?;
-        vehicles_info.set_vehiclesInfo_at(info_path(index, "deathInfo"), Some(death))?;
-        vehicles_info.set_vehiclesInfo_at(info_path(index, "isAlive"), false)?;
-        vehicles_info.set_vehiclesInfo_at(info_path(index, "__generation"), info.__generation)
-    }
-
-}
-
-impl Controller {
-
-    pub fn is_client(&self) -> bool {
-        matches!(self, Self::Client(_))
+        for &vehicles_info in vehicles_infos {
+            let mut vehicles_info = app.component(vehicles_info)?;
+            vehicles_info.set_vehiclesInfo_at(info_path(index, "deathInfo"), Some(death.clone()))?;
+            vehicles_info.set_vehiclesInfo_at(info_path(index, "isAlive"), false)?;
+            vehicles_info.set_vehiclesInfo_at(info_path(index, "__generation"), info.__generation)?;
+        }
+        Ok(())
     }
 
 }
 
 impl ClientDriver {
 
+    /// The avatar of its client.
+    pub fn avatar(&self) -> EntityKey<Avatar> {
+        self.avatar
+    }
+
     /// Give its client what only it knows of its vehicle, `driven` in the world: its
     /// server reticle, from the gun's marker, its avatar where it is, what it aims from,
     /// which must turn with the hull, and the engine's RPM, then its gear when it shifts.
-    fn show(
-        &mut self,
-        app: &mut base::App,
-        client: ClientKey,
-        avatar: EntityKey<Avatar>,
-        driven: &Vehicle,
-        (position, velocity, dispersion): (Vec3, Vec3, f32),
-    ) -> io::Result<()> {
+    fn show(&mut self, app: &mut base::App, driven: &Vehicle, (position, velocity, dispersion): (Vec3, Vec3, f32)) -> io::Result<()> {
+        let (client, avatar) = (self.client, self.avatar);
         let Vehicle { hull, turret } = driven;
         if let Some(marker) = self.gun_marker {
             app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion }))?;

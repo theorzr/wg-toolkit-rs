@@ -22,13 +22,11 @@ use std::io;
 
 use tracing::{debug, info, instrument, warn};
 use rsa::rand_core::{OsRng, RngCore};
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use blowfish::cipher::KeyInit;
 use blowfish::Blowfish;
 use glam::Vec2;
 
-use wgtk::app::entity::{Bytes, EntityId, EntityKey, Pickle};
+use wgtk::app::entity::{EntityId, EntityKey, Pickle};
 use wgtk::pickle::{self, Value as PickleValue};
 use wgtk::app::dispatch::MethodCall;
 use wgtk::res::fs::ResFilesystem;
@@ -43,8 +41,9 @@ use crate::wot::schema::{
     GunReloadTime, PlayLimits, RemoteCamera, ServerStats, TargetingInfo, VehicleAmmo, VehicleHealthInfo, VehicleSetting,
 };
 use crate::wot::account_commands::{
-    token_type, CMD_ADD_INT_USER_SETTINGS, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS, CMD_REQ_QUEUE_INFO,
-    CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS, CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
+    token_type, CMD_ADD_INT_USER_SETTINGS, CMD_DEQUEUE_FROM_BATTLE_QUEUE, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS,
+    CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS,
+    CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
 use crate::wot::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, VehicleDef};
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
@@ -57,7 +56,7 @@ use crate::wot::items::TankmanDescr;
 use gun::Gun;
 pub use advertise::AdvertiseRule;
 
-use battle::{Battle, BattleOptions};
+use battle::{Battle, BattleOptions, Gathering};
 use player::{AccountIds, Player};
 use account::AccountData;
 use shop::Shop;
@@ -112,15 +111,14 @@ impl BaseThread {
         };
         let vehicles = args.give_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?;
         let battle_options = BattleOptions {
-            allies: args.allies,
-            enemies: args.enemies,
+            team_size: args.team_size,
             bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
             bots_fire: args.bots_fire,
             bots_drive: args.bots_drive,
             enemy_distance: args.enemy_distance,
             spawn: args.spawn.map(|(x, z, yaw)| (Vec2::new(x, z), yaw.to_radians())),
         };
-        info!(allies = args.allies, enemies = args.enemies, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
+        info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
             bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
         let account = AccountData::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
@@ -159,9 +157,14 @@ impl BaseThread {
             players: HashMap::new(),
             accounts: HashMap::new(),
             enqueued: HashMap::new(),
+            queued_since: None,
+            queue_wait: Duration::from_secs(args.queue_wait),
             pending_switches: HashMap::new(),
             pending_returns: HashMap::new(),
             battle_clients: HashMap::new(),
+            gatherings: HashMap::new(),
+            battles: HashMap::new(),
+            next_battle: 1,
         })
 
     }
@@ -198,40 +201,37 @@ pub struct BaseThread {
     players: HashMap<ClientKey, Player>,
     /// Each client's account, outside of battles.
     accounts: HashMap<ClientKey, EntityKey<Account>>,
-    /// Clients waiting in the battle queue, with the inventory id of their vehicle.
+    /// Clients waiting in the battle queue, with the inventory id of their vehicle, and
+    /// since when the first of them waits: they all go into a battle [`Self::queue_wait`]
+    /// later, see [`Self::launch_battle`].
     enqueued: HashMap<ClientKey, i64>,
+    queued_since: Option<Instant>,
+    queue_wait: Duration,
     /// Clients told to switch base app for their battle, by the session key they will
-    /// log in again with, with the IP they will come from, their blowfish key and
-    /// their player and vehicle.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleConfig)>,
+    /// log in again with, with the IP they will come from, their blowfish key, their
+    /// player and vehicle, and their battle's id.
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleConfig, u32)>,
     /// Clients told to switch base app back to their account, leaving their battle, by
     /// the session key they will log in with, likewise.
     pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>, Player)>,
     /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
     battle_clients: HashMap<ClientKey, BattleClient>,
+    /// The battles waiting for their clients, those made, by id, and the next battle's.
+    gatherings: HashMap<u32, Gathering>,
+    battles: HashMap<u32, Battle>,
+    next_battle: u32,
 }
 
 /// A client connected for a battle.
 #[derive(Debug)]
 struct BattleClient {
+    /// Its battle's id.
+    battle: u32,
     /// Its vehicle's configuration.
     config: VehicleConfig,
     /// Its avatar, once created.
     avatar: Option<EntityKey<Avatar>>,
-    /// The arena period to switch to, and when.
-    next_period: Option<(Instant, u8)>,
-    /// Its battle, once its avatar is in its space.
-    battle: Option<Battle>,
 }
-
-/// The arena periods, `ARENA_PERIOD`.
-const ARENA_PERIOD_PREBATTLE: u8 = 2;
-const ARENA_PERIOD_BATTLE: u8 = 3;
-/// The countdown before the battle, and the battle's length.
-const PREBATTLE_LENGTH: Duration = Duration::from_secs(10);
-const BATTLE_LENGTH: Duration = Duration::from_secs(900);
-/// `ARENA_UPDATE.PERIOD`.
-const ARENA_UPDATE_PERIOD: u8 = 3;
 /// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
 const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
 const ARENA_GUI_TYPE_RANDOM: u8 = 1;
@@ -352,10 +352,9 @@ impl BaseThread {
     fn forget(&mut self, client: ClientKey) {
         self.players.remove(&client);
         self.accounts.remove(&client);
-        self.enqueued.remove(&client);
-        if let Some(battle) = self.battle_clients.remove(&client).and_then(|battle| battle.battle) {
-            self.app.destroy_space(battle.space());
-        }
+        self.dequeue(client);
+        self.quit_battle(client);
+        self.battle_clients.remove(&client);
     }
 
     /// Bring a client that enabled entities to its account, as the captured server did:
@@ -381,68 +380,71 @@ impl BaseThread {
 
     }
 
-    /// The client's arena is ready: tell its account, then switch it to the base app
-    /// holding its avatar, this one, as the captured server did.
-    fn start_battle(&mut self, client: ClientKey, vehicle_id: i64) -> io::Result<()> {
+    /// Take a client out of the battle queue, which waits no more once empty.
+    fn dequeue(&mut self, client: ClientKey) {
+        self.enqueued.remove(&client);
+        if self.enqueued.is_empty() {
+            self.queued_since = None;
+        }
+    }
+
+    /// Launch a battle for the clients in the queue once due: [`Self::queue_wait`] after
+    /// the first enqueued, everyone queued then goes into one battle, switched into it,
+    /// see [`Self::start_battle`], which gathers them as they enter it, see
+    /// [`Self::gather`].
+    fn launch_battle(&mut self) {
+
+        if !self.queued_since.is_some_and(|since| since.elapsed() >= self.queue_wait) {
+            return;
+        }
+        self.queued_since = None;
+        let id = self.next_battle;
+        self.next_battle += 1;
+
+        let queued: Vec<_> = self.enqueued.drain().collect();
+        let mut switched = 0;
+        for (client, vehicle_id) in queued {
+            match self.start_battle(client, vehicle_id, id) {
+                Ok(true) => switched += 1,
+                Ok(false) => {}
+                Err(e) => warn!(%client, battle = id, "Failed to start the battle: {e}"),
+            }
+        }
+        if switched > 0 {
+            self.gatherings.insert(id, Gathering::new(switched));
+            info!(battle = id, clients = switched, "Launched a battle");
+        }
+
+    }
+
+    /// The client's arena is ready, that of the battle of this id: tell its account, then
+    /// switch it to the base app holding its avatar, this one, as the captured server
+    /// did. Whether it was switched.
+    fn start_battle(&mut self, client: ClientKey, vehicle_id: i64, battle: u32) -> io::Result<bool> {
 
         let (Some(&account), Some(player), Some((session_key, blowfish))) =
             (self.accounts.get(&client), self.players.get(&client), self.app.client_keys(client)) else {
-            return Ok(());
+            return Ok(false);
         };
         let player = player.clone();
         let config = match self.vehicle_config(vehicle_id) {
             Ok(config) => config,
             Err(e) => {
                 warn!(%client, vehicle_id, "Failed to read the vehicle: {e}");
-                return Ok(());
+                return Ok(false);
             }
         };
 
         self.app.entity(account)?.onArenaCreated()?;
 
         let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
-        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config));
+        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, config, battle));
         self.app.switch_base_app(client, base_app, true)?;
         self.accounts.remove(&client);
         self.players.remove(&client);
-        info!(%client, %base_app, "Created the arena, switching base app");
+        info!(%client, %base_app, battle, "Created the arena, switching base app");
 
-        Ok(())
-
-    }
-
-    /// Switch a battle client's arena to a period: the countdown, then the battle. The
-    /// update is `(period, end time, length, extra)`, pickled then compressed.
-    fn arena_period(&mut self, client: ClientKey, period: u8) -> io::Result<()> {
-
-        let Some(battle) = self.battle_clients.get_mut(&client) else { return Ok(()) };
-        let Some(avatar) = battle.avatar else { return Ok(()) };
-        let length = match period {
-            ARENA_PERIOD_PREBATTLE => PREBATTLE_LENGTH,
-            _ => BATTLE_LENGTH,
-        };
-        battle.next_period = (period == ARENA_PERIOD_PREBATTLE).then(|| (Instant::now() + length, ARENA_PERIOD_BATTLE));
-        if let (ARENA_PERIOD_BATTLE, Some(battle)) = (period, battle.battle.as_mut()) {
-            battle.start();
-        }
-        // The client's game time is the ticks it got.
-        let game_time = f64::from(self.app.ticks(client).unwrap_or(0)) * TICK.as_secs_f64();
-        let end = game_time + length.as_secs_f64();
-
-        let info = PickleValue::Tuple(vec![
-            PickleValue::I64(period.into()),
-            PickleValue::F64(end),
-            PickleValue::I64(length.as_secs() as i64),
-            PickleValue::List(Vec::new()),
-        ]);
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        pickle::to_writer(&mut encoder, &info)?;
-        let data = encoder.finish()?;
-
-        self.app.entity(avatar)?.updateArena(ARENA_UPDATE_PERIOD, Bytes(data))?;
-        info!(%client, "Changed the arena period: {period}, until {end:.1}");
-
-        Ok(())
+        Ok(true)
 
     }
 
@@ -476,9 +478,8 @@ impl BaseThread {
         };
         let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
         self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
-        if let Some(battle) = self.battle_clients.remove(&client).and_then(|c| c.battle) {
-            self.app.destroy_space(battle.space());
-        }
+        self.quit_battle(client);
+        self.battle_clients.remove(&client);
         self.app.switch_base_app(client, base_app, true)?;
         info!(%client, %base_app, "Left the battle, switching base app");
         Ok(())
@@ -496,23 +497,8 @@ impl BaseThread {
         }
         info!(%client, %avatar, "Created the avatar");
 
-        // No `SetCellAppExtAddress`, which the captured server sends: given one, the
-        // client opens a direct connection to the cell app and waits for a cell login we
-        // can't answer yet, holding back its cell traffic. Without one, everything
-        // comes through this base app. No arena updates either, which the client
-        // defaults to, see the capture.
-
-        // Then its cell side, in a space of its own with the map, see [`Self::enter_space`].
-        let space = self.app.create_space();
-        for data in space_properties(space.id()) {
-            self.app.set_space_property(space, data)?;
-        }
-        let SocketAddr::V4(entry_id) = self.app.addr()? else {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "base app not on IPv4"));
-        };
-        self.app.add_space_geometry_mapping(space, entry_id, &self.map.geometry)?;
-        info!(%client, %space, "Entered the space: {}", self.map.geometry);
-        self.enter_space(client, avatar, space, player)
+        // Then its cell side, once its battle is made, see [`Self::gather`].
+        self.gather(client, avatar, player)
 
     }
 
@@ -570,10 +556,8 @@ impl BaseThread {
                 self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
             }
             AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
-                self.app.entity(account)?.receiveQueueInfo(queue_info())?;
-                if let Some(vehicle_id) = self.enqueued.remove(&client) {
-                    self.start_battle(client, vehicle_id)?;
-                }
+                let players = self.enqueued.len();
+                self.app.entity(account)?.receiveQueueInfo(queue_info(players))?;
             }
             // `[queue type, vehicle inventory id, ...]`.
             AccountBase::DoCmdIntArr { cmd: CMD_ENQUEUE_IN_BATTLE_QUEUE, args: queue_args, .. } => {
@@ -581,7 +565,15 @@ impl BaseThread {
                     return Err(invalid_data("Missing the queue type or the vehicle"));
                 };
                 self.enqueued.insert(client, vehicle_id.into());
+                self.queued_since.get_or_insert_with(Instant::now);
                 self.app.entity(account)?.onEnqueued(queue_type as u8)?;
+                info!(%client, vehicle_id, queued = self.enqueued.len(), "Enqueued a client");
+            }
+            // Told it left whether it was in the queue or not, so that it shows it left.
+            AccountBase::DoCmdInt { cmd: CMD_DEQUEUE_FROM_BATTLE_QUEUE, arg: queue_type, .. } => {
+                self.dequeue(client);
+                self.app.entity(account)?.onDequeued(queue_type as u8)?;
+                info!(%client, queued = self.enqueued.len(), "Dequeued a client");
             }
             // Only logged by the real server, but answered when asked.
             AccountBase::DoCmdIntArrStrArr { request_id, cmd: CMD_LOG_CLIENT_XMPP_EVENTS, .. } => {
@@ -642,15 +634,8 @@ impl BaseThread {
             // Every tick due, late ones included, so that no tick number is skipped.
             while Instant::now() >= next_tick {
                 next_tick += TICK;
+                self.launch_battle();
                 self.battle_tick();
-                let due: Vec<_> = self.battle_clients.iter()
-                    .filter_map(|(&client, battle)| battle.next_period.filter(|&(at, _)| at <= Instant::now()).map(|(_, period)| (client, period)))
-                    .collect();
-                for (client, period) in due {
-                    if let Err(e) = self.arena_period(client, period) {
-                        warn!(%client, "Failed to change the arena period: {e}");
-                    }
-                }
             }
 
             // Wait for packets until the next tick is due, no longer.
@@ -680,7 +665,7 @@ impl BaseThread {
                     }
 
                     // A client coming back for its battle, see `start_battle`.
-                    if let Some((ip, blowfish, player, config)) = self.pending_switches.remove(&login.login_key) {
+                    if let Some((ip, blowfish, player, config, battle)) = self.pending_switches.remove(&login.login_key) {
                         if ip != login.addr.ip() {
                             warn!(addr = %login.addr, attempt = login.attempt_num, "Refused a login: invalid address after the switch");
                             continue;
@@ -689,7 +674,11 @@ impl BaseThread {
                         if let Some(client) = self.app.answer_login_success(login.addr, blowfish) {
                             self.send_update_frequency(client);
                             self.players.insert(client, player);
-                            self.battle_clients.insert(client, BattleClient { config, avatar: None, next_period: None, battle: None });
+                            self.battle_clients.insert(client, BattleClient {
+                                battle,
+                                config,
+                                avatar: None,
+                            });
                         }
                         continue;
                     }
@@ -731,8 +720,8 @@ impl BaseThread {
                     info!(client = %event.client, entity = %event.entity, "Received a base method call: {name} {args:?}");
                     match self.app.decode::<AvatarBase>(event.entity, &event.call) {
                         Some((_, AvatarBase::SetClientReady {})) => {
-                            if let Err(e) = self.arena_period(event.client, ARENA_PERIOD_PREBATTLE) {
-                                warn!(client = %event.client, "Failed to start the countdown: {e}");
+                            if let Err(e) = self.client_ready(event.client) {
+                                warn!(client = %event.client, "Failed to tell the arena's period: {e}");
                             }
                         }
                         Some((_, AvatarBase::LeaveArena {})) => {
@@ -910,12 +899,12 @@ fn show_gui_ctx(account_id: u64) -> Pickle {
     ]))
 }
 
-/// The random battle queue as the player sees it: alone, the battle starting at once,
-/// so no players counted by vehicle class (light, medium, heavy, SPG, AT-SPG).
-fn queue_info() -> Pickle {
+/// The random battle queue as a player sees it, of this many players: none counted by
+/// vehicle class (light, medium, heavy, SPG, AT-SPG).
+fn queue_info(players: usize) -> Pickle {
     Pickle(pickle_dict([
         ("classes", PickleValue::List(vec![PickleValue::I64(0); 5])),
-        ("players", PickleValue::I64(1)),
+        ("players", PickleValue::I64(players as i64)),
     ]))
 }
 
