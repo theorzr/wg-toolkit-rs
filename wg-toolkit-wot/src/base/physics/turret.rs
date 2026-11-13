@@ -105,6 +105,28 @@ impl Turret {
 
     }
 
+    /// The dispersion's part of a step, as the client's `getOwnVehicleShotDispersionAngle`
+    /// computes it: the ideal factor grows with the hull's speed, its turning and the
+    /// turret's turning, and the actual one jumps up to it but only shrinks back over the
+    /// aiming time. No crew, equipment or shot bonuses.
+    ///
+    /// ```text
+    ///   ideal  = √( 1 + (speed·kₘ)² + (yaw_rate·kᵣ)² + (turret_rate·kₜ)² )
+    ///   factor = ideal                                    if ideal ≥ factor    (jumps up)
+    ///          = ideal + (factor − ideal)·e^(−dt / aiming_time)    otherwise   (settles)
+    /// ```
+    fn step_dispersion(&mut self, dt: f32, hull: &Hull) {
+        let movement = hull.speed * self.aiming.dispersion_movement;
+        let rotation = hull.yaw_rate * self.aiming.dispersion_rotation;
+        let turret = self.yaw_rate * self.aiming.dispersion_turret_rotation;
+        let ideal = (1.0 + movement * movement + rotation * rotation + turret * turret).sqrt();
+        self.dispersion_factor = if ideal >= self.dispersion_factor {
+            ideal
+        } else {
+            ideal + (self.dispersion_factor - ideal) * (-dt / self.aiming.aiming_time).exp()
+        };
+    }
+
     /// The yaw and pitch it aims at, on the hull: those held, or those that drop the
     /// shell onto the point it tracks, in the hull's frame, which the turret and gun
     /// turn in.
@@ -144,28 +166,6 @@ impl Turret {
         };
         let yaw = to.x.atan2(to.z);
         Vec3::new(yaw.sin() * elevation.cos(), elevation.sin(), yaw.cos() * elevation.cos())
-    }
-
-    /// The dispersion's part of a step, as the client's `getOwnVehicleShotDispersionAngle`
-    /// computes it: the ideal factor grows with the hull's speed, its turning and the
-    /// turret's turning, and the actual one jumps up to it but only shrinks back over the
-    /// aiming time. No crew, equipment or shot bonuses.
-    ///
-    /// ```text
-    ///   ideal  = √( 1 + (speed·kₘ)² + (yaw_rate·kᵣ)² + (turret_rate·kₜ)² )
-    ///   factor = ideal                                    if ideal ≥ factor    (jumps up)
-    ///          = ideal + (factor − ideal)·e^(−dt / aiming_time)    otherwise   (settles)
-    /// ```
-    fn step_dispersion(&mut self, dt: f32, hull: &Hull) {
-        let movement = hull.speed * self.aiming.dispersion_movement;
-        let rotation = hull.yaw_rate * self.aiming.dispersion_rotation;
-        let turret = self.yaw_rate * self.aiming.dispersion_turret_rotation;
-        let ideal = (1.0 + movement * movement + rotation * rotation + turret * turret).sqrt();
-        self.dispersion_factor = if ideal >= self.dispersion_factor {
-            ideal
-        } else {
-            ideal + (self.dispersion_factor - ideal) * (-dt / self.aiming.aiming_time).exp()
-        };
     }
 
     /// Where the gun fires from and the shell's initial velocity, as the client's

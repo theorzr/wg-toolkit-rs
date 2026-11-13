@@ -61,6 +61,13 @@ impl ShellHit {
         }
     }
 
+    /// The sticker it leaves, if it pierced and its shell leaves one, as
+    /// `encodeStickerIdData` encodes it (not parametrized: no prefab effects).
+    pub fn sticker(&self, shot: &Shot, bounds: [Vec3; 2]) -> Option<HitPoint> {
+        let sticker = shot.def.pierced_sticker.filter(|_| self.pierced())?;
+        Some(self.point(shot, bounds, sticker & 0x7F))
+    }
+
     /// Whether it pierced the vehicle's armour, leaving a sticker.
     pub fn pierced(&self) -> bool {
         self.effect == HIT_EFFECT_ARMOR_PIERCED
@@ -77,13 +84,6 @@ impl ShellHit {
             segment: self.hit.encode_segment(bounds, context),
             params,
         }
-    }
-
-    /// The sticker it leaves, if it pierced and its shell leaves one, as
-    /// `encodeStickerIdData` encodes it (not parametrized: no prefab effects).
-    pub fn sticker(&self, shot: &Shot, bounds: [Vec3; 2]) -> Option<HitPoint> {
-        let sticker = shot.def.pierced_sticker.filter(|_| self.pierced())?;
-        Some(self.point(shot, bounds, sticker & 0x7F))
     }
 
 }

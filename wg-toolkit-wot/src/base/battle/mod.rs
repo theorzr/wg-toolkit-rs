@@ -297,17 +297,17 @@ impl Battle {
         self.participants.iter().map(|participant| participant.avatar).collect()
     }
 
+    /// The simulated vehicle a client drives.
+    fn own_vehicle_mut(&mut self, client: ClientKey) -> Option<&mut Vehicle> {
+        let id = self.vehicles[self.own(client)?].id;
+        Some(self.world.vehicle_mut(id))
+    }
+
     /// The index of the vehicle a client drives.
     fn own(&self, client: ClientKey) -> Option<usize> {
         self.participants.iter()
             .find(|participant| participant.client == client)
             .map(|participant| participant.vehicle)
-    }
-
-    /// The simulated vehicle a client drives.
-    fn own_vehicle_mut(&mut self, client: ClientKey) -> Option<&mut Vehicle> {
-        let id = self.vehicles[self.own(client)?].id;
-        Some(self.world.vehicle_mut(id))
     }
 
     /// The vehicles the shells of `shooter` can hit: every one alive but its own.
@@ -388,25 +388,6 @@ impl Battle {
 
     }
 
-    /// A cell method of its vehicle a client called.
-    pub fn vehicle_call(&mut self, client: ClientKey, call: VehicleCell) {
-
-        let Some(driven) = self.own_vehicle_mut(client) else {
-            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
-            return;
-        };
-
-        match call {
-            VehicleCell::TrackRelativePointWithGun { point } => {
-                let Vehicle { hull, turret } = driven;
-                debug!(%client, "Tracked a point with the gun: {point:?}, from {:?}", hull.position);
-                turret.track(hull.position + point);
-            }
-            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
-        }
-
-    }
-
     /// Fire a client's gun, if loaded: the shell's tracer and the gun's effects, of its
     /// whole burst, then one shell fewer, the shell it loads next and the reload, once
     /// the burst's other shells are fired too, see [`Self::step`]. Where the shell lands
@@ -447,6 +428,25 @@ impl Battle {
             return Ok(());
         };
         self.vehicles[own].change_setting(app, client, now, code, value)
+    }
+
+    /// A cell method of its vehicle a client called.
+    pub fn vehicle_call(&mut self, client: ClientKey, call: VehicleCell) {
+
+        let Some(driven) = self.own_vehicle_mut(client) else {
+            warn!(%client, "Ignored a cell method call without a vehicle: {call:?}");
+            return;
+        };
+
+        match call {
+            VehicleCell::TrackRelativePointWithGun { point } => {
+                let Vehicle { hull, turret } = driven;
+                debug!(%client, "Tracked a point with the gun: {point:?}, from {:?}", hull.position);
+                turret.track(hull.position + point);
+            }
+            VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
+        }
+
     }
 
     // -- Its tick --
@@ -672,6 +672,40 @@ impl Battle {
 
     }
 
+    /// A vehicle of it alive takes a shell's damage, see [`BattleVehicle::take_damage`],
+    /// every client listing it destroyed once killed, and the client that fired it, if
+    /// any, learns the hit's result.
+    fn hit(&mut self, app: &mut base::App, shooter: EntityId, entity_id: u32, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
+
+        let id = self.id;
+        let now = self.game_time();
+        let vehicles_infos: Vec<_> = self.participants.iter().map(|participant| participant.vehicles_info).collect();
+        let shooter_avatar = self.vehicles.iter()
+            .find(|vehicle| vehicle.entity.id() == shooter)
+            .and_then(|vehicle| vehicle.client_driver())
+            .map(|driver| driver.avatar());
+        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
+            return Ok(());
+        };
+
+        let killed = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
+        if killed {
+            vehicle.mark_killed(app, &vehicles_infos, shooter)?;
+        }
+
+        let Some(shooter_avatar) = shooter_avatar else { return Ok(()) };
+        let mut flags = shell_hit.flags;
+        if killed {
+            flags |= HIT_FLAG_VEHICLE_KILLED;
+        }
+        app.entity(shooter_avatar)?.showShotResults(vec![ShotResult {
+            gunInstallationIndex: 0,
+            hitFlags: flags,
+            vehicleID: vehicle.entity.id(),
+        }])
+
+    }
+
     /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
     /// losing penetration as [`impact::ricochet_pen_factor`] says, see
     /// [`Shot::ricochet`]: the players see it go on, as the server shows it, with a tracer
@@ -722,40 +756,6 @@ impl Battle {
             self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
         }
         Ok(())
-    }
-
-    /// A vehicle of it alive takes a shell's damage, see [`BattleVehicle::take_damage`],
-    /// every client listing it destroyed once killed, and the client that fired it, if
-    /// any, learns the hit's result.
-    fn hit(&mut self, app: &mut base::App, shooter: EntityId, entity_id: u32, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
-
-        let id = self.id;
-        let now = self.game_time();
-        let vehicles_infos: Vec<_> = self.participants.iter().map(|participant| participant.vehicles_info).collect();
-        let shooter_avatar = self.vehicles.iter()
-            .find(|vehicle| vehicle.entity.id() == shooter)
-            .and_then(|vehicle| vehicle.client_driver())
-            .map(|driver| driver.avatar());
-        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
-            return Ok(());
-        };
-
-        let killed = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
-        if killed {
-            vehicle.mark_killed(app, &vehicles_infos, shooter)?;
-        }
-
-        let Some(shooter_avatar) = shooter_avatar else { return Ok(()) };
-        let mut flags = shell_hit.flags;
-        if killed {
-            flags |= HIT_FLAG_VEHICLE_KILLED;
-        }
-        app.entity(shooter_avatar)?.showShotResults(vec![ShotResult {
-            gunInstallationIndex: 0,
-            hitFlags: flags,
-            vehicleID: vehicle.entity.id(),
-        }])
-
     }
 
 }

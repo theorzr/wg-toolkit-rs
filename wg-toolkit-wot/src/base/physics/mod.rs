@@ -715,6 +715,20 @@ impl Hull {
         self.still > REST_TICKS
     }
 
+    /// Whether it is still on the ground, its controls released: no speed or turning
+    /// to speak of, on the ground plane or in 3D, see [`REST_SPEED`] and [`REST_SPIN`].
+    fn is_still(&self) -> bool {
+        self.touching
+            && self.flags == 0
+            && self.speed.abs() < REST_SPEED
+            && self.slide.abs() < REST_SPEED
+            && self.yaw_rate.abs() < REST_SPIN
+            && self.steer.abs() < REST_SPIN
+            && self.tracks.iter().all(|track| track.abs() < REST_SPEED)
+            && self.linear_velocity.length() < REST_SPEED
+            && self.angular_velocity.length() < REST_SPIN
+    }
+
     /// Wake it from rest: another vehicle may push it.
     pub fn wake(&mut self) {
         self.still = 0;
@@ -735,20 +749,6 @@ impl Hull {
         if let Some(bounds) = bounds {
             self.keep_within(bounds);
         }
-    }
-
-    /// Whether it is still on the ground, its controls released: no speed or turning
-    /// to speak of, on the ground plane or in 3D, see [`REST_SPEED`] and [`REST_SPIN`].
-    fn is_still(&self) -> bool {
-        self.touching
-            && self.flags == 0
-            && self.speed.abs() < REST_SPEED
-            && self.slide.abs() < REST_SPEED
-            && self.yaw_rate.abs() < REST_SPIN
-            && self.steer.abs() < REST_SPIN
-            && self.tracks.iter().all(|track| track.abs() < REST_SPEED)
-            && self.linear_velocity.length() < REST_SPEED
-            && self.angular_velocity.length() < REST_SPIN
     }
 
     // -- Its orientation --
@@ -780,6 +780,13 @@ impl Hull {
 
     // -- Its motion on the ground plane --
 
+    /// Set its speeds along and across its heading from a velocity on the ground plane.
+    fn set_velocity(&mut self, velocity: Vec3) {
+        let (heading, right) = self.axes();
+        self.speed = velocity.dot(heading);
+        self.slide = velocity.dot(right);
+    }
+
     /// Its heading and its right on the ground plane.
     fn axes(&self) -> (Vec3, Vec3) {
         let yaw = self.yaw();
@@ -788,23 +795,16 @@ impl Hull {
         (heading, right)
     }
 
-    /// Its velocity on the ground plane, in m/s.
-    pub fn velocity(&self) -> Vec3 {
-        let (heading, right) = self.axes();
-        heading * self.speed + right * self.slide
-    }
-
-    /// Set its speeds along and across its heading from a velocity on the ground plane.
-    fn set_velocity(&mut self, velocity: Vec3) {
-        let (heading, right) = self.axes();
-        self.speed = velocity.dot(heading);
-        self.slide = velocity.dot(right);
-    }
-
     /// How fast the point at `arm` from its middle moves on the ground plane, in m/s: its
     /// velocity and its yaw rate's.
     fn point_velocity(&self, arm: Vec2) -> Vec2 {
         self.velocity().xz() + Vec2::new(arm.y, -arm.x) * self.yaw_rate
+    }
+
+    /// Its velocity on the ground plane, in m/s.
+    pub fn velocity(&self) -> Vec3 {
+        let (heading, right) = self.axes();
+        heading * self.speed + right * self.slide
     }
 
     /// Its collision box on the ground plane, upright: where it touches destructibles.

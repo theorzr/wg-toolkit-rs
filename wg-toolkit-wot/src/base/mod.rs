@@ -80,6 +80,101 @@ pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
 }
 
 
+#[derive(Debug)]
+pub struct BaseThread {
+    app: base::App,
+    /// Where it is bound, and what address it tells its clients, see the `advertise`
+    /// module.
+    addr: SocketAddrV4,
+    advertise: Vec<AdvertiseRule>,
+    link: LinkStream,
+    /// The load last told to the login app, none when it should be told again.
+    load: Option<u32>,
+    /// Clients the login app handed over, by the login key they will log in with.
+    login_clients: HashMap<u32, LoginClient>,
+    /// Each player name's account id, until accounts are stored.
+    account_ids: AccountIds,
+    /// Every player's garage, until accounts are stored.
+    garage: Garage,
+    shop: Shop,
+    /// The client version required, the client's own.
+    required_version: String,
+    /// The game, whose vehicle definitions complete what the account says.
+    game_dir: PathBuf,
+    /// The battles' map, and its space.
+    map: ArenaTypeDef,
+    space: Arc<Space>,
+    /// Who the battles have besides the player.
+    battle_options: BattleOptions,
+    /// Each logged in client's player.
+    players: HashMap<ClientKey, Player>,
+    /// Each client's account, outside of battles.
+    accounts: HashMap<ClientKey, EntityKey<Account>>,
+    /// Clients waiting in the battle queue, with the inventory id of their vehicle, and
+    /// since when the first of them waits: they all go into a battle [`Self::queue_wait`]
+    /// later, see [`Self::launch_battle`].
+    enqueued: HashMap<ClientKey, i64>,
+    queued_since: Option<Instant>,
+    queue_wait: Duration,
+    /// Clients told to switch base app for their battle, by the session key they will
+    /// log in again with, with the IP they will come from, their blowfish key, their
+    /// player and vehicle, and their battle's id.
+    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleLoadout, u32)>,
+    /// Clients told to switch base app back to their account, leaving their battle, by
+    /// the session key they will log in with, likewise.
+    pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>, Player)>,
+    /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
+    battle_clients: HashMap<ClientKey, BattleClient>,
+    /// The battles waiting for their clients, those made, by id, and the next battle's.
+    gatherings: HashMap<u32, Gathering>,
+    battles: HashMap<u32, Battle>,
+    next_battle: u32,
+}
+
+/// A client connected for a battle.
+#[derive(Debug)]
+struct BattleClient {
+    /// Its battle's id.
+    battle: u32,
+    /// Its vehicle's configuration.
+    loadout: VehicleLoadout,
+    /// Its avatar, once created.
+    avatar: Option<EntityKey<Avatar>>,
+}
+
+/// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
+const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
+const ARENA_GUI_TYPE_RANDOM: u8 = 1;
+/// The tier of the battle.
+const BATTLE_LEVEL: i64 = 10;
+/// How many players a player may report each day.
+const DENUNCIATIONS: i16 = 10;
+/// The avatar's `customizationDisplayType`, as captured.
+const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
+/// The account's sessions count, enough not to be a new player, until accounts are
+/// stored.
+const ACCOUNT_SESSIONS: u64 = 1000;
+/// The version of the vehicle dossiers, any: the client drops its cached ones when
+/// it differs from theirs.
+const DOSSIERS_VERSION: i32 = 1;
+/// Why a client is kicked once its player logs in again from another: what it shows,
+/// and `ACCOUNT_KICK_REASONS.UNKNOWN`, the reason shown as is.
+const KICKED_LOGGED_IN_AGAIN: &str = "Logged in again from another client";
+const KICK_REASON_UNKNOWN: u8 = 0;
+/// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
+const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
+
+/// How often battles tick, 10 Hz as captured: the client times what it hears by the
+/// tick it comes with.
+const TICK: Duration = Duration::from_millis(100);
+
+#[derive(Debug)]
+struct LoginClient {
+    addr: SocketAddr,
+    blowfish: Arc<Blowfish>,
+    player: Player,
+}
+
 impl BaseThread {
 
     /// The base app, at this address, taking the clients of the login app it is
@@ -171,454 +266,6 @@ impl BaseThread {
             next_battle: 1,
         })
 
-    }
-
-}
-
-#[derive(Debug)]
-pub struct BaseThread {
-    app: base::App,
-    /// Where it is bound, and what address it tells its clients, see the `advertise`
-    /// module.
-    addr: SocketAddrV4,
-    advertise: Vec<AdvertiseRule>,
-    link: LinkStream,
-    /// The load last told to the login app, none when it should be told again.
-    load: Option<u32>,
-    /// Clients the login app handed over, by the login key they will log in with.
-    login_clients: HashMap<u32, LoginClient>,
-    /// Each player name's account id, until accounts are stored.
-    account_ids: AccountIds,
-    /// Every player's garage, until accounts are stored.
-    garage: Garage,
-    shop: Shop,
-    /// The client version required, the client's own.
-    required_version: String,
-    /// The game, whose vehicle definitions complete what the account says.
-    game_dir: PathBuf,
-    /// The battles' map, and its space.
-    map: ArenaTypeDef,
-    space: Arc<Space>,
-    /// Who the battles have besides the player.
-    battle_options: BattleOptions,
-    /// Each logged in client's player.
-    players: HashMap<ClientKey, Player>,
-    /// Each client's account, outside of battles.
-    accounts: HashMap<ClientKey, EntityKey<Account>>,
-    /// Clients waiting in the battle queue, with the inventory id of their vehicle, and
-    /// since when the first of them waits: they all go into a battle [`Self::queue_wait`]
-    /// later, see [`Self::launch_battle`].
-    enqueued: HashMap<ClientKey, i64>,
-    queued_since: Option<Instant>,
-    queue_wait: Duration,
-    /// Clients told to switch base app for their battle, by the session key they will
-    /// log in again with, with the IP they will come from, their blowfish key, their
-    /// player and vehicle, and their battle's id.
-    pending_switches: HashMap<u32, (IpAddr, Arc<Blowfish>, Player, VehicleLoadout, u32)>,
-    /// Clients told to switch base app back to their account, leaving their battle, by
-    /// the session key they will log in with, likewise.
-    pending_returns: HashMap<u32, (IpAddr, Arc<Blowfish>, Player)>,
-    /// Clients connected for a battle, which get an `Avatar` rather than an `Account`.
-    battle_clients: HashMap<ClientKey, BattleClient>,
-    /// The battles waiting for their clients, those made, by id, and the next battle's.
-    gatherings: HashMap<u32, Gathering>,
-    battles: HashMap<u32, Battle>,
-    next_battle: u32,
-}
-
-/// A client connected for a battle.
-#[derive(Debug)]
-struct BattleClient {
-    /// Its battle's id.
-    battle: u32,
-    /// Its vehicle's configuration.
-    loadout: VehicleLoadout,
-    /// Its avatar, once created.
-    avatar: Option<EntityKey<Avatar>>,
-}
-/// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
-const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
-const ARENA_GUI_TYPE_RANDOM: u8 = 1;
-/// The tier of the battle.
-const BATTLE_LEVEL: i64 = 10;
-/// How many players a player may report each day.
-const DENUNCIATIONS: i16 = 10;
-/// The avatar's `customizationDisplayType`, as captured.
-const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
-/// The account's sessions count, enough not to be a new player, until accounts are
-/// stored.
-const ACCOUNT_SESSIONS: u64 = 1000;
-/// The version of the vehicle dossiers, any: the client drops its cached ones when
-/// it differs from theirs.
-const DOSSIERS_VERSION: i32 = 1;
-/// Why a client is kicked once its player logs in again from another: what it shows,
-/// and `ACCOUNT_KICK_REASONS.UNKNOWN`, the reason shown as is.
-const KICKED_LOGGED_IN_AGAIN: &str = "Logged in again from another client";
-const KICK_REASON_UNKNOWN: u8 = 0;
-/// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
-const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
-
-/// How often battles tick, 10 Hz as captured: the client times what it hears by the
-/// tick it comes with.
-const TICK: Duration = Duration::from_millis(100);
-
-#[derive(Debug)]
-struct LoginClient {
-    addr: SocketAddr,
-    blowfish: Arc<Blowfish>,
-    player: Player,
-}
-
-/// The client the login app handed over, if valid, logging in as the given player.
-fn login_client(client: &ClientHost, player: Player) -> Option<LoginClient> {
-    match Blowfish::new_from_slice(&client.blowfish_key) {
-        Ok(blowfish) => Some(LoginClient {
-            addr: client.addr,
-            blowfish: Arc::new(blowfish),
-            player,
-        }),
-        Err(_) => {
-            warn!(addr = %client.addr, "Refused a client with an invalid blowfish key: {:?}", client.blowfish_key);
-            None
-        }
-    }
-}
-
-impl BaseThread {
-
-    /// The client the login app handed over with this login key.
-    fn login_client(&mut self, login_key: u32) -> Option<LoginClient> {
-        self.login_clients.remove(&login_key)
-    }
-
-    /// Handle the events of the link with the login app, and tell it the load if it
-    /// changed, returning false once stopped.
-    fn link_events(&mut self) -> bool {
-
-        while let Some(event) = self.link.try_event() {
-            match event {
-                LinkEvent::Linked(()) | LinkEvent::Unlinked(()) => self.load = None,
-                LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
-                    let player = self.account_ids.player(&client.name);
-                    let hosted = login_client(&client, player).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
-                    let base_app = advertise::advertised(&self.advertise, self.addr, client.addr);
-                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(base_app) };
-                    if let Err(e) = self.link.send(&message) {
-                        warn!(addr = %client.addr, "Failed to answer the login app: {e}");
-                    }
-                }
-                LinkEvent::Message((), Message::BaseStop) => return false,
-                LinkEvent::Message((), message) => warn!("Received an unexpected message from the login app: {message:?}"),
-            }
-        }
-
-        let load = self.players.len() as u32;
-        if self.load != Some(load) && self.link.send(&Message::BaseStatus { load }).is_ok() {
-            self.load = Some(load);
-        }
-
-        true
-
-    }
-
-    /// Kick the clients playing as this player, logging in again from another: told why,
-    /// then forgotten.
-    fn kick(&mut self, name: &str) {
-        let kicked = self.players.iter()
-            .filter(|(_, player)| player.name == name)
-            .map(|(&client, _)| client)
-            .collect::<Vec<_>>();
-        for client in kicked {
-            if let Err(e) = self.tell_kicked(client) {
-                warn!(%client, "Failed to tell a client it is kicked: {e}");
-            }
-            if let Err(e) = self.app.disconnect(client) {
-                warn!(%client, "Failed to disconnect a client: {e}");
-            }
-            self.forget(client);
-            info!(%client, name, "Kicked a client: its player logged in again");
-        }
-    }
-
-    /// Tell a client it is kicked, through its account or its avatar.
-    fn tell_kicked(&mut self, client: ClientKey) -> io::Result<()> {
-        let reason = KICKED_LOGGED_IN_AGAIN.to_string();
-        if let Some(&account) = self.accounts.get(&client) {
-            self.app.entity(account)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
-        } else if let Some(avatar) = self.battle_clients.get(&client).and_then(|battle| battle.avatar) {
-            self.app.entity(avatar)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
-        }
-        Ok(())
-    }
-
-    /// Forget a client gone: its player, its account or its battle, its place in the
-    /// queue.
-    fn forget(&mut self, client: ClientKey) {
-        self.players.remove(&client);
-        self.accounts.remove(&client);
-        self.dequeue(client);
-        self.quit_battle(client);
-        self.battle_clients.remove(&client);
-    }
-
-    /// Bring a client that enabled entities to its account, as the captured server did:
-    /// the `Account` entity, then `showGUI`.
-    fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
-
-        let Some(player) = self.players.get(&client) else { return Ok(()) };
-
-        let id = player.id;
-        let data = schema::AccountData {
-            name: player.name.clone(),
-            incarnationID: ACCOUNT_SESSIONS,
-            requiredVersion_2410: self.required_version.clone(),
-            initialServerSettings: server_settings(),
-        };
-        let account = self.app.create_base_player::<Account>(client, data)?;
-        self.accounts.insert(client, account);
-        info!(%client, %account, "Created the account");
-
-        self.app.entity(account)?.showGUI(show_gui_ctx(id))?;
-
-        Ok(())
-
-    }
-
-    /// Take a client out of the battle queue, which waits no more once empty.
-    fn dequeue(&mut self, client: ClientKey) {
-        self.enqueued.remove(&client);
-        if self.enqueued.is_empty() {
-            self.queued_since = None;
-        }
-    }
-
-    /// Launch a battle for the clients in the queue once due: [`Self::queue_wait`] after
-    /// the first enqueued, everyone queued then goes into one battle, switched into it,
-    /// see [`Self::start_battle`], which gathers them as they enter it, see
-    /// [`Self::gather`].
-    fn launch_battle(&mut self) {
-
-        if !self.queued_since.is_some_and(|since| since.elapsed() >= self.queue_wait) {
-            return;
-        }
-        self.queued_since = None;
-        let id = self.next_battle;
-        self.next_battle += 1;
-
-        let queued: Vec<_> = self.enqueued.drain().collect();
-        let mut switched = 0;
-        for (client, vehicle_id) in queued {
-            match self.start_battle(client, vehicle_id, id) {
-                Ok(true) => switched += 1,
-                Ok(false) => {}
-                Err(e) => warn!(%client, battle = id, "Failed to start the battle: {e}"),
-            }
-        }
-        if switched > 0 {
-            self.gatherings.insert(id, Gathering::new(switched));
-            info!(battle = id, clients = switched, "Launched a battle");
-        }
-
-    }
-
-    /// The client's arena is ready, that of the battle of this id: tell its account, then
-    /// switch it to the base app holding its avatar, this one, as the captured server
-    /// did. Whether it was switched.
-    fn start_battle(&mut self, client: ClientKey, vehicle_id: i64, battle: u32) -> io::Result<bool> {
-
-        let (Some(&account), Some(player), Some((session_key, blowfish))) =
-            (self.accounts.get(&client), self.players.get(&client), self.app.client_keys(client)) else {
-            return Ok(false);
-        };
-        let player = player.clone();
-        let loadout = match self.vehicle_loadout(vehicle_id) {
-            Ok(loadout) => loadout,
-            Err(e) => {
-                warn!(%client, vehicle_id, "Failed to read the vehicle: {e}");
-                return Ok(false);
-            }
-        };
-
-        self.app.entity(account)?.onArenaCreated()?;
-
-        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
-        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, loadout, battle));
-        self.app.switch_base_app(client, base_app, true)?;
-        self.accounts.remove(&client);
-        self.players.remove(&client);
-        info!(%client, %base_app, battle, "Created the arena, switching base app");
-
-        Ok(true)
-
-    }
-
-    /// The configuration of the vehicle of the given inventory id: its descriptor, crew
-    /// and setups from the account, the rest from the game's definitions.
-    fn vehicle_loadout(&self, vehicle_id: i64) -> io::Result<VehicleLoadout> {
-        let vehicle = self.garage.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
-        let fs = ResFilesystem::new(self.game_dir.join("res"))?;
-        let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
-        info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
-        Ok(VehicleLoadout {
-            descr: vehicle.descr.encode(),
-            max_health: def.max_health,
-            crew: vehicle.crew.iter().map(TankmanDescr::encode).collect(),
-            setups: vehicle.setups(),
-            setup_indexes: wgtk::pickle!({}),
-            mobility: def.mobility,
-            ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
-            shots: def.shots,
-            aiming: def.aiming,
-            magazine: def.magazine,
-            collision: def.collision,
-        })
-    }
-
-    /// Leave the client's battle, as the captured server does: switch it to the base
-    /// app again, where it logs in back to its account.
-    fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
-        let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
-            return Ok(());
-        };
-        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
-        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
-        self.quit_battle(client);
-        self.battle_clients.remove(&client);
-        self.app.switch_base_app(client, base_app, true)?;
-        info!(%client, %base_app, "Left the battle, switching base app");
-        Ok(())
-    }
-
-    /// Bring a client that reconnected for its battle to its avatar.
-    fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
-
-        let Some(player) = self.players.get(&client).cloned() else { return Ok(()) };
-
-        let data = avatar_data(player.name.clone(), self.map.type_id);
-        let avatar = self.app.create_base_player::<Avatar>(client, data)?;
-        if let Some(battle) = self.battle_clients.get_mut(&client) {
-            battle.avatar = Some(avatar);
-        }
-        info!(%client, %avatar, "Created the avatar");
-
-        // Then its cell side, once its battle is made, see [`Self::gather`].
-        self.gather(client, avatar, player)
-
-    }
-
-    /// Tell a client just logged in the update frequency, right after the login reply, as
-    /// the captured server did.
-    fn send_update_frequency(&mut self, client: ClientKey) {
-        let frequency = (1.0 / TICK.as_secs_f32()) as u8;
-        if let Err(e) = self.app.update_frequency(client, frequency, UPDATE_FREQUENCY_UNKNOWN, 0) {
-            warn!(%client, "Failed to send the update frequency: {e}");
-        }
-    }
-
-    /// A request of the client's account, those we don't know being left unanswered. The
-    /// arena is ready as soon as the client first asks how the queue is going.
-    fn account_request(&mut self, client: ClientKey, account: EntityKey<Account>, request: AccountBase, name: &str) -> io::Result<()> {
-        match request {
-            AccountBase::DoCmdInt3 { cmd: CMD_REQ_SERVER_STATS, .. } => {
-                let online = self.players.len() as u32;
-                self.app.entity(account)?.receiveServerStats(ServerStats { clusterCCU: online, regionCCU: online })?;
-            }
-            // `[revision, len, crc32]` of the client's cached shop.
-            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_SHOP, arg1: len, arg2: crc32, .. } => {
-                if self.shop.is_cached(len, crc32) {
-                    self.app.entity(account)?.onCmdResponse(request_id, RES_CACHE, String::new())?;
-                } else {
-                    let data = self.shop.data.clone();
-                    self.stream(client, account, request_id, &data)?;
-                }
-            }
-            // `[revision, crc32 of the cached data, 0]`: a full sync from revision 0, else
-            // nothing new, the updates being sent as they happen.
-            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DATA, arg0: revision, .. } => {
-                let current = self.players.get(&client)
-                    .ok_or_else(|| invalid_data("Syncing the account of no player"))?
-                    .revision;
-                if revision == 0 {
-                    let data = account::compress(&self.garage.data(current))?;
-                    self.stream(client, account, request_id, &data)?;
-                } else {
-                    let ext = pickle_dict([("prevRev", PickleValue::from(revision)), ("rev", PickleValue::from(current))]);
-                    self.app.entity(account)?.onCmdResponseExt(request_id, RES_SUCCESS, String::new(), Pickle(ext))?;
-                }
-            }
-            // `[cache version, latest change time in cache, 0]`, answered with the
-            // `(cache version, [(vehicle type, change time, dossier)])` changed since,
-            // and there are no vehicle dossiers yet.
-            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DOSSIERS, .. } => {
-                let data = account::compress(&wgtk::pickle!((DOSSIERS_VERSION, [])))?;
-                self.stream(client, account, request_id, &data)?;
-            }
-            // `[key, value, ...]` of the settings to set, kept by the client only for now.
-            AccountBase::DoCmdIntArr { request_id, cmd: CMD_ADD_INT_USER_SETTINGS, args: settings, .. } => {
-                let settings = settings.chunks_exact(2).map(|pair| (PickleValue::from(pair[0]), PickleValue::from(pair[1])));
-                self.update(client, account, [("intUserSettings", PickleValue::Dict(settings.collect()))])?;
-                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
-            }
-            AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
-                let players = self.enqueued.len();
-                self.app.entity(account)?.receiveQueueInfo(queue_info(players))?;
-            }
-            // `[queue type, vehicle inventory id, ...]`.
-            AccountBase::DoCmdIntArr { cmd: CMD_ENQUEUE_IN_BATTLE_QUEUE, args: queue_args, .. } => {
-                let (Some(&queue_type), Some(&vehicle_id)) = (queue_args.first(), queue_args.get(1)) else {
-                    return Err(invalid_data("Missing the queue type or the vehicle"));
-                };
-                self.enqueued.insert(client, vehicle_id.into());
-                self.queued_since.get_or_insert_with(Instant::now);
-                self.app.entity(account)?.onEnqueued(queue_type as u8)?;
-                info!(%client, vehicle_id, queued = self.enqueued.len(), "Enqueued a client");
-            }
-            // Told it left whether it was in the queue or not, so that it shows it left.
-            AccountBase::DoCmdInt { cmd: CMD_DEQUEUE_FROM_BATTLE_QUEUE, arg: queue_type, .. } => {
-                self.dequeue(client);
-                self.app.entity(account)?.onDequeued(queue_type as u8)?;
-                info!(%client, queued = self.enqueued.len(), "Dequeued a client");
-            }
-            // Only logged by the real server, but answered when asked.
-            AccountBase::DoCmdIntArrStrArr { request_id, cmd: CMD_LOG_CLIENT_XMPP_EVENTS, .. } => {
-                if request_id != REQUEST_ID_NO_RESPONSE {
-                    self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
-                }
-            }
-            AccountBase::RequestToken { request_id, token_type } => {
-                let id = self.players.get(&client)
-                    .ok_or_else(|| invalid_data("Asking a token for no player"))?
-                    .id;
-                self.app.entity(account)?.onTokenReceived(request_id, token_type, token_data(token_type, id))?;
-            }
-            // No chat yet, and the captured server answered nothing.
-            AccountBase::ChatCommandFromClient { action, .. } => {
-                debug!(%client, "Ignored a chat action: {action}");
-            }
-            // Accepted without effect, as nothing depends on them yet.
-            AccountBase::DoCmdInt2 { request_id, cmd: CMD_SET_ACTIVE_VEH_SEASON, .. }
-            | AccountBase::DoCmdStr { request_id, cmd: CMD_RESET_SESSION_STAT, .. } => {
-                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
-            }
-            _ => warn!(%client, "Left a request unanswered: {name}"),
-        }
-        Ok(())
-    }
-
-    /// Update the client's account data with the given sections, to its next revision.
-    fn update(&mut self, client: ClientKey, account: EntityKey<Account>, diff: impl IntoIterator<Item = (&'static str, PickleValue)>) -> io::Result<()> {
-        let player = self.players.get_mut(&client)
-            .ok_or_else(|| invalid_data("Updating the account of no player"))?;
-        let prev_rev = player.revision;
-        player.revision += 1;
-        let revs = [("prevRev", PickleValue::from(prev_rev)), ("rev", PickleValue::from(player.revision))];
-        self.app.entity(account)?.update(Pickle(pickle_dict(diff.into_iter().chain(revs))))
-    }
-
-    /// Answer an account command with a stream of its data, zlib-compressed.
-    fn stream(&mut self, client: ClientKey, account: EntityKey<Account>, request_id: i16, data: &[u8]) -> io::Result<()> {
-        self.app.entity(account)?.onCmdResponse(request_id, RES_STREAM, String::new())?;
-        self.app.push_resource(client, request_id as u16, account::resource_description(data), data)
     }
 
     #[instrument(name = "base", skip_all)]
@@ -761,29 +408,126 @@ impl BaseThread {
 
     }
 
-    // -- Battles --
+    /// Handle the events of the link with the login app, and tell it the load if it
+    /// changed, returning false once stopped.
+    fn link_events(&mut self) -> bool {
 
-    /// A client switched into a battle entered it, with its avatar: the battle gathers it,
-    /// and is made once due, see [`Self::make_battles`]. One coming after its battle was
-    /// made is sent back to its account.
-    fn gather(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, player: Player) -> io::Result<()> {
+        while let Some(event) = self.link.try_event() {
+            match event {
+                LinkEvent::Linked(()) | LinkEvent::Unlinked(()) => self.load = None,
+                LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
+                    let player = self.account_ids.player(&client.name);
+                    let hosted = login_client(&client, player).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
+                    let base_app = advertise::advertised(&self.advertise, self.addr, client.addr);
+                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(base_app) };
+                    if let Err(e) = self.link.send(&message) {
+                        warn!(addr = %client.addr, "Failed to answer the login app: {e}");
+                    }
+                }
+                LinkEvent::Message((), Message::BaseStop) => return false,
+                LinkEvent::Message((), message) => warn!("Received an unexpected message from the login app: {message:?}"),
+            }
+        }
 
-        let Some(battle_client) = self.battle_clients.get(&client) else { return Ok(()) };
-        let (id, loadout) = (battle_client.battle, battle_client.loadout.clone());
-        let Some(gathering) = self.gatherings.get_mut(&id) else {
-            warn!(%client, battle = id, "Sent a client back: its battle was made without it");
-            return self.leave_battle(client);
+        let load = self.players.len() as u32;
+        if self.load != Some(load) && self.link.send(&Message::BaseStatus { load }).is_ok() {
+            self.load = Some(load);
+        }
+
+        true
+
+    }
+
+    /// Launch a battle for the clients in the queue once due: [`Self::queue_wait`] after
+    /// the first enqueued, everyone queued then goes into one battle, switched into it,
+    /// see [`Self::start_battle`], which gathers them as they enter it, see
+    /// [`Self::gather`].
+    fn launch_battle(&mut self) {
+
+        if !self.queued_since.is_some_and(|since| since.elapsed() >= self.queue_wait) {
+            return;
+        }
+        self.queued_since = None;
+        let id = self.next_battle;
+        self.next_battle += 1;
+
+        let queued: Vec<_> = self.enqueued.drain().collect();
+        let mut switched = 0;
+        for (client, vehicle_id) in queued {
+            match self.start_battle(client, vehicle_id, id) {
+                Ok(true) => switched += 1,
+                Ok(false) => {}
+                Err(e) => warn!(%client, battle = id, "Failed to start the battle: {e}"),
+            }
+        }
+        if switched > 0 {
+            self.gatherings.insert(id, Gathering::new(switched));
+            info!(battle = id, clients = switched, "Launched a battle");
+        }
+
+    }
+
+    /// The client's arena is ready, that of the battle of this id: tell its account, then
+    /// switch it to the base app holding its avatar, this one, as the captured server
+    /// did. Whether it was switched.
+    fn start_battle(&mut self, client: ClientKey, vehicle_id: i64, battle: u32) -> io::Result<bool> {
+
+        let (Some(&account), Some(player), Some((session_key, blowfish))) =
+            (self.accounts.get(&client), self.players.get(&client), self.app.client_keys(client)) else {
+            return Ok(false);
         };
-        gathering.arrivals.push(Arrival {
-            client,
-            avatar,
-            player,
-            loadout,
-        });
-        info!(%client, battle = id, entered = gathering.arrivals.len(), expected = gathering.expected, "Gathered a client for its battle");
-        self.make_battles();
-        Ok(())
+        let player = player.clone();
+        let loadout = match self.vehicle_loadout(vehicle_id) {
+            Ok(loadout) => loadout,
+            Err(e) => {
+                warn!(%client, vehicle_id, "Failed to read the vehicle: {e}");
+                return Ok(false);
+            }
+        };
 
+        self.app.entity(account)?.onArenaCreated()?;
+
+        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
+        self.pending_switches.insert(session_key, (client.addr().ip(), blowfish, player, loadout, battle));
+        self.app.switch_base_app(client, base_app, true)?;
+        self.accounts.remove(&client);
+        self.players.remove(&client);
+        info!(%client, %base_app, battle, "Created the arena, switching base app");
+
+        Ok(true)
+
+    }
+
+    /// The configuration of the vehicle of the given inventory id: its descriptor, crew
+    /// and setups from the account, the rest from the game's definitions.
+    fn vehicle_loadout(&self, vehicle_id: i64) -> io::Result<VehicleLoadout> {
+        let vehicle = self.garage.vehicle(vehicle_id).ok_or_else(|| invalid_data("no such vehicle"))?;
+        let fs = ResFilesystem::new(self.game_dir.join("res"))?;
+        let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
+        info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
+        Ok(VehicleLoadout {
+            descr: vehicle.descr.encode(),
+            max_health: def.max_health,
+            crew: vehicle.crew.iter().map(TankmanDescr::encode).collect(),
+            setups: vehicle.setups(),
+            setup_indexes: wgtk::pickle!({}),
+            mobility: def.mobility,
+            ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
+            shots: def.shots,
+            aiming: def.aiming,
+            magazine: def.magazine,
+            collision: def.collision,
+        })
+    }
+
+    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], then
+    /// give the clients what changed.
+    fn battle_tick(&mut self) {
+        self.make_battles();
+        for battle in self.battles.values_mut() {
+            battle.tick(&mut self.app);
+        }
+        self.app.end_tick();
     }
 
     /// Make the battles due, see [`Gathering::due`]: each in a space of its own with the
@@ -843,11 +587,66 @@ impl BaseThread {
 
     }
 
-    /// A client of a battle is ready, see [`Battle::ready`].
-    fn client_ready(&mut self, client: ClientKey) -> io::Result<()> {
-        let Self { app, battle_clients, battles, .. } = self;
-        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
-        battle.ready(app, client)
+    /// Tell a client just logged in the update frequency, right after the login reply, as
+    /// the captured server did.
+    fn send_update_frequency(&mut self, client: ClientKey) {
+        let frequency = (1.0 / TICK.as_secs_f32()) as u8;
+        if let Err(e) = self.app.update_frequency(client, frequency, UPDATE_FREQUENCY_UNKNOWN, 0) {
+            warn!(%client, "Failed to send the update frequency: {e}");
+        }
+    }
+
+    /// The client the login app handed over with this login key.
+    fn login_client(&mut self, login_key: u32) -> Option<LoginClient> {
+        self.login_clients.remove(&login_key)
+    }
+
+    /// Kick the clients playing as this player, logging in again from another: told why,
+    /// then forgotten.
+    fn kick(&mut self, name: &str) {
+        let kicked = self.players.iter()
+            .filter(|(_, player)| player.name == name)
+            .map(|(&client, _)| client)
+            .collect::<Vec<_>>();
+        for client in kicked {
+            if let Err(e) = self.tell_kicked(client) {
+                warn!(%client, "Failed to tell a client it is kicked: {e}");
+            }
+            if let Err(e) = self.app.disconnect(client) {
+                warn!(%client, "Failed to disconnect a client: {e}");
+            }
+            self.forget(client);
+            info!(%client, name, "Kicked a client: its player logged in again");
+        }
+    }
+
+    /// Tell a client it is kicked, through its account or its avatar.
+    fn tell_kicked(&mut self, client: ClientKey) -> io::Result<()> {
+        let reason = KICKED_LOGGED_IN_AGAIN.to_string();
+        if let Some(&account) = self.accounts.get(&client) {
+            self.app.entity(account)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
+        } else if let Some(avatar) = self.battle_clients.get(&client).and_then(|battle| battle.avatar) {
+            self.app.entity(avatar)?.onKickedFromServer(reason, KICK_REASON_UNKNOWN, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Forget a client gone: its player, its account or its battle, its place in the
+    /// queue.
+    fn forget(&mut self, client: ClientKey) {
+        self.players.remove(&client);
+        self.accounts.remove(&client);
+        self.dequeue(client);
+        self.quit_battle(client);
+        self.battle_clients.remove(&client);
+    }
+
+    /// Take a client out of the battle queue, which waits no more once empty.
+    fn dequeue(&mut self, client: ClientKey) {
+        self.enqueued.remove(&client);
+        if self.enqueued.is_empty() {
+            self.queued_since = None;
+        }
     }
 
     /// Take a client out of its battle, or of the one gathering it, see [`Battle::leave`]:
@@ -869,13 +668,195 @@ impl BaseThread {
         }
     }
 
-    /// An entity of its battle was created on the client.
-    fn entity_entered(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>) {
-        let Self { app, battle_clients, battles, .. } = self;
-        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return };
-        if let Err(e) = battle.entity_entered(app, client, entity) {
-            warn!(%client, "Failed to drive the vehicle: {e}");
+    /// Bring a client that reconnected for its battle to its avatar.
+    fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
+
+        let Some(player) = self.players.get(&client).cloned() else { return Ok(()) };
+
+        let data = avatar_data(player.name.clone(), self.map.type_id);
+        let avatar = self.app.create_base_player::<Avatar>(client, data)?;
+        if let Some(battle) = self.battle_clients.get_mut(&client) {
+            battle.avatar = Some(avatar);
         }
+        info!(%client, %avatar, "Created the avatar");
+
+        // Then its cell side, once its battle is made, see [`Self::gather`].
+        self.gather(client, avatar, player)
+
+    }
+
+    /// A client switched into a battle entered it, with its avatar: the battle gathers it,
+    /// and is made once due, see [`Self::make_battles`]. One coming after its battle was
+    /// made is sent back to its account.
+    fn gather(&mut self, client: ClientKey, avatar: EntityKey<Avatar>, player: Player) -> io::Result<()> {
+
+        let Some(battle_client) = self.battle_clients.get(&client) else { return Ok(()) };
+        let (id, loadout) = (battle_client.battle, battle_client.loadout.clone());
+        let Some(gathering) = self.gatherings.get_mut(&id) else {
+            warn!(%client, battle = id, "Sent a client back: its battle was made without it");
+            return self.leave_battle(client);
+        };
+        gathering.arrivals.push(Arrival {
+            client,
+            avatar,
+            player,
+            loadout,
+        });
+        info!(%client, battle = id, entered = gathering.arrivals.len(), expected = gathering.expected, "Gathered a client for its battle");
+        self.make_battles();
+        Ok(())
+
+    }
+
+    /// Leave the client's battle, as the captured server does: switch it to the base
+    /// app again, where it logs in back to its account.
+    fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
+        let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
+            return Ok(());
+        };
+        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
+        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
+        self.quit_battle(client);
+        self.battle_clients.remove(&client);
+        self.app.switch_base_app(client, base_app, true)?;
+        info!(%client, %base_app, "Left the battle, switching base app");
+        Ok(())
+    }
+
+    /// Bring a client that enabled entities to its account, as the captured server did:
+    /// the `Account` entity, then `showGUI`.
+    fn enter_account(&mut self, client: ClientKey) -> io::Result<()> {
+
+        let Some(player) = self.players.get(&client) else { return Ok(()) };
+
+        let id = player.id;
+        let data = schema::AccountData {
+            name: player.name.clone(),
+            incarnationID: ACCOUNT_SESSIONS,
+            requiredVersion_2410: self.required_version.clone(),
+            initialServerSettings: server_settings(),
+        };
+        let account = self.app.create_base_player::<Account>(client, data)?;
+        self.accounts.insert(client, account);
+        info!(%client, %account, "Created the account");
+
+        self.app.entity(account)?.showGUI(show_gui_ctx(id))?;
+
+        Ok(())
+
+    }
+
+    /// A client of a battle is ready, see [`Battle::ready`].
+    fn client_ready(&mut self, client: ClientKey) -> io::Result<()> {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
+        battle.ready(app, client)
+    }
+
+    /// A request of the client's account, those we don't know being left unanswered. The
+    /// arena is ready as soon as the client first asks how the queue is going.
+    fn account_request(&mut self, client: ClientKey, account: EntityKey<Account>, request: AccountBase, name: &str) -> io::Result<()> {
+        match request {
+            AccountBase::DoCmdInt3 { cmd: CMD_REQ_SERVER_STATS, .. } => {
+                let online = self.players.len() as u32;
+                self.app.entity(account)?.receiveServerStats(ServerStats { clusterCCU: online, regionCCU: online })?;
+            }
+            // `[revision, len, crc32]` of the client's cached shop.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_SHOP, arg1: len, arg2: crc32, .. } => {
+                if self.shop.is_cached(len, crc32) {
+                    self.app.entity(account)?.onCmdResponse(request_id, RES_CACHE, String::new())?;
+                } else {
+                    let data = self.shop.data.clone();
+                    self.stream(client, account, request_id, &data)?;
+                }
+            }
+            // `[revision, crc32 of the cached data, 0]`: a full sync from revision 0, else
+            // nothing new, the updates being sent as they happen.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DATA, arg0: revision, .. } => {
+                let current = self.players.get(&client)
+                    .ok_or_else(|| invalid_data("Syncing the account of no player"))?
+                    .revision;
+                if revision == 0 {
+                    let data = account::compress(&self.garage.data(current))?;
+                    self.stream(client, account, request_id, &data)?;
+                } else {
+                    let ext = pickle_dict([("prevRev", PickleValue::from(revision)), ("rev", PickleValue::from(current))]);
+                    self.app.entity(account)?.onCmdResponseExt(request_id, RES_SUCCESS, String::new(), Pickle(ext))?;
+                }
+            }
+            // `[cache version, latest change time in cache, 0]`, answered with the
+            // `(cache version, [(vehicle type, change time, dossier)])` changed since,
+            // and there are no vehicle dossiers yet.
+            AccountBase::DoCmdInt3 { request_id, cmd: CMD_SYNC_DOSSIERS, .. } => {
+                let data = account::compress(&wgtk::pickle!((DOSSIERS_VERSION, [])))?;
+                self.stream(client, account, request_id, &data)?;
+            }
+            // `[key, value, ...]` of the settings to set, kept by the client only for now.
+            AccountBase::DoCmdIntArr { request_id, cmd: CMD_ADD_INT_USER_SETTINGS, args: settings, .. } => {
+                let settings = settings.chunks_exact(2).map(|pair| (PickleValue::from(pair[0]), PickleValue::from(pair[1])));
+                self.update(client, account, [("intUserSettings", PickleValue::Dict(settings.collect()))])?;
+                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+            }
+            AccountBase::DoCmdInt3 { cmd: CMD_REQ_QUEUE_INFO, .. } => {
+                let players = self.enqueued.len();
+                self.app.entity(account)?.receiveQueueInfo(queue_info(players))?;
+            }
+            // `[queue type, vehicle inventory id, ...]`.
+            AccountBase::DoCmdIntArr { cmd: CMD_ENQUEUE_IN_BATTLE_QUEUE, args: queue_args, .. } => {
+                let (Some(&queue_type), Some(&vehicle_id)) = (queue_args.first(), queue_args.get(1)) else {
+                    return Err(invalid_data("Missing the queue type or the vehicle"));
+                };
+                self.enqueued.insert(client, vehicle_id.into());
+                self.queued_since.get_or_insert_with(Instant::now);
+                self.app.entity(account)?.onEnqueued(queue_type as u8)?;
+                info!(%client, vehicle_id, queued = self.enqueued.len(), "Enqueued a client");
+            }
+            // Told it left whether it was in the queue or not, so that it shows it left.
+            AccountBase::DoCmdInt { cmd: CMD_DEQUEUE_FROM_BATTLE_QUEUE, arg: queue_type, .. } => {
+                self.dequeue(client);
+                self.app.entity(account)?.onDequeued(queue_type as u8)?;
+                info!(%client, queued = self.enqueued.len(), "Dequeued a client");
+            }
+            // Only logged by the real server, but answered when asked.
+            AccountBase::DoCmdIntArrStrArr { request_id, cmd: CMD_LOG_CLIENT_XMPP_EVENTS, .. } => {
+                if request_id != REQUEST_ID_NO_RESPONSE {
+                    self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+                }
+            }
+            AccountBase::RequestToken { request_id, token_type } => {
+                let id = self.players.get(&client)
+                    .ok_or_else(|| invalid_data("Asking a token for no player"))?
+                    .id;
+                self.app.entity(account)?.onTokenReceived(request_id, token_type, token_data(token_type, id))?;
+            }
+            // No chat yet, and the captured server answered nothing.
+            AccountBase::ChatCommandFromClient { action, .. } => {
+                debug!(%client, "Ignored a chat action: {action}");
+            }
+            // Accepted without effect, as nothing depends on them yet.
+            AccountBase::DoCmdInt2 { request_id, cmd: CMD_SET_ACTIVE_VEH_SEASON, .. }
+            | AccountBase::DoCmdStr { request_id, cmd: CMD_RESET_SESSION_STAT, .. } => {
+                self.app.entity(account)?.onCmdResponse(request_id, RES_SUCCESS, String::new())?;
+            }
+            _ => warn!(%client, "Left a request unanswered: {name}"),
+        }
+        Ok(())
+    }
+
+    /// Answer an account command with a stream of its data, zlib-compressed.
+    fn stream(&mut self, client: ClientKey, account: EntityKey<Account>, request_id: i16, data: &[u8]) -> io::Result<()> {
+        self.app.entity(account)?.onCmdResponse(request_id, RES_STREAM, String::new())?;
+        self.app.push_resource(client, request_id as u16, account::resource_description(data), data)
+    }
+
+    /// Update the client's account data with the given sections, to its next revision.
+    fn update(&mut self, client: ClientKey, account: EntityKey<Account>, diff: impl IntoIterator<Item = (&'static str, PickleValue)>) -> io::Result<()> {
+        let player = self.players.get_mut(&client)
+            .ok_or_else(|| invalid_data("Updating the account of no player"))?;
+        let prev_rev = player.revision;
+        player.revision += 1;
+        let revs = [("prevRev", PickleValue::from(prev_rev)), ("rev", PickleValue::from(player.revision))];
+        self.app.entity(account)?.update(Pickle(pickle_dict(diff.into_iter().chain(revs))))
     }
 
     /// The client called a cell method.
@@ -894,14 +875,13 @@ impl BaseThread {
         }
     }
 
-    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], then
-    /// give the clients what changed.
-    fn battle_tick(&mut self) {
-        self.make_battles();
-        for battle in self.battles.values_mut() {
-            battle.tick(&mut self.app);
+    /// An entity of its battle was created on the client.
+    fn entity_entered(&mut self, client: ClientKey, entity: EntityKey<AnyEntity>) {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return };
+        if let Err(e) = battle.entity_entered(app, client, entity) {
+            warn!(%client, "Failed to drive the vehicle: {e}");
         }
-        self.app.end_tick();
     }
 
 }
@@ -927,10 +907,6 @@ pub struct VehicleLoadout {
     collision: Arc<VehicleCollision>,
 }
 
-fn invalid_data(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.to_string())
-}
-
 /// The client version the server requires, which the client checks against the
 /// default of the same property in its own `AccountVersion.def`, so it is the game's.
 fn required_version(fs: &ResFilesystem) -> io::Result<String> {
@@ -941,10 +917,61 @@ fn required_version(fs: &ResFilesystem) -> io::Result<String> {
         .ok_or_else(|| invalid_data("No requiredVersion_2410 in AccountVersion.def, the game is another version"))
 }
 
-/// A pickled dict of the given entries, keyed by their names as bytes, as the game's
-/// Python 2 strings.
-fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -> PickleValue {
-    PickleValue::Dict(entries.into_iter().map(|(key, value)| (PickleValue::Bytes(key.as_bytes().to_vec()), value)).collect())
+fn invalid_data(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.to_string())
+}
+
+/// The client the login app handed over, if valid, logging in as the given player.
+fn login_client(client: &ClientHost, player: Player) -> Option<LoginClient> {
+    match Blowfish::new_from_slice(&client.blowfish_key) {
+        Ok(blowfish) => Some(LoginClient {
+            addr: client.addr,
+            blowfish: Arc::new(blowfish),
+            player,
+        }),
+        Err(_) => {
+            warn!(addr = %client.addr, "Refused a client with an invalid blowfish key: {:?}", client.blowfish_key);
+            None
+        }
+    }
+}
+
+/// The properties of a battle's space, as captured: three records the client expects,
+/// the space id then fixed bytes, see [`SpaceProperty`].
+///
+/// [`SpaceProperty`]: wgtk::app::client::element::SpaceProperty
+fn space_properties(space_id: u32) -> impl Iterator<Item = Vec<u8>> {
+    const RECORDS: [&[u8]; 3] = [
+        &[0, 0, 0, 0, 0, 1, 0, 0, 0],
+        &[2, 0, 0, 0, 0, 0],
+        &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ];
+    RECORDS.into_iter().map(move |record| [&space_id.to_le_bytes()[..], record].concat())
+}
+
+/// The base data of a random battle's avatar, for the given player and map: no limits,
+/// boosters nor modifiers, and no kill cam, whose data the server sends.
+fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
+    let extra_data = PickleValue::Dict([
+        (PickleValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
+        (PickleValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
+    ].into_iter().collect());
+    AvatarData {
+        name,
+        sessionID: String::new(),
+        arenaUniqueID: OsRng.next_u64(),
+        arenaTypeID: arena_type_id,
+        arenaBonusType: ARENA_BONUS_TYPE_REGULAR,
+        arenaGuiType: ARENA_GUI_TYPE_RANDOM,
+        arenaExtraData: Pickle(extra_data),
+        weatherPresetID: 0,
+        denunciationsLeft: DENUNCIATIONS,
+        clientCtx: String::new(),
+        tkillIsSuspected: false,
+        playLimits: PlayLimits { curfew: -1, weeklyPlayLimit: -1, dailyPlayLimit: -1, sessionLimit: -1 },
+        battleChatRestriction: BattleChatRestriction { isBattleChatDisabled: false, restrictionReasonID: -1 },
+        goodiesSnapshot: Vec::new(),
+    }
 }
 
 /// The server's settings: only what the client reads without a default, every other
@@ -1046,6 +1073,12 @@ fn show_gui_ctx(account_id: u64) -> Pickle {
     ]))
 }
 
+/// A pickled dict of the given entries, keyed by their names as bytes, as the game's
+/// Python 2 strings.
+fn pickle_dict(entries: impl IntoIterator<Item = (&'static str, PickleValue)>) -> PickleValue {
+    PickleValue::Dict(entries.into_iter().map(|(key, value)| (PickleValue::Bytes(key.as_bytes().to_vec()), value)).collect())
+}
+
 /// The random battle queue as a player sees it, of this many players: none counted by
 /// vehicle class (light, medium, heavy, SPG, AT-SPG).
 fn queue_info(players: usize) -> Pickle {
@@ -1069,31 +1102,6 @@ fn token_data(token_type: u8, account_id: u64) -> Pickle {
     ]))
 }
 
-/// The base data of a random battle's avatar, for the given player and map: no limits,
-/// boosters nor modifiers, and no kill cam, whose data the server sends.
-fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
-    let extra_data = PickleValue::Dict([
-        (PickleValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
-        (PickleValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
-    ].into_iter().collect());
-    AvatarData {
-        name,
-        sessionID: String::new(),
-        arenaUniqueID: OsRng.next_u64(),
-        arenaTypeID: arena_type_id,
-        arenaBonusType: ARENA_BONUS_TYPE_REGULAR,
-        arenaGuiType: ARENA_GUI_TYPE_RANDOM,
-        arenaExtraData: Pickle(extra_data),
-        weatherPresetID: 0,
-        denunciationsLeft: DENUNCIATIONS,
-        clientCtx: String::new(),
-        tkillIsSuspected: false,
-        playLimits: PlayLimits { curfew: -1, weeklyPlayLimit: -1, dailyPlayLimit: -1, sessionLimit: -1 },
-        battleChatRestriction: BattleChatRestriction { isBattleChatDisabled: false, restrictionReasonID: -1 },
-        goodiesSnapshot: Vec::new(),
-    }
-}
-
 /// The cell data of a random battle's avatar, in the given team on the given vehicle:
 /// not observing nor observed, its vehicle at rest until it moves.
 fn avatar_cell_data(team: u8, vehicle_id: EntityId) -> AvatarCellData {
@@ -1113,19 +1121,6 @@ fn avatar_cell_data(team: u8, vehicle_id: EntityId) -> AvatarCellData {
         remoteCamera: RemoteCamera::default(),
         shouldSendKillcamSimulationData: false,
     }
-}
-
-/// The properties of a battle's space, as captured: three records the client expects,
-/// the space id then fixed bytes, see [`SpaceProperty`].
-///
-/// [`SpaceProperty`]: wgtk::app::client::element::SpaceProperty
-fn space_properties(space_id: u32) -> impl Iterator<Item = Vec<u8>> {
-    const RECORDS: [&[u8]; 3] = [
-        &[0, 0, 0, 0, 0, 1, 0, 0, 0],
-        &[2, 0, 0, 0, 0, 0],
-        &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    ];
-    RECORDS.into_iter().map(move |record| [&space_id.to_le_bytes()[..], record].concat())
 }
 
 /// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and

@@ -209,15 +209,27 @@ impl NavGrid {
 
     }
 
-    /// Whether a tank goes straight from one cell to another without leaving those of
-    /// `clearance` at least: every cell on the line between them, at half a cell's steps.
-    fn clear(&mut self, from: (usize, usize), to: (usize, usize), clearance: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
-        let (from, to) = (cell_vec(from), cell_vec(to));
-        let steps = (from.distance(to) * 2.0).ceil().max(1.0) as usize;
-        (0..=steps).all(|step| {
-            let point = from.lerp(to, step as f32 / steps as f32).round();
-            self.clearance((point.x as usize, point.y as usize), space, keep) >= clearance
-        })
+    /// The cell a point is over, its column and row, if within the grid.
+    fn cell_of(&self, point: Vec3) -> Option<(usize, usize)> {
+        let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;
+        if cell.x < 0.0 || cell.y < 0.0 || cell.x >= self.size.0 as f32 || cell.y >= self.size.1 as f32 {
+            return None;
+        }
+        Some((cell.x as usize, cell.y as usize))
+    }
+
+    /// The cell of the grid nearest a point, within it.
+    fn nearest_cell(&self, point: Vec3) -> (usize, usize) {
+        let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;
+        (
+            (cell.x.max(0.0) as usize).min(self.size.0 - 1),
+            (cell.y.max(0.0) as usize).min(self.size.1 - 1),
+        )
+    }
+
+    /// The distance between two cells' middles, in metres.
+    fn distance(&self, a: (usize, usize), b: (usize, usize)) -> f32 {
+        cell_vec(a).distance(cell_vec(b)) * CELL
     }
 
     /// A cell's clearance, in metres, see the module's documentation: the distance to the
@@ -276,22 +288,15 @@ impl NavGrid {
         height
     }
 
-    /// The cell a point is over, its column and row, if within the grid.
-    fn cell_of(&self, point: Vec3) -> Option<(usize, usize)> {
-        let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;
-        if cell.x < 0.0 || cell.y < 0.0 || cell.x >= self.size.0 as f32 || cell.y >= self.size.1 as f32 {
-            return None;
-        }
-        Some((cell.x as usize, cell.y as usize))
-    }
-
-    /// The cell of the grid nearest a point, within it.
-    fn nearest_cell(&self, point: Vec3) -> (usize, usize) {
-        let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;
-        (
-            (cell.x.max(0.0) as usize).min(self.size.0 - 1),
-            (cell.y.max(0.0) as usize).min(self.size.1 - 1),
-        )
+    /// Whether a tank goes straight from one cell to another without leaving those of
+    /// `clearance` at least: every cell on the line between them, at half a cell's steps.
+    fn clear(&mut self, from: (usize, usize), to: (usize, usize), clearance: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
+        let (from, to) = (cell_vec(from), cell_vec(to));
+        let steps = (from.distance(to) * 2.0).ceil().max(1.0) as usize;
+        (0..=steps).all(|step| {
+            let point = from.lerp(to, step as f32 / steps as f32).round();
+            self.clearance((point.x as usize, point.y as usize), space, keep) >= clearance
+        })
     }
 
     /// The middle of a cell, on its surface, as last asked.
@@ -299,11 +304,6 @@ impl NavGrid {
         let center = self.origin + (cell_vec((column, row)) + 0.5) * CELL;
         let height = self.heights[row * self.size.0 + column].unwrap_or(f32::NAN);
         Vec3::new(center.x, height, center.y)
-    }
-
-    /// The distance between two cells' middles, in metres.
-    fn distance(&self, a: (usize, usize), b: (usize, usize)) -> f32 {
-        cell_vec(a).distance(cell_vec(b)) * CELL
     }
 
 }

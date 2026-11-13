@@ -414,11 +414,6 @@ pub struct DriveForces {
 
 impl DriveForces {
 
-    /// Whether its tracks are blocked, either: it is on its handbrake.
-    pub fn handbrake(&self) -> bool {
-        self.blocked.iter().any(|&blocked| blocked)
-    }
-
     /// How its engine or its brakes push it along its heading, going at `speed`: the
     /// speed they push it toward, and the least and the most force, in N, signed along
     /// its heading, by the cases of "Along its heading" in the module's documentation.
@@ -456,6 +451,11 @@ impl DriveForces {
         let least = force.min(0.0);
         if way > 0.0 { (target, least, force) } else { (target, -force, -least) }
 
+    }
+
+    /// Whether its tracks are blocked, either: it is on its handbrake.
+    pub fn handbrake(&self) -> bool {
+        self.blocked.iter().any(|&blocked| blocked)
     }
 
     /// The speed it asks of a track, in m/s: the speed asked less its steering's share,

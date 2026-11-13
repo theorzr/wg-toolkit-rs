@@ -245,16 +245,16 @@ struct Errors {
 
 impl Errors {
 
+    fn median_distance(&self) -> f32 {
+        Self::stats(&self.distance).0
+    }
+
     /// The median, the 90th percentile and the maximum.
     fn stats(values: &[f32]) -> (f32, f32, f32) {
         let mut sorted = values.to_vec();
         sorted.sort_by(f32::total_cmp);
         let at = |share: f32| sorted[((sorted.len() - 1) as f32 * share) as usize];
         (at(0.5), at(0.9), at(1.0))
-    }
-
-    fn median_distance(&self) -> f32 {
-        Self::stats(&self.distance).0
     }
 
     fn report(&self, label: &str) {

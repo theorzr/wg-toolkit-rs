@@ -89,16 +89,6 @@ impl Garage {
         self.vehicles.get(usize::try_from(vehicle_id).ok()?.checked_sub(1)?)
     }
 
-    /// Each vehicle with its inventory id and its crew's.
-    fn vehicles(&self) -> impl Iterator<Item = (i64, Vec<i64>, &GarageVehicle)> {
-        let mut next_tankman_id = 1;
-        self.vehicles.iter().zip(1..).map(move |(vehicle, id)| {
-            let crew = (next_tankman_id..).take(vehicle.crew.len()).collect();
-            next_tankman_id += vehicle.crew.len() as i64;
-            (id, crew, vehicle)
-        })
-    }
-
     /// The data of a full sync, bringing the client to the given revision.
     pub fn data(&self, revision: i64) -> Value {
         wgtk::pickle!({
@@ -167,6 +157,16 @@ impl Garage {
         }
         Value::Dict(inventory)
 
+    }
+
+    /// Each vehicle with its inventory id and its crew's.
+    fn vehicles(&self) -> impl Iterator<Item = (i64, Vec<i64>, &GarageVehicle)> {
+        let mut next_tankman_id = 1;
+        self.vehicles.iter().zip(1..).map(move |(vehicle, id)| {
+            let crew = (next_tankman_id..).take(vehicle.crew.len()).collect();
+            next_tankman_id += vehicle.crew.len() as i64;
+            (id, crew, vehicle)
+        })
     }
 
     /// The account's money, its research (the vehicles and their modules) and its

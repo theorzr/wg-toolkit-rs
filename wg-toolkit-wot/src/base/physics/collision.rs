@@ -135,6 +135,15 @@ impl Solid {
             .min_by(|a, b| a.0.total_cmp(&b.0))
     }
 
+    /// How deep it is in another, at its deepest: none if they don't touch.
+    pub fn depth_in(&self, other: &Self) -> Option<f32> {
+        let mut deepest: Option<f32> = None;
+        self.meet(other, 0.0, |_, _, depth| {
+            deepest = Some(deepest.map_or(depth, |deepest| deepest.max(depth)));
+        });
+        deepest
+    }
+
     /// Where it touches another, both grown by `margin`, see the module's documentation:
     /// each point, the way out of the other toward it, and how deep they are there,
     /// negative short of it.
@@ -159,15 +168,6 @@ impl Solid {
                 }
             }
         }
-    }
-
-    /// How deep it is in another, at its deepest: none if they don't touch.
-    pub fn depth_in(&self, other: &Self) -> Option<f32> {
-        let mut deepest: Option<f32> = None;
-        self.meet(other, 0.0, |_, _, depth| {
-            deepest = Some(deepest.map_or(depth, |deepest| deepest.max(depth)));
-        });
-        deepest
     }
 
 }
@@ -321,64 +321,6 @@ enum Axis {
 
 impl Obb {
 
-    /// Its axis, by its index: right, up, heading.
-    fn axis(&self, index: usize) -> Vec3 {
-        self.axes.col(index)
-    }
-
-    /// How far it reaches along an axis from its middle.
-    fn reach(&self, axis: Vec3) -> f32 {
-        self.half.x * self.axes.x_axis.dot(axis).abs()
-            + self.half.y * self.axes.y_axis.dot(axis).abs()
-            + self.half.z * self.axes.z_axis.dot(axis).abs()
-    }
-
-    /// The way it overlaps another least, both grown by `margin`, by the separating axis
-    /// theorem over their face normals and their edge pairs: the axis, pointing from the
-    /// other box to this one, how far they overlap along it, not grown, and which it is.
-    /// None if they are apart.
-    ///
-    /// For each of 15 axes (3 + 3 faces, 3 × 3 edge crossings) the boxes' shadows on it
-    /// are intervals centred on the projection of their centres, with half lengths
-    /// [`Self::reach`]; their overlap on it is
-    /// `reach(A) + reach(B) − |(centre A − centre B) · axis|`. One axis with a gap
-    /// proves the boxes apart; otherwise the axis with the smallest overlap is the
-    /// shortest way out. Edge crossings of near-parallel edges are noisy (and null if
-    /// parallel, skipped), so they count [`EDGE_AXIS_BIAS`] more than faces.
-    fn least_overlap(&self, other: &Self, margin: f32) -> Option<(Vec3, f32, Axis)> {
-
-        let offset = self.center - other.center;
-        let mut least: Option<(Vec3, f32, f32, Axis)> = None;
-
-        for index in 0..15 {
-
-            let (axis, bias, which) = match index {
-                0..3 => (self.axis(index), 0.0, Axis::First(index)),
-                3..6 => (other.axis(index - 3), 0.0, Axis::Second(index - 3)),
-                _ => {
-                    let (own, others) = ((index - 6) / 3, (index - 6) % 3);
-                    (self.axis(own).cross(other.axis(others)), EDGE_AXIS_BIAS, Axis::Edges(own, others))
-                }
-            };
-            let Some(axis) = axis.try_normalize().filter(|_| axis.length() > 1e-3) else { continue };
-
-            let along = offset.dot(axis);
-            let overlap = self.reach(axis) + other.reach(axis) - along.abs();
-            if overlap <= -margin {
-                return None;
-            }
-
-            if least.is_none_or(|(_, _, least, _)| overlap + bias < least) {
-                let way = if along < 0.0 { -axis } else { axis };
-                least = Some((way, overlap, overlap + bias, which));
-            }
-
-        }
-
-        least.map(|(way, overlap, _, which)| (way, overlap, which))
-
-    }
-
     /// Where it touches another, both grown by `margin`, see the module's documentation:
     /// each point, the way out of the other toward it, and how deep it is there.
     fn meet(&self, other: &Self, margin: f32, each: &mut impl FnMut(Vec3, Vec3, f32)) {
@@ -430,6 +372,64 @@ impl Obb {
             }
         }
 
+    }
+
+    /// The way it overlaps another least, both grown by `margin`, by the separating axis
+    /// theorem over their face normals and their edge pairs: the axis, pointing from the
+    /// other box to this one, how far they overlap along it, not grown, and which it is.
+    /// None if they are apart.
+    ///
+    /// For each of 15 axes (3 + 3 faces, 3 × 3 edge crossings) the boxes' shadows on it
+    /// are intervals centred on the projection of their centres, with half lengths
+    /// [`Self::reach`]; their overlap on it is
+    /// `reach(A) + reach(B) − |(centre A − centre B) · axis|`. One axis with a gap
+    /// proves the boxes apart; otherwise the axis with the smallest overlap is the
+    /// shortest way out. Edge crossings of near-parallel edges are noisy (and null if
+    /// parallel, skipped), so they count [`EDGE_AXIS_BIAS`] more than faces.
+    fn least_overlap(&self, other: &Self, margin: f32) -> Option<(Vec3, f32, Axis)> {
+
+        let offset = self.center - other.center;
+        let mut least: Option<(Vec3, f32, f32, Axis)> = None;
+
+        for index in 0..15 {
+
+            let (axis, bias, which) = match index {
+                0..3 => (self.axis(index), 0.0, Axis::First(index)),
+                3..6 => (other.axis(index - 3), 0.0, Axis::Second(index - 3)),
+                _ => {
+                    let (own, others) = ((index - 6) / 3, (index - 6) % 3);
+                    (self.axis(own).cross(other.axis(others)), EDGE_AXIS_BIAS, Axis::Edges(own, others))
+                }
+            };
+            let Some(axis) = axis.try_normalize().filter(|_| axis.length() > 1e-3) else { continue };
+
+            let along = offset.dot(axis);
+            let overlap = self.reach(axis) + other.reach(axis) - along.abs();
+            if overlap <= -margin {
+                return None;
+            }
+
+            if least.is_none_or(|(_, _, least, _)| overlap + bias < least) {
+                let way = if along < 0.0 { -axis } else { axis };
+                least = Some((way, overlap, overlap + bias, which));
+            }
+
+        }
+
+        least.map(|(way, overlap, _, which)| (way, overlap, which))
+
+    }
+
+    /// Its axis, by its index: right, up, heading.
+    fn axis(&self, index: usize) -> Vec3 {
+        self.axes.col(index)
+    }
+
+    /// How far it reaches along an axis from its middle.
+    fn reach(&self, axis: Vec3) -> f32 {
+        self.half.x * self.axes.x_axis.dot(axis).abs()
+            + self.half.y * self.axes.y_axis.dot(axis).abs()
+            + self.half.z * self.axes.z_axis.dot(axis).abs()
     }
 
     /// Its edge along its axis `index` furthest the way `toward`: its middle and its

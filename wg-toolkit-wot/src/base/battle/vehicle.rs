@@ -220,14 +220,6 @@ impl BattleVehicle {
         self.health > 0
     }
 
-    /// What its client has of it, if a client drives it.
-    pub fn client_driver(&self) -> Option<&ClientDriver> {
-        match &self.driver {
-            Driver::Client(driver) => Some(driver),
-            Driver::Bot(_) | Driver::Nobody => None,
-        }
-    }
-
     /// Where its hull is in the world.
     pub fn hull_center(&self, world: &World) -> Vec3 {
         Vec3::from(world.vehicle(self.id).part_transforms(self.collision.hull_position)[VehiclePart::Hull as usize].translation)
@@ -325,6 +317,14 @@ impl BattleVehicle {
             own_vehicle.set_vehicleGunReloadTime(reload_time(&self.gun, now))?;
         }
         Ok(())
+    }
+
+    /// What its client has of it, if a client drives it.
+    pub fn client_driver(&self) -> Option<&ClientDriver> {
+        match &self.driver {
+            Driver::Client(driver) => Some(driver),
+            Driver::Bot(_) | Driver::Nobody => None,
+        }
     }
 
     /// Its gun fired the rest of a burst: its client is told its shells and their

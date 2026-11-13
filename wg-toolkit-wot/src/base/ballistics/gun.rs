@@ -181,6 +181,18 @@ impl GunLoader {
         gun
     }
 
+    /// The shells of `loaded_shell` the gun holds once reloaded whole, fewer when it has fewer
+    /// left.
+    fn full_magazine(&self) -> u32 {
+        self.ammo.get(self.loaded_shell).map_or(0, |&(_, count)| count.min(self.magazine_size()))
+    }
+
+    /// The shells the gun holds once reloaded: its magazine's, or its burst's when it
+    /// fires bursts without a magazine, as the client counts them; 1 without either.
+    fn magazine_size(&self) -> u32 {
+        self.magazine.size.max(self.magazine.burst_size).max(1)
+    }
+
     /// The same gun numbering its shots from `first`: the client tells shots apart by
     /// their id alone, whoever fires them.
     pub fn with_shot_ids_from(mut self, first: i32) -> Self {
@@ -231,6 +243,89 @@ impl GunLoader {
 
     }
 
+    /// Fill the magazine again once its whole reload is over by game time `now`, before
+    /// [`Self::take_loaded`] tells it, for the client to fire as soon as it is.
+    fn settle(&mut self, now: f64) {
+        if self.magazine_shells == 0 && self.is_loaded(now) && self.reload.is_some() {
+            self.magazine_shells = self.full_magazine();
+        }
+    }
+
+    /// Whether the gun is loaded by game time `now`.
+    pub fn is_loaded(&self, now: f64) -> bool {
+        self.reload.is_none_or(|reload| now >= reload.end)
+    }
+
+    /// Fire a shell of the magazine, without waiting or reloading.
+    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+
+        if self.magazine_shells == 0 {
+            return None;
+        }
+        let (def, count) = self.ammo.get_mut(self.loaded_shell).filter(|(_, count)| *count > 0)?;
+        *count -= 1;
+        self.magazine_shells -= 1;
+        let def = def.clone();
+
+        let id = self.next_shot_id;
+        self.next_shot_id += 1;
+
+        let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
+        let range = def.max_distance;
+        let launch = Launch {
+            start,
+            velocity,
+            flown: 0.0,
+            range,
+            pen_factor: 1.0,
+        };
+        let flight = fly(&def, launch, obstacles, vehicles);
+        Some(Shot {
+            id,
+            def,
+            start,
+            velocity,
+            flown: 0.0,
+            range,
+            ricochets: 0,
+            pen_factor: flight.pen_factor,
+            end: flight.end,
+            end_velocity: flight.end_velocity,
+            flight_time: flight.flight_time,
+            landing: flight.landing,
+            through: flight.through,
+            burst: None,
+        })
+
+    }
+
+    fn start_reload(&mut self, now: f64, time: f32) {
+        self.reload = Some(Reload { base_time: time, end: now + f64::from(time) });
+    }
+
+    /// After a shot or a burst: wait for the magazine's interval while it has some left,
+    /// else reload whole with the next shell.
+    fn after_shots(&mut self, now: f64) {
+        if self.magazine_shells > 0 {
+            self.start_reload(now, self.magazine.interval);
+        } else {
+            self.load_next();
+            self.start_reload(now, self.reload_time);
+        }
+    }
+
+    /// Load the next shell, or another one once there is none of it left.
+    fn load_next(&mut self) {
+        if !self.has_left(self.next_shell) {
+            self.next_shell = first_left(&self.ammo).unwrap_or(self.next_shell);
+        }
+        self.loaded_shell = self.next_shell;
+    }
+
+    fn has_left(&self, index: usize) -> bool {
+        self.ammo.get(index).is_some_and(|&(_, count)| count > 0)
+    }
+
     /// Fire the next shell of the burst going on, if it is due by game time `now`, as
     /// [`Self::fire`] does, whose reload goes on. Once the burst empties the magazine,
     /// the gun loads its next shell.
@@ -261,6 +356,11 @@ impl GunLoader {
         let Some(index) = self.shell_left(compact_descr) else { return false };
         self.next_shell = index;
         true
+    }
+
+    /// The index of the shell of this integer descriptor, if the gun has some left.
+    fn shell_left(&self, compact_descr: i64) -> Option<usize> {
+        self.ammo.iter().position(|&(ref def, count)| def.compact_descr.to_int() == compact_descr && count > 0)
     }
 
     /// Load the shell of this integer descriptor instead of the one loaded, and after it
@@ -337,11 +437,6 @@ impl GunLoader {
         self.magazine_size() > 1
     }
 
-    /// Whether the gun is loaded by game time `now`.
-    pub fn is_loaded(&self, now: f64) -> bool {
-        self.reload.is_none_or(|reload| now >= reload.end)
-    }
-
     /// Whether the gun got loaded by game time `now` since last asked, its magazine
     /// filled again if it reloaded whole.
     pub fn take_loaded(&mut self, now: f64) -> bool {
@@ -359,109 +454,9 @@ impl GunLoader {
         self.reload_time
     }
 
-    /// The shells the gun holds once reloaded: its magazine's, or its burst's when it
-    /// fires bursts without a magazine, as the client counts them; 1 without either.
-    fn magazine_size(&self) -> u32 {
-        self.magazine.size.max(self.magazine.burst_size).max(1)
-    }
-
-    /// The shells of `loaded_shell` the gun holds once reloaded whole, fewer when it has fewer
-    /// left.
-    fn full_magazine(&self) -> u32 {
-        self.ammo.get(self.loaded_shell).map_or(0, |&(_, count)| count.min(self.magazine_size()))
-    }
-
-    /// Fill the magazine again once its whole reload is over by game time `now`, before
-    /// [`Self::take_loaded`] tells it, for the client to fire as soon as it is.
-    fn settle(&mut self, now: f64) {
-        if self.magazine_shells == 0 && self.is_loaded(now) && self.reload.is_some() {
-            self.magazine_shells = self.full_magazine();
-        }
-    }
-
-    /// Fire a shell of the magazine, without waiting or reloading.
-    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
-
-        if self.magazine_shells == 0 {
-            return None;
-        }
-        let (def, count) = self.ammo.get_mut(self.loaded_shell).filter(|(_, count)| *count > 0)?;
-        *count -= 1;
-        self.magazine_shells -= 1;
-        let def = def.clone();
-
-        let id = self.next_shot_id;
-        self.next_shot_id += 1;
-
-        let velocity = disperse(direction.normalize(), dispersion, &mut rand::thread_rng()) * def.speed;
-        let range = def.max_distance;
-        let launch = Launch {
-            start,
-            velocity,
-            flown: 0.0,
-            range,
-            pen_factor: 1.0,
-        };
-        let flight = fly(&def, launch, obstacles, vehicles);
-        Some(Shot {
-            id,
-            def,
-            start,
-            velocity,
-            flown: 0.0,
-            range,
-            ricochets: 0,
-            pen_factor: flight.pen_factor,
-            end: flight.end,
-            end_velocity: flight.end_velocity,
-            flight_time: flight.flight_time,
-            landing: flight.landing,
-            through: flight.through,
-            burst: None,
-        })
-
-    }
-
-    /// After a shot or a burst: wait for the magazine's interval while it has some left,
-    /// else reload whole with the next shell.
-    fn after_shots(&mut self, now: f64) {
-        if self.magazine_shells > 0 {
-            self.start_reload(now, self.magazine.interval);
-        } else {
-            self.load_next();
-            self.start_reload(now, self.reload_time);
-        }
-    }
-
-    /// Load the next shell, or another one once there is none of it left.
-    fn load_next(&mut self) {
-        if !self.has_left(self.next_shell) {
-            self.next_shell = first_left(&self.ammo).unwrap_or(self.next_shell);
-        }
-        self.loaded_shell = self.next_shell;
-    }
-
-    fn start_reload(&mut self, now: f64, time: f32) {
-        self.reload = Some(Reload { base_time: time, end: now + f64::from(time) });
-    }
-
-    fn has_left(&self, index: usize) -> bool {
-        self.ammo.get(index).is_some_and(|&(_, count)| count > 0)
-    }
-
-    /// The index of the shell of this integer descriptor, if the gun has some left.
-    fn shell_left(&self, compact_descr: i64) -> Option<usize> {
-        self.ammo.iter().position(|&(ref def, count)| def.compact_descr.to_int() == compact_descr && count > 0)
-    }
-
 }
 
 impl Shot {
-
-    /// How far it flew from its gun to `end`, in metres.
-    pub fn distance(&self) -> f32 {
-        self.flown + self.start.distance(self.end)
-    }
 
     /// The shell going on off what it hit at `end`, ricocheting along `direction` at the
     /// same speed, as the server shows ricochets, for the rest of its range, keeping
@@ -501,6 +496,11 @@ impl Shot {
             through: flight.through,
             burst: None,
         })
+    }
+
+    /// How far it flew from its gun to `end`, in metres.
+    pub fn distance(&self) -> f32 {
+        self.flown + self.start.distance(self.end)
     }
 
 }

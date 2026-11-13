@@ -36,6 +36,37 @@ impl Hull {
 
     }
 
+    /// How fast its tracks go together, the middle of their speeds, in m/s.
+    fn track_speed(&self) -> f32 {
+        let [left, right] = self.tracks;
+        (left + right) / 2.0
+    }
+
+    /// The hull's orientation and its tracks' speeds, as the avatar's
+    /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
+    /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
+    /// bits over a turn, pitch on 12 bits over ±π/2, roll on 13 bits over a turn, the left
+    /// then right track speeds on 8 bits each over -15..30 m/s, and the engine's relative
+    /// RPM on 8 bits over 0..1.2, see [`Self::engine`].
+    pub fn aux_physics_data(&self) -> u64 {
+
+        use std::f32::consts::FRAC_PI_2;
+
+        let [left, right] = self.tracks;
+
+        let direction = self.direction();
+        let roll = direction.x;
+        let pitch = direction.y;
+        let yaw = direction.z;
+        pack_range(self.engine().1, 0.0, 1.2, 8) << 56
+            | pack_range(right, -15.0, 30.0, 8) << 48
+            | pack_range(left, -15.0, 30.0, 8) << 40
+            | pack_angle(roll, 13) << 27
+            | pack_range(pitch, -FRAC_PI_2, FRAC_PI_2, 12) << 15
+            | pack_angle(yaw, 15)
+
+    }
+
     /// The engine's gear and its RPM relative to its maximum, which the client's engine
     /// sound follows, by its tracks' speeds: off the ground they run free and it revs, and
     /// landing pulls them to the ground's speed, as the captured server does. In neutral
@@ -65,37 +96,6 @@ impl Hull {
         let high = GEAR_SHIFTS.get(gear).copied().unwrap_or(1.0);
         let in_gear = ((share - low) / (high - low)).clamp(0.0, 1.0);
         (gear as u8 + 1, SHIFT_RPM + (1.0 - SHIFT_RPM) * in_gear)
-
-    }
-
-    /// How fast its tracks go together, the middle of their speeds, in m/s.
-    fn track_speed(&self) -> f32 {
-        let [left, right] = self.tracks;
-        (left + right) / 2.0
-    }
-
-    /// The hull's orientation and its tracks' speeds, as the avatar's
-    /// `ownVehicleAuxPhysicsData` carries them for the client to aim from and animate the
-    /// tracks with, see `WoT.packAuxVehiclePhysicsData`. From the lowest bit: yaw on 15
-    /// bits over a turn, pitch on 12 bits over ±π/2, roll on 13 bits over a turn, the left
-    /// then right track speeds on 8 bits each over -15..30 m/s, and the engine's relative
-    /// RPM on 8 bits over 0..1.2, see [`Self::engine`].
-    pub fn aux_physics_data(&self) -> u64 {
-
-        use std::f32::consts::FRAC_PI_2;
-
-        let [left, right] = self.tracks;
-
-        let direction = self.direction();
-        let roll = direction.x;
-        let pitch = direction.y;
-        let yaw = direction.z;
-        pack_range(self.engine().1, 0.0, 1.2, 8) << 56
-            | pack_range(right, -15.0, 30.0, 8) << 48
-            | pack_range(left, -15.0, 30.0, 8) << 40
-            | pack_angle(roll, 13) << 27
-            | pack_range(pitch, -FRAC_PI_2, FRAC_PI_2, 12) << 15
-            | pack_angle(yaw, 15)
 
     }
 

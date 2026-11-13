@@ -225,6 +225,13 @@ pub struct Rubble {
 
 impl Rubble {
 
+    /// Whether a static triangle is of a structure's module still standing: those stop
+    /// what drives into them until it breaks them, while a fence or a post is driven
+    /// into as it breaks, see [`Hull::ram`].
+    pub fn blocks(&self, statics: &Statics, triangle: &StaticTriangle) -> bool {
+        self.standing(statics, triangle).is_some_and(|(piece, _)| piece.module.is_some())
+    }
+
     /// The piece a static triangle is of, if it is destructible and still stands.
     pub fn standing<'a>(&self, statics: &'a Statics, triangle: &StaticTriangle) -> Option<(DestructiblePiece, &'a PlacedDestructible)> {
         let destructible = statics.destructible(triangle.instance)?;
@@ -240,19 +247,12 @@ impl Rubble {
         (!self.broken.contains(&piece)).then_some((piece, destructible))
     }
 
-    /// Whether a static triangle is of a structure's module still standing: those stop
-    /// what drives into them until it breaks them, while a fence or a post is driven
-    /// into as it breaks, see [`Hull::ram`].
-    pub fn blocks(&self, statics: &Statics, triangle: &StaticTriangle) -> bool {
-        self.standing(statics, triangle).is_some_and(|(piece, _)| piece.module.is_some())
-    }
-
-    /// Damage a piece: its health, and the damage it took in all.
-    fn damage(&mut self, destructible: &PlacedDestructible, piece: DestructiblePiece, damage: f32) -> Option<(f32, f32)> {
-        let health = destructible.health_of(piece.module)?;
-        let done = self.damage.entry(piece).or_default();
-        *done += damage;
-        Some((health, *done))
+    /// Break a piece a shell flew through, with the modules it brings down, the shell
+    /// going `yaw`: its placed model by its index in `BSMI`, of the triangle it met.
+    /// Nothing if it is already broken.
+    pub fn break_shot(&mut self, statics: &Statics, instance: u32, piece: DestructiblePiece, yaw: f32) {
+        let Some(destructible) = statics.destructible(instance) else { return };
+        self.break_piece(destructible, piece, yaw, 0.0, true);
     }
 
     /// Break a piece, a module the others it brings down with it, each told of.
@@ -278,14 +278,6 @@ impl Rubble {
         }
     }
 
-    /// Break a piece a shell flew through, with the modules it brings down, the shell
-    /// going `yaw`: its placed model by its index in `BSMI`, of the triangle it met.
-    /// Nothing if it is already broken.
-    pub fn break_shot(&mut self, statics: &Statics, instance: u32, piece: DestructiblePiece, yaw: f32) {
-        let Some(destructible) = statics.destructible(instance) else { return };
-        self.break_piece(destructible, piece, yaw, 0.0, true);
-    }
-
     /// Damage a piece a shell hit and stopped on, a house's module say, the shell going
     /// `yaw`: it breaks once the damage of all the shells that hit it is its health,
     /// with the modules it brings down. What broke.
@@ -299,6 +291,14 @@ impl Rubble {
             self.break_piece(destructible, piece, yaw, 0.0, true);
         }
         &self.fresh[fresh..]
+    }
+
+    /// Damage a piece: its health, and the damage it took in all.
+    fn damage(&mut self, destructible: &PlacedDestructible, piece: DestructiblePiece, damage: f32) -> Option<(f32, f32)> {
+        let health = destructible.health_of(piece.module)?;
+        let done = self.damage.entry(piece).or_default();
+        *done += damage;
+        Some((health, *done))
     }
 
     /// How many pieces are broken: once more are, what was learnt of the map is stale.
