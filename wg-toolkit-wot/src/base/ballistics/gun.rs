@@ -14,8 +14,12 @@ use wgtk::space::Space;
 use crate::game::collision::{segment_triangle, VehicleCollision, VehicleIntersection};
 use crate::game::item_defs::{MagazineDef, ShellKind, ShotDef};
 
-use crate::base::physics::{DestructiblePiece, Rubble};
+use crate::base::physics::{DestructiblePiece, Dispersion, Rubble};
 
+
+/// How many σ of its shots' normal distribution the dispersion's radius is, stopped, see
+/// [`dispersed_share`]. Our choice.
+const CENTERED_SIGMAS: f32 = 2.0;
 
 /// The flight is followed in steps of this many seconds.
 const FLIGHT_STEP: f32 = 0.005;
@@ -214,14 +218,14 @@ impl GunLoader {
         self
     }
 
-    /// Fire the loaded shell at game time `now` from `start` toward `direction`, off by a
-    /// random angle within `dispersion` radians, if the gun is loaded and has a shell
+    /// Fire the loaded shell at game time `now` from `start` toward `direction`, off
+    /// within the `dispersion`, see [`disperse`], if the gun is loaded and has a shell
     /// left: the first of a burst, which [`Self::fire_burst`] fires the rest of. Once
     /// they are fired, the gun waits for its magazine's interval while it has some left,
     /// else reloads whole with its next shell, or another one once there is none of it
     /// left. That reload starts now, the burst's other shells in it, for the client to
     /// know when it can fire again as soon as it fires.
-    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    pub fn fire(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: Dispersion, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         self.settle(now);
         if self.burst_shells.is_some() || !self.is_loaded(now) || self.magazine_shells == 0 {
@@ -257,7 +261,7 @@ impl GunLoader {
     }
 
     /// Fire a shell of the magazine, without waiting or reloading.
-    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    fn shoot(&mut self, start: Vec3, direction: Vec3, dispersion: Dispersion, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         if self.magazine_shells == 0 {
             return None;
@@ -329,7 +333,7 @@ impl GunLoader {
     /// Fire the next shell of the burst going on, if it is due by game time `now`, as
     /// [`Self::fire`] does, whose reload goes on. Once the burst empties the magazine,
     /// the gun loads its next shell.
-    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+    pub fn fire_burst(&mut self, now: f64, start: Vec3, direction: Vec3, dispersion: Dispersion, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
 
         let (left, at) = self.burst_shells.filter(|&(_, at)| now >= at)?;
         let Some(shot) = self.shoot(start, direction, dispersion, obstacles, vehicles) else {
@@ -510,14 +514,35 @@ fn first_left(ammo: &[(ShotDef, u32)]) -> Option<usize> {
     ammo.iter().position(|&(_, count)| count > 0)
 }
 
-/// A direction off `direction` by an angle within `angle`, uniformly over the cone's
-/// disc.
-fn disperse(direction: Vec3, angle: f32, rng: &mut impl Rng) -> Vec3 {
-    let off = angle * rng.r#gen::<f32>().sqrt();
+/// A direction off `direction` within the dispersion's angle, as far off as
+/// [`dispersed_share`] says, any way around.
+fn disperse(direction: Vec3, dispersion: Dispersion, rng: &mut impl Rng) -> Vec3 {
+    let off = dispersion.angle * dispersed_share(dispersion.focus, rng);
     let around = rng.r#gen::<f32>() * std::f32::consts::TAU;
     let side = direction.any_orthonormal_vector();
     let up = direction.cross(side);
     (direction * off.cos() + (side * around.cos() + up * around.sin()) * off.sin()).normalize()
+}
+
+/// How far off its centre a shot strays, as a share of the dispersion's radius `R`, by
+/// its `focus`: a 2D normal distribution of σ = R / k cut at the radius, whose distance
+/// is a Rayleigh's, drawn through its inverse. At full focus the radius is
+/// [`CENTERED_SIGMAS`] σ; with less, σ grows, to uniform over the disc at none (the
+/// limit k → 0 gives √u). k goes with √focus, so that the median share goes about
+/// linearly with the focus, from 0.53 (2σ) to 0.71 (uniform).
+///
+/// ```text
+///   k     = CENTERED_SIGMAS · √focus
+///   share = √( −2 · ln(1 + u · (e^(−k²/2) − 1)) ) / k,    u uniform in [0, 1]
+/// ```
+fn dispersed_share(focus: f32, rng: &mut impl Rng) -> f32 {
+    let u = rng.r#gen::<f32>();
+    let k = CENTERED_SIGMAS * focus.clamp(0.0, 1.0).sqrt();
+    if k < 1e-4 {
+        return u.sqrt();
+    }
+    let share = (-2.0 * (u * (-k * k / 2.0).exp_m1()).ln_1p()).sqrt() / k;
+    share.min(1.0)
 }
 
 /// Where a shell's flight starts, see [`fly`].
@@ -710,6 +735,9 @@ fn cross_terrain(obstacles: ShotObstacles, from: Vec3, to: Vec3) -> Option<f32> 
 #[cfg(test)]
 mod tests {
 
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
     use wgtk::space::destructibles::{DestructibleKind, Module, PenetrationLoss};
     use wgtk::space::statics::{PlacedDestructible, Statics, StaticTriangle};
 
@@ -718,6 +746,12 @@ mod tests {
     use crate::base::physics::World;
 
     use super::*;
+
+    /// No dispersion: shots go where the gun points.
+    const AIMED: Dispersion = Dispersion {
+        angle: 0.0,
+        focus: 1.0,
+    };
 
     fn shell() -> ShotDef {
         ShotDef {
@@ -745,23 +779,23 @@ mod tests {
     #[test]
     fn fires_then_reloads() {
         let mut gun = GunLoader::new(vec![(shell(), 2)], 10.0);
-        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         assert_eq!(shot.velocity, Vec3::Z * 800.0);
         assert_eq!(shot.landing, ShotLanding::Range);
         assert!((shot.end.length() - 720.0).abs() < 5.0);
-        assert!(gun.fire(5.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+        assert!(gun.fire(5.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).is_none());
         assert!(!gun.take_loaded(5.0));
         assert!(gun.take_loaded(10.0));
         assert!(!gun.take_loaded(10.0));
-        assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_some());
+        assert!(gun.fire(10.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).is_some());
         // Out of shells.
-        assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+        assert!(gun.fire(20.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).is_none());
     }
 
     #[test]
     fn ricochets_at_the_same_speed_for_the_rest_of_its_range() {
         let mut gun = GunLoader::new(vec![(shell(), 1)], 10.0);
-        let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        let mut shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         // As if it hit something 100 m on.
         shot.end = Vec3::Z * 100.0;
         shot.end_velocity = Vec3::Z * 800.0;
@@ -797,7 +831,7 @@ mod tests {
         let mut gun = GunLoader::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
         assert!(gun.select_next(shell_of(2).compact_descr.to_int()));
         assert_eq!(loaded_ids(&gun), (1, 2));
-        assert_eq!(gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap().def.compact_descr.id, 1);
+        assert_eq!(gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap().def.compact_descr.id, 1);
         assert_eq!(loaded_ids(&gun), (2, 2));
         // None of the first left to select.
         assert!(!gun.select_next(shell_of(1).compact_descr.to_int()));
@@ -807,7 +841,7 @@ mod tests {
     #[test]
     fn next_shell_falls_back_once_out() {
         let mut gun = GunLoader::new(vec![(shell_of(1), 1), (shell_of(2), 5)], 10.0);
-        gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         assert_eq!(loaded_ids(&gun), (2, 2));
     }
 
@@ -833,7 +867,7 @@ mod tests {
     }
 
     fn fire(gun: &mut GunLoader, now: f64) -> Option<Shot> {
-        gun.fire(now, Vec3::ZERO, Vec3::Z, 0.0, None, &[])
+        gun.fire(now, Vec3::ZERO, Vec3::Z, AIMED, None, &[])
     }
 
     fn magazine_shells(gun: &GunLoader) -> Vec<u32> {
@@ -878,17 +912,17 @@ mod tests {
         // The burst's other shells, then the magazine's interval.
         assert_eq!(gun.reload(), Some(Reload { base_time: 3.0, end: 3.0 }));
         assert!(fire(&mut gun, 0.1).is_none());
-        assert!(gun.fire_burst(0.4, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
-        let second = gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        assert!(gun.fire_burst(0.4, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).is_none());
+        let second = gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         assert_eq!((second.burst, second.id), (None, first.id + 1));
-        gun.fire_burst(1.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
-        assert!(gun.fire_burst(1.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).is_none());
+        gun.fire_burst(1.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
+        assert!(gun.fire_burst(1.5, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).is_none());
         assert_eq!(gun.reload(), Some(Reload { base_time: 3.0, end: 3.0 }));
         assert_eq!(magazine_shells(&gun), [3]);
         // The second burst empties the magazine.
         fire(&mut gun, 3.0).unwrap();
-        gun.fire_burst(3.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
-        gun.fire_burst(4.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        gun.fire_burst(3.5, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
+        gun.fire_burst(4.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         assert_eq!(gun.reload(), Some(Reload { base_time: 11.0, end: 14.0 }));
     }
 
@@ -897,7 +931,7 @@ mod tests {
         let mut gun = GunLoader::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(1, 2));
         assert_eq!(magazine_shells(&gun), [2]);
         assert_eq!(fire(&mut gun, 0.0).unwrap().burst, Some(2));
-        gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, 0.0, None, &[]).unwrap();
+        gun.fire_burst(0.5, Vec3::ZERO, Vec3::Z, AIMED, None, &[]).unwrap();
         assert_eq!(gun.reload(), Some(Reload { base_time: 10.5, end: 10.5 }));
     }
 
@@ -951,7 +985,7 @@ mod tests {
         };
         let hull = Affine3A::from_translation(Vec3::new(0.0, 0.0, 100.0));
         let target = ShotTarget { entity_id: 7, collision: Arc::new(collision), transforms: [hull; 4] };
-        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, None, &[target]).unwrap();
+        let shot = gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, None, &[target]).unwrap();
         let ShotLanding::Vehicle { entity_id: 7, hit, .. } = shot.landing else { panic!("missed: {:?}", shot.landing) };
         assert_eq!(hit.part, VehiclePart::Hull);
         assert_eq!(hit.material_kind, 1);
@@ -1010,7 +1044,7 @@ mod tests {
             space,
             rubble,
         };
-        gun.fire(0.0, Vec3::ZERO, Vec3::Z, 0.0, Some(obstacles), &[]).unwrap()
+        gun.fire(0.0, Vec3::ZERO, Vec3::Z, AIMED, Some(obstacles), &[]).unwrap()
     }
 
     #[test]
@@ -1074,10 +1108,40 @@ mod tests {
     #[test]
     fn dispersion_stays_within_its_angle() {
         let mut rng = rand::thread_rng();
-        for _ in 0..1000 {
-            let direction = disperse(Vec3::Z, 0.01, &mut rng);
-            assert!(direction.angle_between(Vec3::Z) <= 0.01 + 1e-5);
+        for focus in [0.0, 0.5, 1.0] {
+            let dispersion = Dispersion {
+                angle: 0.01,
+                focus,
+            };
+            for _ in 0..1000 {
+                let direction = disperse(Vec3::Z, dispersion, &mut rng);
+                assert!(direction.angle_between(Vec3::Z) <= 0.01 + 1e-5);
+            }
         }
+    }
+
+    #[test]
+    fn dispersion_gathers_with_its_focus() {
+
+        let mut rng = StdRng::seed_from_u64(1);
+
+        // Uniform over the disc: half the shots within 1/√2 of the radius.
+        let uniform = median_share(0.0, &mut rng);
+        assert!((uniform - 0.5f32.sqrt()).abs() < 0.01, "median {uniform}");
+        // Stopped, the radius is 2σ: half within 0.53 of it.
+        let centred = median_share(1.0, &mut rng);
+        assert!((centred - 0.532).abs() < 0.01, "median {centred}");
+        // Halfway, about halfway.
+        let half = median_share(0.5, &mut rng);
+        assert!((half - (uniform + centred) / 2.0).abs() < 0.01, "median {half}");
+
+    }
+
+    /// The median of many [`dispersed_share`]s at this focus.
+    fn median_share(focus: f32, rng: &mut StdRng) -> f32 {
+        let mut shares = (0..20_000).map(|_| dispersed_share(focus, rng)).collect::<Vec<_>>();
+        shares.sort_by(f32::total_cmp);
+        shares[shares.len() / 2]
     }
 
 }

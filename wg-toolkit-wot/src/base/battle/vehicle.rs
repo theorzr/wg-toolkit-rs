@@ -21,9 +21,9 @@ use crate::base::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
+use crate::base::physics::{Dispersion, Vehicle, VehicleId, World};
 use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
 use crate::game::collision::{VehicleCollision, VehiclePart};
-use crate::base::physics::{Vehicle, VehicleId, World};
 use crate::base::garage::player::Player;
 use crate::game::item_defs::VehicleDef;
 
@@ -348,7 +348,7 @@ impl BattleVehicle {
 
     /// Give its client, if a client drives it, what only it knows of it, `driven` in the
     /// world, its gun's marker as given, see [`ClientDriver::show`].
-    pub fn show_own(&mut self, app: &mut base::App, driven: &Vehicle, marker: (Vec3, Vec3, f32)) -> io::Result<()> {
+    pub fn show_own(&mut self, app: &mut base::App, driven: &Vehicle, marker: (Vec3, Vec3, Dispersion)) -> io::Result<()> {
         match &mut self.driver {
             Driver::Client(driver) => driver.show(app, driven, marker),
             Driver::Bot(_) | Driver::Nobody => Ok(()),
@@ -492,11 +492,11 @@ impl ClientDriver {
     /// Give its client what only it knows of its vehicle, `driven` in the world: its
     /// server reticle, from the gun's marker, its avatar where it is, what it aims from,
     /// which must turn with the hull, and the engine's RPM, then its gear when it shifts.
-    fn show(&mut self, app: &mut base::App, driven: &Vehicle, (position, velocity, dispersion): (Vec3, Vec3, f32)) -> io::Result<()> {
+    fn show(&mut self, app: &mut base::App, driven: &Vehicle, (position, velocity, dispersion): (Vec3, Vec3, Dispersion)) -> io::Result<()> {
         let (client, avatar) = (self.client, self.avatar);
         let Vehicle { hull, turret } = driven;
         if let Some(marker) = self.gun_marker {
-            app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion }))?;
+            app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion: dispersion.angle }))?;
         }
         // Every tick, to compare with what the client simulates.
         debug!(%client, "Stepped the vehicle: at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",

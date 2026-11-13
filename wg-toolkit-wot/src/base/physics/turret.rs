@@ -6,7 +6,8 @@
 //! aim is either a point in the world (the gun is raised so that the shell *drops onto*
 //! it, [`Turret::ballistic_direction`]) or fixed angles on the hull. It also keeps the
 //! gun's dispersion: it jumps up when the hull moves or turns or the turret turns, and
-//! shrinks back over the aiming time. On its roof, the hull rests on its turret, which
+//! shrinks back over the aiming time. Its shots gather toward the centre when the hull
+//! is stopped, and spread uniformly once it moves, see [`Dispersion`]. On its roof, the hull rests on its turret, which
 //! doesn't turn, nor its gun, until it is back on its tracks, see [`TURRET_UPRIGHT`].
 
 use glam::{Quat, Vec3};
@@ -19,6 +20,20 @@ use super::{wrap_angle, Hull};
 /// How upright its hull must be for its turret and its gun to turn, as its up axis'
 /// height: upside down, on its roof, it lies on its turret. Our choice.
 const TURRET_UPRIGHT: f32 = 0.0;
+
+/// How fast a hull goes, in m/s, for its shots to spread uniformly over the dispersion's
+/// disc, see [`Dispersion::focus`]. Our choice, 20 km/h.
+const UNIFORM_SPEED: f32 = 20.0 / 3.6;
+
+/// How a gun's shots stray from where it points, see [`Turret::gun_marker`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dispersion {
+    /// The angle they stay within, in radians.
+    pub angle: f32,
+    /// How much they gather toward the centre, from 1 (stopped, most centred) to 0
+    /// (moving, uniform over the disc).
+    pub focus: f32,
+}
 
 /// A turret and its gun, turning toward what the client aims at at their top speeds,
 /// the gun within its pitch limits at the turret's yaw.
@@ -169,14 +184,22 @@ impl Turret {
     }
 
     /// Where the gun fires from and the shell's initial velocity, as the client's
-    /// `getCurShotPosition` gives them, and the current dispersion angle: what the
-    /// server's gun marker shows.
-    pub fn gun_marker(&self, hull: &Hull) -> (Vec3, Vec3, f32) {
+    /// `getCurShotPosition` gives them, and the current dispersion: its angle, what the
+    /// server's gun marker shows, and how centred its shots are by the hull's speed on
+    /// the ground plane, full when stopped and none from [`UNIFORM_SPEED`].
+    pub fn gun_marker(&self, hull: &Hull) -> (Vec3, Vec3, Dispersion) {
+
         // Turret yaw, then gun pitch (positive downward), on the hull.
         let gun = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch);
         let direction = hull.rotation() * gun * Vec3::Z;
-        let dispersion = self.aiming.dispersion_angle * self.dispersion_factor;
+
+        let dispersion = Dispersion {
+            angle: self.aiming.dispersion_angle * self.dispersion_factor,
+            focus: 1.0 - (hull.speed.hypot(hull.slide) / UNIFORM_SPEED).min(1.0),
+        };
+
         (gun_position(hull, self), direction * self.aiming.shot_speed, dispersion)
+
     }
 
     /// The angles as the `gunAnglesPacked` property carries them, see `encodeGunAngles`:
@@ -269,10 +292,25 @@ mod tests {
         }
         assert!(((turret.dispersion_factor - 1.0) - (moving - 1.0) / std::f32::consts::E).abs() < 1e-3);
         // Aimed straight ahead, the shell leaves at the shot speed.
-        let (position, velocity, angle) = turret.gun_marker(&hull);
+        let (position, velocity, dispersion) = turret.gun_marker(&hull);
         assert_eq!(position, Vec3::new(0.0, GUN_HEIGHT, 0.0));
         assert!((velocity - Vec3::new(0.0, 0.0, 716.0)).length() < 1e-3);
-        assert!((angle - 0.0035 * turret.dispersion_factor).abs() < 1e-6);
+        assert!((dispersion.angle - 0.0035 * turret.dispersion_factor).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shots_gather_when_stopped_and_spread_when_moving() {
+        let mut hull = chieftain();
+        let turret = Turret::new(chieftain_aiming());
+        assert_eq!(turret.gun_marker(&hull).2.focus, 1.0);
+        hull.speed = UNIFORM_SPEED / 2.0;
+        assert!((turret.gun_marker(&hull).2.focus - 0.5).abs() < 1e-6);
+        // Sliding counts as moving.
+        hull.speed = 0.0;
+        hull.slide = UNIFORM_SPEED / 2.0;
+        assert!((turret.gun_marker(&hull).2.focus - 0.5).abs() < 1e-6);
+        hull.speed = -2.0 * UNIFORM_SPEED;
+        assert_eq!(turret.gun_marker(&hull).2.focus, 0.0);
     }
 
     #[test]

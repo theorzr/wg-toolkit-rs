@@ -203,7 +203,7 @@ use self::ground::ground_at;
 use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
-pub use self::turret::Turret;
+pub use self::turret::{Dispersion, Turret};
 
 
 /// The `vehicle_moveWith` flags, `MOVEMENT_FLAGS` in the client's `Avatar.py`.
