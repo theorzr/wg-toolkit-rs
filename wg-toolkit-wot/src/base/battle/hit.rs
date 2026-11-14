@@ -9,6 +9,27 @@ use crate::base::ballistics::gun::Shot;
 use crate::game::schema::HitPoint;
 
 
+/// `VEHICLE_HIT_FLAGS` of a shell piercing a vehicle, as captured: a direct projectile,
+/// through armour and a module.
+const HIT_FLAGS_PIERCED: u32 = HIT_FLAG_DIRECT | 0x100 | 0x10;
+/// `VEHICLE_HIT_FLAGS`: a direct projectile, an explosion beside the vehicle, a
+/// ricochet, armour of the vehicle's own, then a screen, not pierced, a screen pierced,
+/// the vehicle's own armour pierced by an explosion, and the vehicle killed.
+const HIT_FLAG_DIRECT: u32 = 0x100000;
+const HIT_FLAG_EXTERNAL_EXPLOSION: u32 = 0x200000;
+const HIT_FLAG_RICOCHET: u32 = 0x8;
+const HIT_FLAG_ARMOR_NOT_PIERCED: u32 = 0x20;
+const HIT_FLAG_SCREEN_NOT_PIERCED: u32 = 0x80;
+const HIT_FLAG_SCREEN_PIERCED: u32 = 0x40;
+const HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION: u32 = 0x2000;
+pub const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
+/// `VEHICLE_HIT_EFFECT`.
+const HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE: u8 = 0;
+const HIT_EFFECT_FINAL_RICOCHET: u8 = 2;
+const HIT_EFFECT_ARMOR_NOT_PIERCED: u8 = 3;
+const HIT_EFFECT_ARMOR_PIERCED: u8 = 4;
+
+
 /// What a shell does to a vehicle, see the module's documentation.
 #[derive(Debug)]
 pub struct ShellHit {
@@ -87,24 +108,3 @@ impl ShellHit {
     }
 
 }
-
-
-/// `VEHICLE_HIT_FLAGS` of a shell piercing a vehicle, as captured: a direct projectile,
-/// through armour and a module.
-const HIT_FLAGS_PIERCED: u32 = HIT_FLAG_DIRECT | 0x100 | 0x10;
-/// `VEHICLE_HIT_FLAGS`: a direct projectile, an explosion beside the vehicle, a
-/// ricochet, armour of the vehicle's own, then a screen, not pierced, a screen pierced,
-/// the vehicle's own armour pierced by an explosion, and the vehicle killed.
-const HIT_FLAG_DIRECT: u32 = 0x100000;
-const HIT_FLAG_EXTERNAL_EXPLOSION: u32 = 0x200000;
-const HIT_FLAG_RICOCHET: u32 = 0x8;
-const HIT_FLAG_ARMOR_NOT_PIERCED: u32 = 0x20;
-const HIT_FLAG_SCREEN_NOT_PIERCED: u32 = 0x80;
-const HIT_FLAG_SCREEN_PIERCED: u32 = 0x40;
-const HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION: u32 = 0x2000;
-pub const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
-/// `VEHICLE_HIT_EFFECT`.
-const HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE: u8 = 0;
-const HIT_EFFECT_FINAL_RICOCHET: u8 = 2;
-const HIT_EFFECT_ARMOR_NOT_PIERCED: u8 = 3;
-const HIT_EFFECT_ARMOR_PIERCED: u8 = 4;

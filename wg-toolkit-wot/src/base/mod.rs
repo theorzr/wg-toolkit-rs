@@ -50,7 +50,7 @@ use crate::game::account_commands::{
     CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS,
     CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, VehicleDef};
+use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, VehicleDef, VisionDef};
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::game::arena_defs::{ArenaTypeDef, STANDARD_GAMEPLAY};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
@@ -64,6 +64,60 @@ use garage::account::{self, Garage};
 use ballistics::gun::GunLoader;
 use garage::shop::Shop;
 pub use advertise::AdvertiseRule;
+
+
+/// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
+const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
+const ARENA_GUI_TYPE_RANDOM: u8 = 1;
+/// The tier of the battle.
+const BATTLE_LEVEL: i64 = 10;
+/// How many players a player may report each day.
+const DENUNCIATIONS: i16 = 10;
+/// The avatar's `customizationDisplayType`, as captured.
+const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
+/// The account's sessions count, enough not to be a new player, until accounts are
+/// stored.
+const ACCOUNT_SESSIONS: u64 = 1000;
+/// The version of the vehicle dossiers, any: the client drops its cached ones when
+/// it differs from theirs.
+const DOSSIERS_VERSION: i32 = 1;
+/// Why a client is kicked once its player logs in again from another: what it shows,
+/// and `ACCOUNT_KICK_REASONS.UNKNOWN`, the reason shown as is.
+const KICKED_LOGGED_IN_AGAIN: &str = "Logged in again from another client";
+const KICK_REASON_UNKNOWN: u8 = 0;
+/// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
+const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
+
+/// How often battles tick, 10 Hz as captured: the client times what it hears by the
+/// tick it comes with.
+const TICK: Duration = Duration::from_millis(100);
+
+/// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, whether the hull
+/// turns with the turret in sniper mode, reloading a magazine that is not full, and
+/// emptying a full one for the mechanics that do.
+const SETTING_CURRENT_SHELLS: u8 = 0;
+const SETTING_NEXT_SHELLS: u8 = 1;
+const SETTING_AUTOROTATION: u8 = 2;
+const SETTING_RELOAD_PARTIAL_CLIP: u8 = 17;
+const SETTING_RESET_FULL_CLIP: u8 = 18;
+
+/// `INVALID_EFFECT_INDEX`: no prefab effects for a shot, the client then only playing
+/// its legacy shot effects.
+const NO_PREFAB_EFFECTS: u8 = 255;
+
+/// How long the last step `explodeProjectile` gives is, in seconds. The captured
+/// server's are up to its 0.1 s ticks; the client projects the ground effects, the
+/// crater with them, along that step, so it must reach the client's ground.
+const EXPLOSION_STEP: f32 = 0.05;
+
+/// The `ground` effect material, its index in `EFFECT_MATERIALS`: effect materials in the
+/// order `system/data/material_kinds.xml` first names them.
+const GROUND_EFFECT_MATERIAL: u8 = 0;
+
+/// The consumables of the captured battle (repair kit, first aid kit, fire
+/// extinguisher), by integer descriptor, which every vehicle gets until accounts have
+/// their own.
+const CONSUMABLES: [i64; 3] = [1531, 1019, 507];
 
 
 pub fn run(args: AppBaseArgs, game_dir: &Path) -> CliResult<()> {
@@ -141,32 +195,6 @@ struct BattleClient {
     /// Its avatar, once created.
     avatar: Option<EntityKey<Avatar>>,
 }
-
-/// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
-const ARENA_BONUS_TYPE_REGULAR: u8 = 1;
-const ARENA_GUI_TYPE_RANDOM: u8 = 1;
-/// The tier of the battle.
-const BATTLE_LEVEL: i64 = 10;
-/// How many players a player may report each day.
-const DENUNCIATIONS: i16 = 10;
-/// The avatar's `customizationDisplayType`, as captured.
-const CUSTOMIZATION_DISPLAY_TYPE: u8 = 2;
-/// The account's sessions count, enough not to be a new player, until accounts are
-/// stored.
-const ACCOUNT_SESSIONS: u64 = 1000;
-/// The version of the vehicle dossiers, any: the client drops its cached ones when
-/// it differs from theirs.
-const DOSSIERS_VERSION: i32 = 1;
-/// Why a client is kicked once its player logs in again from another: what it shows,
-/// and `ACCOUNT_KICK_REASONS.UNKNOWN`, the reason shown as is.
-const KICKED_LOGGED_IN_AGAIN: &str = "Logged in again from another client";
-const KICK_REASON_UNKNOWN: u8 = 0;
-/// The `UpdateFrequencyNotification`'s field of unknown meaning, as captured.
-const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
-
-/// How often battles tick, 10 Hz as captured: the client times what it hears by the
-/// tick it comes with.
-const TICK: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 struct LoginClient {
@@ -516,6 +544,7 @@ impl BaseThread {
             shots: def.shots,
             aiming: def.aiming,
             magazine: def.magazine,
+            vision: def.vision,
             collision: def.collision,
         })
     }
@@ -904,20 +933,29 @@ impl BaseThread {
 /// about it, and what the server simulates it with.
 #[derive(Debug, Clone)]
 pub struct VehicleLoadout {
+    /// Its compact descriptor: its type and modules, which the clients show it by.
     descr: Vec<u8>,
+    /// Its health in full.
     max_health: u32,
     /// Its crew's compact descriptors, in crew order.
     crew: Vec<Vec<u8>>,
-    /// Its loadouts and the selected ones, see `account::GarageVehicle::setups`.
+    /// Its loadouts, see `account::GarageVehicle::setups`.
     setups: pickle::Value,
+    /// The loadouts selected, of each kind.
     setup_indexes: pickle::Value,
+    /// How it moves: its speeds, engine power, weight, rolling friction and bounds.
     mobility: MobilityDef,
+    /// How its turret and gun aim: their speeds, limits, dispersion and reload.
     aiming: AimingDef,
+    /// How its gun's shells come beyond one per reload: its magazine and bursts.
     magazine: MagazineDef,
+    /// How far it sees and how hard it is to see.
+    vision: VisionDef,
     /// Its shells, by integer descriptor, and how many of each.
     ammo: Vec<(i64, u32)>,
     /// How its gun fires each of its shells, in the order of `ammo`.
     shots: Vec<ShotDef>,
+    /// Its parts' collision models and armour, which shells hit.
     collision: Arc<VehicleCollision>,
 }
 
@@ -1155,15 +1193,6 @@ fn targeting_info(loadout: &VehicleLoadout) -> TargetingInfo {
     }
 }
 
-/// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, whether the hull
-/// turns with the turret in sniper mode, reloading a magazine that is not full, and
-/// emptying a full one for the mechanics that do.
-const SETTING_CURRENT_SHELLS: u8 = 0;
-const SETTING_NEXT_SHELLS: u8 = 1;
-const SETTING_AUTOROTATION: u8 = 2;
-const SETTING_RELOAD_PARTIAL_CLIP: u8 = 17;
-const SETTING_RESET_FULL_CLIP: u8 = 18;
-
 /// The `vehicleSettings` of a vehicle with this gun: its shell loaded, then the next one.
 fn vehicle_settings(entity_id: EntityId, gun: &GunLoader) -> Vec<VehicleSetting> {
     let (loaded, next) = gun.shells();
@@ -1207,21 +1236,3 @@ fn ammo_list(shells: impl Iterator<Item = (i64, u32, u32)>) -> Vec<VehicleAmmo> 
 fn gun_reload_time(base_time: f32, end_time: f32, time_left: f32) -> GunReloadTime {
     GunReloadTime { baseTime: base_time, clipTime: 0.0, endTime: end_time, timeLeft: time_left }
 }
-
-/// `INVALID_EFFECT_INDEX`: no prefab effects for a shot, the client then only playing
-/// its legacy shot effects.
-const NO_PREFAB_EFFECTS: u8 = 255;
-
-/// How long the last step `explodeProjectile` gives is, in seconds. The captured
-/// server's are up to its 0.1 s ticks; the client projects the ground effects, the
-/// crater with them, along that step, so it must reach the client's ground.
-const EXPLOSION_STEP: f32 = 0.05;
-
-/// The `ground` effect material, its index in `EFFECT_MATERIALS`: effect materials in the
-/// order `system/data/material_kinds.xml` first names them.
-const GROUND_EFFECT_MATERIAL: u8 = 0;
-
-/// The consumables of the captured battle (repair kit, first aid kit, fire
-/// extinguisher), by integer descriptor, which every vehicle gets until accounts have
-/// their own.
-const CONSUMABLES: [i64; 3] = [1531, 1019, 507];

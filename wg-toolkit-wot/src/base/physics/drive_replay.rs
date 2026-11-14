@@ -46,6 +46,14 @@ use super::{wrap_angle, Hull, Rubble, Vehicle, World};
 /// late, and the median errors over 1 s were half as large again.
 const CONTROL_DELAY: f64 = -0.06;
 
+/// How far the real vehicle must move over a window for it to count, in metres. Our
+/// choice: standing windows would count as perfect and hide the errors.
+const MOVED: f32 = 0.5;
+
+/// How long [`tilt_errors`] lets a hull rest, in seconds.
+const REST_TIME: f32 = 3.0;
+
+
 /// The seconds between two positions: the server sends one each tick, which reach the
 /// capture irregularly, bunched up after a stall, so always one tick. Measured: counted
 /// on the drives' 100 ms clock, their gaps are one tick but for as many of 0 as of 2.
@@ -94,11 +102,6 @@ impl CapturedSetup {
     }
 
 }
-
-/// How far the real vehicle must move over a window for it to count, in metres. Our
-/// choice: standing windows would count as perfect and hide the errors.
-const MOVED: f32 = 0.5;
-
 
 /// A server position of the vehicle.
 #[derive(Debug, Clone, Copy)]
@@ -411,9 +414,6 @@ fn tilt_errors(drive: &CapturedDrive, mobility: MobilityDef, space: &Space) -> [
         (median * 180.0 / PI, p90 * 180.0 / PI)
     })
 }
-
-/// How long [`tilt_errors`] lets a hull rest, in seconds.
-const REST_TIME: f32 = 3.0;
 
 #[test]
 fn hull_follows_the_real_server() {

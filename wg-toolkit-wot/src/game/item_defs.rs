@@ -32,6 +32,15 @@ pub const ROLES: &[(&str, u8)] = &[
     ("commander", 1), ("radioman", 2), ("driver", 3), ("gunner", 4), ("loader", 5),
 ];
 
+/// `DEFAULT_PIERCING_POWER_RANDOMIZATION`.
+const DEFAULT_PEN_RANDOMIZATION: f32 = 0.25;
+
+/// `SHELL_TYPES_LIST`: a shell kind's index is its position.
+const SHELL_KINDS: &[&str] = &[
+    "HOLLOW_CHARGE", "HIGH_EXPLOSIVE", "ARMOR_PIERCING", "ARMOR_PIERCING_HE", "ARMOR_PIERCING_CR", "SMOKE",
+];
+
+
 /// What it takes to give a vehicle to an account: its descriptor with the default
 /// modules, its crew and its default ammunition.
 #[derive(Debug, Clone)]
@@ -242,14 +251,6 @@ fn interpolate_by_distance([near, far]: [f32; 2], distance: f32) -> f32 {
     let t = (distance.max(first) - first) / (last - first);
     (near + (far - near) * t).max(0.0)
 }
-
-/// `DEFAULT_PIERCING_POWER_RANDOMIZATION`.
-const DEFAULT_PEN_RANDOMIZATION: f32 = 0.25;
-
-/// `SHELL_TYPES_LIST`: a shell kind's index is its position.
-const SHELL_KINDS: &[&str] = &[
-    "HOLLOW_CHARGE", "HIGH_EXPLOSIVE", "ARMOR_PIERCING", "ARMOR_PIERCING_HE", "ARMOR_PIERCING_CR", "SMOKE",
-];
 
 /// How the default turret and gun aim, in the units the client's own item loader
 /// converts them to: speeds in rad/s, dispersion factors per m/s and per rad/s.

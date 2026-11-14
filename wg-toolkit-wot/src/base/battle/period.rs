@@ -58,14 +58,19 @@ pub enum ArenaPeriod {
     /// Still fighting, a team exterminated: over at `at`, won by `winner`, or a draw
     /// ([`NO_WINNER`]).
     Exterminated {
+        /// The team left alive, or [`NO_WINNER`].
         winner: u8,
+        /// When the battle is over, [`EXTERMINATION_DELAY`] after.
         at: Instant,
     },
     /// Over: won by a team, or a draw ([`NO_WINNER`]), why, as `FINISH_REASON`, and
     /// until when its clients stay before they are sent back.
     AfterBattle {
+        /// The team that won, or [`NO_WINNER`].
         winner: u8,
+        /// Why it is over, as `FINISH_REASON`: a team exterminated, or its time up.
         reason: u8,
+        /// When its clients are sent back to their garage.
         until: Instant,
     },
 }

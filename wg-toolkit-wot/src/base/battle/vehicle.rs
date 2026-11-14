@@ -25,30 +25,40 @@ use crate::base::physics::{Dispersion, Vehicle, VehicleId, World};
 use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
 use crate::game::collision::{VehicleCollision, VehiclePart};
 use crate::base::garage::player::Player;
-use crate::game::item_defs::VehicleDef;
+use crate::game::item_defs::{VehicleDef, VisionDef};
 
 use super::spawn::TeamStart;
 use super::hit::ShellHit;
-use super::VIEW_RANGE;
 use super::bot::Bot;
 
 
 /// A vehicle of a battle, whoever drives it, with its entry in `vehiclesInfo`.
 #[derive(Debug)]
 pub struct BattleVehicle {
+    /// Its entity, which the clients see it as.
     pub entity: EntityKey<schema::Vehicle>,
+    /// Its team, one of the battle's `TEAMS`.
     pub team: u8,
-    /// Its `vehiclesInfo` entry, at `info_index`.
+    /// Its `vehiclesInfo` entry.
     pub info: VehicleInfo,
+    /// Its entry's index in `vehiclesInfo`, which a kill updates.
     pub info_index: u32,
     /// Who drives it.
     pub driver: Driver,
-    /// The vehicle the server simulates, in the battle's world, its gun and its collision
-    /// models.
+    /// The vehicle the server simulates, in the battle's world.
     pub id: VehicleId,
+    /// Its gun: its shells, its magazine and its reload.
     pub gun: GunLoader,
+    /// Its parts' collision models and armour, which shells hit.
     pub collision: Arc<VehicleCollision>,
+    /// How far it sees and how hard it is to see.
+    pub vision: VisionDef,
+    /// The game time it last fired at, which makes it easier to see for a while, see
+    /// [`Self::camouflage`].
+    last_shot: Option<f64>,
+    /// Its health left, none once destroyed.
     pub health: i64,
+    /// Its health in full, which it starts with.
     pub max_health: i64,
     /// The `engineMode` last sent, sent again only once it changes.
     engine_mode: Option<[u8; 2]>,
@@ -75,10 +85,14 @@ pub enum Driver {
 /// [`BattleVehicle::enter`].
 #[derive(Debug)]
 pub struct ClientDriver {
+    /// The client, which calls the vehicle's and its avatar's cell methods.
     client: ClientKey,
+    /// Its avatar, which the vehicle belongs to.
     avatar: EntityKey<Avatar>,
-    /// The vehicle's components the client has it with.
+    /// The vehicle's component of what only its driver knows of it: its gun, its ammo,
+    /// its view range.
     own_vehicle: Option<ComponentKey<OwnVehicle>>,
+    /// The vehicle's component of where the server has its gun aim, its server reticle.
     gun_marker: Option<ComponentKey<GunMarkerComponent>>,
     /// The avatar's `ownVehicleGear` last sent, sent again only once it changes.
     engine_gear: Option<u8>,
@@ -151,6 +165,8 @@ impl BattleVehicle {
                 .with_magazine(loadout.magazine)
                 .with_quick_change_factor(QUICK_SHELL_CHANGER_FACTOR),
             collision: loadout.collision.clone(),
+            vision: loadout.vision,
+            last_shot: None,
             health: loadout.max_health.into(),
             max_health: loadout.max_health.into(),
             engine_mode: None,
@@ -206,6 +222,8 @@ impl BattleVehicle {
             id: world.add(driven),
             gun,
             collision: def.collision.clone(),
+            vision: def.vision,
+            last_shot: None,
             health: def.max_health.into(),
             max_health: def.max_health.into(),
             engine_mode: None,
@@ -218,6 +236,32 @@ impl BattleVehicle {
 
     pub fn alive(&self) -> bool {
         self.health > 0
+    }
+
+    /// How hard it is to see at game time `now`, `driven` in the world, see
+    /// [`VisionDef`]: its moving camouflage once it moves faster than [`MOVING_SPEED`],
+    /// else its still one, the share it keeps at a shot for [`SHOT_REVEAL_TIME`] after
+    /// it fired.
+    pub fn camouflage(&self, driven: &Vehicle, now: f64) -> f32 {
+        
+        let hull = &driven.hull;
+        let camouflage = if hull.speed.hypot(hull.slide) > MOVING_SPEED {
+            self.vision.camouflage_moving
+        } else {
+            self.vision.camouflage_still
+        };
+
+        if self.last_shot.is_some_and(|at| now - at <= SHOT_REVEAL_TIME) {
+            camouflage * self.vision.camouflage_at_shot
+        } else {
+            camouflage
+        }
+    }
+
+    /// It fired a shell at game time `now`: it is easier to see for a while, see
+    /// [`Self::camouflage`].
+    pub fn fired(&mut self, now: f64) {
+        self.last_shot = Some(now);
     }
 
     /// Where its hull is in the world.
@@ -244,8 +288,12 @@ impl BattleVehicle {
         let entity_id = self.entity.id();
         let mut entity = app.entity(self.entity)?;
         let mut own_vehicle = entity.add_component::<OwnVehicle>(Audience::OwnClient)?;
-        // No crew or equipment bonus: the view range all vehicles have here.
-        own_vehicle.set_syncVehicleAttrs(VehicleSyncAttrs { circularVisionRadius: VIEW_RANGE as u16, gunPiercing: 1.0, gunShotsSpeed: 1.0 })?;
+        // Its own view range, which its minimap circles, no crew or equipment bonus.
+        own_vehicle.set_syncVehicleAttrs(VehicleSyncAttrs {
+            circularVisionRadius: self.vision.view_range as u16,
+            gunPiercing: 1.0,
+            gunShotsSpeed: 1.0,
+        })?;
         own_vehicle.set_targetingInfo(Some(targeting_info(loadout)))?;
         // What the real server sends right after, as updates: the ammunition, the
         // shells loaded, the reload and the health.
@@ -669,9 +717,13 @@ fn spread_damage(damage: f32) -> i64 {
 
 /// A shell's damage to a vehicle.
 struct Damage {
+    /// The vehicle that fired the shell.
     shooter: EntityId,
+    /// How much health the shell took, after its spread.
     amount: i64,
+    /// The vehicle's health in full, which the client shows the damage as a share of.
     max_health: i64,
+    /// The vehicle's health before the shell and after it.
     old_health: i64,
     new_health: i64,
 }
@@ -724,6 +776,14 @@ fn show_damage(
 /// capture, where the real server sets `isStrafing` on the ticks the player's vehicle
 /// moves sideways faster than 0.03 to 0.05 m/s, pushed, skidding or sliding down a slope.
 const STRAFING_SLIDE: f32 = 0.04;
+
+/// How fast a vehicle goes, in m/s, before it is seen as moving, with its moving
+/// camouflage. Our choice: a vehicle stopped still settles at none.
+const MOVING_SPEED: f32 = 0.1;
+
+/// How long a vehicle is easier to see after it fired, in seconds. Our choice, about
+/// how long the game's shows a shooter.
+const SHOT_REVEAL_TIME: f64 = 3.0;
 
 /// How much a shell's damage varies, either way, as a share of it.
 const DAMAGE_SPREAD: f32 = 0.25;

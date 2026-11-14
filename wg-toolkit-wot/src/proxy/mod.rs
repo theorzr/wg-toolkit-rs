@@ -31,6 +31,11 @@ use crate::{init_tracing, load_script, AppProxyArgs, CliResult};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message, LINK_POLL};
 
 
+/// Tracing target for the Python-level descriptions (see [`python`]), so they can be
+/// filtered on their own: `RUST_LOG=wot::python=info`.
+const PYTHON_TARGET: &str = "wot::python";
+
+
 pub fn run(args: AppProxyArgs, game_dir: &Path) -> CliResult<()> {
 
     init_tracing("proxy-trace.jsonl")?;
@@ -43,11 +48,6 @@ pub fn run(args: AppProxyArgs, game_dir: &Path) -> CliResult<()> {
     Ok(())
 
 }
-
-/// Tracing target for the Python-level descriptions (see [`python`]), so they can be
-/// filtered on their own: `RUST_LOG=wot::python=info`.
-const PYTHON_TARGET: &str = "wot::python";
-
 
 /// Sentinel `id_alias` value meaning "no alias assigned" -- confirmed against the leaked
 /// BigWorld 14.4.1 SDK (`server/cellapp/entity_cache.hpp`: `const IDAlias NO_ID_ALIAS =

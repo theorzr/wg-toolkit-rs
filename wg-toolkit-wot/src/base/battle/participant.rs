@@ -10,20 +10,22 @@ use wgtk::app::base::{self, ClientKey};
 
 use crate::game::schema::{Avatar, AvatarVehiclesInfo};
 use crate::base::{VehicleLoadout, TICK};
-use crate::base::physics::World;
 
 use super::vehicle::BattleVehicle;
+use super::spotting::Spotting;
 use super::period::ArenaPeriod;
-use super::VIEW_RANGE;
 
 
 /// See the module's documentation.
 #[derive(Debug)]
 pub struct Participant {
+    /// Its client, which the battle tells what it sees.
     pub client: ClientKey,
+    /// Its avatar, the player's entity, told the battle's period and shots.
     pub avatar: EntityKey<Avatar>,
-    /// Its vehicle's configuration, and its vehicle, by its index among the battle's.
+    /// Its vehicle's configuration.
     pub loadout: VehicleLoadout,
+    /// Its vehicle, by its index among the battle's.
     pub vehicle: usize,
     /// The arena's vehicles, on its own info entity.
     pub vehicles_info: ComponentKey<AvatarVehiclesInfo>,
@@ -55,29 +57,36 @@ impl Participant {
         }
     }
 
-    /// Show it the battle's vehicles, or hide them, as its own vehicle spots them: its
-    /// allies always, its enemies within [`VIEW_RANGE`]. Its own it always sees.
-    pub fn spot(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], world: &World) -> io::Result<()> {
-        let own = &vehicles[self.vehicle];
-        let position = world.vehicle(own.id).hull.position;
+    /// Show it the battle's vehicles, or hide them, as its team spots them at game time
+    /// `now`, see [`Spotting`]: its allies always, its enemies once spotted. Its own it
+    /// always sees, and a wreck stays as it was when destroyed.
+    pub fn spot(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], spotting: &Spotting, now: f64) -> io::Result<()> {
+        
+        let team = vehicles[self.vehicle].team;
         for (index, vehicle) in vehicles.iter().enumerate() {
-            if index == self.vehicle {
+            
+            if index == self.vehicle || !vehicle.alive() {
                 continue;
             }
-            let offset = world.vehicle(vehicle.id).hull.position - position;
-            let spotted = vehicle.team == own.team || offset.x.hypot(offset.z) <= VIEW_RANGE;
+
+            let spotted = vehicle.team == team || spotting.spotted(team, index, now);
             if spotted == self.spotted[index] {
                 continue;
             }
+
             self.spotted[index] = spotted;
             if spotted {
                 app.show(self.client, vehicle.entity)?;
             } else {
                 app.hide(self.client, vehicle.entity)?;
             }
+
             info!(client = %self.client, entity_id = %vehicle.entity.id(), team = vehicle.team, "{} a vehicle", if spotted { "Spotted" } else { "Lost" });
+
         }
+
         Ok(())
+        
     }
 
     /// Tell its client the battle's period, as long as is left of it: its game time is

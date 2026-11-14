@@ -17,6 +17,7 @@
 //! ```text
 //!   (here)       a battle: made, its tick, its shells landing, its clients' calls
 //!   participant  a client in it: its avatar, its vehicle, what it sees
+//!   spotting     what each team spots of the other's vehicles
 //!   period       waiting, counting down, fighting
 //!   vehicle      a vehicle of it, a player's or a bot's: shown, its gun, damaged
 //!   bot          the server driving a vehicle: its way, its aim, when it fires
@@ -27,6 +28,7 @@
 //! ```
 
 mod participant;
+mod spotting;
 mod period;
 mod vehicle;
 mod bot;
@@ -64,8 +66,25 @@ use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
 use hit::{ShellHit, HIT_FLAG_VEHICLE_KILLED};
 use participant::Participant;
+use spotting::Spotting;
 use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
+
+
+/// The two teams, as the clients know them.
+const TEAMS: [u8; 2] = [1, 2];
+
+/// The scale of the packed horizontal offsets in position updates, as captured: we only
+/// send detailed ones.
+const PACKED_XZ_SCALE: f32 = 0.007644442;
+
+/// The farthest a vehicle spots others, in metres on the ground plane, whatever its own
+/// view range: `VISIBILITY.MAX_RADIUS`. Bots see as far, their own enemies.
+const VIEW_RANGE: f32 = 445.0;
+
+/// How long a battle waits for the clients switched into it to enter before it is made
+/// with those that did. Our choice: a client logs in again within a second or two.
+const GATHER_WAIT: Duration = Duration::from_secs(20);
 
 
 /// A battle, with its clients, see the module's documentation.
@@ -73,6 +92,7 @@ use spawn::TeamStart;
 pub struct Battle {
     /// Its id, which its clients are switched into it with.
     id: u32,
+    /// The app's space it is in, its entities' and its clients' cells'.
     space: SpaceKey,
     /// When it was made, at 0: the battle's clock.
     clock: Instant,
@@ -80,12 +100,20 @@ pub struct Battle {
     options: BattleOptions,
     /// Its clients, each driving one of its vehicles.
     participants: Vec<Participant>,
+    /// Its period: waiting for its clients, counting down, fighting or over, see
+    /// [`ArenaPeriod::next`].
     period: ArenaPeriod,
-    /// Its vehicles, its clients' first, then the bots on either side, and the world
-    /// they move in.
+    /// Its vehicles, its clients' first, then the bots on either side: their index here
+    /// is their `vehiclesInfo` entry's.
     vehicles: Vec<BattleVehicle>,
+    /// The world its vehicles move in, on its map's space: their hulls and turrets, and
+    /// what broke of the map.
     world: World,
+    /// What each team spots of the other's vehicles, which its clients see.
+    spotting: Spotting,
+    /// The shells in flight, until they land.
     shells: Shells,
+    /// The destructibles' entities of its map's chunks, telling the clients what broke.
     areas: DestructibleAreas,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
     targets: Vec<ShotTarget>,
@@ -100,7 +128,14 @@ pub struct BattleOptions {
     pub team_size: u32,
     /// The vehicles bots drive, each the next, round: the first client's own when none.
     pub bot_vehicles: Vec<VehicleDef>,
+    /// Whether bots fire at their target, see [`Bot::fires`].
+    ///
+    /// [`Bot::fires`]: bot::Bot::fires
     pub bots_fire: bool,
+    /// Whether bots drive to their enemies, else only turn their turret to them, see
+    /// [`Bot::drive`].
+    ///
+    /// [`Bot::drive`]: bot::Bot::drive
     pub bots_drive: bool,
     /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
@@ -111,9 +146,11 @@ pub struct BattleOptions {
 /// What a battle is made of, its clients aside.
 #[derive(Debug)]
 pub struct BattleSetup<'a> {
-    /// Its map, and the map's space, which its vehicles move in.
+    /// Its map: its bounds, its bases and spawn points.
     pub map: &'a ArenaTypeDef,
+    /// The map's space, which its vehicles move in: its terrain and static models.
     pub space: Arc<Space>,
+    /// How big its teams are, and what its bots do.
     pub options: BattleOptions,
     /// The vehicle bots drive when the options give none: the first client's.
     pub own_def: Option<VehicleDef>,
@@ -122,9 +159,13 @@ pub struct BattleSetup<'a> {
 /// A client entering a battle, with its avatar.
 #[derive(Debug)]
 pub struct Arrival {
+    /// The client, connected again to this base app for the battle.
     pub client: ClientKey,
+    /// Its avatar, created for it as it entered, base side only until the battle is made.
     pub avatar: EntityKey<Avatar>,
+    /// Who plays it: the name and id the others see.
     pub player: Player,
+    /// The vehicle it goes to battle with.
     pub loadout: VehicleLoadout,
 }
 
@@ -132,9 +173,11 @@ pub struct Arrival {
 /// them, see [`crate::base`].
 #[derive(Debug)]
 pub struct Gathering {
-    /// How many clients were switched into it, and those that entered.
+    /// How many clients were switched into it.
     pub expected: usize,
+    /// Those that entered so far, in the order they did.
     pub arrivals: Vec<Arrival>,
+    /// When it started gathering, which [`GATHER_WAIT`] counts from.
     since: Instant,
 }
 
@@ -163,7 +206,7 @@ impl Battle {
     /// their avatars: their vehicles, on either team in turn, in rows from their team's
     /// start, their avatars' cell sides on them, then the bots filling each team, and each
     /// client's arena info entity, which each client gets in that order. Each sees its
-    /// allies and the enemies its vehicle spots, see [`Participant::spot`].
+    /// allies and the enemies its team spots, see [`Participant::spot`].
     pub fn new(app: &mut base::App, setup: BattleSetup, space: SpaceKey, id: u32, arrivals: Vec<Arrival>) -> io::Result<Self> {
 
         let BattleSetup { map, space: map_space, options, own_def } = setup;
@@ -269,6 +312,7 @@ impl Battle {
             options,
             participants,
             period: ArenaPeriod::new(),
+            spotting: Spotting::new(vehicles.len()),
             vehicles,
             world,
             shells: Shells::default(),
@@ -444,6 +488,7 @@ impl Battle {
             return Ok(());
         };
         info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+        own.fired(now);
         own.show_gun(app, now)?;
         show_shot(app, &avatars, own.entity, &shot)?;
         shells.fly(now, own_id, shot);
@@ -523,8 +568,8 @@ impl Battle {
 
     /// Step it by a tick: every vehicle moves as its driver drives it, a wreck or one
     /// nobody drives stopping where it was shoved, and those that ran into each other are
-    /// pushed apart, see [`World::step`]. Then each client is shown the vehicles its own
-    /// spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
+    /// pushed apart, see [`World::step`]. Then each team spots the other's vehicles, see
+    /// [`Spotting`], each client is shown those its team spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
     /// target too, which it sees, with no ally in the way, see [`Bot::fires`], as its
     /// options say, and the clients see each where it is, see [`BattleVehicle::show`].
     ///
@@ -537,7 +582,7 @@ impl Battle {
         let drives = fighting && self.options.bots_drive;
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, shells, targets, .. } = self;
+        let Self { participants, vehicles, world, spotting, shells, targets, .. } = self;
 
         for index in 0..vehicles.len() {
             let enemies = enemies_of(vehicles, world, index);
@@ -551,8 +596,9 @@ impl Battle {
         }
         world.step(TICK.as_secs_f32());
 
+        spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {
-            participant.spot(app, vehicles, world)?;
+            participant.spot(app, vehicles, spotting, now)?;
         }
 
         for index in 0..vehicles.len() {
@@ -574,6 +620,7 @@ impl Battle {
                 vehicles[index].show_wreck(app, world.vehicle(vehicles[index].id))?;
                 continue;
             }
+            
             fill_targets(targets, vehicles, world, vehicles[index].entity.id());
             let allies = allies_of(vehicles, world, index);
             let vehicle = &mut vehicles[index];
@@ -586,6 +633,7 @@ impl Battle {
                 space: world.space(),
                 rubble: world.rubble(),
             });
+            
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
             let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, obstacles, targets);
@@ -594,8 +642,10 @@ impl Battle {
                     shot = vehicle.gun.fire(now, position, velocity, dispersion, obstacles, targets);
                 }
             }
+
             if let Some(shot) = shot {
                 info!(battle = id, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+                vehicle.fired(now);
                 vehicle.show_burst(app)?;
                 show_shot(app, &avatars, vehicle.entity, &shot)?;
                 shells.fly(now, vehicle.entity.id(), shot);
@@ -838,19 +888,3 @@ fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world
         .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
         .map(|vehicle| vehicle.shot_target(world)));
 }
-
-
-/// The two teams, as the clients know them.
-const TEAMS: [u8; 2] = [1, 2];
-
-/// The scale of the packed horizontal offsets in position updates, as captured: we only
-/// send detailed ones.
-const PACKED_XZ_SCALE: f32 = 0.007644442;
-
-/// How far a vehicle spots others, in metres on the ground plane: the most any vehicle
-/// can see, until vehicles have their own.
-const VIEW_RANGE: f32 = 445.0;
-
-/// How long a battle waits for the clients switched into it to enter before it is made
-/// with those that did. Our choice: a client logs in again within a second or two.
-const GATHER_WAIT: Duration = Duration::from_secs(20);

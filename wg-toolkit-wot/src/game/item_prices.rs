@@ -16,21 +16,6 @@ use super::item_defs::{self, NATIONS};
 use super::items::{item_type, IntCompactDescr};
 
 
-/// An item's price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Price {
-    /// `credits`, `gold`, `crystal`, `xp`, `freeXP` or `equipCoin`.
-    pub currency: &'static str,
-    pub amount: i64,
-}
-
-/// The prices of every item, and the items not in the shop.
-#[derive(Debug, Default)]
-pub struct ItemPrices {
-    pub prices: Vec<(IntCompactDescr, Price)>,
-    pub not_in_shop: Vec<IntCompactDescr>,
-}
-
 /// The currencies a price can be in other than credits, as `_xml.readPrice` reads them.
 const CURRENCIES: &[&str] = &["gold", "crystal", "xp", "freeXP", "equipCoin"];
 
@@ -46,6 +31,22 @@ const MODULES: &[(&str, &str, u8)] = &[
 
 /// The nation of optional devices and equipment, `nations.NONE_INDEX`.
 const NO_NATION: u8 = 15;
+
+
+/// An item's price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Price {
+    /// `credits`, `gold`, `crystal`, `xp`, `freeXP` or `equipCoin`.
+    pub currency: &'static str,
+    pub amount: i64,
+}
+
+/// The prices of every item, and the items not in the shop.
+#[derive(Debug, Default)]
+pub struct ItemPrices {
+    pub prices: Vec<(IntCompactDescr, Price)>,
+    pub not_in_shop: Vec<IntCompactDescr>,
+}
 
 impl ItemPrices {
 

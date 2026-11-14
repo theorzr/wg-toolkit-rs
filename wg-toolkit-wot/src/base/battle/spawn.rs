@@ -10,9 +10,23 @@ use wgtk::space::terrain::Terrain;
 use crate::game::arena_defs::{ArenaTypeDef, Spawn};
 
 
+/// How far behind its base a team starts, in metres, on maps without spawn points: about
+/// as captured.
+const SPAWN_BEHIND_BASE: f32 = 40.0;
+/// How far inside the map's bounds a team starts at least, in metres.
+const SPAWN_MARGIN: f32 = 20.0;
+
+/// How far apart a team's vehicles start side by side, in metres, and its rows of
+/// [`SLOT_ROW`] one behind the other.
+const SLOT_SPACING: f32 = 12.0;
+const ROW_SPACING: f32 = 15.0;
+const SLOT_ROW: u32 = 5;
+
+
 /// Where a vehicle starts.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamStart {
+    /// Where on the ground, in the map's space.
     pub position: Vec3,
     /// Roll, pitch and yaw.
     pub direction: Vec3,
@@ -92,16 +106,3 @@ fn spawn_point(spawn: Spawn) -> Vec2 {
 fn packed_yaw(yaw: f32) -> f32 {
     (yaw + PI).rem_euclid(TAU) - PI
 }
-
-
-/// How far behind its base a team starts, in metres, on maps without spawn points: about
-/// as captured.
-const SPAWN_BEHIND_BASE: f32 = 40.0;
-/// How far inside the map's bounds a team starts at least, in metres.
-const SPAWN_MARGIN: f32 = 20.0;
-
-/// How far apart a team's vehicles start side by side, in metres, and its rows of
-/// [`SLOT_ROW`] one behind the other.
-const SLOT_SPACING: f32 = 12.0;
-const ROW_SPACING: f32 = 15.0;
-const SLOT_ROW: u32 = 5;

@@ -56,6 +56,8 @@ const WALL_MARGIN: f32 = 3.0;
 /// How much more a step costs at a tank's half width from a wall than [`WALL_MARGIN`]
 /// further off. Our choice.
 const WALL_COST: f32 = 2.0;
+/// The cells next to a cell, by their offsets: its sides and its corners.
+const NEIGHBOURS: [(isize, isize); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
 
 
 /// See the module's documentation.
@@ -312,9 +314,6 @@ impl NavGrid {
 fn cell_vec((column, row): (usize, usize)) -> Vec2 {
     Vec2::new(column as f32, row as f32)
 }
-
-/// The cells next to a cell, by their offsets: its sides and its corners.
-const NEIGHBOURS: [(isize, isize); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
 
 /// A cell to look from in [`NavGrid::path`], by the cost of the way through it to the goal
 /// as estimated, least first.

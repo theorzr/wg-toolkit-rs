@@ -17,6 +17,15 @@ use crate::base::physics::{wrap_angle, Breakage, DestructiblePiece};
 use crate::game::schema::AreaDestructibles;
 
 
+/// How far from the middle of its chunk an [`AreaDestructibles`] entity is, in metres:
+/// `RADIUS_FOR_LOCATION_AD` in the client's `DestructiblesCache.py`.
+const AREA_OFFSET: f32 = 4.5;
+/// How fast a vehicle goes for each step of a column's fall speed, in m/s, of 3 at
+/// most. Fitted: the captured Pershing knocked down lamp posts at 5.5 and 12 m/s, which
+/// fell at 2 and 3.
+const FALL_SPEED_STEP: f32 = 2.5;
+
+
 /// The destructibles' entities of a battle's chunks, see the module's documentation.
 #[derive(Debug)]
 pub struct DestructibleAreas {
@@ -27,9 +36,16 @@ pub struct DestructibleAreas {
 /// A chunk's destructibles entity, and what it lists as broken.
 #[derive(Debug)]
 struct Area {
+    /// Its `AreaDestructibles` entity, near the chunk's middle, see [`AREA_OFFSET`].
     entity: EntityKey<AreaDestructibles>,
+    /// Its `destroyedModules`: each structure's module broken, by its index in the
+    /// chunk, big-endian, then the module and whether a shot broke it.
     modules: Vec<[u8; 3]>,
+    /// Its `destroyedFragiles`: each fragile broken, by its index, then whether a shot
+    /// broke it.
     fragiles: Vec<[u8; 3]>,
+    /// Its `fallenColumns`: each column knocked down, by its index, then the way it
+    /// fell and how fast, see [`FALL_SPEED_STEP`].
     columns: Vec<[u8; 3]>,
 }
 
@@ -155,12 +171,3 @@ fn area_position(chunk_id: u16) -> Vec3 {
 fn pack_angle(angle: f32) -> u8 {
     ((wrap_angle(angle) + PI) / (2.0 * PI) * 63.0).round() as u8
 }
-
-
-/// How far from the middle of its chunk an [`AreaDestructibles`] entity is, in metres:
-/// `RADIUS_FOR_LOCATION_AD` in the client's `DestructiblesCache.py`.
-const AREA_OFFSET: f32 = 4.5;
-/// How fast a vehicle goes for each step of a column's fall speed, in m/s, of 3 at
-/// most. Fitted: the captured Pershing knocked down lamp posts at 5.5 and 12 m/s, which
-/// fell at 2 and 3.
-const FALL_SPEED_STEP: f32 = 2.5;

@@ -208,8 +208,11 @@ impl Bot {
 /// hull's centre, and whether it sees it now.
 #[derive(Debug, Clone, Copy)]
 struct Target {
+    /// Its vehicle, in the world.
     vehicle: VehicleId,
+    /// Where the bot last saw its hull's centre.
     at: Vec3,
+    /// Whether the bot sees it now, which it fires at only then.
     seen: bool,
 }
 
