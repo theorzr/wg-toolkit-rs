@@ -15,6 +15,10 @@ use super::seq::Seq;
 /// `1500 - 28 = 1472`, this includes the 4-bytes prefix. When prefix use is disabled
 /// then it's only 1468 that the interface is able to receive.
 pub const PACKET_CAP: usize = 1472;
+/// The length a packet may grow to, see [`Packet::grow`]: its capacity, but the room its
+/// encryption takes once sent, [`PACKET_ENCRYPTION_SPARE_LEN`]. A packet received may be
+/// longer, up to [`PACKET_CAP`].
+pub const PACKET_MAX_LEN: usize = PACKET_CAP - PACKET_ENCRYPTION_SPARE_LEN;
 /// The length of the unknown 4-byte prefix.
 pub const PACKET_PREFIX_LEN: usize = 4;
 /// Flags are u16.
@@ -33,6 +37,11 @@ pub const PACKET_HEADER_LEN: usize = PACKET_PREFIX_LEN + PACKET_FLAGS_LEN;
 /// - 8 for indexed channel
 /// - 4 for checksum
 pub const PACKET_RESERVED_FOOTER_LEN: usize = 8 + 2 + 4 + 4 + 1 + 4 + 4 + 8 + 4;
+/// How much a packet grows at most once encrypted, see `socket`: the encryption's magic,
+/// 4 bytes, its wastage count, 1, and its padding to the cipher's block, 7 at most.
+/// Without it, see [`PACKET_MAX_LEN`], a packet filled to its capacity would overflow it
+/// once encrypted.
+pub const PACKET_ENCRYPTION_SPARE_LEN: usize = 4 + 1 + 7;
 
 
 /// Raw packet layout with only data and length. This structure provides functions for
@@ -108,7 +117,7 @@ impl Packet {
     }
 
     /// Set the length of this packet. The function panics if the length
-    /// is not at least `PACKET_MIN_LEN` or at most `PACKET_MAX_LEN`.
+    /// is not at least [`PACKET_HEADER_LEN`] or at most [`PACKET_CAP`].
     #[inline]
     pub fn set_len(&mut self, len: usize) {
         assert!(len >= PACKET_HEADER_LEN, "given length too small");
@@ -116,10 +125,11 @@ impl Packet {
         self.inner.len = len as u16;
     }
 
-    /// Return the available length in this packet.
+    /// Return the available length in this packet, what it may still grow by, up to
+    /// [`PACKET_MAX_LEN`]: none for a packet received longer.
     #[inline]
     pub fn free(&self) -> usize {
-        PACKET_CAP - self.len()
+        PACKET_MAX_LEN.saturating_sub(self.len())
     }
 
     /// Get a slice to the data, with the packet's length.
@@ -826,15 +836,14 @@ impl PacketConfig {
 
             // Debug assert, and cap to the max number of acks.
             debug_assert!(available_len >= 4, "PACKET_MIN_FOOTER_LEN should ensure at least one single ack");
-            let available_len = available_len.min(u8::MAX as usize * 4);
+            let mut available_len = available_len.min(u8::MAX as usize * 4);
 
             let mut count = 0u8;
-            while let Some(ack) = self.single_acks.pop_front() {
+            while available_len >= 4 {
+                let Some(ack) = self.single_acks.pop_front() else { break };
                 count += 1;
                 packet.grow(4).write_u32(ack.get()).unwrap();
-                if available_len < 4 {
-                    break;
-                }
+                available_len -= 4;
             }
 
             debug_assert!(count != 0);

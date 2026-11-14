@@ -14,10 +14,10 @@ use super::element::{Element, Reply, REPLY_ID};
 use super::codec::Codec;
 
 
-/// The maximum length for writing bundle elements, it's basically the packet capacity 
+/// The maximum length for writing bundle elements, it's basically the packet max length
 /// with prefix, flags and reserved footer length subtracted.
 pub const BUNDLE_PACKET_CAP: usize = 
-    packet::PACKET_CAP - 
+    packet::PACKET_MAX_LEN - 
     packet::PACKET_HEADER_LEN - 
     packet::PACKET_RESERVED_FOOTER_LEN;
     

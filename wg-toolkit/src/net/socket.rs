@@ -20,6 +20,9 @@ const ENCRYPTION_MAGIC: [u8; 4] = 0xDEADBEEFu32.to_le_bytes();
 /// Encryption footer length, 1 byte for wastage count + 4 bytes magic.
 const ENCRYPTION_FOOTER_LEN: usize = ENCRYPTION_MAGIC.len() + 1;
 
+// What encrypting a packet adds at most, its footer and padding, packets leave free.
+const _: () = assert!(ENCRYPTION_FOOTER_LEN + BLOCK_SIZE - 1 <= packet::PACKET_ENCRYPTION_SPARE_LEN);
+
 
 /// A tiny wrapper around UDP socket that allows sending and receiving raw packets, with
 /// support for encryption of specific socket addresses.
@@ -342,6 +345,48 @@ mod encryption_packet {
     pub fn put(mut packet: Packet) {
         packet.reset();
         ENCRYPTION_PACKET.set(Some(packet));
+    }
+
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use std::num::NonZero;
+
+    use blowfish::cipher::KeyInit;
+
+    use super::super::bundle::BUNDLE_PACKET_CAP;
+    use super::super::packet::PacketConfig;
+    use super::super::seq::Seq;
+    use super::*;
+
+    #[test]
+    fn full_packet_fits_once_encrypted() {
+
+        // A packet filled with as much data as a bundle puts, and every footer, a
+        // hundred single acks pending: encrypted, it still fits.
+        let mut packet = Packet::new();
+        packet.grow(BUNDLE_PACKET_CAP).fill(0xAA);
+
+        let mut config = PacketConfig::new();
+        config.set_sequence_range(Seq::new(1).unwrap(), Seq::new(3).unwrap());
+        config.set_first_request_offset(0);
+        config.set_last_reliable_sequence_num(Seq::new(1).unwrap());
+        config.set_reliable(true);
+        config.set_sequence_num(Seq::new(2).unwrap());
+        config.set_cumulative_ack(Seq::new(1).unwrap());
+        config.set_indexed_channel(NonZero::new(1).unwrap(), NonZero::new(1).unwrap());
+        config.set_has_checksum(true);
+        config.single_acks_mut().extend((0..100).map(|num| Seq::new(num).unwrap()));
+        packet.write_config(&mut config);
+        assert!(!config.single_acks().is_empty(), "every ack written");
+
+        let blowfish = Blowfish::new_from_slice(&[7; 16]).unwrap();
+        let encrypted = encrypt_packet(packet, &blowfish);
+        assert!(encrypted.len() <= packet::PACKET_CAP, "{}", encrypted.len());
+
     }
 
 }
