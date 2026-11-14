@@ -190,6 +190,7 @@ use std::ops::Deref;
 use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles};
 use tracing::warn;
 
+use wgtk::space::statics::{BodyKind, StaticTriangle};
 use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
@@ -228,6 +229,10 @@ const GRAVITY: f32 = 9.81;
 const REST_TICKS: u8 = 5;
 const REST_SPEED: f32 = 0.02;
 const REST_SPIN: f32 = 0.01;
+/// How long each ray a sight line is cast in is, in metres, see [`World::sees`]: one
+/// long ray would take in every terrain cell and model of its box. Our choice, the
+/// length found fast on Malinovka, about 12 µs a sight line.
+const SIGHT_PIECE: f32 = 8.0;
 
 /// A vehicle of a [`World`]. It is stale once the vehicle is removed, even if another one
 /// takes its place.
@@ -323,6 +328,38 @@ impl<S: Deref<Target = Space>> World<S> {
             self.nav_broken = broken;
         }
         nav.path(from, to, radius, &self.space, &blocking(&self.space, &self.rubble))
+    }
+
+    /// Whether nothing of its map stands between two points: the terrain and static
+    /// models stop the line, but what shells or vehicles pass (light fences, camera-only
+    /// walls), and of the destructibles only what of a structure still stands (a house's
+    /// walls), as a vehicle is stopped by, see `Rubble::blocks`; not fences nor posts,
+    /// nor vehicles. Our choice. The line is cast as rays [`SIGHT_PIECE`] long, end to
+    /// end.
+    pub fn sees(&self, from: Vec3, to: Vec3) -> bool {
+
+        let offset = to - from;
+        let length = offset.length();
+        if length <= f32::EPSILON {
+            return true;
+        }
+        let direction = offset / length;
+
+        let mut along = 0.0;
+        while along < length {
+            let piece = SIGHT_PIECE.min(length - along);
+            let hit = self.space.ray(from + direction * along, direction, piece, &|triangle: &StaticTriangle| {
+                !triangle.shells_pass
+                    && !triangle.vehicles_pass
+                    && (triangle.kind != BodyKind::Destructible || self.rubble.blocks(&self.space.statics, triangle))
+            });
+            if hit.is_some() {
+                return false;
+            }
+            along += piece;
+        }
+        true
+
     }
 
     // -- Its vehicles --
@@ -860,4 +897,57 @@ pub fn wrap_angle(angle: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
     let wrapped = angle.rem_euclid(TAU);
     if wrapped > PI { wrapped - TAU } else { wrapped }
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use wgtk::space::statics::Statics;
+
+    use super::fixtures::blocks;
+    use super::*;
+
+    /// A wall 40 m wide and 3 m high across +Z at 40 m, shells passing it if
+    /// `shells_pass`, a light fence say.
+    fn fence(shells_pass: bool) -> Space {
+        let [a, b, c, d] = [
+            Vec3::new(-20.0, 0.0, 40.0),
+            Vec3::new(20.0, 0.0, 40.0),
+            Vec3::new(20.0, 3.0, 40.0),
+            Vec3::new(-20.0, 3.0, 40.0),
+        ];
+        let triangles = [[a, b, c], [a, c, d]].map(|points| StaticTriangle {
+            shells_pass,
+            ..StaticTriangle::new(points, 1, 0, BodyKind::Solid)
+        });
+        Space {
+            statics: Statics::from_triangles(triangles.to_vec()),
+            ..Space::default()
+        }
+    }
+
+    #[test]
+    fn sees_over_and_round_walls_not_through() {
+
+        // A wall 40 m off, so that a 100 m line meets it in its fifth piece.
+        let space = blocks(&[(Vec3::new(-20.0, 0.0, 39.0), Vec3::new(20.0, 3.0, 41.0))]);
+        let world = World::new(&space, None);
+        let from = Vec3::new(0.0, 2.0, 0.0);
+        assert!(!world.sees(from, Vec3::new(0.0, 2.0, 100.0)));
+        // Over it, round it, short of it.
+        assert!(world.sees(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 5.0, 100.0)));
+        assert!(world.sees(from, Vec3::new(-60.0, 2.0, 100.0)));
+        assert!(world.sees(from, Vec3::new(0.0, 2.0, 35.0)));
+        // Nor into the ground.
+        assert!(!world.sees(from, Vec3::new(0.0, -1.0, 30.0)));
+
+        // A wall shells fly through hides nothing.
+        let space = fence(false);
+        assert!(!World::new(&space, None).sees(from, Vec3::new(0.0, 2.0, 100.0)));
+        let space = fence(true);
+        assert!(World::new(&space, None).sees(from, Vec3::new(0.0, 2.0, 100.0)));
+
+    }
+
 }

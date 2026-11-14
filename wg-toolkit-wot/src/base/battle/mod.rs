@@ -55,7 +55,7 @@ use crate::base::{
 use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::base::physics::{Vehicle, World};
+use crate::base::physics::{Vehicle, VehicleId, World};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
@@ -525,8 +525,10 @@ impl Battle {
     /// nobody drives stopping where it was shoved, and those that ran into each other are
     /// pushed apart, see [`World::step`]. Then each client is shown the vehicles its own
     /// spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
-    /// enemy too, as its options say, and the clients see each where it is, see
-    /// [`BattleVehicle::show`].
+    /// target too, which it sees, with no ally in the way, see [`Bot::fires`], as its
+    /// options say, and the clients see each where it is, see [`BattleVehicle::show`].
+    ///
+    /// [`Bot::fires`]: bot::Bot::fires
     fn step(&mut self, app: &mut base::App) -> io::Result<()> {
 
         let id = self.id;
@@ -538,12 +540,12 @@ impl Battle {
         let Self { participants, vehicles, world, shells, targets, .. } = self;
 
         for index in 0..vehicles.len() {
-            let enemy = nearest_enemy(vehicles, world, index);
+            let enemies = enemies_of(vehicles, world, index);
             let vehicle = &mut vehicles[index];
             let alive = vehicle.alive();
             match (&mut vehicle.driver, alive) {
                 (_, false) => world.vehicle_mut(vehicle.id).hull.flags = 0,
-                (Driver::Bot(bot), true) => bot.drive(world, vehicle.id, enemy, drives),
+                (Driver::Bot(bot), true) => bot.drive(world, vehicle.id, &enemies, drives),
                 (Driver::Client(_) | Driver::Nobody, true) => {}
             }
         }
@@ -554,8 +556,6 @@ impl Battle {
         }
 
         for index in 0..vehicles.len() {
-
-            let enemy = nearest_enemy(vehicles, world, index);
 
             let shoved = &world.vehicle(vehicles[index].id).hull;
             if matches!(vehicles[index].driver, Driver::Bot(_)) && (shoved.speed != 0.0 || shoved.slide != 0.0) {
@@ -575,6 +575,7 @@ impl Battle {
                 continue;
             }
             fill_targets(targets, vehicles, world, vehicles[index].entity.id());
+            let allies = allies_of(vehicles, world, index);
             let vehicle = &mut vehicles[index];
             let driven = world.vehicle(vehicle.id);
 
@@ -588,8 +589,8 @@ impl Battle {
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
             let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, obstacles, targets);
-            if let (None, Driver::Bot(bot), Some(enemy), true) = (&shot, &vehicle.driver, enemy, bots_fire) {
-                if bot.on_target(driven, enemy) {
+            if let (None, Driver::Bot(bot), true) = (&shot, &vehicle.driver, bots_fire) {
+                if bot.fires(driven, &allies) {
                     shot = vehicle.gun.fire(now, position, velocity, dispersion, obstacles, targets);
                 }
             }
@@ -793,18 +794,40 @@ impl Battle {
 
 }
 
-/// Where the nearest enemy alive of the `index`th vehicle is, its hull's: what a bot
-/// fights. None for a vehicle no bot drives.
-fn nearest_enemy(vehicles: &[BattleVehicle], world: &World, index: usize) -> Option<Vec3> {
+/// The enemies alive of the `index`th vehicle, each its vehicle in the world and its
+/// hull's centre: what a bot fights, see [`Bot::drive`]. None for a vehicle no bot
+/// drives.
+///
+/// [`Bot::drive`]: bot::Bot::drive
+fn enemies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<(VehicleId, Vec3)> {
     let vehicle = &vehicles[index];
     if !matches!(vehicle.driver, Driver::Bot(_)) {
-        return None;
+        return Vec::new();
     }
-    let position = world.vehicle(vehicle.id).hull.position;
     vehicles.iter()
         .filter(|other| other.alive() && other.team != vehicle.team)
-        .map(|other| other.hull_center(world))
-        .min_by(|a, b| a.distance_squared(position).total_cmp(&b.distance_squared(position)))
+        .map(|other| (other.id, other.hull_center(world)))
+        .collect()
+}
+
+/// The allies alive of the `index`th vehicle, each its hull's centre and the radius of a
+/// sphere round its box: what a bot doesn't fire through, see [`Bot::fires`]. None for
+/// a vehicle no bot drives.
+///
+/// [`Bot::fires`]: bot::Bot::fires
+fn allies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<(Vec3, f32)> {
+    let vehicle = &vehicles[index];
+    if !matches!(vehicle.driver, Driver::Bot(_)) {
+        return Vec::new();
+    }
+    vehicles.iter()
+        .enumerate()
+        .filter(|&(other, ally)| other != index && ally.alive() && ally.team == vehicle.team)
+        .map(|(_, ally)| {
+            let [min, max] = world.vehicle(ally.id).hull.mobility.bounds;
+            (ally.hull_center(world), (max - min).length() / 2.0)
+        })
+        .collect()
 }
 
 /// Replace `targets` with the vehicles the shells of `shooter` can hit, as

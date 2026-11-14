@@ -1,10 +1,15 @@
-//! The server driving a vehicle itself: it finds its way to its enemy over the map, see
-//! `World::path`, drives it as a client would, with its controls, until close, then
-//! stops facing it, keeps its turret on it and says when its gun is on it.
+//! The server driving a vehicle itself: it picks its target among the enemies it sees,
+//! finds its way to it over the map, see `World::path`, or to the nearest enemy while it
+//! sees none, drives it as a client would, with its controls, until close, then stops
+//! facing it, keeps its turret on it and says when it fires: its gun on it, and no ally
+//! in the way.
 //!
 //! ```text
 //!   each tick:
-//!     1. close to its enemy: it stops and turns to face it
+//!     0. its target: the one it has while it still sees it, else the nearest it sees,
+//!          within VIEW_RANGE and nothing of the map in the way; one it lost sight of
+//!          remembered where it last saw it
+//!     1. close to its target, or the nearest enemy: it stops and turns to face it
 //!     2. else, its way: planned again once it has none, its enemy moved off its end,
 //!          or it has been some time on it; points it got close to dropped
 //!     3. it drives to the next point: turning toward it, and driving on only when
@@ -15,6 +20,8 @@
 use glam::Vec3;
 
 use crate::base::physics::{movement_flag, wrap_angle, Vehicle, VehicleId, World};
+
+use super::VIEW_RANGE;
 
 
 /// How close to its enemy the bot drives, in metres on the ground plane.
@@ -47,6 +54,8 @@ const BACK_OFF_TICKS: u32 = 15;
 /// The server driving a vehicle, as a client would: it sets its controls and its aim.
 #[derive(Debug, Clone, Default)]
 pub struct Bot {
+    /// The enemy it aims at, see [`Self::spot`].
+    target: Option<Target>,
     /// The points of its way it hasn't reached, the next first.
     way: Vec<Vec3>,
     /// Where its enemy was when it planned its way.
@@ -61,19 +70,74 @@ pub struct Bot {
 
 impl Bot {
 
-    /// Set a vehicle's controls and aim for its next step, its turret on `enemy`, if any:
+    /// Set a vehicle's controls and aim for its next step, among its `enemies` alive,
+    /// each its vehicle and its hull's centre: it picks its target, see [`Self::spot`],
+    /// and heads for it while it sees it, else for the nearest enemy, its turret on it;
     /// if it `drives`, finding its way to it over its world's map until within
     /// [`ENGAGE_RANGE`], then turning to face it. See the module's documentation.
-    pub fn drive(&mut self, world: &mut World, id: VehicleId, enemy: Option<Vec3>, drives: bool) {
-        let vehicle = world.vehicle_mut(id);
-        if let Some(enemy) = enemy {
-            vehicle.turret.track(enemy);
+    pub fn drive(&mut self, world: &mut World, id: VehicleId, enemies: &[(VehicleId, Vec3)], drives: bool) {
+
+        self.spot(world, id, enemies);
+
+        let position = world.vehicle(id).hull.position;
+        let goal = self.sighted().or_else(|| {
+            enemies.iter()
+                .map(|&(_, at)| at)
+                .min_by(|a, b| a.distance_squared(position).total_cmp(&b.distance_squared(position)))
+        });
+        if let Some(goal) = goal {
+            world.vehicle_mut(id).turret.track(goal);
         }
-        let flags = match enemy.filter(|_| drives) {
-            Some(enemy) => self.controls(world, id, enemy),
+
+        let flags = match goal.filter(|_| drives) {
+            Some(goal) => self.controls(world, id, goal),
             None => 0,
         };
         world.vehicle_mut(id).hull.flags = flags;
+
+    }
+
+    /// Pick its target among its `enemies`, as its gun sees them, see [`in_sight`]: the
+    /// one it has while it still sees it, else the nearest it sees. One it no longer
+    /// sees stays its target, where it last saw it, until it sees another, and is
+    /// forgotten once gone from its enemies, destroyed.
+    fn spot(&mut self, world: &World, id: VehicleId, enemies: &[(VehicleId, Vec3)]) {
+
+        let vehicle = world.vehicle(id);
+        let (eye, _, _) = vehicle.turret.gun_marker(&vehicle.hull);
+
+        // 1. Its target, forgotten once destroyed, kept while it sees it.
+        let current = self.target
+            .and_then(|target| enemies.iter().find(|&&(enemy, _)| enemy == target.vehicle))
+            .copied();
+        if current.is_none() {
+            self.target = None;
+        }
+        if let (Some(target), Some((_, at))) = (&mut self.target, current) {
+            target.seen = in_sight(world, eye, at);
+            if target.seen {
+                target.at = at;
+                return;
+            }
+        }
+
+        // 2. Else the nearest enemy it sees, if any.
+        let seen = enemies.iter()
+            .filter(|&&(_, at)| in_sight(world, eye, at))
+            .min_by(|(_, a), (_, b)| a.distance_squared(eye).total_cmp(&b.distance_squared(eye)));
+        if let Some(&(vehicle, at)) = seen {
+            self.target = Some(Target {
+                vehicle,
+                at,
+                seen: true,
+            });
+        }
+
+    }
+
+    /// Where its target is, while it sees it: what it fires at.
+    pub fn sighted(&self) -> Option<Vec3> {
+        self.target.filter(|target| target.seen).map(|target| target.at)
     }
 
     /// The controls driving a vehicle at its enemy, see [`Self::drive`].
@@ -128,12 +192,31 @@ impl Bot {
 
     }
 
-    /// Whether a vehicle's gun points at its enemy, to fire.
-    pub fn on_target(&self, vehicle: &Vehicle, enemy: Vec3) -> bool {
+    /// Whether it fires its vehicle's gun now: at its target, which it sees, its gun on
+    /// it, and none of its `allies` in the way, each its hull's centre and how far round
+    /// it a shell would hit it, see [`in_the_way`].
+    pub fn fires(&self, vehicle: &Vehicle, allies: &[(Vec3, f32)]) -> bool {
+        let Some(target) = self.sighted() else { return false };
         let (position, velocity, _) = vehicle.turret.gun_marker(&vehicle.hull);
-        velocity.angle_between(enemy - position) < AIM_TOLERANCE
+        velocity.angle_between(target - position) < AIM_TOLERANCE
+            && !allies.iter().any(|&(center, radius)| in_the_way(position, target, center, radius))
     }
 
+}
+
+/// An enemy a bot aims at, see [`Bot::spot`]: its vehicle, where the bot last saw its
+/// hull's centre, and whether it sees it now.
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    vehicle: VehicleId,
+    at: Vec3,
+    seen: bool,
+}
+
+/// Whether a bot's gun at `eye` sees a point: within [`VIEW_RANGE`] on the ground plane,
+/// and nothing of the map in the way, see [`World::sees`].
+fn in_sight(world: &World, eye: Vec3, at: Vec3) -> bool {
+    (at - eye).with_y(0.0).length() <= VIEW_RANGE && world.sees(eye, at)
 }
 
 /// The controls turning toward a way `off` the heading, in radians, positive to the
@@ -151,6 +234,14 @@ fn steer(off: f32, forward: bool) -> u8 {
     flags
 }
 
+/// Whether something within `radius` of `center` is in the way from a gun at `from` to
+/// `to`: between them, the line passing within its radius.
+fn in_the_way(from: Vec3, to: Vec3, center: Vec3, radius: f32) -> bool {
+    let line = to - from;
+    let along = (center - from).dot(line) / line.length_squared().max(f32::EPSILON);
+    along > 0.0 && along < 1.0 && (from + line * along).distance(center) < radius
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -164,19 +255,74 @@ mod tests {
     use crate::base::physics::fixtures::{blocks, chieftain_aiming, chieftain_mobility};
     use super::*;
 
-    /// Drive a bot at its enemy for `ticks`, from `start`, facing +Z.
+    /// How high an enemy's hull's centre is over the ground, about, in metres.
+    const HULL_CENTER: f32 = 1.5;
+
+    /// Drive a bot at its enemy, a vehicle standing at `enemy`, for `ticks`, from
+    /// `start`, facing +Z.
     fn drive_at(space: Space, start: Vec3, enemy: Vec3, ticks: usize) -> Vec3 {
         let mut world = World::new(Arc::new(space), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
         let id = world.add(Vehicle::new(start, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let other = world.add(Vehicle::new(enemy, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let enemies = [(other, enemy + Vec3::Y * HULL_CENTER)];
         let mut bot = Bot::default();
         for _ in 0..ticks {
-            bot.drive(&mut world, id, Some(enemy), true);
+            bot.drive(&mut world, id, &enemies, true);
             world.step(0.1);
         }
         let hull = &world.vehicle(id).hull;
         let to = (enemy - hull.position).with_y(0.0);
         assert!(wrap_angle(to.x.atan2(to.z) - hull.yaw()).abs() <= HEADING_TOLERANCE + 0.05, "not facing its enemy");
         hull.position
+    }
+
+    #[test]
+    fn targets_the_nearest_enemy_it_sees_and_keeps_it() {
+
+        // A wall 20 m wide and 5 m high 30 m in front of the bot.
+        let space = blocks(&[(Vec3::new(-10.0, 0.0, -71.0), Vec3::new(10.0, 5.0, -69.0))]);
+        let mut world = World::new(Arc::new(space), None);
+        let id = world.add(Vehicle::new(Vec3::new(0.0, 0.0, -100.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let [hidden, seen, nearer] = [-140.0, -130.0, -120.0].map(|x| {
+            world.add(Vehicle::new(Vec3::new(x, 0.0, 140.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()))
+        });
+        let mut bot = Bot::default();
+        let behind_wall = Vec3::new(0.0, HULL_CENTER, -40.0);
+        let in_the_open = Vec3::new(60.0, HULL_CENTER, 0.0);
+        let far = Vec3::new(0.0, HULL_CENTER, 400.0);
+
+        // The nearest is behind the wall, so it targets the one in the open; one past
+        // its view range it doesn't see.
+        bot.spot(&world, id, &[(hidden, behind_wall), (seen, in_the_open), (nearer, far)]);
+        assert_eq!(bot.sighted(), Some(in_the_open));
+        // It keeps it while it sees it, a nearer one in the open or not.
+        let near_open = Vec3::new(-30.0, HULL_CENTER, -80.0);
+        bot.spot(&world, id, &[(seen, in_the_open), (nearer, near_open)]);
+        assert_eq!(bot.sighted(), Some(in_the_open));
+        // Hidden behind the wall, with no other in sight, it is remembered where it was
+        // last seen, but no longer fired at.
+        bot.spot(&world, id, &[(seen, behind_wall)]);
+        assert_eq!(bot.sighted(), None);
+        assert_eq!(bot.target.map(|target| target.at), Some(in_the_open));
+        // Another in sight, it targets that one; once destroyed, gone from its enemies,
+        // it is forgotten, and none other is in sight.
+        bot.spot(&world, id, &[(seen, behind_wall), (nearer, near_open)]);
+        assert_eq!(bot.sighted(), Some(near_open));
+        bot.spot(&world, id, &[(seen, behind_wall)]);
+        assert!(bot.target.is_none());
+
+    }
+
+    #[test]
+    fn holds_fire_with_an_ally_in_the_way() {
+        let (from, to) = (Vec3::ZERO, Vec3::new(0.0, 0.0, 100.0));
+        // In the line, or near enough it.
+        assert!(in_the_way(from, to, Vec3::new(0.0, 0.0, 30.0), 3.0));
+        assert!(in_the_way(from, to, Vec3::new(2.0, 0.0, 30.0), 3.0));
+        // Off it, behind the gun, or past the target.
+        assert!(!in_the_way(from, to, Vec3::new(5.0, 0.0, 30.0), 3.0));
+        assert!(!in_the_way(from, to, Vec3::new(0.0, 0.0, -2.0), 3.0));
+        assert!(!in_the_way(from, to, Vec3::new(0.0, 0.0, 120.0), 3.0));
     }
 
     #[test]
