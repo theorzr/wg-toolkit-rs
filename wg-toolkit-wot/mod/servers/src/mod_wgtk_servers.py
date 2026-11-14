@@ -17,6 +17,7 @@ from gui.mods.wgtk_servers.ui import g_loginWindows
 
 
 _read_script_config = _PreDefinedHostList.readScriptConfig
+_get_simple_hosts_list = _PreDefinedHostList.getSimpleHostsList
 _populate_login = LoginView._populate
 _dispose_login = LoginView._dispose
 
@@ -27,6 +28,13 @@ def _readScriptConfig(self, dataSection, userDataSection=None):
     _read_script_config(self, dataSection, userDataSection)
     if not loaded and self._isDataLoaded:
         g_serverList.add(self)
+
+
+def _getSimpleHostsList(self, hosts, withShortName=False):
+    """The client's servers as its lists show them, with their status: ours none, so
+    that their ping shows, see `ServerList.ignore_status`."""
+    result = _get_simple_hosts_list(self, hosts, withShortName)
+    return [g_serverList.ignore_status(entry) for entry in result]
 
 
 def _populate(self):
@@ -45,6 +53,7 @@ def _dispose(self):
 
 
 _PreDefinedHostList.readScriptConfig = _readScriptConfig
+_PreDefinedHostList.getSimpleHostsList = _getSimpleHostsList
 LoginView._populate = _populate
 LoginView._dispose = _dispose
 if g_preDefinedHosts._isDataLoaded:

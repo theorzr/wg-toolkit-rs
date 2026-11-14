@@ -30,7 +30,7 @@ import BigWorld
 import ResMgr
 from debug_utils import LOG_CURRENT_EXCEPTION, LOG_NOTE, LOG_WARNING
 from helpers import dependency
-from predefined_hosts import g_preDefinedHosts
+from predefined_hosts import HOST_AVAILABILITY, g_preDefinedHosts
 from skeletons.gui.login_manager import ILoginManager
 
 
@@ -169,6 +169,16 @@ class ServerList(object):
         # How many servers the client listed itself, the first ones.
         self.own = None
         self.modified = None
+        # The addresses of ours.
+        self.urls = set()
+
+    def ignore_status(self, entry):
+        """A server list's entry, `(url, name, [short name,] status, periphery id)`, of
+        no status if it is ours: the game's status service knows nothing of them, so
+        that theirs would wait for it forever, hiding their ping."""
+        if entry[0] not in self.urls:
+            return entry
+        return entry[:-2] + (HOST_AVAILABILITY.IGNORED, entry[-1])
 
     def add(self, hosts):
         """Add the servers of the servers file, those of an address already listed left
@@ -195,6 +205,7 @@ class ServerList(object):
                 hosts._nameMap[item.name] = index
                 hosts._peripheryMap[periphery_id] = index
                 hosts._hosts.append(item)
+                self.urls.add(item.url)
                 log('Added a server', short_name, name, address, periphery_id)
             except Exception:
                 LOG_CURRENT_EXCEPTION()
@@ -214,6 +225,7 @@ class ServerList(object):
             if index >= self.own:
                 del hosts._peripheryMap[periphery_id]
         del hosts._hosts[self.own:]
+        self.urls.clear()
         self.add(hosts)
         # The login screen shows the list of the login manager's servers, made again
         # from the client's.
