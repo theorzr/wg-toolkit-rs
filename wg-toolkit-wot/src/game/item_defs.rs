@@ -51,6 +51,7 @@ pub struct VehicleDef {
     pub mobility: MobilityDef,
     pub aiming: AimingDef,
     pub magazine: MagazineDef,
+    pub vision: VisionDef,
     /// The default modules' collision models.
     pub collision: Arc<VehicleCollision>,
 }
@@ -282,6 +283,22 @@ pub struct AimingDef {
     pub turret_position: Vec3,
     /// Where the gun pitches, from the turret's pivot, turning with it.
     pub gun_position: Vec3,
+}
+
+/// How far the vehicle sees with its default turret, and how hard it is to see, as the
+/// client's item loader reads them (`vehicles.py`): before crew, equipment and the
+/// camouflage paint's bonus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisionDef {
+    /// How far its turret sees, in metres: its `circularVisionRadius`.
+    pub view_range: f32,
+    /// Its camouflage standing still and moving, as a share of an observer's view range
+    /// beyond the closest it is always seen at: its `invisibility` `still` and `moving`.
+    pub camouflage_still: f32,
+    pub camouflage_moving: f32,
+    /// The share of its camouflage it keeps right after firing: its default gun's
+    /// `invisibilityFactorAtShot`, the vehicle's own for a shared gun if it sets one.
+    pub camouflage_at_shot: f32,
 }
 
 /// How the default gun's shells come, beyond one per reload: from a magazine (`clip` to
@@ -657,7 +674,19 @@ impl VehicleDef {
         let (burst_size, burst_interval) = section("burst")?.unwrap_or((1, 0.0));
         let magazine = MagazineDef { size, interval, burst_size, burst_interval };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, mobility, aiming, magazine, collision })
+        let vision = VisionDef {
+            view_range: turret.get_child_float("circularVisionRadius")
+                .ok_or_else(|| invalid(format!("{name} has no turret circularVisionRadius")))?,
+            camouflage_still: vehicle.get_child_value_at(&["invisibility", "still"])
+                .and_then(pxml::Value::as_float)
+                .ok_or_else(|| invalid(format!("{name} has no invisibility/still")))?,
+            camouflage_moving: vehicle.get_child_value_at(&["invisibility", "moving"])
+                .and_then(pxml::Value::as_float)
+                .ok_or_else(|| invalid(format!("{name} has no invisibility/moving")))?,
+            camouflage_at_shot: gun_float(&["invisibilityFactorAtShot"])?,
+        };
+
+        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, mobility, aiming, magazine, vision, collision })
 
     }
 

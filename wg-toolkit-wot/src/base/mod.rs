@@ -222,7 +222,7 @@ impl BaseThread {
         let garage = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
         for vehicle in &vehicles {
-            info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, "Gave the account a vehicle: {}", vehicle.name);
+            info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, vision = ?vehicle.vision, "Gave the account a vehicle: {}", vehicle.name);
         }
 
         let required_version = required_version(&fs)
