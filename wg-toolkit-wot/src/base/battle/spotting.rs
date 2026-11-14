@@ -8,7 +8,9 @@
 //!         at most VIEW_RANGE, nothing of the map in the way, see `World::sees`;
 //!   its camouflage: still or moving, less for a while after it fired, see
 //!     `BattleVehicle::camouflage`;
-//!   a team spots what any of its vehicles spots, still for LINGER once none does
+//!   a team spots what any of its vehicles spots, still for LINGER once none does;
+//!   it remembers where it last spotted each enemy, until one of its vehicles gets
+//!     within MIN_RADIUS of there, which the enemy left then: what bots search
 //! ```
 
 use glam::Vec3;
@@ -31,9 +33,18 @@ const LINGER: f64 = 2.0;
 /// See the module's documentation.
 #[derive(Debug)]
 pub struct Spotting {
-    /// For each team, in [`TEAMS`] order, the game time it last spotted each of the
-    /// battle's vehicles at, by index.
-    teams: [Vec<Option<f64>>; 2],
+    /// For each team, in [`TEAMS`] order, when and where it last spotted each of the
+    /// battle's vehicles, by index: none once searched, or destroyed.
+    teams: [Vec<Option<Sighting>>; 2],
+}
+
+/// When and where a team last spotted an enemy.
+#[derive(Debug, Clone, Copy)]
+struct Sighting {
+    /// The game time it last did at.
+    at: f64,
+    /// Where the enemy's hull's centre was then.
+    position: Vec3,
 }
 
 impl Spotting {
@@ -45,24 +56,40 @@ impl Spotting {
         }
     }
 
-    /// At game time `now`, what each team spots of the other's vehicles alive, see the
-    /// module's documentation.
+    /// At game time `now`, what each team spots of the other's vehicles alive, and
+    /// where it searched those it no longer does, see the module's documentation. A
+    /// destroyed one is forgotten.
     pub fn update(&mut self, now: f64, vehicles: &[BattleVehicle], world: &World) {
 
         let eyes = vehicles.iter().map(|vehicle| eye(world, vehicle)).collect::<Vec<_>>();
 
-        for (index, target) in vehicles.iter().enumerate().filter(|(_, target)| target.alive()) {
+        for (index, target) in vehicles.iter().enumerate() {
 
-            let at = target.hull_center(world);
+            let enemies = TEAMS.iter().position(|&team| team != target.team).unwrap_or_default();
+            if !target.alive() {
+                self.teams[enemies][index] = None;
+                continue;
+            }
+
+            let center = target.hull_center(world);
             let camouflage = target.camouflage(world.vehicle(target.id), now);
-            let spotted = vehicles.iter()
+            let observers = vehicles.iter()
                 .zip(&eyes)
-                .filter(|(observer, _)| observer.alive() && observer.team != target.team)
-                .any(|(observer, &eye)| spots(world, eye, observer.vision.view_range, at, camouflage));
+                .filter(|(observer, _)| observer.alive() && observer.team != target.team);
+            if observers.clone().any(|(observer, &eye)| spots(world, eye, observer.vision.view_range, center, camouflage)) {
+                self.teams[enemies][index] = Some(Sighting {
+                    at: now,
+                    position: center,
+                });
+                continue;
+            }
 
-            if spotted {
-                let enemies = TEAMS.iter().position(|&team| team != target.team).unwrap_or_default();
-                self.teams[enemies][index] = Some(now);
+            // Lost: searched once one of the team gets close to where it was last seen.
+            let Some(sighting) = self.teams[enemies][index] else { continue };
+            let searched = now - sighting.at > LINGER
+                && observers.clone().any(|(_, &eye)| (sighting.position - eye).with_y(0.0).length() <= MIN_RADIUS);
+            if searched {
+                self.teams[enemies][index] = None;
             }
 
         }
@@ -73,7 +100,17 @@ impl Spotting {
     /// within [`LINGER`]. Its own it doesn't, see [`Self::update`].
     pub fn spotted(&self, team: u8, index: usize, now: f64) -> bool {
         let Some(side) = TEAMS.iter().position(|&known| known == team) else { return false };
-        self.teams[side][index].is_some_and(|at| now - at <= LINGER)
+        self.teams[side][index].is_some_and(|sighting| now - sighting.at <= LINGER)
+    }
+
+    /// Where `team` last spotted the enemies it no longer does at game time `now`, and
+    /// hasn't searched yet, see [`Self::update`].
+    pub fn last_seen(&self, team: u8, now: f64) -> impl Iterator<Item = Vec3> + '_ {
+        let side = TEAMS.iter().position(|&known| known == team);
+        side.into_iter()
+            .flat_map(|side| self.teams[side].iter().flatten())
+            .filter(move |sighting| now - sighting.at > LINGER)
+            .map(|sighting| sighting.position)
     }
 
 }

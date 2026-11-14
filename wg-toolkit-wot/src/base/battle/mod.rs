@@ -79,7 +79,7 @@ const TEAMS: [u8; 2] = [1, 2];
 const PACKED_XZ_SCALE: f32 = 0.007644442;
 
 /// The farthest a vehicle spots others, in metres on the ground plane, whatever its own
-/// view range: `VISIBILITY.MAX_RADIUS`. Bots see as far, their own enemies.
+/// view range: `VISIBILITY.MAX_RADIUS`. A bot fires at those it sees itself as far.
 const VIEW_RANGE: f32 = 445.0;
 
 /// How long a battle waits for the clients switched into it to enter before it is made
@@ -111,6 +111,9 @@ pub struct Battle {
     world: World,
     /// What each team spots of the other's vehicles, which its clients see.
     spotting: Spotting,
+    /// Where each team started, in [`TEAMS`] order: where the other's bots search once
+    /// they know of no enemy, see [`search_of`].
+    starts: [Vec3; 2],
     /// The shells in flight, until they land.
     shells: Shells,
     /// The destructibles' entities of its map's chunks, telling the clients what broke.
@@ -302,6 +305,7 @@ impl Battle {
             participants.push(Participant::new(client, avatar, loadout, index, vehicles_info.key(), vehicles.len()));
         }
 
+        let starts = starts.map(|start| start.position);
         let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
 
@@ -313,6 +317,7 @@ impl Battle {
             participants,
             period: ArenaPeriod::new(),
             spotting: Spotting::new(vehicles.len()),
+            starts,
             vehicles,
             world,
             shells: Shells::default(),
@@ -566,13 +571,16 @@ impl Battle {
 
     }
 
-    /// Step it by a tick: every vehicle moves as its driver drives it, a wreck or one
-    /// nobody drives stopping where it was shoved, and those that ran into each other are
-    /// pushed apart, see [`World::step`]. Then each team spots the other's vehicles, see
-    /// [`Spotting`], each client is shown those its team spots, and each vehicle fires the rest of its burst, a bot once its gun is on its
-    /// target too, which it sees, with no ally in the way, see [`Bot::fires`], as its
-    /// options say, and the clients see each where it is, see [`BattleVehicle::show`].
+    /// Step it by a tick: every vehicle moves as its driver drives it, a bot by what its
+    /// team spots, see [`Bot::drive`], a wreck or one nobody drives stopping where it was
+    /// shoved, and those that ran into each other are pushed apart, see [`World::step`].
+    /// Then each team spots the other's vehicles, see [`Spotting`], each client is shown
+    /// those its team spots, and each vehicle fires the rest of its burst, a bot once its
+    /// gun is on its target too, which it sees itself, with no ally in the way, see
+    /// [`Bot::fires`], as its options say, and the clients see each where it is, see
+    /// [`BattleVehicle::show`].
     ///
+    /// [`Bot::drive`]: bot::Bot::drive
     /// [`Bot::fires`]: bot::Bot::fires
     fn step(&mut self, app: &mut base::App) -> io::Result<()> {
 
@@ -582,15 +590,16 @@ impl Battle {
         let drives = fighting && self.options.bots_drive;
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, spotting, shells, targets, .. } = self;
+        let Self { participants, vehicles, world, spotting, starts, shells, targets, .. } = self;
 
         for index in 0..vehicles.len() {
-            let enemies = enemies_of(vehicles, world, index);
+            let enemies = enemies_of(vehicles, world, spotting, index, now);
+            let search = search_of(vehicles, world, spotting, starts, index, now);
             let vehicle = &mut vehicles[index];
             let alive = vehicle.alive();
             match (&mut vehicle.driver, alive) {
                 (_, false) => world.vehicle_mut(vehicle.id).hull.flags = 0,
-                (Driver::Bot(bot), true) => bot.drive(world, vehicle.id, &enemies, drives),
+                (Driver::Bot(bot), true) => bot.drive(world, vehicle.id, &enemies, search, drives),
                 (Driver::Client(_) | Driver::Nobody, true) => {}
             }
         }
@@ -844,20 +853,37 @@ impl Battle {
 
 }
 
-/// The enemies alive of the `index`th vehicle, each its vehicle in the world and its
-/// hull's centre: what a bot fights, see [`Bot::drive`]. None for a vehicle no bot
-/// drives.
+/// The enemies alive the team of the `index`th vehicle spots at game time `now`, each
+/// its vehicle in the world and its hull's centre: what a bot fights, see
+/// [`Bot::drive`]. None for a vehicle no bot drives.
 ///
 /// [`Bot::drive`]: bot::Bot::drive
-fn enemies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<(VehicleId, Vec3)> {
+fn enemies_of(vehicles: &[BattleVehicle], world: &World, spotting: &Spotting, index: usize, now: f64) -> Vec<(VehicleId, Vec3)> {
     let vehicle = &vehicles[index];
     if !matches!(vehicle.driver, Driver::Bot(_)) {
         return Vec::new();
     }
     vehicles.iter()
-        .filter(|other| other.alive() && other.team != vehicle.team)
-        .map(|other| (other.id, other.hull_center(world)))
+        .enumerate()
+        .filter(|&(other, enemy)| enemy.alive() && enemy.team != vehicle.team && spotting.spotted(vehicle.team, other, now))
+        .map(|(_, enemy)| (enemy.id, enemy.hull_center(world)))
         .collect()
+}
+
+/// Where the `index`th vehicle searches for enemies once its team spots none at game
+/// time `now`, as a bot does, see [`Bot::drive`]: the nearest place its team last
+/// spotted one, see [`Spotting::last_seen`], else where the enemy team started.
+///
+/// [`Bot::drive`]: bot::Bot::drive
+fn search_of(vehicles: &[BattleVehicle], world: &World, spotting: &Spotting, starts: &[Vec3; 2], index: usize, now: f64) -> Vec3 {
+    let vehicle = &vehicles[index];
+    let position = world.vehicle(vehicle.id).hull.position;
+    let enemy_start = TEAMS.iter()
+        .position(|&team| team != vehicle.team)
+        .map_or(position, |side| starts[side]);
+    spotting.last_seen(vehicle.team, now)
+        .min_by(|a, b| a.distance_squared(position).total_cmp(&b.distance_squared(position)))
+        .unwrap_or(enemy_start)
 }
 
 /// The allies alive of the `index`th vehicle, each its hull's centre and the radius of a

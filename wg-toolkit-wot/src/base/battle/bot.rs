@@ -1,16 +1,18 @@
-//! The server driving a vehicle itself: it picks its target among the enemies it sees,
-//! finds its way to it over the map, see `World::path`, or to the nearest enemy while it
-//! sees none, drives it as a client would, with its controls, until close, then stops
-//! facing it, keeps its turret on it and says when it fires: its gun on it, and no ally
-//! in the way.
+//! The server driving a vehicle itself: it picks its target among the enemies its team
+//! spots, see `Spotting`, finds its way to it over the map, see `World::path`, or, while
+//! its team spots none, searches where they were last seen, else their team's start. It
+//! drives as a client would, with its controls, until close to its target, then stops
+//! facing it, keeps its turret on it and says when it fires: it sees it itself, its gun
+//! on it, and no ally in the way.
 //!
 //! ```text
 //!   each tick:
-//!     0. its target: the one it has while it still sees it, else the nearest it sees,
-//!          within VIEW_RANGE and nothing of the map in the way; one it lost sight of
-//!          remembered where it last saw it
-//!     1. close to its target, or the nearest enemy: it stops and turns to face it
-//!     2. else, its way: planned again once it has none, its enemy moved off its end,
+//!     0. its target, among those its team spots: the one it has while it sees it
+//!          itself, within VIEW_RANGE and nothing of the map in the way, else the
+//!          nearest it sees, else the one it has, else the nearest
+//!     1. close to its target: it stops and turns to face it; close to where it
+//!          searches, it stops
+//!     2. else, its way: planned again once it has none, its goal moved off its end,
 //!          or it has been some time on it; points it got close to dropped
 //!     3. it drives to the next point: turning toward it, and driving on only when
 //!          headed near enough it
@@ -26,6 +28,9 @@ use super::VIEW_RANGE;
 
 /// How close to its enemy the bot drives, in metres on the ground plane.
 const ENGAGE_RANGE: f32 = 150.0;
+/// How close to where it searches the bot drives, in metres on the ground plane. Our
+/// choice: its team gets there within `spotting::MIN_RADIUS`, which ends the search.
+const SEARCH_RANGE: f32 = 10.0;
 /// How far off its heading its way may be for the bot to drive while turning, in
 /// radians.
 const TURN_WHILE_DRIVING: f32 = 0.6;
@@ -58,7 +63,7 @@ pub struct Bot {
     target: Option<Target>,
     /// The points of its way it hasn't reached, the next first.
     way: Vec<Vec3>,
-    /// Where its enemy was when it planned its way.
+    /// Where its goal was when it planned its way.
     goal: Option<Vec3>,
     /// How many ticks since it planned its way.
     planned: u32,
@@ -70,43 +75,41 @@ pub struct Bot {
 
 impl Bot {
 
-    /// Set a vehicle's controls and aim for its next step, among its `enemies` alive,
-    /// each its vehicle and its hull's centre: it picks its target, see [`Self::spot`],
-    /// and heads for it while it sees it, else for the nearest enemy, its turret on it;
-    /// if it `drives`, finding its way to it over its world's map until within
-    /// [`ENGAGE_RANGE`], then turning to face it. See the module's documentation.
-    pub fn drive(&mut self, world: &mut World, id: VehicleId, enemies: &[(VehicleId, Vec3)], drives: bool) {
+    /// Set a vehicle's controls and aim for its next step, among the `enemies` its team
+    /// spots, each its vehicle and its hull's centre: it picks its target, see
+    /// [`Self::spot`], and heads for it, else for where it `search`es, its turret on it;
+    /// if it `drives`, finding its way over its world's map until within
+    /// [`ENGAGE_RANGE`] of its target, then turning to face it, or within
+    /// [`SEARCH_RANGE`] of where it searches. See the module's documentation.
+    pub fn drive(&mut self, world: &mut World, id: VehicleId, enemies: &[(VehicleId, Vec3)], search: Vec3, drives: bool) {
 
         self.spot(world, id, enemies);
 
-        let position = world.vehicle(id).hull.position;
-        let goal = self.sighted().or_else(|| {
-            enemies.iter()
-                .map(|&(_, at)| at)
-                .min_by(|a, b| a.distance_squared(position).total_cmp(&b.distance_squared(position)))
-        });
-        if let Some(goal) = goal {
-            world.vehicle_mut(id).turret.track(goal);
-        }
+        let (goal, range) = match self.target {
+            Some(target) => (target.at, ENGAGE_RANGE),
+            None => (search, SEARCH_RANGE),
+        };
+        world.vehicle_mut(id).turret.track(goal);
 
-        let flags = match goal.filter(|_| drives) {
-            Some(goal) => self.controls(world, id, goal),
-            None => 0,
+        let flags = if drives {
+            self.controls(world, id, goal, range)
+        } else {
+            0
         };
         world.vehicle_mut(id).hull.flags = flags;
 
     }
 
-    /// Pick its target among its `enemies`, as its gun sees them, see [`in_sight`]: the
-    /// one it has while it still sees it, else the nearest it sees. One it no longer
-    /// sees stays its target, where it last saw it, until it sees another, and is
-    /// forgotten once gone from its enemies, destroyed.
+    /// Pick its target among the `enemies` its team spots: the one it has while it sees
+    /// it itself, see [`in_sight`], else the nearest it sees, else the one it has, else
+    /// the nearest. One its team no longer spots, or destroyed, is forgotten.
     fn spot(&mut self, world: &World, id: VehicleId, enemies: &[(VehicleId, Vec3)]) {
 
         let vehicle = world.vehicle(id);
         let (eye, _, _) = vehicle.turret.gun_marker(&vehicle.hull);
 
-        // 1. Its target, forgotten once destroyed, kept while it sees it.
+        // 1. Its target, forgotten once gone from the enemies spotted, kept while it
+        //    sees it.
         let current = self.target
             .and_then(|target| enemies.iter().find(|&&(enemy, _)| enemy == target.vehicle))
             .copied();
@@ -114,14 +117,14 @@ impl Bot {
             self.target = None;
         }
         if let (Some(target), Some((_, at))) = (&mut self.target, current) {
+            target.at = at;
             target.seen = in_sight(world, eye, at);
             if target.seen {
-                target.at = at;
                 return;
             }
         }
 
-        // 2. Else the nearest enemy it sees, if any.
+        // 2. Else the nearest it sees, if any.
         let seen = enemies.iter()
             .filter(|&&(_, at)| in_sight(world, eye, at))
             .min_by(|(_, a), (_, b)| a.distance_squared(eye).total_cmp(&b.distance_squared(eye)));
@@ -130,6 +133,18 @@ impl Bot {
                 vehicle,
                 at,
                 seen: true,
+            });
+            return;
+        }
+
+        // 3. Else the one it has, or the nearest.
+        if self.target.is_none() {
+            let nearest = enemies.iter()
+                .min_by(|(_, a), (_, b)| a.distance_squared(eye).total_cmp(&b.distance_squared(eye)));
+            self.target = nearest.map(|&(vehicle, at)| Target {
+                vehicle,
+                at,
+                seen: false,
             });
         }
 
@@ -140,8 +155,9 @@ impl Bot {
         self.target.filter(|target| target.seen).map(|target| target.at)
     }
 
-    /// The controls driving a vehicle at its enemy, see [`Self::drive`].
-    fn controls(&mut self, world: &mut World, id: VehicleId, enemy: Vec3) -> u8 {
+    /// The controls driving a vehicle to its goal until within `range` of it, see
+    /// [`Self::drive`].
+    fn controls(&mut self, world: &mut World, id: VehicleId, goal: Vec3, range: f32) -> u8 {
 
         let hull = &world.vehicle(id).hull;
         let (position, yaw) = (hull.position, hull.yaw());
@@ -163,29 +179,29 @@ impl Bot {
             return movement_flag::BACKWARD;
         }
 
-        // 1. Close, it stops facing its enemy.
-        let to_enemy = (enemy - position).with_y(0.0);
-        if to_enemy.length() <= ENGAGE_RANGE {
+        // 1. Close, it stops facing its goal.
+        let to_goal = (goal - position).with_y(0.0);
+        if to_goal.length() <= range {
             self.way.clear();
-            return steer(wrap_angle(to_enemy.x.atan2(to_enemy.z) - yaw), false);
+            return steer(wrap_angle(to_goal.x.atan2(to_goal.z) - yaw), false);
         }
 
         // 2. Its way, planned again as needed, the points it got close to dropped.
         self.planned += 1;
-        let moved = self.goal.is_none_or(|goal| goal.distance(enemy) > REPLAN_DISTANCE);
+        let moved = self.goal.is_none_or(|planned| planned.distance(goal) > REPLAN_DISTANCE);
         if self.way.is_empty() || moved || self.planned >= REPLAN_TICKS {
             let [min, max] = hull.mobility.bounds;
             let radius = max.x.max(-min.x) + WIDTH_MARGIN;
-            self.way = world.path(position, enemy, radius).unwrap_or_default();
-            self.goal = Some(enemy);
+            self.way = world.path(position, goal, radius).unwrap_or_default();
+            self.goal = Some(goal);
             self.planned = 0;
         }
         while self.way.first().is_some_and(|point| (*point - position).with_y(0.0).length() < ARRIVE) {
             self.way.remove(0);
         }
 
-        // 3. It drives to the next point, its enemy's if none.
-        let next = self.way.first().copied().unwrap_or(enemy);
+        // 3. It drives to the next point, its goal if none.
+        let next = self.way.first().copied().unwrap_or(goal);
         let to = (next - position).with_y(0.0);
         let off = wrap_angle(to.x.atan2(to.z) - yaw);
         steer(off, off.abs() < TURN_WHILE_DRIVING)
@@ -204,15 +220,15 @@ impl Bot {
 
 }
 
-/// An enemy a bot aims at, see [`Bot::spot`]: its vehicle, where the bot last saw its
-/// hull's centre, and whether it sees it now.
+/// An enemy a bot aims at, see [`Bot::spot`]: its vehicle, where its hull's centre is,
+/// and whether the bot sees it itself.
 #[derive(Debug, Clone, Copy)]
 struct Target {
     /// Its vehicle, in the world.
     vehicle: VehicleId,
-    /// Where the bot last saw its hull's centre.
+    /// Where its hull's centre is, as the bot's team spots it.
     at: Vec3,
-    /// Whether the bot sees it now, which it fires at only then.
+    /// Whether the bot sees it itself, which it fires at only then.
     seen: bool,
 }
 
@@ -270,7 +286,7 @@ mod tests {
         let enemies = [(other, enemy + Vec3::Y * HULL_CENTER)];
         let mut bot = Bot::default();
         for _ in 0..ticks {
-            bot.drive(&mut world, id, &enemies, true);
+            bot.drive(&mut world, id, &enemies, enemy, true);
             world.step(0.1);
         }
         let hull = &world.vehicle(id).hull;
@@ -302,18 +318,37 @@ mod tests {
         let near_open = Vec3::new(-30.0, HULL_CENTER, -80.0);
         bot.spot(&world, id, &[(seen, in_the_open), (nearer, near_open)]);
         assert_eq!(bot.sighted(), Some(in_the_open));
-        // Hidden behind the wall, with no other in sight, it is remembered where it was
-        // last seen, but no longer fired at.
+        // Behind the wall, still spotted, with no other in sight, it stays its target,
+        // where its team spots it, but isn't fired at.
         bot.spot(&world, id, &[(seen, behind_wall)]);
         assert_eq!(bot.sighted(), None);
-        assert_eq!(bot.target.map(|target| target.at), Some(in_the_open));
-        // Another in sight, it targets that one; once destroyed, gone from its enemies,
-        // it is forgotten, and none other is in sight.
+        assert_eq!(bot.target.map(|target| target.at), Some(behind_wall));
+        // Another in sight, it targets that one; once gone from those spotted, it is
+        // forgotten, and the nearest spotted, which it doesn't see, is its target.
         bot.spot(&world, id, &[(seen, behind_wall), (nearer, near_open)]);
         assert_eq!(bot.sighted(), Some(near_open));
-        bot.spot(&world, id, &[(seen, behind_wall)]);
+        bot.spot(&world, id, &[(hidden, far), (seen, behind_wall)]);
+        assert_eq!(bot.sighted(), None);
+        assert_eq!(bot.target.map(|target| target.vehicle), Some(seen));
+        // None spotted, it has none.
+        bot.spot(&world, id, &[]);
         assert!(bot.target.is_none());
 
+    }
+
+    #[test]
+    fn searches_where_its_team_last_saw_an_enemy() {
+        let space = blocks(&[]);
+        let mut world = World::new(Arc::new(space), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
+        let id = world.add(Vehicle::new(Vec3::new(-120.0, 0.0, -120.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let search = Vec3::new(100.0, 0.0, 100.0);
+        let mut bot = Bot::default();
+        for _ in 0..900 {
+            bot.drive(&mut world, id, &[], search, true);
+            world.step(0.1);
+        }
+        let distance = (search - world.vehicle(id).hull.position).with_y(0.0).length();
+        assert!(distance <= SEARCH_RANGE + 5.0, "stopped {distance} m away");
     }
 
     #[test]
