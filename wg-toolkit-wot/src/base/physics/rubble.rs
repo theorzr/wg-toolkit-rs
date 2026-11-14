@@ -22,6 +22,9 @@
 //!
 //! - A **house's module** blocks like a wall ([`Rubble::blocks`], see the `walls`
 //!   module) until it breaks.
+//! - A **tree** does too, by its trunk, which the statics give it, see
+//!   [`trunk`](wgtk::space::statics::trunk). A bush is one, of 3 health: it barely
+//!   slows the hull.
 //! - A **fence, post or barrel** never blocks. The hull drives into it, damaging it on
 //!   each tick it overlaps it, until it breaks.
 //! - A destructible body of a model the client doesn't number is ignored altogether.
@@ -225,11 +228,13 @@ pub struct Rubble {
 
 impl Rubble {
 
-    /// Whether a static triangle is of a structure's module still standing: those stop
-    /// what drives into them until it breaks them, while a fence or a post is driven
-    /// into as it breaks, see [`Hull::ram`].
+    /// Whether a static triangle is of a structure's module or a tree's trunk still
+    /// standing: those stop what drives into them until it breaks them, while a fence or
+    /// a post is driven into as it breaks, see [`Hull::ram`].
     pub fn blocks(&self, statics: &Statics, triangle: &StaticTriangle) -> bool {
-        self.standing(statics, triangle).is_some_and(|(piece, _)| piece.module.is_some())
+        self.standing(statics, triangle).is_some_and(|(piece, destructible)| {
+            piece.module.is_some() || destructible.kind == DestructibleKind::Tree
+        })
     }
 
     /// The piece a static triangle is of, if it is destructible and still stands.
@@ -319,11 +324,12 @@ mod tests {
 
     use glam::Vec3;
 
+    use wgtk::space::statics::{trunk, BodyKind};
+    use wgtk::space::bin::TREE_INSTANCE;
     use wgtk::space::destructibles::Module;
-    use wgtk::space::statics::BodyKind;
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, nose, wall};
+    use super::super::fixtures::{chieftain, nose, quad, wall};
     use super::super::movement_flag;
     use super::*;
 
@@ -416,6 +422,60 @@ mod tests {
         }
         assert_eq!(rubble.fresh.len(), 1);
         assert!(hull.position.z > 12.0, "{}", hull.position.z);
+    }
+
+
+    /// A tree of this health standing at z = 10 in the way, the 4th of its chunk, on
+    /// flat ground.
+    fn tree(health: f32) -> Space {
+        let instance = TREE_INSTANCE | 12;
+        let mut triangles = Vec::new();
+        quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
+        triangles.extend(trunk(Vec3::new(0.0, 0.0, 10.0), 1.0, instance));
+        let mut space = Space {
+            statics: Statics::from_triangles(triangles),
+            ..Space::default()
+        };
+        space.statics.add_destructible(instance, PlacedDestructible {
+            chunk_id: 0x7f7f,
+            index: 3,
+            kind: DestructibleKind::Tree,
+            health,
+            modules: Vec::new(),
+        });
+        space
+    }
+
+    #[test]
+    fn stops_at_a_tree_too_strong_and_breaks_a_bush() {
+
+        // A tree too strong for it, rammed at 20 km/h, stops it at its trunk.
+        let space = tree(1000.0);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.speed = 20.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        let front = nose(&hull);
+        assert!(front > 9.5 && front < 10.0 && rubble.fresh.is_empty(), "front at {front}");
+
+        // A bush, it breaks, falling the way it went, and drives on through.
+        let space = tree(3.0);
+        let mut rubble = Rubble::default();
+        let mut hull = chieftain();
+        hull.speed = 20.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        assert!(hull.position.z > 12.0, "{}", hull.position.z);
+        let broken: Vec<Breakage> = rubble.take_breakages().collect();
+        assert_eq!(broken.len(), 1);
+        assert_eq!((broken[0].piece.chunk_id, broken[0].piece.index, broken[0].kind), (0x7f7f, 3, DestructibleKind::Tree));
+        assert!(broken[0].yaw.abs() < 0.05, "fell at {}", broken[0].yaw);
+
     }
 
 }

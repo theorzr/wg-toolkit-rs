@@ -6,7 +6,7 @@ use super::{invalid, SpaceSection};
 
 
 /// The bit of an instance index that makes it a speed tree's, in `SPTR`.
-const TREE: u32 = 1 << 31;
+pub const TREE_INSTANCE: u32 = 1 << 31;
 
 
 /// `WGDE`: the space's destructibles as the client numbers them, by the 100 m chunk
@@ -82,8 +82,8 @@ impl SpaceSection for WGDE {
                         let Some(&instance) = instances.get(instance as usize) else {
                             return Err(invalid("destructible instance out of range"));
                         };
-                        if instance & TREE != 0 {
-                            trees.push(instance & !TREE);
+                        if instance & TREE_INSTANCE != 0 {
+                            trees.push(instance & !TREE_INSTANCE);
                         } else {
                             own.push(instance);
                         }

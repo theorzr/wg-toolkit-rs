@@ -163,8 +163,8 @@
 //! doesn't float or sink in water. Its tracks don't scrub sideways as it turns: its
 //! steering turns it as the game's turning speeds say, and holds back a hull spun by a
 //! push off its middle only as fast as it would stop turning. Vehicles take no damage
-//! from ramming, each other or destructibles. Trees don't fall: the client numbers them
-//! among the speed trees, which aren't decoded. What a destroyed module leaves
+//! from ramming, each other or destructibles. A tree's trunk is a prism of our own, the
+//! game's speed trees having no collision we read. What a destroyed module leaves
 //! (`BodyKind::Remains`) is never collided with. Shells are flown in `gun.rs`, against
 //! the same statics and rubble.
 

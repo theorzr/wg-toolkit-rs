@@ -23,7 +23,7 @@ pub use bwt2::{BWT2, TerrainSettings1, TerrainSettings2, TerrainChunk, OutlandCa
 pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bsmi::{BSMI, StaticModelInstance};
 pub use bwal::{BWAL, AssetInfo, AssetType};
-pub use wgde::{WGDE, Destructible};
+pub use wgde::{WGDE, Destructible, TREE_INSTANCE};
 pub use sptr::{SPTR, SpeedTree};
 pub use bsmo::{BSMO, StaticModel};
 pub use bwst::BWST;

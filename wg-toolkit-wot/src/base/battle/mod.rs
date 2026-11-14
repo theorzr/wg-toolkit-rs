@@ -565,7 +565,8 @@ impl Battle {
                 warn!(battle = id, shot = shot.id, "Failed to land a shot: {e}");
             }
         }
-        if let Err(e) = self.areas.show(app, id, self.world.take_breakages()) {
+        let breakages = self.world.take_breakages().collect::<Vec<_>>();
+        if let Err(e) = self.areas.show(app, id, breakages, &self.world.space().terrain) {
             warn!(battle = id, "Failed to tell the destructibles broken: {e}");
         }
 

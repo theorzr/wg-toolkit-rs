@@ -21,7 +21,10 @@
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
 //! - **Trees**: a [`PlacedTree`] for each speed tree of [`SPTR`] the client numbers as
 //!   a destructible: where it stands, its number, and its health at its scale. Speed
-//!   trees have no collision of their own, so none of their triangles are here.
+//!   trees have no collision of their own: each is given a trunk of our own, an upright
+//!   prism of triangles, [`trunk`], destructible, that shells pass. Its triangles'
+//!   `instance` is [`TREE_INSTANCE`] plus the tree's index in `SPTR`, its destructible
+//!   keyed the same.
 //!
 //! ```text
 //!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass,
@@ -46,6 +49,7 @@
 //! | any body of a fence, post or barrel (destructible whole) | `Destructible` | breaks as it drives in |
 //! | a house's module, `n_wood0_1` say, and its solid bodies of the module's material kind, `s_wall_1` say | `Destructible` | a wall until it breaks |
 //! | `n_…` of a model not listed                        | `Destructible` | nothing: no number to break it by |
+//! | a tree's trunk, of our own, see [`trunk`]          | `Destructible` | a wall until it breaks   |
 //! | `c_…`, what a destroyed module leaves               | `Remains`      | nothing, not used yet    |
 //! | anything else                                      | `Solid`        | a wall, or ground if flat |
 //!
@@ -81,12 +85,21 @@ use crate::havok::collision::Collision;
 use crate::res::fs::ResFilesystem;
 
 use super::destructibles::{scaled_health, Destructibles, DestructibleKind, Module};
-use super::bin::{SpaceBin, BSMI, BSMO, BWST, SPTR, WGDE};
+use super::bin::{SpaceBin, BSMI, BSMO, BWST, SPTR, TREE_INSTANCE, WGDE};
 
 
 /// The side of the grid's square cells the triangles are indexed in, in metres: about
 /// a hull's length.
 const CELL: f32 = 8.0;
+
+/// A tree's trunk, see [`trunk`]: its radius at a scale of 1, how high it rises over
+/// the point it stands on, and how deep under it it starts, in metres, and its sides.
+/// Our choice: a speed tree has no collision, and its `.srt` isn't decoded. As high as
+/// a turret's top, as deep as a slope under it falls away.
+const TRUNK_RADIUS: f32 = 0.3;
+const TRUNK_HEIGHT: f32 = 4.0;
+const TRUNK_DEPTH: f32 = 1.0;
+const TRUNK_SIDES: usize = 3;
 
 
 /// The triangles of a space's static models, in the world.
@@ -159,7 +172,8 @@ pub struct StaticTriangle {
     pub bounds: [Vec3; 2],
     /// Its unit normal, its vertices' winding deciding its side; zero if degenerate.
     pub normal: Vec3,
-    /// Which placed model it is of, its index in [`BSMI`].
+    /// Which placed model it is of, its index in [`BSMI`], or which tree's trunk,
+    /// [`TREE_INSTANCE`] plus its index in [`SPTR`].
     pub instance: u32,
     /// Its body's material kind, see [`crate::havok::collision::CollisionBody`].
     pub material_kind: u32,
@@ -310,12 +324,26 @@ impl Statics {
                     .and_then(|path| definitions.get(path)) else { continue };
 
                 let scale = tree.transform.matrix3.y_axis.length();
+                let position = tree.transform.translation.into();
+                let health = scaled_health(scale, destructible.health);
+
+                // Its trunk, of its own instance, see `TREE_INSTANCE`.
+                let instance = TREE_INSTANCE | index;
+                triangles.extend(trunk(position, scale, instance));
+                destructibles.insert(instance, PlacedDestructible {
+                    chunk_id: numbered.chunk_id,
+                    index: numbered.index,
+                    kind: destructible.kind,
+                    health,
+                    modules: Vec::new(),
+                });
+
                 trees.push(PlacedTree {
                     chunk_id: numbered.chunk_id,
                     index: numbered.index,
-                    position: tree.transform.translation.into(),
+                    position,
                     scale,
-                    health: scaled_health(scale, destructible.health),
+                    health,
                 });
 
             }
@@ -438,6 +466,30 @@ impl Statics {
 
 }
 
+
+/// The triangles of the trunk of a tree standing at `position`, placed at `scale`, as
+/// the statics give it, see [`TRUNK_RADIUS`]: an upright prism, its sides only, so that
+/// what looks down at the ground, a bot's way say, doesn't see it. Its triangles are of
+/// `instance`, destructible, and shells pass them.
+pub fn trunk(position: Vec3, scale: f32, instance: u32) -> impl Iterator<Item = StaticTriangle> {
+    let radius = TRUNK_RADIUS * scale;
+    (0..TRUNK_SIDES).flat_map(move |side| {
+        let a = trunk_corner(position, radius, side, -TRUNK_DEPTH);
+        let b = trunk_corner(position, radius, side + 1, -TRUNK_DEPTH);
+        let c = trunk_corner(position, radius, side + 1, TRUNK_HEIGHT);
+        let d = trunk_corner(position, radius, side, TRUNK_HEIGHT);
+        [[a, b, c], [a, c, d]].map(|vertices| StaticTriangle {
+            shells_pass: true,
+            ..StaticTriangle::new(vertices, instance, 0, BodyKind::Destructible)
+        })
+    })
+}
+
+/// The `side`th corner of a trunk of `radius` at `position`, `height` above it.
+fn trunk_corner(position: Vec3, radius: f32, side: usize, height: f32) -> Vec3 {
+    let angle = side as f32 * std::f32::consts::TAU / TRUNK_SIDES as f32;
+    position + Vec3::new(radius * angle.sin(), height, radius * angle.cos())
+}
 
 /// The sections of a compiled space its static models need: its strings, its placed
 /// models and its models.
