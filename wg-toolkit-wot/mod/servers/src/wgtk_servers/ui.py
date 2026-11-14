@@ -13,11 +13,14 @@ Each view's page reads its model, `window.model`, and calls its commands, which 
 views handle: the servers file changes, and the login screen with it.
 """
 
+import GUI
 from debug_utils import LOG_CURRENT_EXCEPTION
-from frameworks.wulf import Array, PositionAnchor, ViewModel, ViewSettings, WindowFlags
+from frameworks.wulf import Array, ViewModel, ViewSettings, WindowFlags
 from gui.impl.gen import R
 from gui.impl.pub import ViewImpl
 from gui.impl.pub.window_impl import WindowImpl
+from helpers import dependency
+from skeletons.account_helpers.settings_core import ISettingsCore
 
 from gui.mods.wgtk_servers.servers import log, read_servers, remove_server, save_server
 
@@ -190,6 +193,7 @@ class ButtonView(ViewImpl):
         g_loginWindows.show_editor()
 
     def __onSized(self, *args):
+        log('The servers button page was sized')
         g_loginWindows.place_button()
 
 
@@ -296,9 +300,17 @@ class LoginWindows(object):
 
     @staticmethod
     def __placeButton(window):
-        """Place the button in the screen's bottom right corner."""
-        moved = window.move(BUTTON_MARGIN, BUTTON_MARGIN, PositionAnchor.RIGHT, PositionAnchor.BOTTOM)
-        log('Placed the servers button', moved, 'size', window.size, 'at', window.position)
+        """Place the button in the screen's bottom right corner, `BUTTON_MARGIN` off it.
+        A window is placed by its top left corner, in the screen's pixels over the
+        interface's scale, as the game places its own: the client's right and bottom
+        anchors leave it at the top left."""
+        screen_width, screen_height = GUI.screenResolution()[:2]
+        scale = dependency.instance(ISettingsCore).interfaceScale.get() or 1
+        width, height = window.size
+        x = int(screen_width / scale - width - BUTTON_MARGIN)
+        y = int(screen_height / scale - height - BUTTON_MARGIN)
+        moved = window.move(x, y)
+        log('Placed the servers button', moved, 'at', (x, y), 'size', (width, height), 'screen', (screen_width, screen_height), 'scale', scale)
 
     @staticmethod
     def __placeEditor(window):
