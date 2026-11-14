@@ -17,7 +17,9 @@ without one has none: the client logs into it without encrypting its login.
 
 The client reads its server list once, `_PreDefinedHostList.readScriptConfig`, from
 `scripts_config.xml` and the player's preferences: ours are added after, see
-[`ServerList`], and follow the servers file as it changes.
+[`ServerList`], and follow the servers file as it changes. Each has a periphery of its
+own, so that the lobby's server switch lists it too, see `PERIPHERY_BASE`: switching
+logs in again with the last login's token, which a server must have sent.
 """
 
 import json
@@ -26,7 +28,6 @@ import re
 
 import BigWorld
 import ResMgr
-import constants
 from debug_utils import LOG_CURRENT_EXCEPTION, LOG_NOTE, LOG_WARNING
 from helpers import dependency
 from predefined_hosts import g_preDefinedHosts
@@ -41,6 +42,10 @@ CONFIG_NAME = 'servers.json'
 KEYS_DIR = 'keys'
 # How often the servers file is looked at for changes, in seconds.
 WATCH_PERIOD = 2.0
+# The periphery id of our first server, the next ones following: the lobby's server
+# switch lists only servers of a periphery, and finds the one to log into by its id. Our
+# choice, far past the game's own.
+PERIPHERY_BASE = 9000
 
 
 def log(message, *args):
@@ -167,23 +172,30 @@ class ServerList(object):
 
     def add(self, hosts):
         """Add the servers of the servers file, those of an address already listed left
-        out."""
+        out, each of a periphery of its own, see `PERIPHERY_BASE`, so that the lobby can
+        switch to it as to the game's own servers."""
         if self.own is None:
             self.own = len(hosts._hosts)
         self.modified = _modified(config_path())
-        for server in read_servers():
+        for position, server in enumerate(read_servers()):
             try:
                 address = server['address'].strip()
                 short_name = server.get('short_name') or server.get('name') or address
                 name = server.get('name') or short_name
+                periphery_id = PERIPHERY_BASE + position
                 if address in hosts._urlMap:
                     LOG_WARNING('[wgtk_servers] Left out a server of an address already listed', name, address)
                     continue
-                item = hosts._makeHostItem(name, short_name, address, keyPath=key_path(server), peripheryID=constants.STANDALONE_CLUSTER_ID)
-                hosts._urlMap[item.url] = len(hosts._hosts)
-                hosts._nameMap[item.name] = len(hosts._hosts)
+                if periphery_id in hosts._peripheryMap:
+                    LOG_WARNING('[wgtk_servers] Left out a server of a periphery already listed', name, periphery_id)
+                    continue
+                item = hosts._makeHostItem(name, short_name, address, keyPath=key_path(server), peripheryID=periphery_id)
+                index = len(hosts._hosts)
+                hosts._urlMap[item.url] = index
+                hosts._nameMap[item.name] = index
+                hosts._peripheryMap[periphery_id] = index
                 hosts._hosts.append(item)
-                log('Added a server', short_name, name, address)
+                log('Added a server', short_name, name, address, periphery_id)
             except Exception:
                 LOG_CURRENT_EXCEPTION()
 
@@ -198,6 +210,9 @@ class ServerList(object):
         for name, index in hosts._nameMap.items():
             if index >= self.own:
                 del hosts._nameMap[name]
+        for periphery_id, index in hosts._peripheryMap.items():
+            if index >= self.own:
+                del hosts._peripheryMap[periphery_id]
         del hosts._hosts[self.own:]
         self.add(hosts)
         # The login screen shows the list of the login manager's servers, made again

@@ -79,15 +79,16 @@ class EditorModel(ViewModel):
 
 
 class ButtonModel(ViewModel):
-    """The button: clicked."""
-    __slots__ = ('onClick',)
+    """The button: clicked, and its page sized, for its window to be placed again."""
+    __slots__ = ('onClick', 'onSized')
 
-    def __init__(self, properties=0, commands=1):
+    def __init__(self, properties=0, commands=2):
         super(ButtonModel, self).__init__(properties=properties, commands=commands)
 
     def _initialize(self):
         super(ButtonModel, self)._initialize()
         self.onClick = self._addCommand('onClick')
+        self.onSized = self._addCommand('onSized')
 
 
 # -- Views --
@@ -177,14 +178,19 @@ class ButtonView(ViewImpl):
     def _initialize(self, *args, **kwargs):
         super(ButtonView, self)._initialize(*args, **kwargs)
         self.viewModel.onClick += self.__onClick
+        self.viewModel.onSized += self.__onSized
 
     def _finalize(self):
         self.viewModel.onClick -= self.__onClick
+        self.viewModel.onSized -= self.__onSized
         g_loginWindows.button = None
         super(ButtonView, self)._finalize()
 
     def __onClick(self, *args):
         g_loginWindows.show_editor()
+
+    def __onSized(self, *args):
+        g_loginWindows.place_button()
 
 
 # -- Windows --
@@ -262,6 +268,12 @@ class LoginWindows(object):
         if self.editor is not None:
             self.editor.want(False)
 
+    def place_button(self):
+        """Place the button again, its page sized: the window may not have said its size
+        changed, nor be ready yet when it did, see [`ModWindow`]."""
+        if self.button is not None and self.button.isReady:
+            self.__placeButton(self.button)
+
     def close(self):
         """Close both, the login screen gone."""
         windows = (self.editor, self.button)
@@ -286,7 +298,7 @@ class LoginWindows(object):
     def __placeButton(window):
         """Place the button in the screen's bottom right corner."""
         moved = window.move(BUTTON_MARGIN, BUTTON_MARGIN, PositionAnchor.RIGHT, PositionAnchor.BOTTOM)
-        log('Placed the servers button', moved)
+        log('Placed the servers button', moved, 'size', window.size, 'at', window.position)
 
     @staticmethod
     def __placeEditor(window):
