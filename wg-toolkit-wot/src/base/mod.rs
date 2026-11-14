@@ -520,14 +520,28 @@ impl BaseThread {
         })
     }
 
-    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], then
-    /// give the clients what changed.
+    /// End a tick: make the battles due, tick every battle, see [`Battle::tick`], send
+    /// the clients of those done back to their garage, see [`Self::leave_battle`], which
+    /// ends them, then give the clients what changed.
     fn battle_tick(&mut self) {
+
         self.make_battles();
         for battle in self.battles.values_mut() {
             battle.tick(&mut self.app);
         }
+
+        let done = self.battles.values()
+            .filter(|battle| battle.is_done())
+            .flat_map(Battle::clients)
+            .collect::<Vec<_>>();
+        for client in done {
+            if let Err(e) = self.leave_battle(client) {
+                warn!(%client, "Failed to send a client back from its battle: {e}");
+            }
+        }
+
         self.app.end_tick();
+
     }
 
     /// Make the battles due, see [`Gathering::due`]: each in a space of its own with the
@@ -585,6 +599,40 @@ impl BaseThread {
         info!(battle = id, clients, %space, "Made a battle: {}", self.map.geometry);
         Ok(())
 
+    }
+
+    /// Leave the client's battle, as the captured server does: switch it to the base
+    /// app again, where it logs in back to its account.
+    fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
+        let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
+            return Ok(());
+        };
+        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
+        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
+        self.quit_battle(client);
+        self.battle_clients.remove(&client);
+        self.app.switch_base_app(client, base_app, true)?;
+        info!(%client, %base_app, "Left the battle, switching base app");
+        Ok(())
+    }
+
+    /// Take a client out of its battle, or of the one gathering it, see [`Battle::leave`]:
+    /// a battle left without clients is gone, with its space.
+    fn quit_battle(&mut self, client: ClientKey) {
+        let Some(id) = self.battle_clients.get(&client).map(|c| c.battle) else { return };
+        if let Some(gathering) = self.gatherings.get_mut(&id) {
+            let before = gathering.arrivals.len();
+            gathering.arrivals.retain(|arrival| arrival.client != client);
+            gathering.expected -= before - gathering.arrivals.len();
+        }
+        let Some(battle) = self.battles.get_mut(&id) else { return };
+        battle.leave(client);
+        if battle.is_empty() {
+            let space = battle.space();
+            self.battles.remove(&id);
+            self.app.destroy_space(space);
+            info!(battle = id, "Ended a battle: its last client left");
+        }
     }
 
     /// Tell a client just logged in the update frequency, right after the login reply, as
@@ -649,25 +697,6 @@ impl BaseThread {
         }
     }
 
-    /// Take a client out of its battle, or of the one gathering it, see [`Battle::leave`]:
-    /// a battle left without clients is gone, with its space.
-    fn quit_battle(&mut self, client: ClientKey) {
-        let Some(id) = self.battle_clients.get(&client).map(|c| c.battle) else { return };
-        if let Some(gathering) = self.gatherings.get_mut(&id) {
-            let before = gathering.arrivals.len();
-            gathering.arrivals.retain(|arrival| arrival.client != client);
-            gathering.expected -= before - gathering.arrivals.len();
-        }
-        let Some(battle) = self.battles.get_mut(&id) else { return };
-        battle.leave(client);
-        if battle.is_empty() {
-            let space = battle.space();
-            self.battles.remove(&id);
-            self.app.destroy_space(space);
-            info!(battle = id, "Ended a battle: its last client left");
-        }
-    }
-
     /// Bring a client that reconnected for its battle to its avatar.
     fn enter_battle(&mut self, client: ClientKey) -> io::Result<()> {
 
@@ -706,21 +735,6 @@ impl BaseThread {
         self.make_battles();
         Ok(())
 
-    }
-
-    /// Leave the client's battle, as the captured server does: switch it to the base
-    /// app again, where it logs in back to its account.
-    fn leave_battle(&mut self, client: ClientKey) -> io::Result<()> {
-        let (Some((session_key, blowfish)), Some(player)) = (self.app.client_keys(client), self.players.remove(&client)) else {
-            return Ok(());
-        };
-        let base_app = advertise::advertised(&self.advertise, self.addr, client.addr());
-        self.pending_returns.insert(session_key, (client.addr().ip(), blowfish, player));
-        self.quit_battle(client);
-        self.battle_clients.remove(&client);
-        self.app.switch_base_app(client, base_app, true)?;
-        info!(%client, %base_app, "Left the battle, switching base app");
-        Ok(())
     }
 
     /// Bring a client that enabled entities to its account, as the captured server did:

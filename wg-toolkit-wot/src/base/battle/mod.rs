@@ -6,7 +6,9 @@
 //! see [`Gathering`], then is made with them all at once: their vehicles, each one's own
 //! arena info, and the bots. It counts down once they are all ready, done loading, and
 //! goes on while any client is in it, a vehicle whose client left standing where it
-//! stopped.
+//! stopped, until a team has no vehicle left alive or its time is up. Over, it tells its
+//! clients who won, then is done with them a little later: they go back to their garage,
+//! see [`period`].
 //!
 //! A battle holds all it needs, and only tells its clients what happens through the app
 //! it is given, so that an app may run several, a thread of its own each, say. The base
@@ -62,7 +64,7 @@ use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
 use hit::{ShellHit, HIT_FLAG_VEHICLE_KILLED};
 use participant::Participant;
-use period::ArenaPeriod;
+use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
 
 
@@ -287,6 +289,32 @@ impl Battle {
         self.participants.is_empty()
     }
 
+    /// Whether it has been over long enough for its clients to go back to their garage,
+    /// see [`ArenaPeriod::done`].
+    pub fn is_done(&self) -> bool {
+        self.period.done()
+    }
+
+    /// Its clients.
+    pub fn clients(&self) -> impl Iterator<Item = ClientKey> + '_ {
+        self.participants.iter().map(|participant| participant.client)
+    }
+
+    /// The winner once a team has no vehicle left alive: the other team, or nobody
+    /// ([`NO_WINNER`]) if neither has.
+    fn exterminated(&self) -> Option<u8> {
+        let [first, second] = TEAMS.map(|team| self.vehicles.iter().any(|vehicle| vehicle.team == team && vehicle.alive()));
+        if first && second {
+            None
+        } else if first {
+            Some(TEAMS[0])
+        } else if second {
+            Some(TEAMS[1])
+        } else {
+            Some(NO_WINNER)
+        }
+    }
+
     /// Its game time, in seconds.
     fn game_time(&self) -> f64 {
         self.clock.elapsed().as_secs_f64()
@@ -388,13 +416,17 @@ impl Battle {
 
     }
 
-    /// Fire a client's gun, if loaded: the shell's tracer and the gun's effects, of its
-    /// whole burst, then one shell fewer, the shell it loads next and the reload, once
-    /// the burst's other shells are fired too, see [`Self::step`]. Where the shell lands
-    /// follows with [`Self::land`].
+    /// Fire a client's gun, if loaded and the battle is on: the shell's tracer and the
+    /// gun's effects, of its whole burst, then one shell fewer, the shell it loads next
+    /// and the reload, once the burst's other shells are fired too, see [`Self::step`].
+    /// Where the shell lands follows with [`Self::land`].
     fn shoot(&mut self, app: &mut base::App, client: ClientKey) -> io::Result<()> {
 
         let now = self.game_time();
+        if !self.period.fighting() {
+            debug!(%client, "Refused a shot: the battle is not on");
+            return Ok(());
+        }
         let Some(own) = self.own(client).filter(|&own| self.vehicles[own].alive()) else { return Ok(()) };
         let own_id = self.vehicles[own].entity.id();
         let targets = self.shell_targets(own_id);
@@ -451,13 +483,14 @@ impl Battle {
 
     // -- Its tick --
 
-    /// End a tick: go to its next period when due, step it, once a client has its
-    /// vehicle, break what shells got through, land the shells due, then tell what broke.
+    /// End a tick: go to its next period when due, over once a team is exterminated, see
+    /// [`Self::exterminated`], step it, once a client has its vehicle, break what shells
+    /// got through, land the shells due, then tell what broke.
     pub fn tick(&mut self, app: &mut base::App) {
 
         let id = self.id;
         let ready = self.participants.iter().all(|participant| participant.ready);
-        if let Some(period) = self.period.next(ready) {
+        if let Some(period) = self.period.next(ready, self.exterminated()) {
             self.period = period;
             info!(battle = id, ?period, "Changed the battle's period");
             for participant in self.participants.iter().filter(|participant| participant.ready) {

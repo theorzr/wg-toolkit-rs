@@ -81,13 +81,20 @@ impl Participant {
     }
 
     /// Tell its client the battle's period, as long as is left of it: its game time is
-    /// the ticks it got.
+    /// the ticks it got. Once over, it is first told who won, which it shows.
     pub fn show_period(&self, app: &mut base::App, period: ArenaPeriod) -> io::Result<()> {
+
+        if let ArenaPeriod::AfterBattle { winner, reason, .. } = period {
+            app.entity(self.avatar)?.onRoundFinished(winner as i8, reason)?;
+            info!(client = %self.client, winner, reason, "Told the battle's end");
+        }
+
         let game_time = f64::from(app.ticks(self.client).unwrap_or(0)) * TICK.as_secs_f64();
         let Some((kind, data)) = period.arena_update(game_time)? else { return Ok(()) };
         app.entity(self.avatar)?.updateArena(kind, data)?;
         info!(client = %self.client, ?period, "Changed the arena period");
         Ok(())
+
     }
 
 }

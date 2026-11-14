@@ -105,6 +105,9 @@ entity_schema! {
                 damaged_destructibles: Vec<u32>,
             );
             fn showShotResults(results: Vec<ShotResult>);
+            /// The battle is over: won by a team, none for a draw, and why, as
+            /// `FINISH_REASON`.
+            fn onRoundFinished(winner_team: i8, reason: u8);
         }
         base {
             fn setClientReady();
