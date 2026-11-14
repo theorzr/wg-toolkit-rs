@@ -36,6 +36,15 @@
 //! A model is keyed by its path without extension, in lower case, see `stem`. Its
 //! `.model` (as listed) and its `.havok` (as `space.bin` gives it) then share a key.
 //!
+//! # Bushes
+//!
+//! Some trees are bushes, which `vegetation/bushes.xml` lists apart, by their file's
+//! name alone: `Hawthorn_01: ""` say. The client's native `wg_checkDestructibleIsBush`
+//! reads it: a bush the server tells fallen isn't felled but switched off, gone. Tanks
+//! drive through bushes in the game, so the server never breaks one, see
+//! [`Destructible::bush`]. The list isn't all the trees of 3 health: `Hawthorn_03` and
+//! `BrokenTree_01` aren't on it, and fall.
+//!
 //! # A structure's modules
 //!
 //! A module's `matName` is also the name of its collision body:
@@ -74,7 +83,7 @@
 //! it whole and takes its damage. With modules of 10 to 80 health
 //! and shells of 100 or more, a module breaks at the first shell.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::res::fs::ResFilesystem;
@@ -83,6 +92,8 @@ use crate::pxml::{self, Element};
 
 /// Where the game lists its destructibles.
 const DESTRUCTIBLES_PATH: &str = "scripts/destructibles.xml";
+/// Where the game lists the trees that are bushes, see the module's documentation.
+const BUSHES_PATH: &str = "vegetation/bushes.xml";
 
 /// The material kind of a structure's first module, the next ones following in the
 /// order of their ids, `DESTRUCTIBLE_MATKIND.NORMAL_MIN` in the client's `constants.py`:
@@ -140,6 +151,9 @@ pub struct Destructible {
     pub density: f32,
     /// How a tree or a falling atom falls, if its entry says.
     pub fall: Option<FallParams>,
+    /// Whether it is a tree the game lists as a bush, which nothing breaks, see the
+    /// module's documentation.
+    pub bush: bool,
 }
 
 /// How a tree or a falling atom falls, at a scale of 1: its `physicParams`, as the
@@ -208,6 +222,7 @@ impl Destructibles {
             shoot_through_loss: penetration_loss(&root).unwrap_or_default(),
         };
 
+        let bushes = bushes(fs)?;
         let whole = [
             ("trees", DestructibleKind::Tree),
             ("fallingAtoms", DestructibleKind::FallingAtom),
@@ -218,12 +233,14 @@ impl Destructibles {
             for entry in entries(&root, section) {
                 let Some(model) = model(entry) else { continue };
                 let health = number(entry, "health").unwrap_or(0.0);
+                let bush = kind == DestructibleKind::Tree && bushes.contains(file_name(&model));
                 destructibles.models.insert(model, Destructible {
                     kind,
                     health,
                     modules: HashMap::new(),
                     density: number(entry, "density").unwrap_or(0.0),
                     fall: fall_params(entry),
+                    bush,
                 });
             }
         }
@@ -236,6 +253,7 @@ impl Destructibles {
                 modules: modules(entry),
                 density: 0.0,
                 fall: None,
+                bush: false,
             });
         }
 
@@ -367,6 +385,20 @@ fn fall_params(entry: &Element) -> Option<FallParams> {
     })
 }
 
+/// The trees that are bushes, by their file's name without extension, in lower case,
+/// see the module's documentation.
+fn bushes(fs: &ResFilesystem) -> io::Result<HashSet<String>> {
+
+    let file = fs.read(BUSHES_PATH)
+        .map_err(|e| io::Error::new(e.kind(), format!("{BUSHES_PATH}: {e}")))?;
+
+    let root = pxml::from_reader(io::BufReader::new(file))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{BUSHES_PATH}: {e}")))?;
+
+    Ok(root.iter_children_all().map(|(name, _)| name.to_lowercase()).collect())
+
+}
+
 /// The entries of a kind of destructibles, `fragiles` say.
 fn entries<'a>(root: &'a Element, kind: &str) -> impl Iterator<Item = &'a Element> {
     root.get_child_element(kind).into_iter()
@@ -377,6 +409,11 @@ fn entries<'a>(root: &'a Element, kind: &str) -> impl Iterator<Item = &'a Elemen
 /// An entry's model, as [`Destructibles`] keys it, see [`stem`].
 fn model(entry: &Element) -> Option<String> {
     entry.get_child_string("filename").map(stem)
+}
+
+/// The file's name of a model, as [`Destructibles`] keys it: its last part.
+fn file_name(model: &str) -> &str {
+    model.rsplit_once('/').map_or(model, |(_, name)| name)
 }
 
 /// A model's path as [`Destructibles`] keys it: without its extension, in lower case.

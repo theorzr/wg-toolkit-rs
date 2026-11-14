@@ -20,7 +20,8 @@
 //!   From a triangle a vehicle touches, it gives the client's number for what the
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
 //! - **Trees**: a [`PlacedTree`] for each speed tree of [`SPTR`] the client numbers as
-//!   a destructible: its placement, its number, its health at its scale and how it
+//!   a destructible, but bushes, which nothing breaks (see
+//!   [`Destructible::bush`](super::destructibles::Destructible::bush)): its placement, its number, its health at its scale and how it
 //!   falls. Speed trees have no collision of their own: each is given a trunk of our
 //!   own, an upright prism of triangles, [`trunk`], destructible, that shells pass.
 //!   Its triangles' `instance` is [`TREE_INSTANCE`] plus the tree's index in `SPTR`,
@@ -327,6 +328,11 @@ impl Statics {
 
                 let Some(destructible) = strings.get_string(tree.resource)
                     .and_then(|path| definitions.get(path)) else { continue };
+
+                // A bush, vehicles drive through, and nothing breaks it.
+                if destructible.bush {
+                    continue;
+                }
 
                 let scale = tree.transform.matrix3.y_axis.length();
                 let position = tree.transform.translation.into();
