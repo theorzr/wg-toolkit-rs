@@ -475,7 +475,7 @@ impl<S: Deref<Target = Space>> World<S> {
             }
 
             let Some(&at) = self.trees.get(&(breakage.piece.chunk_id, breakage.piece.index)) else { continue };
-            let Some(fall) = TreeFall::new(&statics.trees()[at], &self.space.terrain, breakage.yaw, breakage.speed) else { continue };
+            let Some(fall) = TreeFall::new(&statics.trees()[at], &self.space, &self.rubble, breakage.yaw, breakage.speed) else { continue };
             self.falls.insert(breakage.piece, fall);
             
         }

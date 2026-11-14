@@ -3,7 +3,8 @@
 //!
 //! The server tells the clients three things of a fall, see `fallenTrees`: the way it
 //! falls, the vehicle's; how fast it starts, of 4 steps of the vehicle's speed; and how
-//! far it may tip, [`TreeFall::limit`], where its top meets the terrain. The client does
+//! far it may tip, [`TreeFall::limit`], where its top meets the terrain or its trunk a
+//! static model, a house or a rock say, see [`fall_limit`]. The client does
 //! the rest, `_DestructiblesAnimator` in its `AreaDestructibles.py`, which this is a port
 //! of: the tree is a rod hinged at its foot, of its kind's mass and height
 //! ([`FallParams`]) scaled by its scale, falling under gravity and the air's drag, its
@@ -32,9 +33,13 @@ use std::f32::consts::PI;
 
 use glam::{Affine3A, Mat3A, Quat, Vec3, Vec3A};
 
+use wgtk::space::statics::{PlacedTree, StaticTriangle};
 use wgtk::space::destructibles::FallParams;
-use wgtk::space::statics::PlacedTree;
-use wgtk::space::terrain::Terrain;
+use wgtk::space::bin::TREE_INSTANCE;
+use wgtk::space::Space;
+
+use super::body::blocking;
+use super::Rubble;
 
 
 /// Gravity, in m/s²: `physics_shared.G`.
@@ -60,6 +65,9 @@ const LIMIT_STEP: f32 = PI / 180.0;
 const MAX_LIMIT: f32 = 0.75 * PI;
 /// How many halvings refine a tree's limit, see [`fall_limit`]: to a 250th of a degree.
 const LIMIT_REFINES: usize = 8;
+/// How far up its trunk a tree looks for what it falls against, in metres, see
+/// [`blocked`]: past the ground and the decks around its foot. Our choice.
+const TRUNK_CLEARANCE: f32 = 1.0;
 
 
 /// A tree falling, or lying, see the module's documentation.
@@ -92,10 +100,10 @@ pub struct TreeFall {
 
 impl TreeFall {
 
-    /// A tree knocked down by a vehicle going `speed` in m/s toward `yaw`, falling on
-    /// `terrain`, as it falls: `showFallTree`. None for a tree whose kind doesn't say
-    /// how it falls.
-    pub fn new(tree: &PlacedTree, terrain: &Terrain, yaw: f32, speed: f32) -> Option<Self> {
+    /// A tree knocked down by a vehicle going `speed` in m/s toward `yaw`, falling in
+    /// `space` against what of it stands, see [`fall_limit`], as it falls:
+    /// `showFallTree`. None for a tree whose kind doesn't say how it falls.
+    pub fn new(tree: &PlacedTree, space: &Space, rubble: &Rubble, yaw: f32, speed: f32) -> Option<Self> {
         let fall: FallParams = tree.fall?;
         let scale = tree.scale;
         let height = fall.height * scale;
@@ -103,7 +111,7 @@ impl TreeFall {
         Some(Self {
             yaw,
             speed,
-            limit: fall_limit(terrain, tree.transform.translation.into(), height, yaw),
+            limit: fall_limit(space, rubble, tree.transform.translation.into(), height, yaw),
             pitch: 0.0,
             pitch_speed: (f32::from(speed) + 1.0) * INIT_SPEED_NORMALISER,
             time: 0.0,
@@ -195,18 +203,17 @@ impl TreeFall {
 }
 
 /// How far a tree of this `height` standing at `foot` may tip falling toward `yaw`, in
-/// radians from upright: until its top meets the terrain, looked for by
-/// [`LIMIT_STEP`], then refined, at most [`MAX_LIMIT`]. Only the terrain counts, not
-/// what stands on it.
-fn fall_limit(terrain: &Terrain, foot: Vec3, height: f32, yaw: f32) -> f32 {
+/// radians from upright: until it meets the terrain or a static model, see
+/// [`blocked`], looked for by [`LIMIT_STEP`], then refined, at most [`MAX_LIMIT`].
+fn fall_limit(space: &Space, rubble: &Rubble, foot: Vec3, height: f32, yaw: f32) -> f32 {
     let mut above = 0.0;
     let mut pitch = LIMIT_STEP;
     while pitch < MAX_LIMIT {
-        if top_below_ground(terrain, foot, height, yaw, pitch) {
+        if blocked(space, rubble, foot, height, yaw, pitch) {
             let mut below = pitch;
             for _ in 0..LIMIT_REFINES {
                 let middle = (above + below) / 2.0;
-                if top_below_ground(terrain, foot, height, yaw, middle) {
+                if blocked(space, rubble, foot, height, yaw, middle) {
                     below = middle;
                 } else {
                     above = middle;
@@ -220,20 +227,31 @@ fn fall_limit(terrain: &Terrain, foot: Vec3, height: f32, yaw: f32) -> f32 {
     MAX_LIMIT
 }
 
-/// Whether the top of a tree of this `height` at `foot`, tipped by `pitch` toward
-/// `yaw`, is at or under the terrain; off the terrain, under its foot's height.
-fn top_below_ground(terrain: &Terrain, foot: Vec3, height: f32, yaw: f32, pitch: f32) -> bool {
-    let reach = height * pitch.sin();
-    let top = foot + Vec3::new(yaw.sin() * reach, height * pitch.cos(), yaw.cos() * reach);
-    top.y <= terrain.height_at(top.x, top.z).unwrap_or(foot.y)
-}
+/// Whether a tree of this `height` at `foot`, tipped by `pitch` toward `yaw`, meets
+/// what it falls on: its top at or under the terrain, off it under its foot's height,
+/// or its trunk, from [`TRUNK_CLEARANCE`] up, through a static model that stops
+/// vehicles, see [`blocking`], but other trees' trunks, ours.
+fn blocked(space: &Space, rubble: &Rubble, foot: Vec3, height: f32, yaw: f32, pitch: f32) -> bool {
 
+    let along = Vec3::new(yaw.sin() * pitch.sin(), pitch.cos(), yaw.cos() * pitch.sin());
+    let top = foot + along * height;
+    if top.y <= space.terrain.height_at(top.x, top.z).unwrap_or(foot.y) {
+        return true;
+    }
+
+    let start = foot + along * TRUNK_CLEARANCE;
+    space.static_ray(start, along, height - TRUNK_CLEARANCE, &|triangle: &StaticTriangle| {
+        triangle.instance & TREE_INSTANCE == 0 && blocking(space, rubble)(triangle)
+    }).is_some()
+
+}
 
 #[cfg(test)]
 mod tests {
 
     use std::f32::consts::FRAC_PI_2;
 
+    use super::super::fixtures::wall;
     use super::*;
 
     /// A tree of the most common kind's way of falling, standing at `foot`.
@@ -262,8 +280,8 @@ mod tests {
 
         // On flat ground, it may tip a quarter turn, and lies short of it, held up by
         // its crown, where the client's solver puts it.
-        let terrain = Terrain::default();
-        let mut fall = TreeFall::new(&maple(Vec3::ZERO), &terrain, 0.0, 10.0).unwrap();
+        let space = Space::default();
+        let mut fall = TreeFall::new(&maple(Vec3::ZERO), &space, &Rubble::default(), 0.0, 10.0).unwrap();
         assert!((fall.limit - FRAC_PI_2).abs() < 1e-3, "{}", fall.limit);
         assert_eq!(fall.speed, 3);
         let mut ticks = 0;
@@ -284,6 +302,19 @@ mod tests {
         assert!(top.z > 9.5 && top.x.abs() < 1e-3 && top.y < 2.5, "top at {top}");
         assert!(transform.translation.y < 0.0 && transform.translation.y > -0.15);
 
+    }
+
+
+    #[test]
+    fn falls_against_a_wall_short_of_the_ground() {
+        // A wall 3 m high at z = 10, a tree 10 m high 6 m in front of it falling its
+        // way: its trunk meets the wall's top at atan(6 / 3) from upright.
+        let space = wall(3.0);
+        let fall = TreeFall::new(&maple(Vec3::new(0.0, 0.0, 4.0)), &space, &Rubble::default(), 0.0, 10.0).unwrap();
+        assert!((fall.limit - 2.0f32.atan()).abs() < 0.01, "{}", fall.limit);
+        // Falling away from it, it lies on the ground.
+        let fall = TreeFall::new(&maple(Vec3::new(0.0, 0.0, 4.0)), &space, &Rubble::default(), PI, 10.0).unwrap();
+        assert!((fall.limit - FRAC_PI_2).abs() < 0.01, "{}", fall.limit);
     }
 
 }

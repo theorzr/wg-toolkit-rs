@@ -292,11 +292,25 @@ impl Space {
     /// The first surface a ray from `origin` along `direction`, a unit vector, crosses
     /// within `length`, of those `keep` keeps: the terrain only from above.
     pub fn ray<'a>(&'a self, origin: Vec3, direction: Vec3, length: f32, keep: &impl Fn(&StaticTriangle) -> bool) -> Option<Hit<'a>> {
+        self.ray_through(origin, direction, length, keep, true)
+    }
+
+    /// The first static model's triangle a ray from `origin` along `direction`, a unit
+    /// vector, crosses within `length`, of those `keep` keeps, see [`Self::ray`]: the
+    /// terrain left out, a ray from under it, a tree's from its buried foot say, not
+    /// stopped by it.
+    pub fn static_ray<'a>(&'a self, origin: Vec3, direction: Vec3, length: f32, keep: &impl Fn(&StaticTriangle) -> bool) -> Option<Hit<'a>> {
+        self.ray_through(origin, direction, length, keep, false)
+    }
+
+    /// The first surface a ray crosses, see [`Self::ray`], the terrain's from above if
+    /// it counts.
+    fn ray_through<'a>(&'a self, origin: Vec3, direction: Vec3, length: f32, keep: &impl Fn(&StaticTriangle) -> bool, terrain: bool) -> Option<Hit<'a>> {
         let end = origin + direction * length;
         let mut first: Option<Hit<'a>> = None;
         self.surfaces_in(origin.min(end), origin.max(end), keep, |triangle, normal, surface| {
             let facing = direction.dot(normal);
-            if matches!(surface, Surface::Terrain) && facing >= 0.0 {
+            if matches!(surface, Surface::Terrain) && (!terrain || facing >= 0.0) {
                 return;
             }
             let Some(distance) = ray_triangle(origin, direction, triangle) else { return };
