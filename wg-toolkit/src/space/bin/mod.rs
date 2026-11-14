@@ -11,6 +11,7 @@ mod bwt2;
 mod bsmo;
 mod bsmi;
 mod wgde;
+mod sptr;
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
@@ -23,6 +24,7 @@ pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bsmi::{BSMI, StaticModelInstance};
 pub use bwal::{BWAL, AssetInfo, AssetType};
 pub use wgde::{WGDE, Destructible};
+pub use sptr::{SPTR, SpeedTree};
 pub use bsmo::{BSMO, StaticModel};
 pub use bwst::BWST;
 pub use bwcs::BWCS;

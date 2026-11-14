@@ -19,6 +19,9 @@
 //!   destructible, keyed by its `BSMI` index, the same as a triangle's `instance`.
 //!   From a triangle a vehicle touches, it gives the client's number for what the
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
+//! - **Trees**: a [`PlacedTree`] for each speed tree of [`SPTR`] the client numbers as
+//!   a destructible: where it stands, its number, and its health at its scale. Speed
+//!   trees have no collision of their own, so none of their triangles are here.
 //!
 //! ```text
 //!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass,
@@ -78,7 +81,7 @@ use crate::havok::collision::Collision;
 use crate::res::fs::ResFilesystem;
 
 use super::destructibles::{scaled_health, Destructibles, DestructibleKind, Module};
-use super::bin::{SpaceBin, BSMI, BSMO, BWST, WGDE};
+use super::bin::{SpaceBin, BSMI, BSMO, BWST, SPTR, WGDE};
 
 
 /// The side of the grid's square cells the triangles are indexed in, in metres: about
@@ -94,6 +97,8 @@ pub struct Statics {
     grids: [HashMap<IVec2, Vec<u32>>; 4],
     /// The placed models that are destructible, by their index in [`BSMI`].
     destructibles: HashMap<u32, PlacedDestructible>,
+    /// The speed trees that are destructible, in [`SPTR`]'s order.
+    trees: Vec<PlacedTree>,
 }
 
 /// A destructible placed model, as the client numbers it and as it is destroyed, see
@@ -127,6 +132,23 @@ impl PlacedDestructible {
         }
     }
 
+}
+
+/// A destructible speed tree of [`SPTR`], as the client numbers it, see [`WGDE`], and
+/// as it falls, see [`Destructibles`].
+#[derive(Debug, Clone)]
+pub struct PlacedTree {
+    /// The id of the 100 m chunk it is in, see [`WGDE`].
+    pub chunk_id: u16,
+    /// Its index in its chunk.
+    pub index: u16,
+    /// Where it stands: the bottom of its trunk, in the world.
+    pub position: Vec3,
+    /// How much larger than its kind it is placed, along its height, which the client
+    /// scales its effects by.
+    pub scale: f32,
+    /// Its health, scaled with it, see [`scaled_health`].
+    pub health: f32,
 }
 
 /// A triangle of a placed static model.
@@ -235,6 +257,10 @@ impl Statics {
             .inspect_err(|e| warn!(space = space_dir, "Failed to read the destructibles' numbering: {e}"))
             .map(|section| section.destructibles)
             .unwrap_or_default();
+        let speed_trees = bin.read_section::<SPTR>()
+            .inspect_err(|e| warn!(space = space_dir, "Failed to read the speed trees: {e}"))
+            .map(|section| section.trees)
+            .unwrap_or_default();
 
         // Each model's collision, loaded once for all its placements, with its bodies'
         // kinds.
@@ -269,16 +295,45 @@ impl Statics {
             }
         }
 
-        // Those that the client numbers and the game lists as destructible.
+        // Those that the client numbers and the game lists as destructible, models and
+        // trees.
         let mut destructibles = HashMap::new();
+        let mut trees = Vec::new();
+
         for numbered in numbered {
+
+            for &index in &numbered.trees {
+                
+                let Some(tree) = speed_trees.get(index as usize) else { continue };
+
+                let Some(destructible) = strings.get_string(tree.resource)
+                    .and_then(|path| definitions.get(path)) else { continue };
+
+                let scale = tree.transform.matrix3.y_axis.length();
+                trees.push(PlacedTree {
+                    chunk_id: numbered.chunk_id,
+                    index: numbered.index,
+                    position: tree.transform.translation.into(),
+                    scale,
+                    health: scaled_health(scale, destructible.health),
+                });
+
+            }
+
             for &index in &numbered.instances {
+                
                 let Some(instance) = instances.instances.get(index as usize) else { continue };
+                    
                 if instance.visibility_mask & visibility_mask == 0 {
                     continue;
                 }
-                let Some(havok) = models.models.get(instance.model as usize).and_then(|model| model.havok_fnv) else { continue };
-                let Some(destructible) = strings.get_string(havok).and_then(|path| definitions.get(path)) else { continue };
+                
+                let Some(havok) = models.models.get(instance.model as usize)
+                    .and_then(|model| model.havok_fnv) else { continue };
+                
+                let Some(destructible) = strings.get_string(havok)
+                    .and_then(|path| definitions.get(path)) else { continue };
+                
                 let scale = instance.transform.matrix3.x_axis.length();
                 let modules = destructible.modules.values()
                     .map(|module| Module {
@@ -286,6 +341,7 @@ impl Statics {
                         ..module.clone()
                     })
                     .collect();
+
                 destructibles.insert(index, PlacedDestructible {
                     chunk_id: numbered.chunk_id,
                     index: numbered.index,
@@ -293,11 +349,14 @@ impl Statics {
                     health: scaled_health(scale, destructible.health),
                     modules,
                 });
+
             }
+
         }
 
         let mut statics = Self::from_triangles(triangles);
         statics.destructibles = destructibles;
+        statics.trees = trees;
         Ok(statics)
 
     }
@@ -311,6 +370,11 @@ impl Statics {
     /// A placed model's destructible, by its index in [`BSMI`], if it is one.
     pub fn destructible(&self, instance: u32) -> Option<&PlacedDestructible> {
         self.destructibles.get(&instance)
+    }
+
+    /// Every destructible speed tree.
+    pub fn trees(&self) -> &[PlacedTree] {
+        &self.trees
     }
 
     /// Every destructible placed model, by its index in [`BSMI`].
@@ -333,6 +397,7 @@ impl Statics {
             triangles,
             grids,
             destructibles: HashMap::new(),
+            trees: Vec::new(),
         }
     }
 

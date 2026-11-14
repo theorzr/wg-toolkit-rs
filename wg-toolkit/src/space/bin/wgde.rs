@@ -5,27 +5,33 @@ use crate::util::io::WgReadExt;
 use super::{invalid, SpaceSection};
 
 
+/// The bit of an instance index that makes it a speed tree's, in `SPTR`.
+const TREE: u32 = 1 << 31;
+
+
 /// `WGDE`: the space's destructibles as the client numbers them, by the 100 m chunk
 /// they are in then their index in it: what the server's `AreaDestructibles` entity of
 /// a chunk lists as destroyed, see the client's `AreaDestructibles.py`. Each is placed
-/// static models of [`super::BSMI`], or none, as the trees aren't: they are speed trees.
+/// static models of [`super::BSMI`], a speed tree of [`super::SPTR`], or nothing.
 ///
 /// Its first vector holds each chunk's id, `(x + 127) << 8 | (z + 127)` of its grid
 /// indexes, then the first of its destructibles in the second vector and how many it
 /// has; the second each destructible's first and last instance in the third, inclusive,
 /// none when the last comes before the first; the third the instances' indexes in
-/// `BSMI`, some with their top bit set, its meaning unknown.
+/// `BSMI`, or with their top bit set, in `SPTR`: a tree, alone in its destructible. On
+/// Malinovka, 4739 of its 6140 speed trees are numbered so, each in the chunk it
+/// stands in but 5 at their edge.
 ///
 /// ```text
 ///   chunks                    ranges                   instances
-///   (chunk id, first, count)  (first, last) into       BSMI index
-///                             instances, inclusive     (top bit masked off)
-///   ┌──────────────┐          ┌──────────┐ index 0     ┌──────┐
-///   │ 0x8083, 0, 3 │ ───────▶ │ 0, 1     │ ──────────▶ │ 5390 │  one destructible,
-///   │ 0x8084, 3, 1 │ ──┐      │ 2, 2     │ index 1     │ 5391 │  two placed models
-///   └──────────────┘   │      │ 0, MAX   │ index 2:    │ 5387 │
-///                      │      ├──────────┤ a tree,     │ 6012 │
-///                      └────▶ │ 3, 3     │ no instance └──────┘
+///   (chunk id, first, count)  (first, last) into       BSMI index, or
+///                             instances, inclusive     2^31 + SPTR index
+///   ┌──────────────┐          ┌──────────┐ index 0     ┌───────────┐
+///   │ 0x8083, 0, 3 │ ───────▶ │ 0, 1     │ ──────────▶ │ 5390      │  one destructible,
+///   │ 0x8084, 3, 1 │ ──┐      │ 2, 2     │ index 1     │ 5391      │  two placed models
+///   └──────────────┘   │      │ 3, 3     │ index 2     │ 5387      │
+///                      │      ├──────────┤             │ 2^31 + 12 │  a tree, SPTR's 13th
+///                      └────▶ │ 4, 3     │ nothing     └───────────┘
 ///                             └──────────┘
 /// ```
 ///
@@ -48,6 +54,8 @@ pub struct Destructible {
     pub index: u16,
     /// Its static model instances, their indexes in `BSMI`.
     pub instances: Vec<u32>,
+    /// Its speed trees, their indexes in `SPTR`: one at most, and no instance then.
+    pub trees: Vec<u32>,
 }
 
 impl SpaceSection for WGDE {
@@ -68,18 +76,24 @@ impl SpaceSection for WGDE {
                     return Err(invalid("destructible out of its chunk's range"));
                 };
                 let mut own = Vec::new();
+                let mut trees = Vec::new();
                 if last_instance != u32::MAX {
                     for instance in first_instance..=last_instance {
                         let Some(&instance) = instances.get(instance as usize) else {
                             return Err(invalid("destructible instance out of range"));
                         };
-                        own.push(instance & 0x7fff_ffff);
+                        if instance & TREE != 0 {
+                            trees.push(instance & !TREE);
+                        } else {
+                            own.push(instance);
+                        }
                     }
                 }
                 destructibles.push(Destructible {
                     chunk_id,
                     index: index as u16,
                     instances: own,
+                    trees,
                 });
             }
         }

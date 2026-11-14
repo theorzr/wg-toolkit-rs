@@ -4,8 +4,9 @@
 //! # Static models and destructibles, end to end
 //!
 //! What a vehicle can hit besides the terrain is the space's *static models*: houses,
-//! rocks, fences, lamp posts, bridges. Some of them are *destructible*. Four sources
-//! describe them, and [`statics::Statics::load`] joins them:
+//! rocks, fences, lamp posts, bridges. Some of them are *destructible*, and so are
+//! its trees, which aren't static models. Five sources describe them, and
+//! [`statics::Statics::load`] joins them:
 //!
 //! ```text
 //!   spaces/<map>/space.bin                           scripts/destructibles.xml
@@ -13,8 +14,11 @@
 //!   ├─ BSMO  models: bounds, .havok hash ┤            by model path: kind, health,
 //!   ├─ BSMI  placed models: transform,   │            a house's modules)
 //!   │        model index, visibility     │                    │
+//!   ├─ SpTr  speed trees: transform,     │                    │
+//!   │        .srt hash                   │                    │
 //!   └─ WGDE  the client's numbering:     │                    ▼
-//!            chunk → index → BSMI ids    │           destructibles::Destructibles
+//!            chunk → index → BSMI ids,   │           destructibles::Destructibles
+//!            or a SpTr id                │                    │
 //!                    │                   ▼                    │
 //!                    │        <model>.havok collision         │
 //!                    │        (bodies of triangles, each      │
@@ -26,8 +30,10 @@
 //!                    ├─ triangles, in the world, each with its BSMI instance,
 //!                    │  material kind and BodyKind (solid, ramp, destructible, remains)
 //!                    ├─ a grid of 8 m cells per BodyKind, to find them near a box
-//!                    └─ PlacedDestructible by BSMI instance: the client's
-//!                       (chunk id, index), kind, scaled health, modules
+//!                    ├─ PlacedDestructible by BSMI instance: the client's
+//!                    │  (chunk id, index), kind, scaled health, modules
+//!                    └─ PlacedTree: the client's (chunk id, index), where it
+//!                       stands, scale, scaled health
 //! ```
 //!
 //! The statics only describe the map as it was built. What breaks during a battle is
@@ -50,7 +56,8 @@
 //!    in the world's frame.
 //! 5. [`bin::WGDE`] gives each destructible the number the client knows it by, which
 //!    the server must use to say it broke: its 100 m chunk's id and its index there.
-//!    One destructible can be several placed models, all numbered the same.
+//!    One destructible can be several placed models, all numbered the same, or one
+//!    speed tree of [`bin::SPTR`], its kind its `.srt` file's in `destructibles.xml`.
 //!
 //! # Contacts
 //!
