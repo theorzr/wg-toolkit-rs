@@ -173,6 +173,7 @@ mod body;
 mod contacts;
 mod ground;
 mod rubble;
+mod fall;
 mod walls;
 mod collision;
 mod nav;
@@ -183,13 +184,15 @@ pub mod fixtures;
 #[cfg(test)]
 mod drive_replay;
 
+use std::collections::HashMap;
 use std::vec::Drain;
 use std::sync::Arc;
 use std::ops::Deref;
 
 use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles};
-use tracing::warn;
+use tracing::{info, warn};
 
+use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::statics::{BodyKind, StaticTriangle};
 use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::terrain::Ground;
@@ -204,6 +207,7 @@ use self::ground::ground_at;
 use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
+pub use self::fall::TreeFall;
 pub use self::turret::{Dispersion, Turret};
 
 
@@ -274,6 +278,11 @@ pub struct World<S = Arc<Space>> {
     bounds: Option<(Vec2, Vec2)>,
     vehicles: Slots<Placed>,
     rubble: Rubble,
+    /// Its space's destructible trees, their indexes in its statics' by their chunk's
+    /// id and their index there, and those that fell, by piece, as the clients show
+    /// them falling, see [`TreeFall`].
+    trees: HashMap<(u16, u16), usize>,
+    falls: HashMap<DestructiblePiece, TreeFall>,
     /// The bodies of the vehicles moving, in a step, for each other to touch.
     solids: Vec<Solid>,
     /// Where they touch, in a step.
@@ -288,11 +297,17 @@ pub struct World<S = Arc<Space>> {
 impl<S: Deref<Target = Space>> World<S> {
 
     pub fn new(space: S, bounds: Option<(Vec2, Vec2)>) -> Self {
+        let trees = space.statics.trees().iter()
+            .enumerate()
+            .map(|(at, tree)| ((tree.chunk_id, tree.index), at))
+            .collect();
         Self {
             space,
             bounds,
             vehicles: Slots::default(),
             rubble: Rubble::default(),
+            trees,
+            falls: HashMap::new(),
             solids: Vec::new(),
             touching: Vec::new(),
             nav: bounds.map(NavGrid::new),
@@ -437,6 +452,39 @@ impl<S: Deref<Target = Space>> World<S> {
 
         self.report_jumps(dt);
 
+        // 5. The trees knocked down falling, as the clients show them.
+        self.fell_trees();
+        for (piece, fall) in self.falls.iter_mut() {
+            if fall.step(dt) {
+                let top = fall.transform().transform_point3(Vec3::Y * fall.height());
+                info!(chunk_id = piece.chunk_id, index = piece.index, limit = fall.limit, pitch = fall.pitch(), ?top, "Laid a tree down");
+            }
+        }
+
+    }
+
+    /// Start the fall of each tree broken since the clients were last told, see
+    /// [`TreeFall::new`], the way and as fast as its breaker went.
+    fn fell_trees(&mut self) {
+
+        let statics = &self.space.statics;
+        for breakage in self.rubble.fresh() {
+            
+            if breakage.kind != DestructibleKind::Tree || self.falls.contains_key(&breakage.piece) {
+                continue;
+            }
+
+            let Some(&at) = self.trees.get(&(breakage.piece.chunk_id, breakage.piece.index)) else { continue };
+            let Some(fall) = TreeFall::new(&statics.trees()[at], &self.space.terrain, breakage.yaw, breakage.speed) else { continue };
+            self.falls.insert(breakage.piece, fall);
+            
+        }
+
+    }
+
+    /// The fall of a tree knocked down, see [`TreeFall`].
+    pub fn tree_fall(&self, piece: DestructiblePiece) -> Option<&TreeFall> {
+        self.falls.get(&piece)
     }
 
     /// Remember where every vehicle is, as a step starts, to tell jumps after.

@@ -138,6 +138,30 @@ pub struct Destructible {
     /// How much a tree's foliage hides what is behind it, of 1: its `density`, 0.5 for
     /// one in leaf, 0.25 for a dry, bare or burnt one; none for another kind.
     pub density: f32,
+    /// How a tree or a falling atom falls, if its entry says.
+    pub fall: Option<FallParams>,
+}
+
+/// How a tree or a falling atom falls, at a scale of 1: its `physicParams`, as the
+/// client's `_readDestructiblePhysicParams` reads them, in their order there, and as
+/// its `_DestructiblesAnimator` uses them. It falls as a rod hinged at its foot, under
+/// gravity, its branches a spring once it tips within `spring_angle` of the ground.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FallParams {
+    /// Its mass, in kg, scaled by its scale cubed.
+    pub mass: f32,
+    /// Its height, in metres, scaled by its scale.
+    pub height: f32,
+    /// How far short of the ground its branches start holding it up, in radians.
+    pub spring_angle: f32,
+    /// How hard its branches hold it up, and damp it, scaled by its scale squared.
+    pub spring_stiffness: f32,
+    pub spring_resist: f32,
+    /// How much the air damps its fall, scaled by its scale squared.
+    pub air_resist: f32,
+    /// How deep its foot sinks once it lies, at a quarter turn, in metres, scaled by its
+    /// scale.
+    pub bury_depth: f32,
 }
 
 /// What a destructible does once destroyed, `DESTR_TYPE_*` in the client's
@@ -199,6 +223,7 @@ impl Destructibles {
                     health,
                     modules: HashMap::new(),
                     density: number(entry, "density").unwrap_or(0.0),
+                    fall: fall_params(entry),
                 });
             }
         }
@@ -210,6 +235,7 @@ impl Destructibles {
                 health: 0.0,
                 modules: modules(entry),
                 density: 0.0,
+                fall: None,
             });
         }
 
@@ -318,6 +344,27 @@ fn penetration_loss(root: &Element) -> Option<PenetrationLoss> {
 /// A child's number, written as an integer or a float.
 fn number(element: &Element, key: &str) -> Option<f32> {
     element.get_child_integer(key).map(|value| value as f32).or_else(|| element.get_child_float(key))
+}
+
+/// An entry's `physicParams`, its seven numbers, see [`FallParams`].
+fn fall_params(entry: &Element) -> Option<FallParams> {
+    let numbers = entry.get_child_string("physicParams")?
+        .split_whitespace()
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let [mass, height, spring_angle, spring_stiffness, spring_resist, air_resist, bury_depth] = numbers[..] else {
+        return None;
+    };
+    Some(FallParams {
+        mass,
+        height,
+        spring_angle,
+        spring_stiffness,
+        spring_resist,
+        air_resist,
+        bury_depth,
+    })
 }
 
 /// The entries of a kind of destructibles, `fragiles` say.

@@ -2,7 +2,7 @@
 //! that has some has an [`AreaDestructibles`] entity, listing those broken in it, by kind.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::PI;
 use std::io;
 
 use tracing::{info, warn};
@@ -10,11 +10,10 @@ use glam::Vec3;
 
 use wgtk::app::base::{self, EntityInit, SpaceKey, Visibility};
 use wgtk::space::destructibles::DestructibleKind;
-use wgtk::space::terrain::Terrain;
 use wgtk::space::statics::Statics;
 use wgtk::app::entity::EntityKey;
 
-use crate::base::physics::{wrap_angle, Breakage, DestructiblePiece};
+use crate::base::physics::{wrap_angle, Breakage, DestructiblePiece, World};
 use crate::game::schema::AreaDestructibles;
 
 
@@ -25,11 +24,6 @@ const AREA_OFFSET: f32 = 4.5;
 /// most. Fitted: the captured Pershing knocked down lamp posts at 5.5 and 12 m/s, which
 /// fell at 2 and 3.
 const FALL_SPEED_STEP: f32 = 2.5;
-/// How far along its fall a tree's tip is reckoned from the ground, in metres at a
-/// scale of 1, see [`fall_pitch`]. Our choice, about where a tree's crown lands: the
-/// captured trees tip from 69° to 103°, 86° in the middle, as the ground falls away or
-/// rises along their way.
-const FALL_REACH: f32 = 8.0;
 
 
 /// The destructibles' entities of a battle's chunks, see the module's documentation.
@@ -37,9 +31,6 @@ const FALL_REACH: f32 = 8.0;
 pub struct DestructibleAreas {
     /// Each chunk's, by its id.
     areas: HashMap<u16, Area>,
-    /// Where each destructible tree stands and its scale, by its chunk's id and its
-    /// index there: how far it tips as it falls depends on the ground around it.
-    trees: HashMap<(u16, u16), (Vec3, f32)>,
 }
 
 /// A chunk's destructibles entity, and what it lists as broken.
@@ -56,9 +47,11 @@ struct Area {
     /// Its `fallenColumns`: each column knocked down, by its index, then the way it
     /// fell and how fast, see [`FALL_SPEED_STEP`].
     columns: Vec<[u8; 3]>,
-    /// Its `fallenTrees`: each tree knocked down, by its index, then how far it tips,
-    /// see [`fall_pitch`], on 16 bits, then the way it fell and how fast, as columns
-    /// do: `encodeFallenTree` in the client's `DestructiblesCache.py`.
+    /// Its `fallenTrees`: each tree knocked down, by its index, then how far it may tip
+    /// on 16 bits, then the way it fell and how fast, as columns do, see [`TreeFall`]:
+    /// `encodeFallenTree` in the client's `DestructiblesCache.py`.
+    ///
+    /// [`TreeFall`]: crate::base::physics::TreeFall
     trees: Vec<[u8; 5]>,
 }
 
@@ -72,9 +65,7 @@ impl DestructibleAreas {
             .map(|(_, destructible)| destructible.chunk_id)
             .collect();
         
-        let trees = statics.trees().iter()
-            .map(|tree| ((tree.chunk_id, tree.index), (tree.position, tree.scale)))
-            .collect();
+
         
         let mut areas = HashMap::new();
         for chunk_id in chunk_ids {
@@ -97,7 +88,6 @@ impl DestructibleAreas {
         
         Ok(Self {
             areas,
-            trees,
         })
 
     }
@@ -107,13 +97,13 @@ impl DestructibleAreas {
         self.areas.len()
     }
 
-    /// Tell the clients of this battle what broke, rammed or shot, on this terrain: each
-    /// list once, however much of it broke, a house bringing down a dozen modules at
-    /// once.
-    pub fn show(&mut self, app: &mut base::App, battle: u32, breakages: impl IntoIterator<Item = Breakage>, terrain: &Terrain) -> io::Result<()> {
+    /// Tell the clients of this battle what broke, rammed or shot, in its `world`, which
+    /// falls its trees: each list once, however much of it broke, a house bringing down
+    /// a dozen modules at once.
+    pub fn show(&mut self, app: &mut base::App, battle: u32, breakages: impl IntoIterator<Item = Breakage>, world: &World) -> io::Result<()> {
         let mut broken = HashSet::new();
         for breakage in breakages {
-            if let Some(list) = self.record(battle, breakage, terrain) {
+            if let Some(list) = self.record(battle, breakage, world) {
                 broken.insert(list);
             }
         }
@@ -124,9 +114,9 @@ impl DestructibleAreas {
     }
 
     /// List a destructible broken in its chunk's entity, encoded as its kind is, see
-    /// [`AreaDestructibles`], a tree tipping as `terrain` lets it: the list it changed,
-    /// by its chunk's id and its kind.
-    fn record(&mut self, battle: u32, breakage: Breakage, terrain: &Terrain) -> Option<(u16, DestructibleKind)> {
+    /// [`AreaDestructibles`], a tree as it falls in `world`: the list it changed, by its
+    /// chunk's id and its kind.
+    fn record(&mut self, battle: u32, breakage: Breakage, world: &World) -> Option<(u16, DestructibleKind)> {
 
         let Breakage { piece, kind, yaw, speed, shot } = breakage;
         let Some(area) = self.areas.get_mut(&piece.chunk_id) else {
@@ -144,13 +134,12 @@ impl DestructibleAreas {
                 area.columns.push([high, low, (pack_angle(yaw, 6) as u8) << 2 | fall]);
             }
             DestructibleKind::Tree => {
-                let fall = ((speed / FALL_SPEED_STEP) as u8).min(3);
-                let pitch = match self.trees.get(&(piece.chunk_id, piece.index)) {
-                    Some(&(position, scale)) => fall_pitch(terrain, position, scale, yaw),
-                    None => FRAC_PI_2,
+                let Some(fall) = world.tree_fall(piece) else {
+                    warn!(battle, chunk_id = piece.chunk_id, index = piece.index, "Failed to tell of a tree broken without its fall");
+                    return None;
                 };
-                let [pitch_high, pitch_low] = pack_angle(pitch, 16).to_be_bytes();
-                area.trees.push([high, low, pitch_high, pitch_low, (pack_angle(yaw, 6) as u8) << 2 | fall]);
+                let [limit_high, limit_low] = pack_angle(fall.limit, 16).to_be_bytes();
+                area.trees.push([high, low, limit_high, limit_low, (pack_angle(fall.yaw, 6) as u8) << 2 | fall.speed]);
             }
             DestructibleKind::Structure => {
                 let module = piece.module.unwrap_or_default();
@@ -200,18 +189,6 @@ fn area_position(chunk_id: u16) -> Vec3 {
     )
 }
 
-/// How far a tree standing at `position`, placed at `scale`, tips as it falls toward
-/// `yaw`, in radians from upright: until it lies on the ground, a quarter turn on
-/// flat ground, less where the ground rises along its way and more where it falls
-/// away, the ground read [`FALL_REACH`] off, terrain only.
-fn fall_pitch(terrain: &Terrain, position: Vec3, scale: f32, yaw: f32) -> f32 {
-    let reach = FALL_REACH * scale;
-    let tip = position + Vec3::new(yaw.sin(), 0.0, yaw.cos()) * reach;
-    let base = terrain.height_at(position.x, position.z).unwrap_or(position.y);
-    let ground = terrain.height_at(tip.x, tip.z).unwrap_or(base);
-    FRAC_PI_2 + ((base - ground) / reach).atan()
-}
-
 /// An angle on `bits` bits, as the client's native `packAngleToUint` does: from -π to
 /// π over 0 to its most. Fitted on 6 bits: the two lamp posts the captured Pershing
 /// knocked down fell its way, within 0.25 rad, read so; on 16, the captured trees tip
@@ -230,13 +207,8 @@ mod tests {
     #[test]
     fn packs_a_fallen_tree_as_the_real_server() {
 
-        // The first tree the captured battle's server felled tipped 87°, packed so.
+        // The first tree the captured battle's server felled could tip 87°, packed so.
         assert_eq!(pack_angle(1.519_67, 16).to_be_bytes(), [189, 234]);
-
-        // On flat ground, a tree falls flat, whichever way.
-        let terrain = Terrain::default();
-        let position = Vec3::new(10.0, 3.0, -20.0);
-        assert_eq!(fall_pitch(&terrain, position, 1.3, 2.0), FRAC_PI_2);
 
     }
 

@@ -311,6 +311,11 @@ impl Rubble {
         self.broken.len()
     }
 
+    /// The destructibles broken since last taken.
+    pub fn fresh(&self) -> &[Breakage] {
+        &self.fresh
+    }
+
     /// The destructibles broken since last taken, for the battle to tell its clients.
     pub fn take_breakages(&mut self) -> Drain<'_, Breakage> {
         self.fresh.drain(..)

@@ -20,11 +20,11 @@
 //!   From a triangle a vehicle touches, it gives the client's number for what the
 //!   triangle is a part of, its kind and its health at the scale it is placed at.
 //! - **Trees**: a [`PlacedTree`] for each speed tree of [`SPTR`] the client numbers as
-//!   a destructible: where it stands, its number, and its health at its scale. Speed
-//!   trees have no collision of their own: each is given a trunk of our own, an upright
-//!   prism of triangles, [`trunk`], destructible, that shells pass. Its triangles'
-//!   `instance` is [`TREE_INSTANCE`] plus the tree's index in `SPTR`, its destructible
-//!   keyed the same.
+//!   a destructible: its placement, its number, its health at its scale and how it
+//!   falls. Speed trees have no collision of their own: each is given a trunk of our
+//!   own, an upright prism of triangles, [`trunk`], destructible, that shells pass.
+//!   Its triangles' `instance` is [`TREE_INSTANCE`] plus the tree's index in `SPTR`,
+//!   its destructible keyed the same.
 //!
 //! ```text
 //!   StaticTriangle { vertices, bounds, normal, instance, material_kind, kind, shells_pass,
@@ -78,13 +78,13 @@ use std::io::{self, Read, Seek};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::{IVec2, Vec2, Vec3, Vec3Swizzles};
+use glam::{Affine3A, IVec2, Vec2, Vec3, Vec3Swizzles};
 use tracing::warn;
 
 use crate::havok::collision::Collision;
 use crate::res::fs::ResFilesystem;
 
-use super::destructibles::{scaled_health, Destructibles, DestructibleKind, Module};
+use super::destructibles::{scaled_health, Destructibles, DestructibleKind, FallParams, Module};
 use super::bin::{SpaceBin, BSMI, BSMO, BWST, SPTR, TREE_INSTANCE, WGDE};
 
 
@@ -155,13 +155,18 @@ pub struct PlacedTree {
     pub chunk_id: u16,
     /// Its index in its chunk.
     pub index: u16,
-    /// Where it stands: the bottom of its trunk, in the world.
-    pub position: Vec3,
+    /// Its index in [`SPTR`], its plant's, see [`super::foliage::Plant::tree`].
+    pub tree: u32,
+    /// Its placement in the world: its scaled axes, then the point it stands on, the
+    /// bottom of its trunk.
+    pub transform: Affine3A,
     /// How much larger than its kind it is placed, along its height, which the client
-    /// scales its effects by.
+    /// scales its effects and its fall by.
     pub scale: f32,
     /// Its health, scaled with it, see [`scaled_health`].
     pub health: f32,
+    /// How it falls, at a scale of 1, as its kind's entry says.
+    pub fall: Option<FallParams>,
 }
 
 /// A triangle of a placed static model.
@@ -341,9 +346,11 @@ impl Statics {
                 trees.push(PlacedTree {
                     chunk_id: numbered.chunk_id,
                     index: numbered.index,
-                    position,
+                    tree: index,
+                    transform: tree.transform,
                     scale,
                     health,
+                    fall: destructible.fall,
                 });
 
             }

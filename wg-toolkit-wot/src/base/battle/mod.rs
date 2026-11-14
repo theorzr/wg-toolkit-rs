@@ -566,7 +566,7 @@ impl Battle {
             }
         }
         let breakages = self.world.take_breakages().collect::<Vec<_>>();
-        if let Err(e) = self.areas.show(app, id, breakages, &self.world.space().terrain) {
+        if let Err(e) = self.areas.show(app, id, breakages, &self.world) {
             warn!(battle = id, "Failed to tell the destructibles broken: {e}");
         }
 
