@@ -19,7 +19,9 @@
 //!     </entry> …
 //!   </fragiles>
 //!   <fallingAtoms> … </fallingAtoms>                the same, lamp posts and poles
-//!   <trees> … </trees>                              the same, speed trees
+//!   <trees> … </trees>                              the same, speed trees, each with
+//!                                                   a <density>, how much its foliage
+//!                                                   hides, see `super::foliage`
 //!   <structures>
 //!     <entry>
 //!       <filename> content/…/house_03.model </filename>
@@ -133,6 +135,9 @@ pub struct Destructible {
     pub health: f32,
     /// A structure's modules, by their body's name.
     pub modules: HashMap<String, Module>,
+    /// How much a tree's foliage hides what is behind it, of 1: its `density`, 0.5 for
+    /// one in leaf, 0.25 for a dry, bare or burnt one; none for another kind.
+    pub density: f32,
 }
 
 /// What a destructible does once destroyed, `DESTR_TYPE_*` in the client's
@@ -193,6 +198,7 @@ impl Destructibles {
                     kind,
                     health,
                     modules: HashMap::new(),
+                    density: number(entry, "density").unwrap_or(0.0),
                 });
             }
         }
@@ -203,6 +209,7 @@ impl Destructibles {
                 kind: DestructibleKind::Structure,
                 health: 0.0,
                 modules: modules(entry),
+                density: 0.0,
             });
         }
 

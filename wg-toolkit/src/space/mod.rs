@@ -102,6 +102,7 @@ pub mod bin;
 pub mod terrain;
 pub mod statics;
 pub mod destructibles;
+pub mod foliage;
 
 use std::io;
 
@@ -113,15 +114,18 @@ use crate::pxml;
 
 use statics::{BodyKind, StaticTriangle, Statics};
 use destructibles::Destructibles;
+use foliage::Foliage;
 use terrain::Terrain;
 
 
-/// A space as what moves in it needs it: its terrain and its static models' collision.
-/// The default one is empty, with neither.
+/// A space as what moves in it needs it: its terrain, its static models' collision, and
+/// its foliage. The default one is empty, with none of them.
 #[derive(Debug, Default)]
 pub struct Space {
     pub terrain: Terrain,
     pub statics: Statics,
+    /// Its trees and bushes, as what they hide, see [`foliage`].
+    pub foliage: Foliage,
     /// What of the game's models is destructible, the space's or not: what the
     /// destructibles of [`Self::statics`] were read from, and the settings that apply to
     /// all of them.
@@ -139,6 +143,7 @@ impl Space {
         Ok(Self {
             terrain: Terrain::load(fs, space_dir)?,
             statics: Statics::load(fs, space_dir, &destructibles, mask)?,
+            foliage: Foliage::load(fs, space_dir, &destructibles)?,
             destructibles,
         })
     }

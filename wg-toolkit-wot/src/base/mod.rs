@@ -229,7 +229,7 @@ impl BaseThread {
             .map_err(|e| format!("Failed to load the map {}: {e}", args.map))?;
         let space = Space::load(&fs, &map.geometry, STANDARD_GAMEPLAY)
             .map_err(|e| format!("Failed to load the space of {}: {e}", map.geometry))?;
-        info!(triangles = space.statics.len(), trees = space.statics.trees().len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
+        info!(triangles = space.statics.len(), trees = space.statics.trees().len(), plants = space.foliage.plants.len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
 
         let load_vehicle = |vehicle: &String| {
             let (nation, name) = vehicle.split_once(':')
