@@ -248,6 +248,10 @@ pub struct BaseArgs {
     /// Whether bots drive toward their enemies, else they stay where they start.
     #[arg(long)]
     pub bots_drive: bool,
+    /// Whether battles draw what they debug in their clients' world: how each vehicle is
+    /// spotted, over it.
+    #[arg(long)]
+    pub debug_draw: bool,
     /// Start the second team this many metres in front of the first instead of at its
     /// spawn, facing it.
     #[arg(long)]

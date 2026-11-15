@@ -126,12 +126,12 @@ use super::{approach, movement_flag, Hull, GRAVITY, REST_SPEED};
 /// them, gives a median of 1.125 on the T110E4 (559 samples) and 1.137 on the Type 64
 /// (1040). Fitting the friction too trades it against the power (1.2 to 1.36 for 1.25 to
 /// 1.3 times the friction), so the game's friction is kept.
-const POWER_FACTOR: f32 = 1.13;
+pub const POWER_FACTOR: f32 = 1.13;
 /// The most the engine accelerates the vehicle, in m/s²: its power, over the speed,
 /// would be endless from a standstill. Fitted: the drives' errors fall up to 16 and
 /// hardly after, though both vehicles start up to about 6 m/s² in the captured ticks, so
 /// it makes up for something else.
-const MAX_ACCELERATION: f32 = 16.0;
+pub const MAX_ACCELERATION: f32 = 16.0;
 /// How hard its brakes slow the vehicle when released, and against its controls or past
 /// the speed asked, in m/s², whatever the vehicle and its ground. Measured: released from
 /// forward, both vehicles lose 1.2 to 1.6 m/s a tick (the T110E4 9.8, 8.7, 7.1, 5.7; the

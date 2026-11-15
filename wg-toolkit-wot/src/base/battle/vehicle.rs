@@ -239,11 +239,12 @@ impl BattleVehicle {
     }
 
     /// How hard it is to see at game time `now`, `driven` in the world, see
-    /// [`VisionDef`]: its moving camouflage once it moves faster than [`MOVING_SPEED`],
-    /// else its still one, the share it keeps at a shot for [`SHOT_REVEAL_TIME`] after
-    /// it fired.
-    pub fn camouflage(&self, driven: &Vehicle, now: f64) -> f32 {
-        
+    /// [`VisionDef`], and whether it fired within [`SHOT_REVEAL_TIME`] before: its
+    /// moving camouflage once it moves faster than [`MOVING_SPEED`], else its still
+    /// one, cut to its share at a shot if it fired, when the foliage near it hides it
+    /// less too, see the `spotting` module.
+    pub fn camouflage(&self, driven: &Vehicle, now: f64) -> (f32, bool) {
+
         let hull = &driven.hull;
         let camouflage = if hull.speed.hypot(hull.slide) > MOVING_SPEED {
             self.vision.camouflage_moving
@@ -251,11 +252,13 @@ impl BattleVehicle {
             self.vision.camouflage_still
         };
 
-        if self.last_shot.is_some_and(|at| now - at <= SHOT_REVEAL_TIME) {
-            camouflage * self.vision.camouflage_at_shot
+        let fired = self.last_shot.is_some_and(|at| now - at <= SHOT_REVEAL_TIME);
+        if fired {
+            (camouflage * self.vision.camouflage_at_shot, true)
         } else {
-            camouflage
+            (camouflage, false)
         }
+
     }
 
     /// It fired a shell at game time `now`: it is easier to see for a while, see

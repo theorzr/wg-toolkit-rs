@@ -24,6 +24,7 @@
 //!   shells       its shells in flight, and their tracers
 //!   hit          what a shell does to a vehicle, as the clients are told
 //!   areas        what broke of its destructibles, by chunk
+//!   debug        what it draws in its clients' world to be debugged
 //!   spawn        where its vehicles start
 //! ```
 
@@ -35,6 +36,7 @@ mod bot;
 mod shells;
 mod hit;
 mod areas;
+mod debug;
 mod spawn;
 
 use std::time::{Duration, Instant};
@@ -69,6 +71,7 @@ use participant::Participant;
 use spotting::Spotting;
 use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
+use debug::DebugDraw;
 
 
 /// The two teams, as the clients know them.
@@ -118,6 +121,8 @@ pub struct Battle {
     shells: Shells,
     /// The destructibles' entities of its map's chunks, telling the clients what broke.
     areas: DestructibleAreas,
+    /// What it draws in its clients' world to be debugged, if its options say so.
+    debug: Option<DebugDraw>,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
     targets: Vec<ShotTarget>,
     /// Whether a client has its vehicle: it runs from then on.
@@ -140,6 +145,8 @@ pub struct BattleOptions {
     ///
     /// [`Bot::drive`]: bot::Bot::drive
     pub bots_drive: bool,
+    /// Whether it draws what it debugs in its clients' world, see [`DebugDraw`].
+    pub debug_draw: bool,
     /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
     /// Where the first team starts, if not at its spawn, and its yaw in radians.
@@ -308,6 +315,13 @@ impl Battle {
         let starts = starts.map(|start| start.position);
         let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
+        
+        let debug = if options.debug_draw {
+            let center = (map.bounds.0 + map.bounds.1) / 2.0;
+            Some(DebugDraw::new(app, space, Vec3::new(center.x, 0.0, center.y))?)
+        } else {
+            None
+        };
 
         Ok(Self {
             id,
@@ -322,6 +336,7 @@ impl Battle {
             world,
             shells: Shells::default(),
             areas,
+            debug,
             targets: Vec::new(),
             running: false,
         })
@@ -591,7 +606,7 @@ impl Battle {
         let drives = fighting && self.options.bots_drive;
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, spotting, starts, shells, targets, .. } = self;
+        let Self { participants, vehicles, world, spotting, starts, shells, targets, debug, .. } = self;
 
         for index in 0..vehicles.len() {
             let enemies = enemies_of(vehicles, world, spotting, index, now);
@@ -609,6 +624,9 @@ impl Battle {
         spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {
             participant.spot(app, vehicles, spotting, now)?;
+        }
+        if let Some(debug) = debug {
+            debug.show(app, vehicles, world, spotting)?;
         }
 
         for index in 0..vehicles.len() {

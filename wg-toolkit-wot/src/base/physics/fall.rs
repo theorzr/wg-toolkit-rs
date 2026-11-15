@@ -73,6 +73,9 @@ const TRUNK_CLEARANCE: f32 = 1.0;
 /// A tree falling, or lying, see the module's documentation.
 #[derive(Debug, Clone)]
 pub struct TreeFall {
+    /// The tree's index in its space's speed trees, its plant's, see
+    /// `wgtk::space::foliage::Plant::tree`.
+    pub tree: u32,
     /// The way it falls, the yaw of its fall, in radians: the vehicle's.
     pub yaw: f32,
     /// How fast it starts, of 0 to 3, see [`FALL_SPEED_STEP`].
@@ -109,6 +112,7 @@ impl TreeFall {
         let height = fall.height * scale;
         let speed = ((speed / FALL_SPEED_STEP) as u8).min(3);
         Some(Self {
+            tree: tree.tree,
             yaw,
             speed,
             limit: fall_limit(space, rubble, tree.transform.translation.into(), height, yaw),

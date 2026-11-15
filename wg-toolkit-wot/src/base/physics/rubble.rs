@@ -43,8 +43,13 @@
 //! ```text
 //!   damage += KINETIC_DAMAGE · ½ · m · v²     the energy of the hit, as the game's
 //!                                             client reckons it
-//!           + RAM_PRESS · w · dt              pressing, so a stopped hull still breaks it
+//!           + RAM_PRESS · F · dt              pressing, so a stopped hull still breaks it,
+//!                                             F the force its engine pushes with
 //! ```
+//!
+//! The force a hull presses with is its engine's power spread over [`PRESS_SPEED`],
+//! at most what its drive gives at a standstill, see [`press_force`]: a light tank,
+//! light but powerful, presses nearly as hard as a heavy one.
 //!
 //! The damage adds up from tick to tick in `rubble.damage`. Once it reaches the piece's
 //! health, the piece breaks: it goes into `rubble.broken` with the modules it brings
@@ -83,6 +88,9 @@ use wgtk::space::statics::{PlacedDestructible, Statics, StaticTriangle};
 use wgtk::space::Space;
 use wgtk::space::destructibles::DestructibleKind;
 
+use crate::game::item_defs::MobilityDef;
+
+use super::drive::{MAX_ACCELERATION, POWER_FACTOR};
 use super::walls::wall_contact;
 use super::{Footprint, Hull};
 
@@ -103,10 +111,14 @@ const KINETIC_DAMAGE: f32 = 0.00015;
 /// health at 15.6 m/s, all but keeping its speed.
 const RAM_COST: f32 = 0.05;
 /// How much a vehicle damages a destructible it presses against, its tracks driving it
-/// in, per second, of its weight in [`UNIT_VEHICLE_MASS`], on top of [`KINETIC_DAMAGE`]: one
-/// stopped by a house's wall breaks it in time, a module of 50 health in 2 s at 35 t.
-/// Our choice, by feel.
-const RAM_PRESS: f32 = 25.0;
+/// in, per second, for each newton it presses with, see [`press_force`], on top of
+/// [`KINETIC_DAMAGE`]: one stopped by a tree or a house's wall breaks it in time. Our
+/// choice, by feel: a 16 t light tank of 550 hp fells a big maple, 173 health, in 4 s,
+/// a 55 t Chieftain breaks a house's module of 50 health in under 1 s.
+const RAM_PRESS: f32 = 2e-4;
+/// The speed a vehicle pressing against a destructible spreads its engine's power over,
+/// in m/s, see [`press_force`]. Our choice.
+const PRESS_SPEED: f32 = 2.0;
 /// How much further than its collision box a hull rams, in metres: one pressing
 /// against a piece, stopped by it, still damages it. Our choice, as far as a wall
 /// touches it from, `WALL_MARGIN`.
@@ -160,7 +172,8 @@ impl Hull {
             //    it too: the real T110E4 drove on along a fence.
             let speed = point.length();
             let energy = KINETIC_DAMAGE * self.mobility.weight * speed * speed / 2.0;
-            let Some((health, done)) = rubble.damage(destructible, piece, energy + RAM_PRESS * weight * dt) else { continue };
+            let pressing = RAM_PRESS * press_force(&self.mobility) * dt;
+            let Some((health, done)) = rubble.damage(destructible, piece, energy + pressing) else { continue };
             if done < health {
                 continue;
             }
@@ -177,6 +190,13 @@ impl Hull {
 
     }
 
+}
+
+/// The force a vehicle presses against a destructible with, in newtons: its engine's
+/// power spread over [`PRESS_SPEED`], as its drive spreads it over its speed, at most
+/// what its drive gives at a standstill, see the `drive` module.
+fn press_force(mobility: &MobilityDef) -> f32 {
+    (POWER_FACTOR * mobility.engine_power / PRESS_SPEED).min(mobility.weight * MAX_ACCELERATION)
 }
 
 /// Where a hull's footprint touches a piece it rams, from its middle: its corner deepest
@@ -429,6 +449,28 @@ mod tests {
         assert!(hull.position.z > 12.0, "{}", hull.position.z);
     }
 
+
+    #[test]
+    fn pushes_a_tree_down_from_a_standstill() {
+
+        // Against a big maple, 173 health, stopped: a 16 t light tank of 550 hp pushes it
+        // down in about 4 s, as a 55 t heavy does in about 3 s.
+        for (weight, horsepower, within) in [(16_000.0, 550.0, 45), (55_000.0, 750.0, 35)] {
+            let space = tree(173.0);
+            let mut rubble = Rubble::default();
+            let mut hull = chieftain();
+            hull.mobility.weight = weight;
+            hull.mobility.engine_power = horsepower * 735.5;
+            hull.position.z = 9.4 - hull.mobility.bounds[1].z;
+            hull.flags = movement_flag::FORWARD;
+            let broken = (0..60).position(|_| {
+                hull.advance(0.1, &space, None, &mut rubble);
+                !rubble.fresh.is_empty()
+            });
+            assert!(broken.is_some_and(|tick| tick < within), "{weight} kg broke it at {broken:?}");
+        }
+
+    }
 
     /// A tree of this health standing at z = 10 in the way, the 4th of its chunk, on
     /// flat ground.

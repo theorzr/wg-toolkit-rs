@@ -1,7 +1,7 @@
 //! The members of WoT's entities that the server uses, bound against the loaded
 //! script when it starts, see [`wgtk::app::entity`].
 
-use glam::Vec3;
+use glam::{Vec3, Vec4};
 
 use wgtk::{component_schema, entity_schema, script_dict};
 use wgtk::app::entity::{BindError, Bytes, EntityId, Pickle};
@@ -16,6 +16,7 @@ pub fn register(app: &mut base::App) -> Result<(), BindError> {
     app.register::<Vehicle>()?;
     app.register::<AvatarInfo>()?;
     app.register::<AreaDestructibles>()?;
+    app.register::<DebugDrawEntity>()?;
     app.register_component::<AvatarVehiclesInfo>()?;
     app.register_component::<OwnVehicle>()?;
     app.register_component::<GunMarkerComponent>()?;
@@ -199,6 +200,76 @@ entity_schema! {
             fallenColumns: Vec<[u8; 3]>,
             fallenTrees: Vec<[u8; 5]>,
         }
+    }
+}
+
+entity_schema! {
+    /// What the server draws in its clients' world to be debugged, groups of lines,
+    /// boxes, spheres and texts: the client's `DebugDrawEntity.py`, which redraws a group
+    /// once its version changes. The retail client lacks the models of its lines, boxes
+    /// and spheres, `helpers/models/unit_cube.model` and `unit_sphere.model`: only its
+    /// texts are drawn as it is.
+    pub DebugDrawEntity {
+        cell {
+            drawObjects: Vec<DebugDrawObject>,
+        }
+    }
+}
+
+script_dict! {
+    /// A group of what a [`DebugDrawEntity`] draws, by its name.
+    #[derive(Debug, Clone, Default)]
+    pub struct DebugDrawObject {
+        pub name: String,
+        /// Changed, the client draws the group again.
+        pub version: u32,
+        /// Unused by the client, -1.
+        pub destroyTime: f32,
+        pub lines: Vec<DebugLine>,
+        pub boxes: Vec<DebugBox>,
+        pub spheres: Vec<DebugSphere>,
+        pub texts: Vec<DebugText>,
+    }
+}
+
+script_dict! {
+    /// A line of a [`DebugDrawObject`] through its points, as wide as `width`, in metres.
+    #[derive(Debug, Clone)]
+    pub struct DebugLine {
+        pub points: Vec<Vec3>,
+        pub width: f32,
+    }
+}
+
+script_dict! {
+    /// A box of a [`DebugDrawObject`]: its bottom's middle, its size, and its yaw,
+    /// pitch and roll.
+    #[derive(Debug, Clone)]
+    pub struct DebugBox {
+        pub position: Vec3,
+        pub size: Vec3,
+        pub rotation: Vec3,
+    }
+}
+
+script_dict! {
+    /// A sphere of a [`DebugDrawObject`], its radius along each axis.
+    #[derive(Debug, Clone)]
+    pub struct DebugSphere {
+        pub position: Vec3,
+        pub radius: Vec3,
+    }
+}
+
+script_dict! {
+    /// A text of a [`DebugDrawObject`], facing the camera, its bottom at `position`: of
+    /// several lines, its colour red, green, blue and alpha, of 255.
+    #[derive(Debug, Clone)]
+    pub struct DebugText {
+        pub position: Vec3,
+        pub text: String,
+        pub color: Vec4,
+        pub textSize: f32,
     }
 }
 

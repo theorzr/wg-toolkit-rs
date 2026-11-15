@@ -195,6 +195,7 @@ use tracing::{info, warn};
 use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::statics::{BodyKind, StaticTriangle};
 use wgtk::app::slots::{SlotKey, Slots};
+use wgtk::space::foliage::Crossing;
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
@@ -374,6 +375,24 @@ impl<S: Deref<Target = Space>> World<S> {
             along += piece;
         }
         true
+
+    }
+
+    /// Where the line between two points crosses the map's foliage as it is now, as the
+    /// players see it, see `wgtk::space::foliage`: its plants standing, but the trees
+    /// knocked down, which hide where they fall, as far as they fell yet, see
+    /// [`TreeFall::transform`]. In no order.
+    pub fn foliage(&self, from: Vec3, to: Vec3) -> Vec<Crossing> {
+
+        let foliage = &self.space.foliage;
+        let mut crossings = foliage.crossings(from, to);
+        crossings.retain(|crossing| !self.falls.values().any(|fall| fall.tree == crossing.tree));
+
+        for fall in self.falls.values() {
+            let Some(plant) = foliage.plant(fall.tree) else { continue };
+            crossings.extend(plant.crossing_at(&fall.transform(), from, to));
+        }
+        crossings
 
     }
 

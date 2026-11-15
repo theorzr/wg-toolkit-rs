@@ -229,26 +229,32 @@ impl BaseThread {
             .map_err(|e| format!("Failed to load the map {}: {e}", args.map))?;
         let space = Space::load(&fs, &map.geometry, STANDARD_GAMEPLAY)
             .map_err(|e| format!("Failed to load the space of {}: {e}", map.geometry))?;
-        info!(triangles = space.statics.len(), trees = space.statics.trees().len(), plants = space.foliage.plants.len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
+
+        info!(triangles = space.statics.len(), trees = space.statics.trees().len(), plants = space.foliage.plants().len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
 
         let load_vehicle = |vehicle: &String| {
             let (nation, name) = vehicle.split_once(':')
                 .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
             VehicleDef::load(&fs, nation, name).map_err(|e| format!("Failed to load vehicle {vehicle}: {e}"))
         };
+
         let vehicles = args.give_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?;
         let battle_options = BattleOptions {
             team_size: args.team_size,
             bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
             bots_fire: args.bots_fire,
             bots_drive: args.bots_drive,
+            debug_draw: args.debug_draw,
             enemy_distance: args.enemy_distance,
             spawn: args.spawn.map(|(x, z, yaw)| (Vec2::new(x, z), yaw.to_radians())),
         };
+
         info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
-            bots_drive = args.bots_drive, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
+            bots_drive = args.bots_drive, debug_draw = args.debug_draw, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
+        
         let garage = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
+
         for vehicle in &vehicles {
             info!(descr = ?vehicle.descr, ammo = ?vehicle.default_ammo(), magazine = ?vehicle.magazine, vision = ?vehicle.vision, "Gave the account a vehicle: {}", vehicle.name);
         }
@@ -259,7 +265,9 @@ impl BaseThread {
         let start = Instant::now();
         let prices = ItemPrices::load(&fs)
             .map_err(|e| format!("Failed to read the item prices: {e}"))?;
+        
         info!("Read the prices of {} items, {} not in the shop, in {:.1?}", prices.prices.len(), prices.not_in_shop.len(), start.elapsed());
+        
         let shop = Shop::new(&prices).map_err(|e| format!("Failed to encode the shop: {e}"))?;
 
         if !args.advertise.is_empty() {
