@@ -106,6 +106,9 @@
 //!   goal  = clamp(goal, ±|v| · per m/s),   per m/s = GeneralWheels::turning(|v| / top)
 //! ```
 //!
+//! On its handbrake, all its wheels are blocked, and it doesn't pivot: it slides, and
+//! swings as fast as it slides, as a drift on tracks does, see "Its turning".
+//!
 //! Its wheels turn toward the way its keys ask, left or right, backing up too, over
 //! [`WHEELS_TURN_TIME`] from straight to their lock, and back: `Hull::wheels_turn`, the
 //! share of their lock, which the clients are shown, and nothing else uses.
@@ -236,7 +239,7 @@ impl Hull {
         let mut blocked = [false; 2];
         if controls.handbrake {
             for side in Side::BOTH {
-                blocked[side.index()] = controls.turn() == 0.0 || side == controls.inner();
+                blocked[side.index()] = controls.turn() == 0.0 || !controls.tracked || side == controls.inner();
             }
         }
 
@@ -283,6 +286,7 @@ impl Hull {
 
         Controls {
             handbrake,
+            tracked: self.mobility.general_wheels.is_none(),
             keys,
             backing,
             way,
@@ -497,6 +501,8 @@ impl DriveForces {
 struct Controls {
     /// Its tracks are blocked.
     handbrake: bool,
+    /// It has tracks, which it pivots on, on its handbrake: not on wheels.
+    tracked: bool,
     /// Which way its keys turn it, -1 left, 1 right, else 0, whichever way it goes.
     keys: f32,
     /// It backs up: asked to, or on its handbrake, sliding backward.
@@ -519,8 +525,11 @@ impl Controls {
 
     /// On its handbrake, driving into a turn, the speed it pivots at on its blocked inner
     /// track, its outer one carrying it around, in m/s, signed as it drives, at this
-    /// turning speed on the spot.
+    /// turning speed on the spot. On wheels, none: they are all blocked.
     fn pivot(&self, rotation_speed: f32) -> f32 {
+        if !self.tracked {
+            return 0.0;
+        }
         self.way * self.turn().abs() * rotation_speed * ROTATION_ON_MOVE * PIVOT_RADIUS
     }
 
@@ -660,6 +669,47 @@ mod tests {
             tick(&mut hull, 0.1, Ground::Firm);
         }
         assert!(hull.wheels_turn.abs() < 1e-4, "{}", hull.wheels_turn);
+
+    }
+
+    #[test]
+    fn slides_out_of_fast_turns_on_wheels() {
+
+        // At 20 m/s, turning right hard, its wheels hold less than tracks would: it
+        // slides out to the left as it turns.
+        let space = slope(0.0);
+        let mut hull = ebr();
+        hull.speed = 20.0;
+        hull.match_tracks();
+        hull.flags = movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
+        let mut widest: f32 = 0.0;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            widest = widest.min(hull.slide);
+        }
+        assert!(widest < -0.5, "{widest}");
+        assert!(hull.yaw_rate > 0.3, "{}", hull.yaw_rate);
+
+        // Stopped, on its handbrake, driving into a turn, it neither pivots nor turns.
+        let mut hull = ebr();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        assert!(hull.speed.abs() < 0.05 && hull.yaw_rate.abs() < 0.01, "{} m/s, {} rad/s", hull.speed, hull.yaw_rate);
+
+        // At 15 m/s on it, turning, its wheels all blocked, it slides on and swings round.
+        let mut hull = ebr();
+        hull.speed = 15.0;
+        hull.match_tracks();
+        hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_RIGHT;
+        let mut swing: f32 = 0.0;
+        for _ in 0..15 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            swing = swing.max(hull.yaw_rate);
+        }
+        assert_eq!(hull.tracks, [0.0; 2]);
+        assert!(swing > 1.0, "{swing}");
 
     }
 

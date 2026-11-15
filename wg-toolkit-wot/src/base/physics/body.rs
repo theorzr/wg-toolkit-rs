@@ -155,7 +155,8 @@
 //! A contact's side grip is [`TRACK_GRIP`], and [`SIDE_GRIP`], less, on its handbrake:
 //! a turning hull holds its line, and a drifting one slides on, its velocity kept as
 //! its hull swings round it, as the real ones did; let off, its tracks grip again at
-//! once. On its handbrake, its blocked tracks slide along the ground rather than roll:
+//! once. On wheels, it is [`WHEEL_SIDE_GRIP`], and [`WHEEL_SLIDE_SIDE_GRIP`] on its
+//! handbrake: less than tracks', it slides out of a turn taken fast. On its handbrake, its blocked tracks slide along the ground rather than roll:
 //! the force range along is their sliding grip, [`SLIDE_GRIP`] of how hard they press,
 //! and the grips aren't shared, its steering swinging it as it slides.
 //!
@@ -260,6 +261,11 @@ const TRACK_GRIP: f32 = 2.5;
 /// along them, [`TRACK_GRIP`]: turning at 20 m/s, the Type 64 holds 14.6 m/s² across,
 /// and let off its handbrake mid-drift, about 17 m/s², its slide gone in 0.4 s.
 const SIDE_GRIP: f32 = 11.0 / GRAVITY;
+/// How much its wheels hold the ground across them, a wheeled hull's, as a share of how
+/// hard each presses on it: less than tracks, so that it slides out of a turn taken
+/// fast. On its handbrake, sliding, less again. Our choice, about tyres on dirt.
+const WHEEL_SIDE_GRIP: f32 = 0.9;
+const WHEEL_SLIDE_SIDE_GRIP: f32 = 0.5;
 /// How much a blocked track holds the ground along it, sliding on it, as a share of how
 /// hard each contact presses on it: 3 m/s². Fitted, as `HANDBRAKE_FRICTION` was: on the
 /// same drifts, its slide along its tracks slowed by 2 to 3.5 m/s².
@@ -976,8 +982,9 @@ impl Hull {
     /// what pushing along takes of its grip: where the track passes under the centre of
     /// mass, so that it holds what slides the hull, not what turns it, which its steering
     /// does. Its impulse so far is `so_far`. It holds as much as its tracks grip along,
-    /// [`TRACK_GRIP`]; `blocked`, on its handbrake, sliding, [`SIDE_GRIP`]; both falling
-    /// with the ground's slope across, as the game's slope grip says.
+    /// [`TRACK_GRIP`]; `blocked`, on its handbrake, sliding, [`SIDE_GRIP`]; on wheels,
+    /// [`WHEEL_SIDE_GRIP`], and blocked, [`WHEEL_SLIDE_SIDE_GRIP`]; all falling with the
+    /// ground's slope across, as the game's slope grip says.
     fn hold_across(
         &mut self,
         touch: &Touch,
@@ -987,15 +994,26 @@ impl Hull {
         pressed: f32,
         so_far: &mut f32,
     ) {
+
         let under = raised(touch.arm - along * touch.arm.dot(along), along.cross(across));
         let slip = (self.linear_velocity + self.angular_velocity.cross(under)).dot(across);
-        let side_grip = if blocked { SIDE_GRIP } else { TRACK_GRIP };
+        
+        let side_grip = if self.mobility.general_wheels.is_some() {
+            if blocked { WHEEL_SLIDE_SIDE_GRIP } else { WHEEL_SIDE_GRIP }
+        } else if blocked {
+            SIDE_GRIP
+        } else {
+            TRACK_GRIP
+        };
+
         let limit = side_grip * grip(across.y.asin(), SLOPE_GRIP_ACROSS) * pressed;
         let held = (*so_far - slip / body.per_impulse(under, across)).clamp(-limit, limit);
         let impulse = across * (held - *so_far);
         *so_far = held;
+
         self.linear_velocity += impulse / body.mass;
         self.angular_velocity += body.inverse_inertia * under.cross(impulse);
+        
     }
 
     /// One pass of a track's end climbing what it meets head on, its belt gripping it: up
