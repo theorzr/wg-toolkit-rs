@@ -1,5 +1,5 @@
 //! What a battle draws in its clients' world to be debugged, with `--debug-draw`: a
-//! [`DebugDrawEntity`], every client seeing it. Over each vehicle alive, how its
+//! [`DebugDrawEntity`], every client seeing it. Under each vehicle alive, how its
 //! enemies best look at it, see [`Look`]:
 //!
 //! ```text
@@ -9,10 +9,12 @@
 //!                                  of which of its checkpoints, see the `spotting` module
 //! ```
 //!
-//! red if spotted, green if not, white if no enemy looks at it. A vehicle's text is
-//! drawn anew each tick it changed, or the vehicle moved [`TEXT_STEP`]: its group is
-//! named `entity:<id>:<height>`, which our client mod moves with the vehicle, as the
-//! client draws it, while the client has it, see its `debug_draw`.
+//! magenta if spotted, cyan if not, white if no enemy looks at it, none a team's colour.
+//! It is where the vehicle stands, our client mod hanging it under it, never over its
+//! marker. A vehicle's text is drawn anew each tick it changed, or the vehicle moved
+//! [`TEXT_STEP`]: its group is named `entity:<id>:<height>`, which our client mod moves
+//! with the vehicle, as the client draws it, while the client has it, see its
+//! `debug_draw`.
 
 use std::io;
 
@@ -28,18 +30,21 @@ use super::spotting::{Look, Point, Sight, Spotting};
 use super::vehicle::BattleVehicle;
 
 
-/// How high over a vehicle its text is, in metres from where it stands.
-const TEXT_HEIGHT: f32 = 4.0;
+/// How high over a vehicle its text is, in metres from where it stands: where it stands,
+/// our client mod hanging it under it, see its `debug_draw`.
+const TEXT_HEIGHT: f32 = 0.0;
 /// How big a vehicle's text is, of the client's default size, 1: twice as big, to be
-/// read from behind its own vehicle.
+/// read from behind its own vehicle. Our client mod ignores it, drawing its texts on the
+/// screen as big as their font however far, see its `debug_draw`.
 const TEXT_SIZE: f32 = 2.0;
 /// How far a vehicle moves before its text is moved, in metres: our client mod moves it
 /// with the vehicle, as smoothly as it draws the vehicle, while the client has it.
 const TEXT_STEP: f32 = 2.0;
-/// The colours of a vehicle's text, of 255, pure for contrast: spotted, red, not, green,
-/// and with no enemy looking, white.
-const SPOTTED: Vec4 = Vec4::new(255.0, 40.0, 40.0, 255.0);
-const HIDDEN: Vec4 = Vec4::new(40.0, 255.0, 40.0, 255.0);
+/// The colours of a vehicle's text, of 255, pure for contrast, none a team's, neither
+/// red, green, gold nor purple: spotted, magenta, not, cyan, and with no enemy looking,
+/// white.
+const SPOTTED: Vec4 = Vec4::new(255.0, 64.0, 255.0, 255.0);
+const HIDDEN: Vec4 = Vec4::new(64.0, 224.0, 255.0, 255.0);
 const UNSEEN: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
 
 

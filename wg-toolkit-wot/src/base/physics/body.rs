@@ -63,7 +63,16 @@
 //!   for a track's end, deepest d in what it touches, of normal n, the hull's up u:
 //!                 travel = SUSPENSION_TRAVEL * max(n . u, 0)
 //!                 push   = k * min(d, travel) + d * (how fast it sinks along n), along n
+//!   and, s of the way from its end to its nearest road wheel, that wheel's spring as
+//!   deep as depth, it is risen up its hull by
+//!                 rise   = s * clamp(depth - SAG, 0, SUSPENSION_TRAVEL)
 //! ```
+//!
+//! A track's end rises with its nearest road wheel so, as the track between them does:
+//! on flat ground, its front springs giving as it brakes or dips, it stays as high over
+//! the ground as at rest, rather than meeting it as a wheel without a spring and
+//! bouncing the hull off it, as it did a light tank with its idler low by its first road
+//! wheel.
 //!
 //! A spring gives [`SUSPENSION_TRAVEL`] past where it rests, then stops hard: its contact
 //! sinks no deeper, an impulse stopping it as the ground does, and a hull landing from a
@@ -604,7 +613,8 @@ impl Hull {
         for contact in &self.contacts {
             let touched = match contact.shape {
                 Shape::Spring { .. } => continue,
-                Shape::Sphere { center, radius } => {
+                Shape::Sphere { center, radius, follows } => {
+                    let center = center + Vec3::Y * risen(follows, &self.depths, suspension);
                     space.sphere(self.position + self.orientation * center, radius, CONTACT_MARGIN, keep)
                 }
                 Shape::Box { center, half } => {
@@ -1268,6 +1278,19 @@ fn raised(arm: Vec3, normal: Vec3) -> Vec3 {
     arm - normal * (arm.dot(normal) * FRICTION_HEIGHT)
 }
 
+/// How far up its hull a track's end has risen with the road wheel it `follows`, if
+/// any, its spring's place among the contacts and the end's share of the way to it, the
+/// springs as deep as `depths` say, see the module's documentation: none for a spring
+/// in the air.
+fn risen(follows: Option<(usize, f32)>, depths: &[f32], suspension: &Suspension) -> f32 {
+    let Some((spring, share)) = follows else { return 0.0 };
+    let depth = depths.get(spring).copied().unwrap_or(f32::NAN);
+    if !depth.is_finite() {
+        return 0.0;
+    }
+    share * (depth - suspension.sag).clamp(0.0, suspension.stop - suspension.sag)
+}
+
 /// The axes of the ground's plane, its `normal`'s, along a track running `heading` and
 /// across it, to its right.
 fn ground_axes(heading: Vec3, normal: Vec3) -> (Vec3, Vec3) {
@@ -1479,7 +1502,7 @@ mod tests {
             .iter()
             .map(|contact| match contact.shape {
                 Shape::Spring { point, .. } => place(point).y,
-                Shape::Sphere { center, radius } => place(center).y - radius,
+                Shape::Sphere { center, radius, .. } => place(center).y - radius,
                 Shape::Box { center, half } => {
                     let axes = Mat3::from_quat(hull.orientation);
                     let reach = half.x * axes.x_axis.y.abs() + half.y * axes.y_axis.y.abs() + half.z * axes.z_axis.y.abs();

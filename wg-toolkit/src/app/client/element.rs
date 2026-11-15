@@ -19,7 +19,7 @@ use crate::app::bit::{BitReader, BitWriter};
 use crate::util::AsciiFmt;
 use crate::pickle;
 
-pub use crate::app::math::{PackedXyz, PackedXz, PackedYawPitch, PackedYawPitchRoll, PackedYaw};
+pub use crate::app::math::{PackedCreationYawPitchRoll, PackedXyz, PackedXz, PackedYawPitch, PackedYawPitchRoll, PackedYaw};
 
 
 /// Internal module containing all raw elements numerical ids.
@@ -636,23 +636,10 @@ pub struct CreateEntity {
     /// rather than a per-entity value. Meaning otherwise unconfirmed.
     pub resource_name: String,
     pub position: Vec3,
-    /// Yaw/pitch/roll, packed the same way as the `AVATAR_UPDATE_*_YAW_PITCH_ROLL`
-    /// family (see [`PackedYawPitchRoll`]) but with `HALFPITCH` forced to `false` here
-    /// (confirmed: `ServerConnection::createEntity` explicitly instantiates
-    /// `PackedYawPitchRoll</* HALFPITCH */ false>`, unlike the avatar-update messages'
-    /// default `HALFPITCH = true`) -- decode with [`PackedYawPitchRoll::unpack`]
-    /// passing `half_pitch = false`.
-    pub direction: PackedYawPitchRoll,
-    /// The byte WoT sends immediately after a packed yaw/pitch/roll, meaning unknown.
-    ///
-    /// Not part of [`PackedYawPitchRoll`], whose three bytes are confirmed by the fixed
-    /// element lengths of the whole `AVATAR_UPDATE_*` family: every `*_YAW_PITCH_ROLL`
-    /// variant there is exactly one byte longer than its three packed bytes account for,
-    /// and those lengths decode live. `CreateEntity` simply never had the extra byte
-    /// modelled, which shifted [`Self::client_data`] one byte early and made every
-    /// `CreateEntity` payload undecodable -- `CreateEntityDetailed`, whose direction is
-    /// three raw floats with no such byte, was unaffected and decoded fine all along.
-    pub direction_unk: u8,
+    /// Its yaw, pitch and roll, packed on four bytes, see [`PackedCreationYawPitchRoll`].
+    /// Long read as a three-byte [`PackedYawPitchRoll`] and a trailing byte of unknown
+    /// meaning, which was the roll.
+    pub direction: PackedCreationYawPitchRoll,
     /// The entity's initial client-visible property values, still encoded -- decode with
     /// [`Self::client_properties`] against this entity type's own property table.
     ///
@@ -713,7 +700,6 @@ impl SimpleCodec for CreateEntity {
         write.write_string_variable(&self.resource_name)?;
         write.write_vec3(self.position)?;
         SimpleCodec::write(&self.direction, write)?;
-        write.write_u8(self.direction_unk)?;
         write.write_all(&self.client_data)
     }
 
@@ -726,10 +712,9 @@ impl SimpleCodec for CreateEntity {
         let resource_name = read.read_string_variable_lossy()?;
         let position = read.read_vec3()?;
         let direction = SimpleCodec::read(read)?;
-        let direction_unk = read.read_u8()?;
         let mut client_data = Vec::new();
         read.read_to_end(&mut client_data)?;
-        Ok(Self { entity_id, entity_type_id, unk_u16, resource_name, position, direction, direction_unk, client_data })
+        Ok(Self { entity_id, entity_type_id, unk_u16, resource_name, position, direction, client_data })
     }
 
 }
@@ -3575,8 +3560,8 @@ mod tests {
     ///
     /// The run here is the head of a real `Vehicle` create from a live battle. Aligned
     /// correctly it starts with its count (`0x0a`, ten properties) and then ascending
-    /// exposed ids; one byte early, that count reads as the trailing direction byte
-    /// instead and everything after it is nonsense. See [`CreateEntity::direction_unk`].
+    /// exposed ids; one byte early, that count reads as the direction's last byte
+    /// instead and everything after it is nonsense. See [`CreateEntity::direction`].
     #[test]
     fn create_entity_direction_carries_a_trailing_byte() {
 
@@ -3596,8 +3581,7 @@ mod tests {
 
         assert_eq!(create.entity_type_id, 6);
         assert_eq!(create.resource_name, "bw.default");
-        assert_eq!(create.direction.0, [0x01, 0x02, 0x03]);
-        assert_eq!(create.direction_unk, 0x07);
+        assert_eq!(create.direction.0, [0x01, 0x02, 0x03, 0x07]);
         // The payload must begin at the run's count byte, not one byte before it.
         assert_eq!(create.client_data, const_hex(run));
         assert_eq!(create.client_data[0], 0x0a, "the real count: ten properties");

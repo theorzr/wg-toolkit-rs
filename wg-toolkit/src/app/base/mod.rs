@@ -39,7 +39,7 @@ use super::entity::{
 use super::dispatch::{EntityDispatch, ScriptDispatch, MethodCall, MethodDef};
 use super::client::element::ChangedProperties;
 use super::outbox::{ClientOutbox, Outbox};
-use super::math::PackedYawPitchRoll;
+use super::math::PackedCreationYawPitchRoll;
 use super::slots::{SlotKey, Slots};
 use super::io_invalid_data;
 use super::client;
@@ -1734,8 +1734,7 @@ impl Witness {
                     unk_u16: 0,
                     resource_name: RESOURCE_NAME.to_string(),
                     position: cell.position,
-                    direction: PackedYawPitchRoll::pack(yaw, pitch, roll, false),
-                    direction_unk: CREATE_ENTITY_UNK,
+                    direction: PackedCreationYawPitchRoll::pack(yaw, pitch, roll),
                     client_data,
                 })?,
                 None => out.write_simple(client::element::CreateEntityDetailed {
@@ -1897,11 +1896,6 @@ const NO_ALIAS: u8 = 255;
 /// What entity creations carry before their position, always this in captures, see
 /// [`client::element::CreateEntity::resource_name`].
 const RESOURCE_NAME: &str = "bw.default";
-
-/// The byte `CreateEntity` carries after the direction, of unknown meaning, see
-/// [`client::element::CreateEntity::direction_unk`]: as captured for a vehicle, the
-/// client crashing on a vehicle created with 0.
-const CREATE_ENTITY_UNK: u8 = 5;
 
 
 // ============ //

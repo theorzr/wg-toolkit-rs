@@ -103,7 +103,7 @@ impl Solid {
         for contact in &hull.contacts {
             match contact.shape {
                 Shape::Spring { .. } => {}
-                Shape::Sphere { center, radius } => spheres.push((hull.position + axes * center, radius)),
+                Shape::Sphere { center, radius, .. } => spheres.push((hull.position + axes * center, radius)),
                 Shape::Box { center, half } => boxes.push(Obb {
                     center: hull.position + axes * center,
                     axes,
@@ -273,7 +273,7 @@ impl Hull {
         let (low, high) = self.contacts.iter()
             .filter_map(|contact| match contact.shape {
                 Shape::Box { center, half } => Some((center - half, center + half)),
-                Shape::Sphere { center, radius } => Some((center - radius, center + radius)),
+                Shape::Sphere { center, radius, .. } => Some((center - radius, center + radius)),
                 Shape::Spring { .. } => None,
             })
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(low, high), (min, max)| (low.min(min), high.max(max)));

@@ -153,9 +153,9 @@ pub type PingDatacenter = DebugElementFixed<{ id::PING_DATACENTER }, 10>;
 // client-directed `*Detailed` messages in `client::element` carry the same extra byte.
 //
 // Its position and meaning are unknown, so it is kept as a trailing `unk_byte: u8`;
-// trailing is an assumption. The same extra byte follows the packed yaw/pitch/roll in
-// `CreateEntity` (`direction_unk`) and in the `*_YAW_PITCH_ROLL` avatar updates, so it
-// may belong to the direction rather than to the end of the message.
+// trailing is an assumption. A like extra byte follows the packed yaw/pitch/roll in
+// the `*_YAW_PITCH_ROLL` avatar updates, and in `CreateEntity` belongs to the direction,
+// see `PackedCreationYawPitchRoll`, so it may here too.
 crate::__struct_simple_codec! {
     /// Sent by the client to report an update to its own position/direction, without
     /// stating which vehicle it's on -- see [`AvatarUpdateExplicit`] for the version that

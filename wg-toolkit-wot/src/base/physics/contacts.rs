@@ -19,7 +19,10 @@
 //!
 //! Its tracks' spheres meet what its road wheels would run into: a rock, a step, a
 //! kerb, which lift its nose as its track's front climbs onto them, giving as its road
-//! wheels do. Its hull's boxes leave its tracks' ends to them: its belly, between its
+//! wheels do. Those between a track's end and its nearest road wheel rise with that
+//! wheel, by their share of the way to it, as the track between them does: on flat
+//! ground, its springs giving, they stay as high over it as at rest, see
+//! [`Shape::Sphere`], rather than meeting it as a wheel without a spring. Its hull's boxes leave its tracks' ends to them: its belly, between its
 //! road wheels, is as high as its tracks' ends reach down, and its nose and its tail are
 //! over them, so that they touch the ground only when the hull rolls, or on what is
 //! higher than its tracks.
@@ -146,12 +149,15 @@ fn wheel_contacts(wheels: &Wheels, contacts: &mut Contacts) -> HullShape {
         hull.clearance = hull.clearance.min(end.center.y - end.radius - wheels.track_thickness);
         hull.ends = hull.ends.max(end.center.y);
 
+        // Its nearest road wheel, by its spring's place among the contacts: the road
+        // wheels' springs come first, in their order.
         let out = end.center.z.signum();
         let nearest = wheels.road().iter()
-            .filter(|wheel| wheel.center.x.signum() == end.center.x.signum())
-            .max_by(|a, b| (a.center.z * out).total_cmp(&(b.center.z * out)));
-        
-        let toward = nearest.map_or((end.center, end.radius), |wheel| (wheel.center, wheel.radius));
+            .enumerate()
+            .filter(|(_, wheel)| wheel.center.x.signum() == end.center.x.signum())
+            .max_by(|(_, a), (_, b)| (a.center.z * out).total_cmp(&(b.center.z * out)));
+
+        let toward = nearest.map_or((end.center, end.radius), |(_, wheel)| (wheel.center, wheel.radius));
         for index in 0..END_SPHERES {
             let share = index as f32 / END_SPHERES as f32;
             let center = end.center.lerp(toward.0, share);
@@ -160,6 +166,7 @@ fn wheel_contacts(wheels: &Wheels, contacts: &mut Contacts) -> HullShape {
                 shape: Shape::Sphere {
                     center,
                     radius,
+                    follows: nearest.map(|(spring, _)| (spring, share)).filter(|&(_, share)| share > 0.0),
                 },
                 side: Some(Side::of(end.center.x)),
             });
@@ -218,14 +225,48 @@ pub enum Shape {
         height: f32,
     },
     /// Around a wheel at its track's end, or between it and a road wheel: it gives up its
-    /// hull as the road wheels' springs do, see the `body` module.
+    /// hull as the road wheels' springs do, see the `body` module. Between, it rises with
+    /// that road wheel as its spring gives, by its share of the way to it: the spring's
+    /// place among the contacts, and that share.
     Sphere {
         center: Vec3,
         radius: f32,
+        follows: Option<(usize, f32)>,
     },
     /// Rigid: its hull's or its turret's.
     Box {
         center: Vec3,
         half: Vec3,
     },
+}
+
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::fixtures::chieftain_mobility;
+    use super::*;
+
+    #[test]
+    fn track_ends_follow_their_nearest_road_wheel() {
+
+        // Of each track's end's spheres, its wheel's own follows nothing; those toward
+        // its nearest road wheel follow that wheel's spring, by their share of the way.
+        let contacts = contacts_of(&chieftain_mobility());
+        let mut followed = 0;
+        for contact in &contacts {
+            let Shape::Sphere { center, follows, .. } = contact.shape else { continue };
+            let Some((spring, share)) = follows else { continue };
+            let Shape::Spring { point, .. } = contacts[spring].shape else { panic!("{spring} isn't a spring") };
+            assert_eq!(point.x.signum(), center.x.signum(), "another track's wheel");
+            assert_eq!(point.z.signum(), center.z.signum(), "the other end's wheel");
+            assert!((point.z.abs() - 2.4).abs() < 1e-3, "not the nearest road wheel: {point}");
+            assert!(share > 0.0 && share < 1.0, "{share}");
+            followed += 1;
+        }
+        assert_eq!(followed, 2 * 4, "two spheres following, at each of four ends");
+
+    }
+
 }
