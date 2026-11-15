@@ -28,7 +28,7 @@ import BigWorld
 import GUI
 import Math
 import math_utils
-from debug_utils import LOG_CURRENT_EXCEPTION, LOG_NOTE
+from debug_utils import LOG_CURRENT_EXCEPTION
 from DebugDrawEntity import DebugDrawEntity
 
 
@@ -40,8 +40,6 @@ SHADOW = (0, 0, 0, 255)
 SHADOW_OFFSET = 1.0
 # How far under its place a text hangs, in pixels, see the module.
 TEXT_GAP = 8.0
-# How often each vehicle followed is reported, in seconds, see `_report`.
-REPORT_PERIOD = 1.0
 
 _update = DebugDrawEntity._DebugDrawEntity__update
 _create = DebugDrawEntity._DebugDrawEntity__create3DText
@@ -194,60 +192,13 @@ def _follow_entities(self):
             _follow(entity, state['3Dtexts'], followed[1])
 
 
-def _report(self):
-    """Log, for each entity followed, at most every `REPORT_PERIOD`, where the server put
-    its text, where it stands, and where and how the client draws it: its position, its
-    direction, the yaw, pitch and roll of its matrix and of its hull's node, to compare
-    its position updates with."""
-    now = BigWorld.time()
-    reported = getattr(self, '_wgtkReported', None)
-    if reported is None:
-        reported = self._wgtkReported = {}
-    for drawObject in self.drawObjects:
-        followed = _followed(drawObject['name'])
-        if followed is None or not drawObject['texts']:
-            continue
-        entity = BigWorld.entities.get(followed[0])
-        if entity is None or now - reported.get(followed[0], -REPORT_PERIOD) < REPORT_PERIOD:
-            continue
-        reported[followed[0]] = now
-        server = drawObject['texts'][0]['position']
-        LOG_NOTE('[wgtk_servers] Vehicle drawn', followed[0], 'server', tuple(server),
-                 'client', tuple(entity.position),
-                 'entity', (entity.yaw, entity.pitch, entity.roll),
-                 'matrix', _angles(entity.matrix),
-                 'hull', _angles(_hull_node(entity)))
-
-
-def _angles(matrix):
-    """The yaw, pitch and roll of a matrix provider, None if there is none."""
-    if matrix is None:
-        return None
-    matrix = Math.Matrix(matrix)
-    return matrix.yaw, matrix.pitch, matrix.roll
-
-
-def _hull_node(entity):
-    """Where the client draws an entity's hull, its model's swinging hull node, which its
-    suspension moves on its matrix, None if it has none."""
-    model = getattr(entity, 'model', None)
-    if model is None:
-        return None
-    try:
-        return model.node('V')
-    except Exception:
-        return None
-
-
 def _update_following(self):
     """The entity drawing what the server sent, then its texts deleted off the screen,
-    and those left on the entities they follow, see `_follow_entities`, reported, see
-    `_report`."""
+    and those left on the entities they follow, see `_follow_entities`."""
     _update(self)
     try:
         _drop_unused(self)
         _follow_entities(self)
-        _report(self)
     except Exception:
         LOG_CURRENT_EXCEPTION()
 

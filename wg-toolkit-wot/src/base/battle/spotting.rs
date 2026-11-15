@@ -77,7 +77,6 @@ const MIN_RADIUS: f32 = 50.0;
 /// wiki's spotting duration.
 const LINGER: f64 = 10.0;
 
-
 /// How near an observer the foliage doesn't hide from it, and how near a vehicle that
 /// just fired it hides it less, in metres along the line of sight: the game's 15 m
 /// rule, see the module's documentation.
