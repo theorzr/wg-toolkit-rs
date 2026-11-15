@@ -4,15 +4,16 @@
 //!
 //! # Ports and checkpoints
 //!
-//! A vehicle looks from both its view range ports: its static one, the middle of its
-//! top, its turret's roof as it faces ahead, else its hull's, and its dynamic one,
-//! where its gun is mounted, turning with its turret. The wiki has them take turns
-//! every 2 s; both look every tick here, our choice. It is
-//! looked at by six checkpoints: its two ports, the middles of its hull's front and
-//! rear, and of its turret's left and right sides, all [`POINT_INSET`] inside its
-//! boxes, see [`Viewed`]. An observer spots a vehicle once it spots one of its
-//! checkpoints: a turret over a hedge is spotted, the hull behind it hidden, and the
-//! foliage hides a vehicle only if it covers all its checkpoints.
+//! A vehicle looks from its view range ports, in turns: its static one, the middle of
+//! its top, its turret's roof as it faces ahead, else its hull's, and its dynamic one,
+//! where its gun is mounted, turning with its turret. One looks each tick, the other
+//! the next, each vehicle from a random one first; the wiki has them take turns every
+//! 2 s, our choice is every tick. It is looked at by six
+//! checkpoints: its two ports, the middles of its hull's front and rear, and of its
+//! turret's left and right sides, all [`POINT_INSET`] inside its boxes, see [`Viewed`].
+//! An observer spots a vehicle once it spots one of its checkpoints: a turret over a
+//! hedge is spotted, the hull behind it hidden, and the foliage hides a vehicle only if
+//! it covers all its checkpoints.
 //!
 //! ```text
 //!        static port, top ─▶ ●  ● ◀─ dynamic port, gun mount
@@ -22,11 +23,14 @@
 //!                        └────────────────┘
 //! ```
 //!
-//! # A checkpoint spotted
+//! # Near, else a checkpoint spotted
+//!
+//! An enemy within MIN_RADIUS of a vehicle, on the ground plane, the middle of its
+//! hull's box to the middle of the vehicle's, spots it, whatever is in the way: once for
+//! both, rather than from each port to each checkpoint, see [`near`] (Near). Else:
 //!
 //! ```text
 //!   distance d, on the ground plane, from the observer's port to the checkpoint:
-//!     d ≤ MIN_RADIUS                       spotted, whatever is in the way   (Near)
 //!     d > range(camouflage)                not spotted, nothing looked at    (Far)
 //!     the map in the way, World::sees      not spotted                       (Blocked)
 //!     else the foliage on the line hides it (Clear):
@@ -51,11 +55,12 @@
 //! # A team's sightings
 //!
 //! A team spots what any of its vehicles spots, still for LINGER once none does. It
-//! remembers where it last spotted each enemy, until one of its vehicles gets within
-//! MIN_RADIUS of there, which the enemy left then: what its bots search.
+//! remembers where it last spotted each enemy, until one of its vehicles' hulls gets
+//! within MIN_RADIUS of there, which the enemy left then: what its bots search.
 
 use std::cmp::Ordering;
 
+use rand::Rng;
 use glam::Vec3;
 
 use crate::base::physics::World;
@@ -64,8 +69,8 @@ use super::vehicle::BattleVehicle;
 use super::{TEAMS, VIEW_RANGE};
 
 
-/// How close an enemy is always spotted, in metres on the ground plane, whatever is in
-/// the way: `VISIBILITY.MIN_RADIUS`.
+/// How close an enemy is always spotted, in metres on the ground plane from hull to hull,
+/// whatever is in the way: `VISIBILITY.MIN_RADIUS`.
 const MIN_RADIUS: f32 = 50.0;
 
 /// How long a team still spots an enemy once none of its vehicles does, in seconds: the
@@ -102,16 +107,19 @@ pub struct Spotting {
     /// For each of the battle's vehicles, by index, its enemies' best look at it this
     /// tick, see [`Self::look`].
     looks: Vec<Option<Look>>,
+    /// For each of the battle's vehicles, by index, which of its view range ports it
+    /// looks from this tick, see the module's documentation.
+    ports: Vec<usize>,
 }
 
 /// How an observer looks at a checkpoint of an enemy, see [`look`], whether it spots
 /// it or not and why.
 #[derive(Debug, Clone, Copy)]
 pub struct Look {
-    /// The checkpoint of the enemy looked at.
-    pub point: Point,
+    /// The checkpoint of the enemy looked at, none if near, see [`near`].
+    pub point: Option<Point>,
     /// How far the checkpoint is from the observer's port, on the ground plane, in
-    /// metres.
+    /// metres, or near, its hull from the observer's.
     pub distance: f32,
     /// What is in the way, as far as it was looked at.
     pub sight: Sight,
@@ -128,7 +136,8 @@ pub struct Look {
 /// What is in the way of a [`Look`], as far as it was looked at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sight {
-    /// Within [`MIN_RADIUS`]: nothing was looked at, it is spotted.
+    /// Within [`MIN_RADIUS`], hull to hull: nothing was looked at, it is spotted, see
+    /// [`near`].
     Near,
     /// Beyond its range before the foliage: nothing was looked at, it isn't spotted.
     Far,
@@ -158,6 +167,8 @@ pub enum Point {
 /// module's documentation.
 #[derive(Debug, Clone, Copy)]
 struct Viewed {
+    /// The middle of its hull's box.
+    center: Vec3,
     /// Its view range ports, static then dynamic.
     ports: [Vec3; 2],
     /// Its checkpoints, in [`POINTS`] order.
@@ -174,17 +185,20 @@ struct Sighting {
     by: u8,
     /// The game time it last did at.
     at: f64,
-    /// Where the enemy's hull was then.
+    /// Where the middle of the enemy's hull was then.
     position: Vec3,
 }
 
 impl Spotting {
 
-    /// No vehicle spotted yet, of a battle's `vehicles`.
+    /// No vehicle spotted yet, of a battle's `vehicles`, each looking first from a random
+    /// one of its ports.
     pub fn new(vehicles: usize) -> Self {
+        let mut rng = rand::thread_rng();
         Self {
             sightings: vec![None; vehicles],
             looks: vec![None; vehicles],
+            ports: (0..vehicles).map(|_| rng.gen_range(0..2)).collect(),
         }
     }
 
@@ -194,12 +208,15 @@ impl Spotting {
     /// 1. Each vehicle's ports and checkpoints in the world, once for the tick.
     /// 2. For each target alive, whether it fired lately, and its camouflage now, cut
     ///    to its share at a shot if it did.
-    /// 3. Each enemy alive looks at its checkpoints from each of its ports, see
+    /// 3. An enemy alive within [`MIN_RADIUS`] of it, hull to hull, spots it, see
+    ///    [`near`], the nearest the look kept.
+    /// 4. Else each enemy alive looks at its checkpoints from its port of this tick, see
     ///    [`look_at`], until one spots one: then the target is spotted, and the look
     ///    kept is that one. Else the look kept is the nearest to spotting it, see
     ///    [`better`].
-    /// 4. Spotted, its enemies' sighting of it is where it is now. Else their last one
+    /// 5. Spotted, its enemies' sighting of it is where it is now. Else their last one
     ///    lingers, until one of them gets within [`MIN_RADIUS`] of it, searched.
+    /// 6. Each vehicle's other port looks the next tick.
     ///
     /// A destroyed vehicle is forgotten.
     pub fn update(&mut self, now: f64, vehicles: &[BattleVehicle], world: &World) {
@@ -222,16 +239,23 @@ impl Spotting {
             let (camouflage, revealed) = target.camouflage(world.vehicle(target.id), now);
             let observers = vehicles.iter()
                 .zip(&viewed)
-                .filter(|(observer, _)| observer.alive() && observer.team != target.team);
+                .zip(&self.ports)
+                .filter(|((observer, _), _)| observer.alive() && observer.team != target.team);
 
-            // 4. Each enemy alive looks at its checkpoints from each of its ports, the
-            //    first spotting one ending it all: spotted once by one, it is by its
+            // 4. Near an enemy alive, hull to hull, it is spotted, whatever is in the
+            //    way: nothing else is looked at.
+            let near = observers.clone()
+                .filter_map(|((observer, seen), _)| near(observer.vision.view_range, seen, &viewed[index], camouflage))
+                .min_by(|a, b| a.distance.total_cmp(&b.distance));
+
+            // 5. Else each enemy alive looks at its checkpoints from its port of this tick,
+            //    the first spotting one ending it all: spotted once by one, it is by its
             //    team. The look kept, for the debug drawing, is that one, else the
             //    nearest to.
-            let mut best: Option<Look> = None;
-            let looks = observers.clone().flat_map(|(observer, seen)| {
-                seen.ports.map(|port| (observer.vision.view_range, port))
-            });
+            let mut best = near;
+            let looks = observers.clone()
+                .filter(|_| near.is_none())
+                .map(|((observer, seen), &port)| (observer.vision.view_range, seen.ports[port]));
             for (view_range, port) in looks {
                 let look = look_at(world, port, view_range, &viewed[index], camouflage, revealed);
                 if best.is_none_or(|best| better(&look, &best) == Ordering::Less) {
@@ -243,25 +267,30 @@ impl Spotting {
             }
             self.looks[index] = best;
 
-            // 5. Spotted: its enemies' sighting is where it is now, from now.
+            // 6. Spotted: its enemies' sighting is where it is now, from now.
             if best.is_some_and(|best| best.spots()) {
                 self.sightings[index] = Some(Sighting {
                     by: TEAMS.into_iter().find(|&team| team != target.team).unwrap_or_default(),
                     at: now,
-                    position: target.hull_center(world),
+                    position: viewed[index].center,
                 });
                 continue;
             }
 
-            // 6. Not: their last sighting lingers, spotting it still for LINGER, then
+            // 7. Not: their last sighting lingers, spotting it still for LINGER, then
             //    tells their bots where to search, until one of them gets close to it.
             let Some(sighting) = self.sightings[index] else { continue };
             let searched = now - sighting.at > LINGER
-                && observers.clone().any(|(_, seen)| (sighting.position - seen.ports[0]).with_y(0.0).length() <= MIN_RADIUS);
+                && observers.clone().any(|((_, seen), _)| (sighting.position - seen.center).with_y(0.0).length() <= MIN_RADIUS);
             if searched {
                 self.sightings[index] = None;
             }
 
+        }
+
+        // 8. Each vehicle's other port looks the next tick.
+        for port in &mut self.ports {
+            *port = 1 - *port;
         }
 
     }
@@ -328,6 +357,7 @@ fn viewed(world: &World, vehicle: &BattleVehicle) -> Viewed {
     let mount = Vec3::from(gun.translation);
 
     Viewed {
+        center: chassis.transform_point3(hull_middle),
         ports: [top, mount],
         points: [
             top,
@@ -339,6 +369,22 @@ fn viewed(world: &World, vehicle: &BattleVehicle) -> Viewed {
         ],
     }
 
+}
+
+/// How an observer, seeing as far as `view_range`, looks at a target of the given
+/// camouflage, if near it: within [`MIN_RADIUS`] on the ground plane, the middle of its
+/// hull to the middle of the target's, it spots it, whatever is in the way.
+fn near(view_range: f32, observer: &Viewed, target: &Viewed, camouflage: f32) -> Option<Look> {
+    let distance = (target.center - observer.center).with_y(0.0).length();
+    (distance <= MIN_RADIUS).then_some(Look {
+        point: None,
+        distance,
+        sight: Sight::Near,
+        camouflage,
+        hidden: camouflage,
+        plants: 0,
+        range: range(view_range, camouflage),
+    })
 }
 
 /// How an observer at `eye`, its port, seeing as far as `view_range`, looks at a
@@ -360,25 +406,21 @@ fn look_at(world: &World, eye: Vec3, view_range: f32, target: &Viewed, camouflag
 
 /// How an observer at `eye`, its port, seeing as far as `view_range`, looks at a
 /// target's checkpoint `point` at `at`, of the given camouflage, `revealed` if it just
-/// fired, see the module's documentation. The foliage is looked at last, as it only
-/// hides more.
+/// fired, see the module's documentation, beyond [`near`]. The foliage is looked at
+/// last, as it only hides more.
 fn look(world: &World, eye: Vec3, view_range: f32, point: Point, at: Vec3, camouflage: f32, revealed: bool) -> Look {
 
     let distance = (at - eye).with_y(0.0).length();
     let mut look = Look {
-        point,
+        point: Some(point),
         distance,
-        sight: Sight::Near,
+        sight: Sight::Far,
         camouflage,
         hidden: camouflage,
         plants: 0,
         range: range(view_range, camouflage),
     };
-    if distance <= MIN_RADIUS {
-        return look;
-    }
     if distance > look.range {
-        look.sight = Sight::Far;
         return look;
     }
     if !world.sees(eye, at) {
@@ -446,7 +488,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spots_within_its_range_by_camouflage_and_close_behind_walls() {
+    fn spots_near_hull_to_hull_only() {
+
+        // Hull to hull 45 m apart on the ground plane, its checkpoints further: near.
+        // 55 m apart: not, its checkpoints left to look at.
+        let observer = viewed_at(Vec3::new(0.0, 1.0, 0.0));
+        let close = near(400.0, &observer, &viewed_at(Vec3::new(0.0, 20.0, 45.0)), 0.3)
+            .expect("near");
+        assert!(close.spots() && close.point.is_none() && (close.distance - 45.0).abs() < 1e-4, "{close:?}");
+        assert!(near(400.0, &observer, &viewed_at(Vec3::new(0.0, 1.0, 55.0)), 0.3).is_none());
+
+    }
+
+    #[test]
+    fn spots_within_its_range_by_camouflage_but_behind_walls() {
 
         // A wall 20 m wide and 5 m high 30 m in front of the observer.
         let space = blocks(&[(Vec3::new(-10.0, 0.0, -71.0), Vec3::new(10.0, 5.0, -69.0))]);
@@ -460,8 +515,9 @@ mod tests {
         assert!(look(&world, eye, 400.0, Point::Top, Vec3::new(390.0, 1.5, -100.0), 0.0, false).spots());
         assert!(!look(&world, eye, 500.0, Point::Top, Vec3::new(450.0, 1.5, -100.0), 0.0, false).spots());
 
-        // Behind the wall, only within 50 m.
-        assert!(look(&world, eye, 400.0, Point::Top, Vec3::new(0.0, 1.5, -55.0), 0.0, false).spots());
+        // Behind the wall, never: within 50 m too, which is left to `near`.
+        let behind = look(&world, eye, 400.0, Point::Top, Vec3::new(0.0, 1.5, -55.0), 0.0, false);
+        assert!(!behind.spots() && behind.sight == Sight::Blocked, "{behind:?}");
         assert!(!look(&world, eye, 400.0, Point::Top, Vec3::new(0.0, 1.5, -40.0), 0.0, false).spots());
 
     }
@@ -510,6 +566,7 @@ mod tests {
         let world = World::new(Arc::new(space), None);
         let eye = Vec3::new(0.0, 2.4, -100.0);
         let mut target = Viewed {
+            center: Vec3::new(0.0, 0.9, 4.0),
             ports: [Vec3::new(0.0, 2.4, 4.0), Vec3::new(0.0, 1.3, 5.0)],
             points: [
                 Vec3::new(0.0, 2.4, 4.0),
@@ -523,13 +580,22 @@ mod tests {
 
         // Its top is spotted, the first checkpoint looked at.
         let look = look_at(&world, eye, 400.0, &target, 0.0, false);
-        assert!(look.spots() && look.point == Point::Top, "{look:?}");
+        assert!(look.spots() && look.point == Some(Point::Top), "{look:?}");
 
         // Its top down behind the wall too, nothing of it is.
         target.points[0] = Vec3::new(0.0, 1.2, 4.0);
         let look = look_at(&world, eye, 400.0, &target, 0.0, false);
         assert!(!look.spots() && look.sight == Sight::Blocked, "{look:?}");
 
+    }
+
+    /// A vehicle whose hull's middle, ports and checkpoints are all at `at`.
+    fn viewed_at(at: Vec3) -> Viewed {
+        Viewed {
+            center: at,
+            ports: [at; 2],
+            points: [at; 6],
+        }
     }
 
     /// A bush 6 m wide and 4 m high standing at `at`, hiding half of what is behind it.

@@ -6,7 +6,8 @@
 //!   Bot 3                          its name
 //!   camo 0.31 -> 0.66, 2 plants    its camouflage, then hidden by the foliage
 //!   312 m of 230 m: clear, top     how far, of how far it is spotted, what is in the way,
-//!                                  of which of its checkpoints, see the `spotting` module
+//!                                  of which of its checkpoints, or of its hull if
+//!                                  near, see the `spotting` module
 //! ```
 //!
 //! magenta if spotted, cyan if not, white if no enemy looks at it, none a team's colour.
@@ -135,12 +136,13 @@ fn text(vehicle: &BattleVehicle, world: &World, look: Option<&Look>) -> DebugTex
         Sight::Clear => "clear",
     };
     let point = match look.point {
-        Point::Top => "top",
-        Point::Gun => "gun",
-        Point::Front => "front",
-        Point::Rear => "rear",
-        Point::Left => "left",
-        Point::Right => "right",
+        None => "hull",
+        Some(Point::Top) => "top",
+        Some(Point::Gun) => "gun",
+        Some(Point::Front) => "front",
+        Some(Point::Rear) => "rear",
+        Some(Point::Left) => "left",
+        Some(Point::Right) => "right",
     };
     let text = format!(
         "{}\ncamo {:.2} -> {:.2}, {} plants\n{:.0} m of {:.0} m: {sight}, {point}",

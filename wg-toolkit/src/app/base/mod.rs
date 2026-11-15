@@ -39,7 +39,7 @@ use super::entity::{
 use super::dispatch::{EntityDispatch, ScriptDispatch, MethodCall, MethodDef};
 use super::client::element::ChangedProperties;
 use super::outbox::{ClientOutbox, Outbox};
-use super::math::PackedCreationYawPitchRoll;
+use super::math::{PackedCreationYawPitchRoll, PackedXyz, PackedYawPitchRoll, calculate_reference_position};
 use super::slots::{SlotKey, Slots};
 use super::io_invalid_data;
 use super::client;
@@ -1175,7 +1175,7 @@ impl App {
             space.entities.push(player.any());
         }
         if let Some(client) = self.clients.get_mut(client.slot) {
-            client.witness = Some(Witness::new(player.any()));
+            client.witness = Some(Witness::new(player.any(), init.packed_xz_scale));
         }
 
         Ok(())
@@ -1450,17 +1450,17 @@ impl App {
 
     }
 
-    /// A client asks for an entity that entered its area of interest: it gets created
-    /// with the next tick.
+    /// A client asks for an entity that entered its area of interest: it was created on
+    /// it already, with its entering, as the captured server does, see
+    /// [`Witness::write_created`].
     fn request_entity(&mut self, client: ClientKey, entity_id: u32) {
 
-        let known = self.clients.get_mut(client.slot)
-            .and_then(|client| client.witness.as_mut())
-            .and_then(|witness| witness.known.iter_mut().find(|known| known.entity.id == entity_id));
+        let known = self.clients.get(client.slot)
+            .and_then(|client| client.witness.as_ref())
+            .is_some_and(|witness| witness.known.iter().any(|known| known.entity.id == entity_id));
 
-        match known {
-            Some(known) => known.requested = true,
-            None => debug!(addr = %client.addr, "Asked for entity {entity_id}, which it doesn't know"),
+        if !known {
+            debug!(addr = %client.addr, "Asked for entity {entity_id}, which it doesn't know");
         }
 
     }
@@ -1560,6 +1560,9 @@ struct Witness {
     shown: HashSet<EntityKey<AnyEntity>>,
     /// The entities whose NRL node it has, with their components it has.
     nrl: HashMap<EntityKey<AnyEntity>, Vec<SlotKey>>,
+    /// How its space's packed positions scale `x` and `z`, see
+    /// [`client::element::CreateCellPlayer`] and [`Self::write_positions`].
+    packed_xz_scale: f32,
 }
 
 /// An entity in the area of interest of a witness.
@@ -1567,8 +1570,7 @@ struct Witness {
 struct WitnessEntity {
     entity: EntityKey<AnyEntity>,
     alias: Option<u8>,
-    /// Whether its client asked for it, and whether it was created on it since.
-    requested: bool,
+    /// Whether it was created on its client, see [`Witness::write_created`].
     created: bool,
 }
 
@@ -1600,7 +1602,7 @@ impl<'a> TickView<'a> {
 
 impl Witness {
 
-    fn new(entity: EntityKey<AnyEntity>) -> Self {
+    fn new(entity: EntityKey<AnyEntity>, packed_xz_scale: f32) -> Self {
         Self {
             entity,
             known: Vec::new(),
@@ -1609,6 +1611,7 @@ impl Witness {
             interest: Interest::WholeSpace,
             shown: HashSet::new(),
             nrl: HashMap::new(),
+            packed_xz_scale,
         }
     }
 
@@ -1701,8 +1704,11 @@ impl Witness {
 
             out.write_simple(client::element::EnterAoi { entity_id: key.id, id_alias: alias.unwrap_or(NO_ALIAS) })?;
 
-            // Without an alias, it is created right away rather than once asked for.
-            self.known.push(WitnessEntity { entity: key, alias, requested: alias.is_none(), created: false });
+            self.known.push(WitnessEntity {
+                entity: key,
+                alias,
+                created: false,
+            });
 
         }
 
@@ -1710,12 +1716,14 @@ impl Witness {
 
     }
 
-    /// The entities its client asked for, created with what of them is visible to it.
+    /// The entities new to its client, created with what of them is visible to it: in the
+    /// tick they entered its area of interest, the client's request for them following,
+    /// as the captured server does.
     fn write_created(&mut self, out: &mut ClientOutbox, view: &TickView, created: &mut Vec<EntityKey<AnyEntity>>) -> io::Result<()> {
 
         for known in &mut self.known {
 
-            if !known.requested || known.created {
+            if known.created {
                 continue;
             }
 
@@ -1768,15 +1776,20 @@ impl Witness {
 
     }
 
-    /// Where its player entity and the entities it knows moved.
+    /// Where its player entity and the entities it knows moved, as the captured server
+    /// tells them: each tick, the reference position, its player's rounded to the metre;
+    /// the entity its player controls, its vehicle, in floats, and the others packed,
+    /// from the reference position.
     fn write_positions(&self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
 
-        // Where it is, as the captured server places the player: a reference point at
-        // its position rounded to the metre, then itself on that point.
+        // The reference position after its player: the client sets its own to its
+        // player's detailed position, rounded (`detailedPositionReceived`), here the
+        // origin, which would offset every packed position by its player's.
         if view.player.moved {
-            out.write_simple(client::element::RelativePosition { position: view.player.position.round() })?;
             out.write_simple(client::element::AvatarUpdatePlayerDetailed { ref_num: 0, position: Vec3::ZERO, direction: Vec3::ZERO })?;
         }
+        let reference = calculate_reference_position(view.player.position);
+        out.write_simple(client::element::RelativePosition { position: reference })?;
 
         // Each position update of the others selects its entity by alias.
         for known in &self.known {
@@ -1784,11 +1797,26 @@ impl Witness {
             let (Some(id_alias), true) = (known.alias, known.created) else { continue };
             let Some((_, cell)) = view.get(known.entity).filter(|(_, cell)| cell.moved) else { continue };
 
-            out.write_simple(client::element::AvatarUpdateAliasDetailed {
+            if cell.is_controlled_by(self.entity) {
+                out.write_simple(client::element::AvatarUpdateAliasDetailed {
+                    ref_num: 0,
+                    id_alias,
+                    position: cell.position,
+                    direction: cell.direction,
+                })?;
+                continue;
+            }
+
+            // Its direction as its creation's, see `PackedCreationYawPitchRoll`: its 3
+            // direction bytes, and the one after them, the roll's last bits.
+            let packed = PackedCreationYawPitchRoll::pack(cell.direction.z, cell.direction.y, cell.direction.x);
+            let [yaw_pitch @ .., roll] = packed.0;
+            out.write_simple(client::element::AvatarUpdateAliasFullPosYawPitchRoll {
                 ref_num: 0,
                 id_alias,
-                position: cell.position,
-                direction: cell.direction,
+                position: PackedXyz::pack(cell.position - reference, self.packed_xz_scale),
+                direction: PackedYawPitchRoll(yaw_pitch),
+                unk: [roll],
             })?;
 
         }
@@ -2018,7 +2046,7 @@ mod tests {
         let player = EntityKey::new(slots.insert(()), 3);
         let at = |x| EntityCell::new(space, Vec3::new(x, 5.0, 0.0), Vec3::ZERO, true, None, Visibility::Interest);
 
-        let mut witness = Witness::new(player);
+        let mut witness = Witness::new(player, 1.0);
         witness.interest = Interest::Radius { enter: 10.0, leave: 15.0 };
         assert!(witness.sees(Vec3::ZERO, key, &at(9.0), false));
         assert!(!witness.sees(Vec3::ZERO, key, &at(12.0), false));

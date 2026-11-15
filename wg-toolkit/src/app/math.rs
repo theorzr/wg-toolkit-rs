@@ -12,8 +12,8 @@
 //! client's handler table) match this source's bit widths exactly, which is strong
 //! indirect confirmation.
 
+use std::f32::consts::PI;
 use std::io::{self, Read, Write};
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 
 use glam::Vec3;
 
@@ -293,23 +293,17 @@ impl SimpleCodec for PackedYawPitchRoll {
     }
 }
 
-/// A direction as WoT's entity creations carry it, see `CreateEntity::direction`: four
-/// bytes of bit fields, most significant first, each signed. Fitted on the captures,
-/// their creations against the floats of the same vehicles' next detailed updates: the
-/// yaw's 12 bits within a unit or two of its floats in all four, the pitch's within two
-/// (-0.0134 rad as -16, 0.0189 rad as 24), the roll's 0.0312 rad as 5.
+/// A direction as WoT's entity creations carry it, see `CreateEntity::direction`, and
+/// its `FullPosYawPitchRoll` position updates, their 3 direction bytes and the one
+/// after: four bytes of bit fields, most significant first, each signed.
 ///
 /// ```text
 ///   byte   0          1           2          3
-///          yyyyyyyy   yyyy pppp   pppppppp   rrrrrrrr
-///   yaw    12 bits over [-π, π)
-///   pitch  12 bits over [-π/2, π/2)
-///   roll    8 bits over [-π/4, π/4)
+///          yyyyyyyy   yyyp pppp   pppppp rr  rrrrrrrr
+///   yaw    11 bits over [-π, π)
+///   pitch  11 bits over [-π, π)
+///   roll   10 bits over [-π, π)
 /// ```
-///
-/// Read as a [`PackedYawPitchRoll`] and a trailing byte, as it once was, its pitch byte
-/// mixed the yaw's last bits with the pitch's first: a vehicle created so showed tilted
-/// until its first update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedCreationYawPitchRoll(pub [u8; 4]);
 
@@ -317,28 +311,21 @@ impl PackedCreationYawPitchRoll {
 
     /// Decode into `(yaw, pitch, roll)` radians.
     pub fn unpack(&self) -> (f32, f32, f32) {
-        let [a, b, c, d] = self.0;
-        let yaw = signed_12(u16::from(a) << 4 | u16::from(b) >> 4);
-        let pitch = signed_12(u16::from(b & 0x0f) << 8 | u16::from(c));
+        let bits = u32::from_be_bytes(self.0);
         (
-            f32::from(yaw) * PI / 2048.0,
-            f32::from(pitch) * FRAC_PI_2 / 2048.0,
-            f32::from(d as i8) * FRAC_PI_4 / 128.0,
+            f32::from(signed(bits >> 21, 11)) * PI / 1024.0,
+            f32::from(signed(bits >> 10, 11)) * PI / 1024.0,
+            f32::from(signed(bits, 10)) * PI / 512.0,
         )
     }
 
     /// Inverse of [`Self::unpack`], each angle rounded, and held within its range.
     pub fn pack(yaw: f32, pitch: f32, roll: f32) -> Self {
-        let yaw = (yaw.sin().atan2(yaw.cos()) * 2048.0 / PI).round().clamp(-2048.0, 2047.0) as i16;
-        let pitch = (pitch * 2048.0 / FRAC_PI_2).round().clamp(-2048.0, 2047.0) as i16;
-        let roll = (roll * 128.0 / FRAC_PI_4).round().clamp(-128.0, 127.0) as i8;
-        let [yaw, pitch] = [yaw as u16 & 0x0fff, pitch as u16 & 0x0fff];
-        Self([
-            (yaw >> 4) as u8,
-            ((yaw & 0x0f) << 4 | pitch >> 8) as u8,
-            pitch as u8,
-            roll as u8,
-        ])
+        let yaw = (yaw.sin().atan2(yaw.cos()) * 1024.0 / PI).round().clamp(-1024.0, 1023.0) as i32;
+        let pitch = (pitch.sin().atan2(pitch.cos()) * 1024.0 / PI).round().clamp(-1024.0, 1023.0) as i32;
+        let roll = (roll.sin().atan2(roll.cos()) * 512.0 / PI).round().clamp(-512.0, 511.0) as i32;
+        let bits = (yaw as u32 & 0x7ff) << 21 | (pitch as u32 & 0x7ff) << 10 | (roll as u32 & 0x3ff);
+        Self(bits.to_be_bytes())
     }
 
 }
@@ -354,9 +341,9 @@ impl SimpleCodec for PackedCreationYawPitchRoll {
     }
 }
 
-/// A 12-bit two's complement number, in the low bits of `bits`.
-fn signed_12(bits: u16) -> i16 {
-    ((bits << 4) as i16) >> 4
+/// A two's complement number of `len` bits, the low bits of `bits`.
+fn signed(bits: u32, len: u32) -> i16 {
+    ((bits << (32 - len)) as i32 >> (32 - len)) as i16
 }
 
 /// Yaw and pitch each packed into one byte, both full-range (`YAWPITCH_HALFPITCH` is
@@ -434,17 +421,39 @@ mod tests {
         for (bytes, (yaw, pitch, roll)) in captured {
             let packed = PackedCreationYawPitchRoll(bytes);
             let (read_yaw, read_pitch, read_roll) = packed.unpack();
-            assert!((read_yaw - yaw).abs() < 2.0 * PI / 2048.0, "{bytes:?} yaw {read_yaw} for {yaw}");
-            assert!((read_pitch - pitch).abs() < 2.0 * FRAC_PI_2 / 2048.0, "{bytes:?} pitch {read_pitch} for {pitch}");
-            assert!((read_roll - roll).abs() < FRAC_PI_4 / 128.0, "{bytes:?} roll {read_roll} for {roll}");
+            assert!((read_yaw - yaw).abs() < PI / 1024.0, "{bytes:?} yaw {read_yaw} for {yaw}");
+            assert!((read_pitch - pitch).abs() < PI / 1024.0, "{bytes:?} pitch {read_pitch} for {pitch}");
+            assert!((read_roll - roll).abs() < PI / 512.0, "{bytes:?} roll {read_roll} for {roll}");
             assert_eq!(PackedCreationYawPitchRoll::pack(read_yaw, read_pitch, read_roll), packed);
         }
 
-        // A turn, negative pitches and rolls, and what is out of range held to it.
+        // A captured update of a vehicle driving, rolled a little left: its roll's first
+        // bits set, a few degrees below zero, not half a turn.
+        let (_, pitch, roll) = PackedCreationYawPitchRoll([36, 63, 159, 215]).unpack();
+        assert!(pitch.abs() < 0.1 && roll < 0.0 && roll > -0.3, "pitch {pitch} roll {roll}");
+
+        // A turn, negative pitches and rolls, a small pitch beside its roll, an odd yaw
+        // beside a level pitch.
         let packed = PackedCreationYawPitchRoll::pack(-2.0, -0.3, -0.1);
         let (yaw, pitch, roll) = packed.unpack();
-        assert!((yaw + 2.0).abs() < 0.002 && (pitch + 0.3).abs() < 0.001 && (roll + 0.1).abs() < 0.004, "{packed:?}");
-        assert!((PackedCreationYawPitchRoll::pack(0.0, 0.0, 1.0).unpack().2 - FRAC_PI_4).abs() < 0.01);
+        assert!((yaw + 2.0).abs() < 0.002 && (pitch + 0.3).abs() < 0.002 && (roll + 0.1).abs() < 0.004, "{packed:?}");
+        let (_, pitch, roll) = PackedCreationYawPitchRoll::pack(-0.73, 0.02, 0.03).unpack();
+        assert!((pitch - 0.02).abs() < 0.002 && (roll - 0.03).abs() < 0.004, "pitch {pitch} roll {roll}");
+        let (yaw, pitch, roll) = PackedCreationYawPitchRoll::pack(PI / 1024.0, 0.0, 0.0).unpack();
+        assert!((yaw - PI / 1024.0).abs() < 1e-6 && pitch == 0.0 && roll == 0.0, "{yaw} {pitch} {roll}");
+
+    }
+
+    #[test]
+    fn full_positions_read_as_captured() {
+
+        // A vehicle's first update once spotted, from the reference position before it,
+        // in the captured space's scale: 0.2 s from its creation at
+        // (-297.35, 3.54, 27.68), driving back at about 6 m/s.
+        let packed = PackedXyz([242, 220, 187, 23, 130, 193]);
+        let position = Vec3::new(42.0, 0.0, -417.0) + packed.unpack(0.007_644_442);
+        assert!(position.distance(Vec3::new(-297.35, 3.54, 27.68)) < 1.5, "{position}");
+        assert_eq!(PackedXyz::pack(packed.unpack(0.007_644_442), 0.007_644_442).0, packed.0);
 
     }
 
