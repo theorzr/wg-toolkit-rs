@@ -2,6 +2,7 @@
 //! the clients as it moves, firing and reloading, its settings changed by the client
 //! driving it, and taking damage.
 
+use std::f32::consts::PI;
 use std::sync::Arc;
 use std::io;
 
@@ -21,15 +22,54 @@ use crate::base::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
-use crate::base::physics::{Dispersion, Vehicle, VehicleId, World};
+use crate::base::physics::{Dispersion, Hull, Vehicle, VehicleId, World};
 use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
 use crate::game::collision::{VehicleCollision, VehiclePart};
 use crate::base::garage::player::Player;
-use crate::game::item_defs::{VehicleDef, VisionDef};
+use crate::game::item_defs::{GeneralWheels, VehicleDef, VisionDef};
 
 use super::spawn::TeamStart;
 use super::hit::ShellHit;
 use super::bot::Bot;
+
+
+/// The fastest a wheel rolls as `wheelsScroll` packs it, in m/s, either way.
+const WHEEL_SCROLL_MAX: f32 = 25.0;
+
+/// How fast a vehicle slides across its heading, in m/s, before the clients are told it
+/// is strafing: their filter, which models its tracks, otherwise holds it back from
+/// sliding, and draws it metres behind where it is shoved. Fitted on the collisions
+/// capture, where the real server sets `isStrafing` on the ticks the player's vehicle
+/// moves sideways faster than 0.03 to 0.05 m/s, pushed, skidding or sliding down a slope.
+const STRAFING_SLIDE: f32 = 0.04;
+
+/// How fast a vehicle goes, in m/s, before it is seen as moving, with its moving
+/// camouflage. Our choice: a vehicle stopped still settles at none.
+const MOVING_SPEED: f32 = 0.1;
+
+/// How long a vehicle is easier to see after it fired, in seconds. Our choice, about
+/// how long the game's shows a shooter.
+const SHOT_REVEAL_TIME: f64 = 3.0;
+
+/// How much a shell's damage varies, either way, as a share of it.
+const DAMAGE_SPREAD: f32 = 0.25;
+
+/// How long a vehicle burns after its last hit, in seconds.
+const FIRE_DURATION: f64 = 5.0;
+
+/// `ATTACK_REASON.SHOT`'s index.
+const ATTACK_REASON_SHOT: i8 = 0;
+
+/// The first shot id of the first bot, of the next one twice that, and so on, apart from
+/// the player's.
+const BOT_FIRST_SHOT_ID: i32 = 1_000_000;
+
+/// The `quickShellChangerFactor` of a vehicle, as captured: how much faster it changes
+/// shells, from its crew and equipment.
+const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
+
+/// The default dog tag's components, as captured: their ids and grades.
+const DEFAULT_DOG_TAG: [(i32, i8); 2] = [(300, 9), (66, 0)];
 
 
 /// A vehicle of a battle, whoever drives it, with its entry in `vehiclesInfo`.
@@ -64,6 +104,10 @@ pub struct BattleVehicle {
     engine_mode: Option<[u8; 2]>,
     /// The `isStrafing` last sent, see [`STRAFING_SLIDE`].
     strafing: bool,
+    /// The `steeringAngles` and `wheelsScroll` last sent, its general wheels', see
+    /// [`wheels_motion`].
+    steering: Vec<u8>,
+    scroll: Vec<u8>,
     /// Its `damageStickers`: where shells pierced it.
     damage_stickers: Vec<HitPoint>,
     /// Its fire, with the game time it goes out at, see [`FIRE_DURATION`].
@@ -171,6 +215,8 @@ impl BattleVehicle {
             max_health: loadout.max_health.into(),
             engine_mode: None,
             strafing: false,
+            steering: Vec::new(),
+            scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
         })
@@ -228,6 +274,8 @@ impl BattleVehicle {
             max_health: def.max_health.into(),
             engine_mode: None,
             strafing: false,
+            steering: Vec::new(),
+            scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
         })
@@ -314,7 +362,8 @@ impl BattleVehicle {
     }
 
     /// Give the clients it as it is, `driven` in the world: where it is, its gun's angles,
-    /// and its engine's mode and whether it slides sideways once they change.
+    /// and its engine's mode, whether it slides sideways, and how its general wheels
+    /// steer and roll, once they change.
     pub fn show(&mut self, app: &mut base::App, driven: &Vehicle) -> io::Result<()> {
 
         let Vehicle { hull, turret } = driven;
@@ -332,6 +381,18 @@ impl BattleVehicle {
         if self.strafing != strafing {
             self.strafing = strafing;
             view.set_isStrafing(strafing)?;
+        }
+
+        if let Some(wheels) = &hull.mobility.general_wheels {
+            let (steering, scroll) = wheels_motion(hull, wheels, &self.steering);
+            if self.steering != steering {
+                view.set_steeringAngles(steering.clone())?;
+                self.steering = steering;
+            }
+            if self.scroll != scroll {
+                view.set_wheelsScroll(scroll.clone())?;
+                self.scroll = scroll;
+            }
         }
 
         Ok(())
@@ -773,37 +834,116 @@ fn show_damage(
 }
 
 
-/// How fast a vehicle slides across its heading, in m/s, before the clients are told it
-/// is strafing: their filter, which models its tracks, otherwise holds it back from
-/// sliding, and draws it metres behind where it is shoved. Fitted on the collisions
-/// capture, where the real server sets `isStrafing` on the ticks the player's vehicle
-/// moves sideways faster than 0.03 to 0.05 m/s, pushed, skidding or sliding down a slope.
-const STRAFING_SLIDE: f32 = 0.04;
+/// How its general wheels steer and roll, as `steeringAngles` and `wheelsScroll` pack
+/// them, by how its hull moves on the ground: each wheel heads where its centre goes,
+/// those that steer, by [`pack_wheel_steering`], and rolls as fast along its heading, by
+/// [`pack_wheel_scroll`]. A wheel that steers but barely moves keeps its `last` angle.
+///
+/// ```text
+///   a wheel at (x, z) of a hull going `speed` ahead, `slide` right, turning `yaw_rate`
+///   to the right, moves (slide + z · yaw_rate, speed - x · yaw_rate): to the right, and
+///   ahead; the rear wheels steer against the front ones
+/// ```
+fn wheels_motion(hull: &Hull, wheels: &GeneralWheels, last: &[u8]) -> (Vec<u8>, Vec<u8>) {
 
-/// How fast a vehicle goes, in m/s, before it is seen as moving, with its moving
-/// camouflage. Our choice: a vehicle stopped still settles at none.
-const MOVING_SPEED: f32 = 0.1;
+    let mut steering = Vec::new();
+    let mut scroll = Vec::new();
+    for wheel in wheels.all() {
 
-/// How long a vehicle is easier to see after it fired, in seconds. Our choice, about
-/// how long the game's shows a shooter.
-const SHOT_REVEAL_TIME: f64 = 3.0;
+        let right = hull.slide + wheel.center.z * hull.yaw_rate;
+        let ahead = hull.speed - wheel.center.x * hull.yaw_rate;
+        if !wheel.steers {
+            scroll.push(pack_wheel_scroll(ahead));
+            continue;
+        }
 
-/// How much a shell's damage varies, either way, as a share of it.
-const DAMAGE_SPREAD: f32 = 0.25;
+        let speed = right.hypot(ahead).copysign(ahead);
+        scroll.push(pack_wheel_scroll(speed));
+        let angle = if speed.abs() < MOVING_SPEED {
+            last.get(steering.len()).copied().unwrap_or(pack_wheel_steering(0.0))
+        } else {
+            pack_wheel_steering((right * ahead.signum()).atan2(ahead.abs()))
+        };
+        steering.push(angle);
 
-/// How long a vehicle burns after its last hit, in seconds.
-const FIRE_DURATION: f64 = 5.0;
+    }
 
-/// `ATTACK_REASON.SHOT`'s index.
-const ATTACK_REASON_SHOT: i8 = 0;
+    (steering, scroll)
 
-/// The first shot id of the first bot, of the next one twice that, and so on, apart from
-/// the player's.
-const BOT_FIRST_SHOT_ID: i32 = 1_000_000;
+}
 
-/// The `quickShellChangerFactor` of a vehicle, as captured: how much faster it changes
-/// shells, from its crew and equipment.
-const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
+/// A wheel's steering, in radians, positive to the right, as the client's
+/// `WoT.unpackWheelSteering` reads it: over ±π/2, 0 at 127.5.
+fn pack_wheel_steering(angle: f32) -> u8 {
+    (angle * 255.0 / PI + 127.5).round().clamp(0.0, 255.0) as u8
+}
 
-/// The default dog tag's components, as captured: their ids and grades.
-const DEFAULT_DOG_TAG: [(i32, i8); 2] = [(300, 9), (66, 0)];
+/// A wheel's speed along its heading, in m/s, as the client's `WoT.unpackWheelScroll`
+/// reads it: over ±25 m/s, 0 at 127.
+fn pack_wheel_scroll(speed: f32) -> u8 {
+    (speed * 127.5 / WHEEL_SCROLL_MAX + 127.0).round().clamp(0.0, 255.0) as u8
+}
+
+
+
+#[cfg(test)]
+mod tests {
+
+    use crate::base::physics::fixtures::chieftain_mobility;
+    use crate::game::item_defs::GeneralWheel;
+    use super::*;
+
+    #[test]
+    fn packs_wheels_as_the_client_reads_them() {
+
+        // As the client's `WoT.packWheelSteering` and `WoT.packWheelScroll` pack them.
+        assert_eq!([0.0, 1.0, -1.0, 0.1, 0.5].map(pack_wheel_steering), [128, 209, 46, 136, 168]);
+        assert_eq!([0.0, 1.0, -1.0, 10.0, 0.1].map(pack_wheel_scroll), [127, 132, 122, 178, 128]);
+
+    }
+
+    #[test]
+    fn steers_its_wheels_where_they_go() {
+
+        // Six wheels, those in front and behind steering, turning right at 5 m/s.
+        let wheels = GeneralWheels::new(&[
+            wheel(-1.1, -2.0, true),
+            wheel(1.1, -2.0, true),
+            wheel(-1.1, 0.0, false),
+            wheel(1.1, 0.0, false),
+            wheel(-1.1, 2.0, true),
+            wheel(1.1, 2.0, true),
+        ]);
+        let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility());
+        hull.speed = 5.0;
+        hull.yaw_rate = 0.5;
+
+        // Those in front steer right, those behind left; the right ones roll slower.
+        let (steering, scroll) = wheels_motion(&hull, &wheels, &[]);
+        assert_eq!(steering.len(), 4);
+        assert!(steering[0] < 127 && steering[1] < 127 && steering[2] > 128 && steering[3] > 128, "{steering:?}");
+        assert!(scroll[0] > scroll[1] && scroll[2] > scroll[3] && scroll[4] > scroll[5], "{scroll:?}");
+
+        // Backing up, the front ones steer left, and they all roll backward.
+        hull.speed = -5.0;
+        let (steering, scroll) = wheels_motion(&hull, &wheels, &[]);
+        assert!(steering[2] < 127 && steering[3] < 127, "{steering:?}");
+        assert!(scroll.iter().all(|&scroll| scroll < 127), "{scroll:?}");
+
+        // Stopped, they keep their angles.
+        hull.speed = 0.0;
+        hull.yaw_rate = 0.0;
+        let (kept, _) = wheels_motion(&hull, &wheels, &steering);
+        assert_eq!(kept, steering);
+
+    }
+
+    /// A wheel `x` metres right and `z` ahead, 0.6 m up.
+    fn wheel(x: f32, z: f32, steers: bool) -> GeneralWheel {
+        GeneralWheel {
+            center: Vec3::new(x, 0.6, z),
+            steers,
+        }
+    }
+
+}

@@ -29,6 +29,7 @@ pub fn chieftain_mobility() -> MobilityDef {
         bounds: [Vec3::new(-1.8, 0.0, -3.7), Vec3::new(1.8, 2.6, 3.8)],
         turret_bounds: [Vec3::new(-1.3, 2.0, -1.5), Vec3::new(1.3, 2.9, 1.5)],
         wheels: Some(chieftain_wheels()),
+        general_wheels: None,
     }
 }
 

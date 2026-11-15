@@ -99,6 +99,9 @@ pub struct MobilityDef {
     pub turret_bounds: [Vec3; 2],
     /// Its chassis' wheels, where its model places them, if it does.
     pub wheels: Option<Wheels>,
+    /// Its chassis' wheels that the client steers and rolls by what the server tells,
+    /// a wheeled vehicle's, if it has any.
+    pub general_wheels: Option<GeneralWheels>,
 }
 
 /// The most road wheels a chassis has, both sides, and wheels at its tracks' ends.
@@ -154,6 +157,48 @@ impl Wheels {
     /// The wheels at its tracks' ends, the frontmost and the rearmost of each side.
     pub fn ends(&self) -> &[WheelDef] {
         &self.ends[..self.end_count as usize]
+    }
+
+}
+
+/// The most wheels a chassis' general wheels have.
+pub const MAX_GENERAL_WHEELS: usize = 16;
+
+/// A wheel of a chassis' general wheels, see [`GeneralWheels`]: its centre, in the
+/// vehicle's frame, and whether it steers.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GeneralWheel {
+    pub center: Vec3,
+    pub steers: bool,
+}
+
+/// A chassis' general wheels, as its definition names them (`chassis/wheels`, with
+/// `generalWheels`): those not under a track, `nonTrack`, by their `index`, which the
+/// client turns and rolls by its vehicle's `steeringAngles`, one for each that steers,
+/// `steeringProcessor`, and `wheelsScroll`, one for each.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeneralWheels {
+    wheels: [GeneralWheel; MAX_GENERAL_WHEELS],
+    count: u8,
+}
+
+impl GeneralWheels {
+
+    /// General wheels of these, by their index, as many as fit, see
+    /// [`MAX_GENERAL_WHEELS`].
+    pub fn new(wheels: &[GeneralWheel]) -> Self {
+        let wheels = &wheels[..wheels.len().min(MAX_GENERAL_WHEELS)];
+        let mut general = Self {
+            wheels: [GeneralWheel::default(); MAX_GENERAL_WHEELS],
+            count: wheels.len() as u8,
+        };
+        general.wheels[..wheels.len()].copy_from_slice(wheels);
+        general
+    }
+
+    /// Its wheels, by their index.
+    pub fn all(&self) -> &[GeneralWheel] {
+        &self.wheels[..self.count as usize]
     }
 
 }
@@ -813,6 +858,7 @@ fn mobility(
         .inspect_err(|e| warn!(vehicle = name, "Failed to read a chassis' wheels: {e}"))
         .ok()
         .flatten();
+    let general_wheels = read_general_wheels(chassis);
     Ok(MobilityDef {
         speed_forward,
         speed_backward,
@@ -824,7 +870,36 @@ fn mobility(
         bounds,
         turret_bounds,
         wheels,
+        general_wheels,
     })
+
+}
+
+/// A chassis' general wheels, see [`GeneralWheels`]: none if its definition has none.
+fn read_general_wheels(chassis: &Element) -> Option<GeneralWheels> {
+
+    let wheels = chassis.get_child_element("wheels")?;
+    if !wheels.get_child("generalWheels").and_then(pxml::Value::as_boolean).unwrap_or(false) {
+        return None;
+    }
+
+    let mut indexed = Vec::new();
+    for (key, value) in wheels.iter_children_all() {
+        let Some(wheel) = value.as_element().filter(|_| key.as_str() == "wheel") else { continue };
+        if !wheel.get_child("nonTrack").and_then(pxml::Value::as_boolean).unwrap_or(false) {
+            continue;
+        }
+        let (Some(index), Some(center)) = (wheel.get_child_integer("index"), wheel.get_child_vec3("wheelPos")) else { continue };
+        let steers = wheel.get_child("steeringProcessor").is_some();
+        indexed.push((index, GeneralWheel {
+            center,
+            steers,
+        }));
+    }
+    indexed.sort_by_key(|&(index, _)| index);
+
+    let wheels: Vec<GeneralWheel> = indexed.into_iter().map(|(_, wheel)| wheel).collect();
+    (!wheels.is_empty()).then(|| GeneralWheels::new(&wheels))
 
 }
 

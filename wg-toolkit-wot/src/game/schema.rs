@@ -160,6 +160,9 @@ entity_schema! {
             publicInfo: PublicVehicleInfo,
             isStrafing: bool,
             isCrewActive: bool,
+            // Its general wheels' steering and speeds, see `GeneralWheels`.
+            steeringAngles: Vec<u8>,
+            wheelsScroll: Vec<u8>,
             publicStateModifiers: Vec<u8>,
             dogTag: BattleDogTag,
             // Its `MY_VEHICLE` level of detail, which only its own client gets.
