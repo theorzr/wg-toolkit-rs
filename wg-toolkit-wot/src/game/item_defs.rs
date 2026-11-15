@@ -40,6 +40,25 @@ const SHELL_KINDS: &[&str] = &[
     "HOLLOW_CHARGE", "HIGH_EXPLOSIVE", "ARMOR_PIERCING", "ARMOR_PIERCING_HE", "ARMOR_PIERCING_CR", "SMOKE",
 ];
 
+/// The most road wheels a chassis has, both sides, and wheels at its tracks' ends.
+pub const MAX_ROAD_WHEELS: usize = 32;
+pub const MAX_TRACK_ENDS: usize = 4;
+
+/// The most wheels a chassis' general wheels have.
+pub const MAX_GENERAL_WHEELS: usize = 16;
+
+/// `PIERCING_POWER_INTERPOLATION_DIST_FIRST` and `_LAST`, the same as for damage.
+const INTERPOLATION_DISTANCES: [f32; 2] = [50.0, 500.0];
+
+/// How far above the lowest road wheel's bottom a wheel's bottom may be, in metres, for
+/// it to be a road wheel: higher, it is a return roller, on top of its track, a metre
+/// up. Our choice.
+const ROAD_WHEEL_RISE: f32 = 0.25;
+
+/// How far apart along a chassis two of its general wheels may be, in metres, to be on
+/// the same axle. Our choice.
+const AXLE_SPREAD: f32 = 0.1;
+
 
 /// What it takes to give a vehicle to an account: its descriptor with the default
 /// modules, its crew and its default ammunition.
@@ -104,10 +123,6 @@ pub struct MobilityDef {
     pub general_wheels: Option<GeneralWheels>,
 }
 
-/// The most road wheels a chassis has, both sides, and wheels at its tracks' ends.
-pub const MAX_ROAD_WHEELS: usize = 32;
-pub const MAX_TRACK_ENDS: usize = 4;
-
 /// A wheel of a chassis: its centre, in the vehicle's frame, and its radius, in metres.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct WheelDef {
@@ -161,39 +176,87 @@ impl Wheels {
 
 }
 
-/// The most wheels a chassis' general wheels have.
-pub const MAX_GENERAL_WHEELS: usize = 16;
-
 /// A wheel of a chassis' general wheels, see [`GeneralWheels`]: its centre, in the
-/// vehicle's frame, and whether it steers.
+/// vehicle's frame, its radius, in metres, and whether it steers.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct GeneralWheel {
     pub center: Vec3,
+    pub radius: f32,
     pub steers: bool,
+    /// How far its axle steers it at most, in radians, positive to the right, the
+    /// vehicle turning right: at a standstill, its axle's `axleSteeringLockAngles`, and
+    /// at its top speed, its `axleSteeringAngles`. Negative for an axle steering
+    /// against the front's, none for one that doesn't steer.
+    pub lock: f32,
+    pub lock_at_speed: f32,
+}
+
+impl GeneralWheel {
+
+    /// How far its axle steers it at most at this share of its top speed, in radians,
+    /// from its lock at a standstill to its lock at its top speed.
+    pub fn lock_at(&self, share: f32) -> f32 {
+        self.lock + (self.lock_at_speed - self.lock) * share.clamp(0.0, 1.0)
+    }
+
 }
 
 /// A chassis' general wheels, as its definition names them (`chassis/wheels`, with
 /// `generalWheels`): those not under a track, `nonTrack`, by their `index`, which the
 /// client turns and rolls by its vehicle's `steeringAngles`, one for each that steers,
-/// `steeringProcessor`, and `wheelsScroll`, one for each.
+/// `steeringProcessor`, and `wheelsScroll`, one for each. How far their axles steer
+/// comes from its physics section, and whether it turns on the spot, as tracks do,
+/// `isWheeledOnSpotRotation`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeneralWheels {
     wheels: [GeneralWheel; MAX_GENERAL_WHEELS],
     count: u8,
+    pub turns_on_spot: bool,
 }
 
 impl GeneralWheels {
 
     /// General wheels of these, by their index, as many as fit, see
     /// [`MAX_GENERAL_WHEELS`].
-    pub fn new(wheels: &[GeneralWheel]) -> Self {
+    pub fn new(wheels: &[GeneralWheel], turns_on_spot: bool) -> Self {
         let wheels = &wheels[..wheels.len().min(MAX_GENERAL_WHEELS)];
         let mut general = Self {
             wheels: [GeneralWheel::default(); MAX_GENERAL_WHEELS],
             count: wheels.len() as u8,
+            turns_on_spot,
         };
         general.wheels[..wheels.len()].copy_from_slice(wheels);
         general
+    }
+
+    /// How fast they let the vehicle turn at most, in rad/s for each m/s it goes, at this
+    /// share of its top speed, its wheels rolling where they point: one over the radius
+    /// of the circle its steering axles' locks put it on. Its centre is level with its
+    /// axles that don't steer, between them, else with its middle.
+    ///
+    /// ```text
+    ///   seen from above, front up, steering right:
+    ///
+    ///     / /    front axle, its lock δ, z ahead of the centre's level
+    ///     | |    axles that don't steer, level with the centre ·
+    ///     \ \    rear axle, steering against it
+    ///
+    ///   per m/s = max over the steering axles of |tan δ| / |z − level|
+    /// ```
+    pub fn turning(&self, share: f32) -> f32 {
+
+        let (mut sum, mut count) = (0.0, 0);
+        for wheel in self.all().iter().filter(|wheel| wheel.lock == 0.0 && wheel.lock_at_speed == 0.0) {
+            sum += wheel.center.z;
+            count += 1;
+        }
+        let level = if count == 0 { 0.0 } else { sum / count as f32 };
+
+        self.all().iter()
+            .map(|wheel| (wheel.lock_at(share).tan() / (wheel.center.z - level)).abs())
+            .filter(|per_speed| per_speed.is_finite())
+            .fold(0.0, f32::max)
+
     }
 
     /// Its wheels, by their index.
@@ -285,9 +348,6 @@ impl ShotDef {
     }
 
 }
-
-/// `PIERCING_POWER_INTERPOLATION_DIST_FIRST` and `_LAST`, the same as for damage.
-const INTERPOLATION_DISTANCES: [f32; 2] = [50.0, 500.0];
 
 /// A value at a distance between its values at [`INTERPOLATION_DISTANCES`], held before
 /// the first, carried on past the last, never below zero.
@@ -858,7 +918,9 @@ fn mobility(
         .inspect_err(|e| warn!(vehicle = name, "Failed to read a chassis' wheels: {e}"))
         .ok()
         .flatten();
-    let general_wheels = read_general_wheels(chassis);
+    let chassis_physics = physics.and_then(|physics| physics.get_child_element("chassis"))
+        .and_then(|chassis| chassis.get_child_element(chassis_name));
+    let general_wheels = read_general_wheels(chassis, chassis_physics);
     Ok(MobilityDef {
         speed_forward,
         speed_backward,
@@ -875,8 +937,11 @@ fn mobility(
 
 }
 
-/// A chassis' general wheels, see [`GeneralWheels`]: none if its definition has none.
-fn read_general_wheels(chassis: &Element) -> Option<GeneralWheels> {
+/// A chassis' general wheels, see [`GeneralWheels`], how far their axles steer from
+/// its section of the vehicle's physics, `physics`: none if its definition has none.
+/// Its axles are its wheels' places along it, from the rearmost, as the physics section
+/// lists them; without lock angles, an axle's lock is its angle at speed.
+fn read_general_wheels(chassis: &Element, physics: Option<&Element>) -> Option<GeneralWheels> {
 
     let wheels = chassis.get_child_element("wheels")?;
     if !wheels.get_child("generalWheels").and_then(pxml::Value::as_boolean).unwrap_or(false) {
@@ -890,23 +955,54 @@ fn read_general_wheels(chassis: &Element) -> Option<GeneralWheels> {
             continue;
         }
         let (Some(index), Some(center)) = (wheel.get_child_integer("index"), wheel.get_child_vec3("wheelPos")) else { continue };
+        let radius = wheel.get_child_element("geometry")
+            .and_then(|geometry| geometry.get_child_float("radius"))
+            .or_else(|| wheel.get_child_float("radius"));
+        let Some(radius) = radius else { continue };
         let steers = wheel.get_child("steeringProcessor").is_some();
         indexed.push((index, GeneralWheel {
             center,
+            radius,
             steers,
+            lock: 0.0,
+            lock_at_speed: 0.0,
         }));
     }
     indexed.sort_by_key(|&(index, _)| index);
 
+    // Its axles, from the rearmost, and how far each steers.
+    let mut axles: Vec<f32> = Vec::new();
+    for (_, wheel) in &indexed {
+        if !axles.iter().any(|&z| (z - wheel.center.z).abs() < AXLE_SPREAD) {
+            axles.push(wheel.center.z);
+        }
+    }
+    axles.sort_by(f32::total_cmp);
+    let at_speed = physics.and_then(|physics| physics.get_child_value("axleSteeringAngles")).and_then(floats).unwrap_or_default();
+    let lock = physics.and_then(|physics| physics.get_child_value("axleSteeringLockAngles")).and_then(floats).unwrap_or_else(|| at_speed.clone());
+    for (_, wheel) in &mut indexed {
+        let Some(axle) = axles.iter().position(|&z| (z - wheel.center.z).abs() < AXLE_SPREAD) else { continue };
+        wheel.lock = lock.get(axle).copied().unwrap_or(0.0).to_radians();
+        wheel.lock_at_speed = at_speed.get(axle).copied().unwrap_or(0.0).to_radians();
+    }
+
+    let turns_on_spot = physics.and_then(|physics| physics.get_child_value("isWheeledOnSpotRotation"))
+        .is_some_and(|value| value.as_boolean().unwrap_or(false) || value.as_string().is_some_and(|value| value.trim().eq_ignore_ascii_case("true")));
     let wheels: Vec<GeneralWheel> = indexed.into_iter().map(|(_, wheel)| wheel).collect();
-    (!wheels.is_empty()).then(|| GeneralWheels::new(&wheels))
+    (!wheels.is_empty()).then(|| GeneralWheels::new(&wheels, turns_on_spot))
 
 }
 
-/// How far above the lowest road wheel's bottom a wheel's bottom may be, in metres, for
-/// it to be a road wheel: higher, it is a return roller, on top of its track, a metre
-/// up. Our choice.
-const ROAD_WHEEL_RISE: f32 = 0.25;
+/// The floats of a value: a vector's, or a string's, space-separated, or a single one.
+fn floats(value: &pxml::Value) -> Option<Vec<f32>> {
+    if let Some(vector) = value.as_vector() {
+        return Some(vector.iter().copied().collect());
+    }
+    if let Some(text) = value.as_string() {
+        return text.split_whitespace().map(|float| float.parse().ok()).collect();
+    }
+    value.as_float().map(|float| vec![float])
+}
 
 /// A chassis' wheels, see [`Wheels`]: none if its definition names none, or its model
 /// places none of them.
@@ -1051,6 +1147,31 @@ mod tests {
         assert!(degrees.iter().zip([26.0, 22.75, 13.481]).all(|(real, expected)| (real - expected).abs() < 1e-3), "{degrees:?}");
         // Hull, chassis, turret, engine, fuel tank and radio, and the gun's few tonnes.
         assert!((63_000.0..70_000.0).contains(&mobility.weight), "{}", mobility.weight);
+    }
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: the EBR's six wheels, by their
+    /// index, the rear and front pairs steering, 15° at a standstill and 4.6° at its top
+    /// speed, the rear against the front, not on the spot; the Concept No. 5's front
+    /// pair alone, 6° at any speed, and it turns on the spot.
+    #[test]
+    fn real_general_wheels() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let mobility = VehicleDef::load(&fs, "france", "F107_Hotchkiss_EBR").unwrap().mobility;
+        let wheels = mobility.general_wheels.unwrap();
+        let steers: Vec<bool> = wheels.all().iter().map(|wheel| wheel.steers).collect();
+        assert_eq!(steers, [true, true, false, false, true, true]);
+        assert!(wheels.all().iter().all(|wheel| wheel.radius == 0.608 && wheel.center.y == 0.618));
+        assert_eq!(wheels.all()[4].center, Vec3::new(-1.119, 0.618, 2.005));
+        let locks: Vec<[f32; 2]> = wheels.all().iter().map(|wheel| [wheel.lock, wheel.lock_at_speed].map(|lock| lock.to_degrees().round())).collect();
+        assert_eq!(locks, [[-15.0, -5.0], [-15.0, -5.0], [0.0, 0.0], [0.0, 0.0], [15.0, 5.0], [15.0, 5.0]]);
+        assert!(!wheels.turns_on_spot);
+
+        let mobility = VehicleDef::load(&fs, "uk", "GB120_Concept_No_5").unwrap().mobility;
+        let wheels = mobility.general_wheels.unwrap();
+        let locks: Vec<f32> = wheels.all().iter().filter(|wheel| wheel.steers).map(|wheel| wheel.lock.to_degrees().round()).collect();
+        assert_eq!(locks, [6.0, 6.0]);
+        assert!(wheels.turns_on_spot);
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: story mode's Pershing, from the

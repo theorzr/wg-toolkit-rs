@@ -26,11 +26,15 @@
 //! road wheels, is as high as its tracks' ends reach down, and its nose and its tail are
 //! over them, so that they touch the ground only when the hull rolls, or on what is
 //! higher than its tracks.
+//!
+//! A wheeled hull, its chassis' general wheels known, has no tracks: a spring under each
+//! of its wheels, and a sphere around each, which rises with its spring, see
+//! [`general_wheel_contacts`].
 
 use smallvec::SmallVec;
 use glam::Vec3;
 
-use crate::game::item_defs::{MobilityDef, Wheels, MAX_ROAD_WHEELS, MAX_TRACK_ENDS};
+use crate::game::item_defs::{GeneralWheels, MobilityDef, Wheels, MAX_GENERAL_WHEELS, MAX_ROAD_WHEELS, MAX_TRACK_ENDS};
 
 use super::drive::Side;
 
@@ -48,25 +52,36 @@ const ENDS_HEIGHT: f32 = 0.8;
 /// How many spheres there are around each wheel at its tracks' ends and down toward the
 /// nearest road wheel: the wheel's, and those between.
 const END_SPHERES: usize = 3;
+/// How much smaller than its wheel a general wheel's sphere is, in metres: at rest, its
+/// bottom is as high over the ground, so that it meets what is higher, a step, a kerb,
+/// leaving the ground under it to its spring. Our choice.
+const WHEEL_SPHERE_GAP: f32 = 0.1;
 /// The most contacts a hull has, a size `SmallVec` takes: a spring under each road
-/// wheel, [`END_SPHERES`] at each of its tracks' ends, and its three boxes.
+/// wheel, [`END_SPHERES`] at each of its tracks' ends, and its three boxes; or a spring
+/// and a sphere for each of its general wheels, and its boxes.
 pub const MAX_CONTACTS: usize = 64;
 const _: () = assert!(MAX_ROAD_WHEELS + END_SPHERES * MAX_TRACK_ENDS + 3 <= MAX_CONTACTS);
+const _: () = assert!(2 * MAX_GENERAL_WHEELS + 3 <= MAX_CONTACTS);
 
 /// A hull's contacts, in their order, see [`contacts_of`].
 pub type Contacts = SmallVec<[Contact; MAX_CONTACTS]>;
 
 /// Where a hull touches the space, in its own frame, for its mobility: they never
 /// change, and its body keeps how deep each spring was from a step to the next, by its
-/// place in them. Its springs first, see [`wheel_contacts`], else, its wheels unknown,
-/// [`SPRINGS_PER_TRACK`] along each track, see [`even_wheel_contacts`]. Then its boxes.
+/// place in them. Its springs first: its general wheels', see
+/// [`general_wheel_contacts`], else its road wheels', see [`wheel_contacts`], else, its
+/// wheels unknown, [`SPRINGS_PER_TRACK`] along each track, see [`even_wheel_contacts`].
+/// Then its boxes.
 pub fn contacts_of(mobility: &MobilityDef) -> Contacts {
 
     let mut contacts = SmallVec::new();
     let [min, max] = mobility.bounds;
-    let hull = match &mobility.wheels {
-        Some(wheels) => wheel_contacts(wheels, &mut contacts),
-        None => even_wheel_contacts(mobility, &mut contacts),
+    let hull = if let Some(wheels) = &mobility.general_wheels {
+        general_wheel_contacts(wheels, &mut contacts)
+    } else if let Some(wheels) = &mobility.wheels {
+        wheel_contacts(wheels, &mut contacts)
+    } else {
+        even_wheel_contacts(mobility, &mut contacts)
     };
 
     // Its hull: its belly between its road wheels, from its clearance up, then all its
@@ -102,6 +117,56 @@ struct HullShape {
     clearance: f32,
     ends: f32,
     belly: [f32; 2],
+}
+
+/// A wheeled hull's contacts on its general wheels, and what of its hull they leave to
+/// its boxes: all of it, from its own bottom up, see [`contacts_of`]. Under each wheel,
+/// a spring, its ray down from the wheel's centre to where the wheel rests on the
+/// ground; and around it, a sphere [`WHEEL_SPHERE_GAP`] smaller than the wheel, which
+/// rises with its spring: it meets a step before the spring's ray gets over it, and the
+/// wheel climbs it.
+///
+/// ```text
+///   seen from the side, front to the right:
+///
+///     ( o )     ( o )     ( o )     spheres around each wheel's centre o
+///    ___s_________s_________s___    springs s: a ray down from each centre
+/// ```
+fn general_wheel_contacts(wheels: &GeneralWheels, contacts: &mut Contacts) -> HullShape {
+
+    for wheel in wheels.all() {
+        contacts.push(Contact {
+            shape: Shape::Spring {
+                point: Vec3::new(wheel.center.x, 0.0, wheel.center.z),
+                height: wheel.center.y,
+            },
+            side: Some(Side::of(wheel.center.x)),
+        });
+    }
+
+    // Each wheel's spring is its place among the contacts: they come first, in order.
+    for (spring, wheel) in wheels.all().iter().enumerate() {
+        contacts.push(Contact {
+            shape: Shape::Sphere {
+                center: wheel.center,
+                radius: (wheel.radius - WHEEL_SPHERE_GAP).max(0.0),
+                follows: Some((spring, 1.0)),
+            },
+            side: Some(Side::of(wheel.center.x)),
+        });
+    }
+
+    let mut belly = [f32::INFINITY, f32::NEG_INFINITY];
+    for wheel in wheels.all() {
+        belly = [belly[0].min(wheel.center.z), belly[1].max(wheel.center.z)];
+    }
+
+    HullShape {
+        clearance: f32::NEG_INFINITY,
+        ends: f32::NEG_INFINITY,
+        belly,
+    }
+
 }
 
 /// Its tracks' contacts on its wheels, and what of its hull they leave to its boxes:

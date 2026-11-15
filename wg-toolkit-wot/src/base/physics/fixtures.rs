@@ -1,4 +1,5 @@
-//! What the physics' tests drive on: a Chieftain-like vehicle and simple maps.
+//! What the physics' tests drive on: a Chieftain-like vehicle, an EBR-like one on
+//! wheels, and simple maps.
 
 use glam::{BVec3, Vec2, Vec3};
 
@@ -6,7 +7,7 @@ use wgtk::space::statics::{BodyKind, Statics, StaticTriangle};
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
-use crate::game::item_defs::{AimingDef, MobilityDef, PitchCurve, WheelDef, Wheels};
+use crate::game::item_defs::{AimingDef, GeneralWheel, GeneralWheels, MobilityDef, PitchCurve, WheelDef, Wheels};
 
 use super::contacts::Shape;
 use super::{Hull, Rubble};
@@ -31,6 +32,43 @@ pub fn chieftain_mobility() -> MobilityDef {
         wheels: Some(chieftain_wheels()),
         general_wheels: None,
     }
+}
+
+/// About an EBR's: 440 hp for 13.5 t, on six wheels, its physics section's rolling
+/// friction, its terrain resistance 1, 1.35 and 1.95, and its models' bounds.
+pub fn ebr_mobility() -> MobilityDef {
+    MobilityDef {
+        speed_forward: 75.0 / 3.6,
+        speed_backward: 45.0 / 3.6,
+        rotation_speed: [34f32.to_radians(), 34f32.to_radians() / 1.35, 34f32.to_radians() / 1.95],
+        engine_power: 440.0 * 735.5,
+        weight: 13_500.0,
+        rolling_friction: [0.05; 3],
+        carrying_point: Vec2::new(1.18, 2.02),
+        bounds: [Vec3::new(-1.1, 0.48, -2.55), Vec3::new(1.1, 1.62, 2.77)],
+        turret_bounds: [Vec3::new(-0.95, 1.22, -1.91), Vec3::new(0.93, 2.49, 0.39)],
+        wheels: None,
+        general_wheels: Some(ebr_wheels()),
+    }
+}
+
+/// The EBR's wheels, by their index: rear, middle and front pairs, left first, 0.61 m,
+/// those in front and behind steering, 15° at a standstill, 4.6° at its top speed, the
+/// rear ones against the front ones. It doesn't turn on the spot.
+fn ebr_wheels() -> GeneralWheels {
+    let mut wheels = Vec::new();
+    for (z, lock, lock_at_speed) in [(-2.0, -15f32, -4.6f32), (0.0, 0.0, 0.0), (2.0, 15.0, 4.6)] {
+        for x in [-1.12, 1.12] {
+            wheels.push(GeneralWheel {
+                center: Vec3::new(x, 0.62, z),
+                radius: 0.61,
+                steers: lock != 0.0,
+                lock: lock.to_radians(),
+                lock_at_speed: lock_at_speed.to_radians(),
+            });
+        }
+    }
+    GeneralWheels::new(&wheels, false)
 }
 
 /// Wheels laid out as the T110E4's model lays them, over the Chieftain's tracks: 6
@@ -93,6 +131,11 @@ fn pitch_curve(points: &[(f32, f32)]) -> PitchCurve {
 /// A Chieftain at the origin, facing +Z.
 pub fn chieftain() -> Hull {
     Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility())
+}
+
+/// An EBR at the origin, facing +Z.
+pub fn ebr() -> Hull {
+    Hull::new(Vec3::ZERO, Vec3::ZERO, ebr_mobility())
 }
 
 /// A tick of `dt` seconds on this ground, in a space without any, see

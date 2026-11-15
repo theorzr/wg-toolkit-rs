@@ -384,7 +384,7 @@ impl BattleVehicle {
         }
 
         if let Some(wheels) = &hull.mobility.general_wheels {
-            let (steering, scroll) = wheels_motion(hull, wheels, &self.steering);
+            let (steering, scroll) = wheels_motion(hull, wheels);
             if self.steering != steering {
                 view.set_steeringAngles(steering.clone())?;
                 self.steering = steering;
@@ -835,37 +835,28 @@ fn show_damage(
 
 
 /// How its general wheels steer and roll, as `steeringAngles` and `wheelsScroll` pack
-/// them, by how its hull moves on the ground: each wheel heads where its centre goes,
-/// those that steer, by [`pack_wheel_steering`], and rolls as fast along its heading, by
-/// [`pack_wheel_scroll`]. A wheel that steers but barely moves keeps its `last` angle.
+/// them: those that steer, turned their share of their lock at its speed that its
+/// steering has them, `Hull::wheels_turn`, by [`pack_wheel_steering`]; and each rolling
+/// as fast as its centre goes along its heading, by [`pack_wheel_scroll`].
 ///
 /// ```text
 ///   a wheel at (x, z) of a hull going `speed` ahead, `slide` right, turning `yaw_rate`
 ///   to the right, moves (slide + z · yaw_rate, speed - x · yaw_rate): to the right, and
-///   ahead; the rear wheels steer against the front ones
+///   ahead; turned δ, it rolls at right · sin δ + ahead · cos δ
 /// ```
-fn wheels_motion(hull: &Hull, wheels: &GeneralWheels, last: &[u8]) -> (Vec<u8>, Vec<u8>) {
+fn wheels_motion(hull: &Hull, wheels: &GeneralWheels) -> (Vec<u8>, Vec<u8>) {
 
+    let share = hull.top_speed_share();
     let mut steering = Vec::new();
     let mut scroll = Vec::new();
     for wheel in wheels.all() {
-
         let right = hull.slide + wheel.center.z * hull.yaw_rate;
         let ahead = hull.speed - wheel.center.x * hull.yaw_rate;
-        if !wheel.steers {
-            scroll.push(pack_wheel_scroll(ahead));
-            continue;
+        let angle = if wheel.steers { hull.wheels_turn * wheel.lock_at(share) } else { 0.0 };
+        if wheel.steers {
+            steering.push(pack_wheel_steering(angle));
         }
-
-        let speed = right.hypot(ahead).copysign(ahead);
-        scroll.push(pack_wheel_scroll(speed));
-        let angle = if speed.abs() < MOVING_SPEED {
-            last.get(steering.len()).copied().unwrap_or(pack_wheel_steering(0.0))
-        } else {
-            pack_wheel_steering((right * ahead.signum()).atan2(ahead.abs()))
-        };
-        steering.push(angle);
-
+        scroll.push(pack_wheel_scroll(right * angle.sin() + ahead * angle.cos()));
     }
 
     (steering, scroll)
@@ -903,46 +894,52 @@ mod tests {
     }
 
     #[test]
-    fn steers_its_wheels_where_they_go() {
+    fn steers_its_wheels_as_its_keys_turn_them() {
 
-        // Six wheels, those in front and behind steering, turning right at 5 m/s.
+        // Six wheels, those in front and behind steering, 15° at a standstill and 5° at
+        // its top speed, the rear ones against the front ones.
         let wheels = GeneralWheels::new(&[
-            wheel(-1.1, -2.0, true),
-            wheel(1.1, -2.0, true),
-            wheel(-1.1, 0.0, false),
-            wheel(1.1, 0.0, false),
-            wheel(-1.1, 2.0, true),
-            wheel(1.1, 2.0, true),
-        ]);
+            wheel(-1.1, -2.0, -15.0, -5.0),
+            wheel(1.1, -2.0, -15.0, -5.0),
+            wheel(-1.1, 0.0, 0.0, 0.0),
+            wheel(1.1, 0.0, 0.0, 0.0),
+            wheel(-1.1, 2.0, 15.0, 5.0),
+            wheel(1.1, 2.0, 15.0, 5.0),
+        ], false);
         let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility());
-        hull.speed = 5.0;
-        hull.yaw_rate = 0.5;
 
-        // Those in front steer right, those behind left; the right ones roll slower.
-        let (steering, scroll) = wheels_motion(&hull, &wheels, &[]);
-        assert_eq!(steering.len(), 4);
-        assert!(steering[0] < 127 && steering[1] < 127 && steering[2] > 128 && steering[3] > 128, "{steering:?}");
+        // Turned right all the way at a standstill: those in front at 15° right, those
+        // behind left.
+        hull.wheels_turn = 1.0;
+        let (steering, scroll) = wheels_motion(&hull, &wheels);
+        assert_eq!(steering, [pack_wheel_steering(-15f32.to_radians()); 2].into_iter().chain([pack_wheel_steering(15f32.to_radians()); 2]).collect::<Vec<_>>());
+        assert!(scroll.iter().all(|&scroll| scroll == 127), "{scroll:?}");
+
+        // Half way, at half its top speed, turning right: 5° in front, the right wheels
+        // rolling slower.
+        hull.wheels_turn = 0.5;
+        hull.speed = hull.mobility.speed_forward / 2.0;
+        hull.yaw_rate = 0.3;
+        let (steering, scroll) = wheels_motion(&hull, &wheels);
+        assert_eq!(steering[2], pack_wheel_steering(5f32.to_radians()));
         assert!(scroll[0] > scroll[1] && scroll[2] > scroll[3] && scroll[4] > scroll[5], "{scroll:?}");
 
-        // Backing up, the front ones steer left, and they all roll backward.
-        hull.speed = -5.0;
-        let (steering, scroll) = wheels_motion(&hull, &wheels, &[]);
-        assert!(steering[2] < 127 && steering[3] < 127, "{steering:?}");
+        // Backing up, they all roll backward.
+        hull.speed = -hull.mobility.speed_backward / 2.0;
+        let (_, scroll) = wheels_motion(&hull, &wheels);
         assert!(scroll.iter().all(|&scroll| scroll < 127), "{scroll:?}");
-
-        // Stopped, they keep their angles.
-        hull.speed = 0.0;
-        hull.yaw_rate = 0.0;
-        let (kept, _) = wheels_motion(&hull, &wheels, &steering);
-        assert_eq!(kept, steering);
 
     }
 
-    /// A wheel `x` metres right and `z` ahead, 0.6 m up.
-    fn wheel(x: f32, z: f32, steers: bool) -> GeneralWheel {
+    /// A wheel `x` metres right and `z` ahead, 0.6 m up and as wide, its axle's locks
+    /// at a standstill and at its top speed in degrees, steering if any.
+    fn wheel(x: f32, z: f32, lock: f32, lock_at_speed: f32) -> GeneralWheel {
         GeneralWheel {
             center: Vec3::new(x, 0.6, z),
-            steers,
+            radius: 0.6,
+            steers: lock != 0.0,
+            lock: lock.to_radians(),
+            lock_at_speed: lock_at_speed.to_radians(),
         }
     }
 

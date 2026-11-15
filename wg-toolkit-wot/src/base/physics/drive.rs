@@ -95,6 +95,21 @@
 //! `pivot = pivoting · PIVOT_RADIUS`, the target along its heading. Blocked are both its
 //! tracks, or, turning, its inner one.
 //!
+//! # On wheels
+//!
+//! A wheeled vehicle, its chassis' general wheels known, turns as tracks do, toward the
+//! same goal, as the real server's do: its wheels don't steer it. Unless its chassis
+//! turns on the spot, though, the goal is no more than its wheels' locks allow at its
+//! speed, none at a standstill:
+//!
+//! ```text
+//!   goal  = clamp(goal, ±|v| · per m/s),   per m/s = GeneralWheels::turning(|v| / top)
+//! ```
+//!
+//! Its wheels turn toward the way its keys ask, left or right, backing up too, over
+//! [`WHEELS_TURN_TIME`] from straight to their lock, and back: `Hull::wheels_turn`, the
+//! share of their lock, which the clients are shown, and nothing else uses.
+//!
 //! # Its tracks
 //!
 //! Each track has its own speed, its belt's, which the client animates and its engine
@@ -185,6 +200,9 @@ const HANDBRAKE_ROTATION_RISE: f32 = 0.7;
 /// swing grows 1.3 to 1.5 rad/s² whether it slides at 13 or 20 m/s, and it turns 0.07 rad
 /// in its first second at 1.85 m/s; the square is our choice between.
 const HANDBRAKE_SWING_SPEED: f32 = 6.0;
+/// How long its general wheels take to turn from straight to their lock, and back, in
+/// seconds: about as long as the real server's take.
+const WHEELS_TURN_TIME: f32 = 1.0;
 /// How far from its centre the vehicle pivots, in metres, on its blocked inner track as
 /// its outer one drives it. Fitted: backing up into a turn on its handbrake, the Type 64
 /// settles at 1.8 m/s turning at its 41.9°/s while moving, on medium ground.
@@ -200,14 +218,16 @@ impl Hull {
         // 1. What the flags ask, and how fast it turns on this ground.
         let ground = ground_index(ground);
         let rotation_speed = self.mobility.rotation_speed[ground];
-        let controls = self.controls(rotation_speed);
+        let controls = self.controls();
 
-        // 2. Its steering, from the turning it has toward its goal, rising or falling.
+        // 2. Its steering, from the turning it has toward its goal, rising or falling;
+        //    its general wheels, if any, toward the way its keys ask.
         let (goal, rise) = self.steer_goal(&controls, rotation_speed);
         let turning = self.yaw_rate;
         let time = if goal.abs() > turning.abs() && goal * turning >= 0.0 { rise } else { ROTATION_FALL };
         let rate = rotation_speed / time;
         self.steer = approach(turning, goal, rate * dt);
+        self.wheels_turn = approach(self.wheels_turn, controls.keys, dt / WHEELS_TURN_TIME);
 
         // 3. What its engine and its brakes can do, and which tracks are blocked: on its
         //    handbrake, both, or, turning, its inner one.
@@ -216,12 +236,12 @@ impl Hull {
         let mut blocked = [false; 2];
         if controls.handbrake {
             for side in Side::BOTH {
-                blocked[side.index()] = controls.turn == 0.0 || side == controls.inner;
+                blocked[side.index()] = controls.turn() == 0.0 || side == controls.inner();
             }
         }
 
         DriveForces {
-            target: if controls.handbrake { controls.pivot } else { controls.target },
+            target: if controls.handbrake { controls.pivot(rotation_speed) } else { controls.target },
             top: if controls.target < 0.0 { mobility.speed_backward } else { mobility.speed_forward },
             blocked,
             turning: controls.turning,
@@ -239,45 +259,34 @@ impl Hull {
     }
 
     /// What its flags ask of it, see [`Controls`].
-    fn controls(&self, rotation_speed: f32) -> Controls {
+    fn controls(&self) -> Controls {
 
         use movement_flag::*;
 
         let handbrake = self.flags & BLOCK_TRACKS != 0;
-
-        let mut turn: f32 = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
+        let keys = match self.flags & (ROTATE_LEFT | ROTATE_RIGHT) {
             ROTATE_LEFT => -1.0,
             ROTATE_RIGHT => 1.0,
             _ => 0.0,
         };
-        // Backing up steers like a car: left swings the rear to the left. On its
-        // handbrake, sliding, it backs up as it goes, whatever it is asked.
+        // On its handbrake, sliding, it backs up as it goes, whatever it is asked.
         let backing = if handbrake && self.speed.abs() >= ON_SPOT_SPEED {
             self.speed < 0.0
         } else {
             self.flags & BACKWARD != 0
         };
-        if backing {
-            turn = -turn;
-        }
-
-        // On its handbrake, driving into a turn pivots it on its blocked inner track,
-        // its outer one carrying it around at this speed.
-        let drive_way = match self.flags & (FORWARD | BACKWARD) {
+        let way = match self.flags & (FORWARD | BACKWARD) {
             FORWARD => 1.0,
             BACKWARD => -1.0,
             _ => 0.0,
         };
-        let pivot = drive_way * turn.abs() * rotation_speed * ROTATION_ON_MOVE * PIVOT_RADIUS;
-        // Turning right, backing up or not, its right track is the inner one.
-        let inner = if turn * drive_way > 0.0 || (drive_way == 0.0 && turn > 0.0) { Side::Right } else { Side::Left };
 
         Controls {
             handbrake,
-            turn,
+            keys,
+            backing,
+            way,
             turning: self.flags & (ROTATE_LEFT | ROTATE_RIGHT) != 0,
-            pivot,
-            inner,
             target: if handbrake { 0.0 } else { self.target_speed() },
         }
 
@@ -309,11 +318,14 @@ impl Hull {
     }
 
     /// The turning speed its controls ask for, and how long it takes to get there from
-    /// rest, in seconds: its ground's turning speed on the spot, less while moving; on
+    /// rest, in seconds: its ground's turning speed on the spot, less while moving, on
+    /// wheels no more than they allow, see "On wheels" in the module's documentation; on
     /// its handbrake, faster the faster it slides, see [`HANDBRAKE_ROTATION`].
     fn steer_goal(&self, controls: &Controls, rotation_speed: f32) -> (f32, f32) {
 
-        let Controls { handbrake, turn, pivot, target, .. } = *controls;
+        let Controls { handbrake, target, .. } = *controls;
+        let turn = controls.turn();
+        let pivot = controls.pivot(rotation_speed);
 
         if handbrake {
             // Sliding faster than it pivots swings it round faster than it drives.
@@ -327,9 +339,20 @@ impl Hull {
             (turn * drifting.max(pivoting), rise)
         } else {
             let moving = self.speed.abs() >= ON_SPOT_SPEED || target != 0.0;
-            (turn * rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 }, ROTATION_RISE)
+            let goal = turn * rotation_speed * if moving { ROTATION_ON_MOVE } else { 1.0 };
+            let Some(wheels) = self.mobility.general_wheels.filter(|wheels| !wheels.turns_on_spot) else {
+                return (goal, ROTATION_RISE);
+            };
+            let most = self.speed.abs() * wheels.turning(self.top_speed_share());
+            (goal.clamp(-most, most), ROTATION_RISE)
         }
 
+    }
+
+    /// The share of its top speed the way it goes it goes at, along its heading.
+    pub fn top_speed_share(&self) -> f32 {
+        let top = if self.speed < 0.0 { self.mobility.speed_backward } else { self.mobility.speed_forward };
+        self.speed.abs() / top.max(1e-3)
     }
 
     /// Its tracks rolling with it, as if they gripped, at its speed and turning: what a
@@ -474,17 +497,39 @@ impl DriveForces {
 struct Controls {
     /// Its tracks are blocked.
     handbrake: bool,
-    /// Which way it turns, -1 left, 1 right, else 0: reversed backing up.
-    turn: f32,
+    /// Which way its keys turn it, -1 left, 1 right, else 0, whichever way it goes.
+    keys: f32,
+    /// It backs up: asked to, or on its handbrake, sliding backward.
+    backing: bool,
+    /// Which way it is asked to drive, -1 backward, 1 forward, else 0.
+    way: f32,
     /// Either way of turning is asked, even both at once.
     turning: bool,
-    /// On its handbrake, driving into a turn, the speed it pivots at around its blocked
-    /// inner track, in m/s, signed as it drives.
-    pivot: f32,
-    /// Its inner track as it turns.
-    inner: Side,
     /// The speed asked, see [`Hull::target_speed`]; none on its handbrake.
     target: f32,
+}
+
+impl Controls {
+
+    /// Which way it turns, -1 left, 1 right, else 0: its keys', reversed backing up,
+    /// steering like a car, left swinging its rear to the left.
+    fn turn(&self) -> f32 {
+        if self.backing { -self.keys } else { self.keys }
+    }
+
+    /// On its handbrake, driving into a turn, the speed it pivots at on its blocked inner
+    /// track, its outer one carrying it around, in m/s, signed as it drives, at this
+    /// turning speed on the spot.
+    fn pivot(&self, rotation_speed: f32) -> f32 {
+        self.way * self.turn().abs() * rotation_speed * ROTATION_ON_MOVE * PIVOT_RADIUS
+    }
+
+    /// Its inner track as it turns: turning right, backing up or not, its right one.
+    fn inner(&self) -> Side {
+        let turn = self.turn();
+        if turn * self.way > 0.0 || (self.way == 0.0 && turn > 0.0) { Side::Right } else { Side::Left }
+    }
+
 }
 
 /// A ground's index in a vehicle's per-ground mobility, firm, medium then soft.
@@ -508,7 +553,7 @@ mod tests {
 
     use crate::game::item_defs::MobilityDef;
 
-    use super::super::fixtures::{chieftain, chieftain_mobility, slope, tick};
+    use super::super::fixtures::{chieftain, chieftain_mobility, ebr, slope, tick};
     use super::super::{Rubble, GRAVITY};
     use super::*;
 
@@ -583,6 +628,39 @@ mod tests {
             .map(|_| hull.advance(0.1, &space, None, &mut Rubble::default()))
             .collect();
         assert!(!moved[9], "{moved:?}");
+    }
+
+    #[test]
+    fn turns_on_wheels_only_as_they_allow() {
+
+        // Stopped, asked to turn right, it doesn't, but its wheels turn right all the way.
+        let mut hull = ebr();
+        hull.flags = movement_flag::ROTATE_RIGHT;
+        for _ in 0..20 {
+            tick(&mut hull, 0.1, Ground::Firm);
+        }
+        assert!(hull.yaw_rate.abs() < 1e-3, "{}", hull.yaw_rate);
+        assert_eq!(hull.wheels_turn, 1.0);
+
+        // Driving off, it turns no faster than its wheels' locks allow at its speed, on a
+        // circle 7.5 m wide at first, then, faster, as tracks would.
+        hull.flags = movement_flag::FORWARD | movement_flag::ROTATE_RIGHT;
+        let wheels = hull.mobility.general_wheels.unwrap();
+        for _ in 0..60 {
+            tick(&mut hull, 0.1, Ground::Firm);
+            let most = hull.speed.abs() * wheels.turning(hull.top_speed_share());
+            assert!(hull.yaw_rate <= most + 1e-3, "{} at {} m/s", hull.yaw_rate, hull.speed);
+        }
+        assert!((wheels.turning(0.0) - 15f32.to_radians().tan() / 2.0).abs() < 1e-4, "{}", wheels.turning(0.0));
+        assert!((hull.yaw_rate - 34f32.to_radians() * ROTATION_ON_MOVE).abs() < 1e-3, "{}", hull.yaw_rate);
+
+        // Released, its wheels turn back straight in a second.
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..10 {
+            tick(&mut hull, 0.1, Ground::Firm);
+        }
+        assert!(hull.wheels_turn.abs() < 1e-4, "{}", hull.wheels_turn);
+
     }
 
     #[test]

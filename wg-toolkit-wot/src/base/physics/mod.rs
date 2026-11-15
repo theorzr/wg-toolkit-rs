@@ -725,6 +725,9 @@ pub struct Hull {
     /// The turning speed its steering pushes it toward, in rad/s, positive to the right,
     /// see [`Self::drive`].
     steer: f32,
+    /// The share of their lock its general wheels are turned, if it has any, -1 to the
+    /// left to 1 to the right, see "On wheels" in the `drive` module.
+    pub wheels_turn: f32,
     /// The velocity of its centre of mass, in m/s: its body's, see [`Self::begin_step`].
     pub linear_velocity: Vec3,
     /// How fast it turns, about each axis of the world, in rad/s: its body's.
@@ -759,6 +762,7 @@ impl Hull {
             yaw_rate: 0.0,
             tracks: [0.0; 2],
             steer: 0.0,
+            wheels_turn: 0.0,
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             airborne: false,

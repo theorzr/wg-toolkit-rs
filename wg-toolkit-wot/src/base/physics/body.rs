@@ -1321,7 +1321,7 @@ mod tests {
     use wgtk::space::statics::Statics;
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, ground_under, quad};
+    use super::super::fixtures::{chieftain, ebr, ground_under, quad};
     use super::super::{movement_flag, Rubble};
     use super::*;
 
@@ -1376,6 +1376,38 @@ mod tests {
         assert!(pitch < -1f32.to_radians(), "{}°", pitch.to_degrees());
         // And climbs onto it.
         assert!(hull.position.z > 10.0 && (hull.position.y - 0.5).abs() < 0.05, "{}", hull.position);
+    }
+
+    #[test]
+    fn rests_and_climbs_on_its_wheels() {
+        // On flat ground, it rests level on its six wheels' springs, its hull and its
+        // wheels' spheres off the ground.
+        let mut triangles = Vec::new();
+        quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
+        quad(&mut triangles, 6.0, 60.0, 0.3, 0.3);
+        let space = Space {
+            statics: Statics::from_triangles(triangles),
+            ..Space::default()
+        };
+        let mut hull = ebr();
+        hull.position.z = -10.0;
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+        }
+        let direction = hull.direction();
+        assert!(!hull.airborne && hull.position.y.abs() < 0.05, "{}", hull.position);
+        assert!(direction.y.abs() < 0.5f32.to_radians() && direction.z.abs() < 0.5f32.to_radians(), "{direction}");
+        assert!(lowest_contact(&hull) > -0.05, "{}", lowest_contact(&hull));
+        // Driven at a kerb 0.3 m high, its front wheels meet it and climb it, then the
+        // others, and it rests on it.
+        hull.flags = movement_flag::FORWARD;
+        let mut steepest: f32 = 0.0;
+        for _ in 0..60 {
+            hull.advance(0.1, &space, None, &mut Rubble::default());
+            steepest = steepest.min(hull.direction().y);
+        }
+        assert!(steepest < -2f32.to_radians(), "{}°", steepest.to_degrees());
+        assert!(hull.position.z > 15.0 && (hull.position.y - 0.3).abs() < 0.05, "{}", hull.position);
     }
 
     #[test]
