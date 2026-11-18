@@ -163,6 +163,8 @@ entity_schema! {
             // Its general wheels' steering and speeds, see `GeneralWheels`.
             steeringAngles: Vec<u8>,
             wheelsScroll: Vec<u8>,
+            // `VEHICLE_SIEGE_STATE`: where it is in switching its siege mode.
+            siegeState: u8,
             publicStateModifiers: Vec<u8>,
             dogTag: BattleDogTag,
             // Its `MY_VEHICLE` level of detail, which only its own client gets.
@@ -297,6 +299,7 @@ component_schema! {
             vehicleSettings: Vec<VehicleSetting>,
             vehicleGunReloadTime: GunReloadTime,
             vehicleHealthInfo: VehicleHealthInfo,
+            siegeStateStatus: Option<SiegeStateStatus>,
         }
     }
 }
@@ -374,6 +377,17 @@ script_dict! {
         pub circularVisionRadius: u16,
         pub gunPiercing: f32,
         pub gunShotsSpeed: f32,
+    }
+}
+
+script_dict! {
+    /// `SIEGE_STATE_STATUS`: where its own vehicle is in switching its siege mode, a
+    /// `VEHICLE_SIEGE_STATE`, the time it ends at, and how long is left of it, in seconds.
+    #[derive(Debug, Clone)]
+    pub struct SiegeStateStatus {
+        pub status: u8,
+        pub endTime: f32,
+        pub timeLeft: f32,
     }
 }
 

@@ -50,7 +50,7 @@ use crate::game::account_commands::{
     CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS,
     CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, VehicleDef, VisionDef};
+use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, SiegeDef, VehicleDef, VisionDef};
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::game::arena_defs::{ArenaTypeDef, STANDARD_GAMEPLAY};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
@@ -93,11 +93,12 @@ const UPDATE_FREQUENCY_UNKNOWN: u16 = 1;
 const TICK: Duration = Duration::from_millis(100);
 
 /// `VEHICLE_SETTING`: the shell loaded, the shell loaded after it, whether the hull
-/// turns with the turret in sniper mode, reloading a magazine that is not full, and
+/// turns with the turret in sniper mode, its siege mode on or off, reloading a magazine that is not full, and
 /// emptying a full one for the mechanics that do.
 const SETTING_CURRENT_SHELLS: u8 = 0;
 const SETTING_NEXT_SHELLS: u8 = 1;
 const SETTING_AUTOROTATION: u8 = 2;
+const SETTING_SIEGE_MODE: u8 = 3;
 const SETTING_RELOAD_PARTIAL_CLIP: u8 = 17;
 const SETTING_RESET_FULL_CLIP: u8 = 18;
 
@@ -554,6 +555,7 @@ impl BaseThread {
             magazine: def.magazine,
             vision: def.vision,
             collision: def.collision,
+            siege: def.siege,
         })
     }
 
@@ -965,6 +967,8 @@ pub struct VehicleLoadout {
     shots: Vec<ShotDef>,
     /// Its parts' collision models and armour, which shells hit.
     collision: Arc<VehicleCollision>,
+    /// Its siege mode, if it has one.
+    siege: Option<SiegeDef>,
 }
 
 /// The client version the server requires, which the client checks against the

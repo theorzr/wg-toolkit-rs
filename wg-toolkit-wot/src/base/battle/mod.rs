@@ -54,7 +54,8 @@ use crate::game::schema::{
     Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, ShotResult, VehicleCell,
 };
 use crate::base::{
-    avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, TICK,
+    avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, SETTING_SIEGE_MODE,
+    TICK,
 };
 use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
@@ -517,14 +518,24 @@ impl Battle {
     }
 
     /// A client changes one of its vehicle's settings, see
-    /// [`BattleVehicle::change_setting`].
+    /// [`BattleVehicle::change_setting`], or switches its siege mode, see
+    /// [`BattleVehicle::switch_siege`].
     fn change_setting(&mut self, app: &mut base::App, client: ClientKey, code: u8, value: i32) -> io::Result<()> {
+        
         let now = self.game_time();
         let Some(own) = self.own(client) else {
             warn!(%client, "Ignored a setting without a vehicle: {code} = {value}");
             return Ok(());
         };
-        self.vehicles[own].change_setting(app, client, now, code, value)
+
+        let vehicle = &mut self.vehicles[own];
+        if code == SETTING_SIEGE_MODE {
+            let driven = self.world.vehicle_mut(vehicle.id);
+            return vehicle.switch_siege(app, driven, client, now, value != 0);
+        }
+
+        vehicle.change_setting(app, client, now, code, value)
+        
     }
 
     /// A cell method of its vehicle a client called.
@@ -608,6 +619,9 @@ impl Battle {
         let avatars = self.avatars();
         let Self { participants, vehicles, world, spotting, starts, shells, targets, debug, .. } = self;
 
+        for vehicle in vehicles.iter_mut() {
+            vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
+        }
         for index in 0..vehicles.len() {
             let enemies = enemies_of(vehicles, world, spotting, index, now);
             let search = search_of(vehicles, world, spotting, starts, index, now);

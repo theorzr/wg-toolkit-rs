@@ -53,18 +53,18 @@ pub fn ebr_mobility() -> MobilityDef {
 }
 
 /// The EBR's wheels, by their index: rear, middle and front pairs, left first, 0.61 m,
-/// those in front and behind steering, 15° at a standstill, 4.6° at its top speed, the
-/// rear ones against the front ones. It doesn't turn on the spot.
+/// those in front and behind steering, locked 15°, 4.6° driving, the rear ones against
+/// the front ones. It doesn't turn on the spot.
 fn ebr_wheels() -> GeneralWheels {
     let mut wheels = Vec::new();
-    for (z, lock, lock_at_speed) in [(-2.0, -15f32, -4.6f32), (0.0, 0.0, 0.0), (2.0, 15.0, 4.6)] {
+    for (z, lock, on_move) in [(-2.0, -15f32, -4.6f32), (0.0, 0.0, 0.0), (2.0, 15.0, 4.6)] {
         for x in [-1.12, 1.12] {
             wheels.push(GeneralWheel {
                 center: Vec3::new(x, 0.62, z),
                 radius: 0.61,
                 steers: lock != 0.0,
                 lock: lock.to_radians(),
-                lock_at_speed: lock_at_speed.to_radians(),
+                on_move: on_move.to_radians(),
             });
         }
     }

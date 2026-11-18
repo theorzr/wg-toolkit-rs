@@ -155,10 +155,16 @@
 //! A contact's side grip is [`TRACK_GRIP`], and [`SIDE_GRIP`], less, on its handbrake:
 //! a turning hull holds its line, and a drifting one slides on, its velocity kept as
 //! its hull swings round it, as the real ones did; let off, its tracks grip again at
-//! once. On wheels, it is [`WHEEL_SIDE_GRIP`], and [`WHEEL_SLIDE_SIDE_GRIP`] on its
-//! handbrake: less than tracks', it slides out of a turn taken fast. On its handbrake, its blocked tracks slide along the ground rather than roll:
+//! once. On its handbrake, its blocked tracks slide along the ground rather than roll:
 //! the force range along is their sliding grip, [`SLIDE_GRIP`] of how hard they press,
 //! and the grips aren't shared, its steering swinging it as it slides.
+//!
+//! On wheels, it keeps to its wheels' line as on rails, as the game's does: they hold
+//! it across with [`WHEEL_SIDE_GRIP`], level with its centre of mass, so that it
+//! doesn't lean out of its turns, however tight. Blocked, on its handbrake, they slide,
+//! holding it across with [`WHEEL_LOCKED_GRIP`] of how hard they press and along with
+//! [`WHEEL_SLIDE_GRIP`], less: its velocity follows its hull round as it swings, a
+//! slide's width behind, as the real EBR 105's drifts do.
 //!
 //! After the passes, each belt's speed is set: blocked, 0; gripping, if the grip didn't
 //! cut the push along, the ground's speed under it, the middle of its contacts'; else
@@ -262,10 +268,14 @@ const TRACK_GRIP: f32 = 2.5;
 /// and let off its handbrake mid-drift, about 17 m/s², its slide gone in 0.4 s.
 const SIDE_GRIP: f32 = 11.0 / GRAVITY;
 /// How much its wheels hold the ground across them, a wheeled hull's, as a share of how
-/// hard each presses on it: less than tracks, so that it slides out of a turn taken
-/// fast. On its handbrake, sliding, less again. Our choice, about tyres on dirt.
-const WHEEL_SIDE_GRIP: f32 = 0.9;
-const WHEEL_SLIDE_SIDE_GRIP: f32 = 0.5;
+/// hard each presses on it: as the real EBR 105's, which keeps to its line at 25 m/s
+/// turning at 120°/s, 5 g across, as if on rails.
+const WHEEL_SIDE_GRIP: f32 = 8.0;
+/// How much its wheels hold the ground blocked, on its handbrake, across them and along
+/// them, sliding on it, as a share of how hard each presses on it: as the real EBR 105,
+/// which drifts to a stop from 19.5 m/s in 1.8 s, its velocity swinging behind its hull.
+const WHEEL_LOCKED_GRIP: f32 = 1.3;
+const WHEEL_SLIDE_GRIP: f32 = 0.7;
 /// How much a blocked track holds the ground along it, sliding on it, as a share of how
 /// hard each contact presses on it: 3 m/s². Fitted, as `HANDBRAKE_FRICTION` was: on the
 /// same drifts, its slide along its tracks slowed by 2 to 3.5 m/s².
@@ -470,7 +480,7 @@ impl Hull {
             let (along, across) = step.axes;
             let (point, load, _) = track_point(&step.touches, &step.stops, (along, across));
             let speed = self.velocity_at(point).dot(along);
-            let sliding = SLIDE_GRIP * grip(along.y.asin(), SLOPE_GRIP_ALONG) * load / tick.step;
+            let sliding = self.slide_grip() * grip(along.y.asin(), SLOPE_GRIP_ALONG) * load / tick.step;
             step.push = tick.drive.along(speed, sliding);
         }
 
@@ -707,7 +717,7 @@ impl Hull {
         let speed = (self.linear_velocity + self.angular_velocity.cross(origin)).dot(heading);
         let speed = approach(speed, 0.0, drive.rolling * GRAVITY * step);
 
-        let (target, low, high) = drive.along(speed, SLIDE_GRIP * GRAVITY * mass);
+        let (target, low, high) = drive.along(speed, self.slide_grip() * GRAVITY * mass);
         let speed = speed + ((target - speed) * mass).clamp(low * step, high * step) / mass;
         self.angular_velocity = Vec3::Y * drive.steer;
         self.linear_velocity = heading * speed - self.angular_velocity.cross(origin);
@@ -983,8 +993,8 @@ impl Hull {
     /// mass, so that it holds what slides the hull, not what turns it, which its steering
     /// does. Its impulse so far is `so_far`. It holds as much as its tracks grip along,
     /// [`TRACK_GRIP`]; `blocked`, on its handbrake, sliding, [`SIDE_GRIP`]; on wheels,
-    /// [`WHEEL_SIDE_GRIP`], and blocked, [`WHEEL_SLIDE_SIDE_GRIP`]; all falling with the
-    /// ground's slope across, as the game's slope grip says.
+    /// [`WHEEL_SIDE_GRIP`], and blocked, [`WHEEL_LOCKED_GRIP`], level with its centre of
+    /// mass; all falling with the ground's slope across, as the game's slope grip says.
     fn hold_across(
         &mut self,
         touch: &Touch,
@@ -995,11 +1005,14 @@ impl Hull {
         so_far: &mut f32,
     ) {
 
-        let under = raised(touch.arm - along * touch.arm.dot(along), along.cross(across));
+        let wheeled = self.mobility.general_wheels.is_some();
+        let flat = touch.arm - along * touch.arm.dot(along);
+        let normal = along.cross(across);
+        let under = if wheeled { flat - normal * flat.dot(normal) } else { raised(flat, normal) };
         let slip = (self.linear_velocity + self.angular_velocity.cross(under)).dot(across);
         
-        let side_grip = if self.mobility.general_wheels.is_some() {
-            if blocked { WHEEL_SLIDE_SIDE_GRIP } else { WHEEL_SIDE_GRIP }
+        let side_grip = if wheeled {
+            if blocked { WHEEL_LOCKED_GRIP } else { WHEEL_SIDE_GRIP }
         } else if blocked {
             SIDE_GRIP
         } else {
@@ -1014,6 +1027,12 @@ impl Hull {
         self.linear_velocity += impulse / body.mass;
         self.angular_velocity += body.inverse_inertia * under.cross(impulse);
         
+    }
+
+    /// How much its blocked tracks hold the ground along them, sliding on it, as a share
+    /// of how hard they press: [`SLIDE_GRIP`], on wheels [`WHEEL_SLIDE_GRIP`].
+    fn slide_grip(&self) -> f32 {
+        if self.mobility.general_wheels.is_some() { WHEEL_SLIDE_GRIP } else { SLIDE_GRIP }
     }
 
     /// One pass of a track's end climbing what it meets head on, its belt gripping it: up

@@ -15,7 +15,8 @@ use wgtk::pickle::Value as PickleValue;
 
 use crate::game::schema::{
     self, Avatar, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag, DogTagComponent, Fire, GunMarker,
-    GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, VehicleInfo, VehicleSyncAttrs,
+    GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, SiegeStateStatus, VehicleInfo,
+    VehicleSyncAttrs,
 };
 use crate::base::{
     ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, VehicleLoadout,
@@ -26,7 +27,7 @@ use crate::base::physics::{Dispersion, Hull, Vehicle, VehicleId, World};
 use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
 use crate::game::collision::{VehicleCollision, VehiclePart};
 use crate::base::garage::player::Player;
-use crate::game::item_defs::{GeneralWheels, VehicleDef, VisionDef};
+use crate::game::item_defs::{GeneralWheels, MobilityDef, SiegeDef, VehicleDef, VisionDef};
 
 use super::spawn::TeamStart;
 use super::hit::ShellHit;
@@ -44,7 +45,8 @@ const WHEEL_SCROLL_MAX: f32 = 25.0;
 const STRAFING_SLIDE: f32 = 0.04;
 
 /// How fast a vehicle goes, in m/s, before it is seen as moving, with its moving
-/// camouflage. Our choice: a vehicle stopped still settles at none.
+/// camouflage, and the general wheels of a chassis turning on the spot steer. Our
+/// choice: a vehicle stopped still settles at none.
 const MOVING_SPEED: f32 = 0.1;
 
 /// How long a vehicle is easier to see after it fired, in seconds. Our choice, about
@@ -70,6 +72,12 @@ const QUICK_SHELL_CHANGER_FACTOR: f32 = 0.268;
 
 /// The default dog tag's components, as captured: their ids and grades.
 const DEFAULT_DOG_TAG: [(i32, i8); 2] = [(300, 9), (66, 0)];
+
+/// `VEHICLE_SIEGE_STATE`: out of its siege mode, switching to it, in it, switching back.
+const SIEGE_DISABLED: u8 = 0;
+const SIEGE_SWITCHING_ON: u8 = 1;
+const SIEGE_ENABLED: u8 = 2;
+const SIEGE_SWITCHING_OFF: u8 = 3;
 
 
 /// A vehicle of a battle, whoever drives it, with its entry in `vehiclesInfo`.
@@ -112,6 +120,32 @@ pub struct BattleVehicle {
     damage_stickers: Vec<HitPoint>,
     /// Its fire, with the game time it goes out at, see [`FIRE_DURATION`].
     fire: Option<(ComponentKey<Fire>, f64)>,
+    /// Its siege mode, if it has one, and where it is in switching it.
+    siege: Option<Siege>,
+}
+
+/// A vehicle's siege mode, see [`SiegeDef`], how it moves out of it, and where it is in
+/// switching it: its `VEHICLE_SIEGE_STATE`, and the game time it ends switching at.
+#[derive(Debug, Clone, Copy)]
+struct Siege {
+    def: SiegeDef,
+    default: MobilityDef,
+    state: u8,
+    until: f64,
+}
+
+impl Siege {
+
+    /// The siege mode of this definition, out of it, moving as `default` out of it.
+    fn new(def: SiegeDef, default: MobilityDef) -> Self {
+        Self {
+            def,
+            default,
+            state: SIEGE_DISABLED,
+            until: 0.0,
+        }
+    }
+
 }
 
 /// Who drives a vehicle: its controls and its aim.
@@ -219,6 +253,7 @@ impl BattleVehicle {
             scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
+            siege: loadout.siege.map(|siege| Siege::new(siege, loadout.mobility)),
         })
 
     }
@@ -278,6 +313,7 @@ impl BattleVehicle {
             scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
+            siege: def.siege.map(|siege| Siege::new(siege, def.mobility)),
         })
 
     }
@@ -507,6 +543,72 @@ impl BattleVehicle {
         } else {
             app.component(own_vehicle)?.set_vehicleSettings(vehicle_settings(self.entity.id(), &self.gun))
         }
+
+    }
+
+    /// Its client switches its siege mode on or off at game time `now`, `driven` in the
+    /// world: it takes its definition's time to, then moves as in its new mode, see
+    /// [`Self::finish_switching`]. Without one, it stays as it is.
+    pub fn switch_siege(&mut self, app: &mut base::App, driven: &mut Vehicle, client: ClientKey, now: f64, on: bool) -> io::Result<()> {
+
+        let Some(siege) = &mut self.siege else {
+            warn!(%client, on, "Ignored a siege mode switch without one");
+            return Ok(());
+        };
+
+        let (state, time) = if on {
+            (SIEGE_SWITCHING_ON, siege.def.switch_on)
+        } else {
+            (SIEGE_SWITCHING_OFF, siege.def.switch_off)
+        };
+
+        let done = if on { SIEGE_ENABLED } else { SIEGE_DISABLED };
+        if siege.state != done {
+            siege.state = state;
+            siege.until = now + f64::from(time);
+            info!(%client, on, time, "Switched the siege mode");
+        }
+
+        self.show_siege(app, now)?;
+        self.finish_switching(app, driven, now)
+
+    }
+
+    /// Once its siege mode's switching ends, by game time `now`, `driven` in the world
+    /// moves as in its new mode, and the clients are told.
+    pub fn finish_switching(&mut self, app: &mut base::App, driven: &mut Vehicle, now: f64) -> io::Result<()> {
+
+        let Some(siege) = &mut self.siege else { return Ok(()) };
+        if now < siege.until {
+            return Ok(());
+        }
+
+        let (state, mobility) = match siege.state {
+            SIEGE_SWITCHING_ON => (SIEGE_ENABLED, siege.def.mobility),
+            SIEGE_SWITCHING_OFF => (SIEGE_DISABLED, siege.default),
+            _ => return Ok(()),
+        };
+        siege.state = state;
+        driven.hull.mobility = mobility;
+        self.show_siege(app, now)
+
+    }
+
+    /// Tell the clients where it is in switching its siege mode at game time `now`, its
+    /// own client how long is left of it too.
+    fn show_siege(&self, app: &mut base::App, now: f64) -> io::Result<()> {
+
+        let Some(siege) = &self.siege else { return Ok(()) };
+        app.entity(self.entity)?.set_siegeState(siege.state)?;
+
+        let Some(own_vehicle) = self.client_driver()
+            .and_then(|driver| driver.own_vehicle) else { return Ok(()) };
+        
+        app.component(own_vehicle)?.set_siegeStateStatus(Some(SiegeStateStatus {
+            status: siege.state,
+            endTime: siege.until as f32,
+            timeLeft: (siege.until - now).max(0.0) as f32,
+        }))
 
     }
 
@@ -835,9 +937,11 @@ fn show_damage(
 
 
 /// How its general wheels steer and roll, as `steeringAngles` and `wheelsScroll` pack
-/// them: those that steer, turned their share of their lock at its speed that its
-/// steering has them, `Hull::wheels_turn`, by [`pack_wheel_steering`]; and each rolling
-/// as fast as its centre goes along its heading, by [`pack_wheel_scroll`].
+/// them: those that steer, pointing where they go on the circle they steer it on,
+/// `Hull::wheels_steer`, or, a chassis turning on the spot, as the hull turns, its
+/// curvature its turning over its speed, straight under [`MOVING_SPEED`], see
+/// [`GeneralWheels::angle`], by [`pack_wheel_steering`]; and each rolling as fast as its
+/// centre goes along its heading, by [`pack_wheel_scroll`].
 ///
 /// ```text
 ///   a wheel at (x, z) of a hull going `speed` ahead, `slide` right, turning `yaw_rate`
@@ -846,13 +950,20 @@ fn show_damage(
 /// ```
 fn wheels_motion(hull: &Hull, wheels: &GeneralWheels) -> (Vec<u8>, Vec<u8>) {
 
-    let share = hull.top_speed_share();
+    let curvature = if !wheels.turns_on_spot {
+        wheels.curvature(hull.wheels_steer)
+    } else if hull.speed.abs() < MOVING_SPEED {
+        0.0
+    } else {
+        let tightest = wheels.turning(true);
+        (hull.yaw_rate / hull.speed).clamp(-tightest, tightest)
+    };
     let mut steering = Vec::new();
     let mut scroll = Vec::new();
     for wheel in wheels.all() {
         let right = hull.slide + wheel.center.z * hull.yaw_rate;
         let ahead = hull.speed - wheel.center.x * hull.yaw_rate;
-        let angle = if wheel.steers { hull.wheels_turn * wheel.lock_at(share) } else { 0.0 };
+        let angle = wheels.angle(wheel, curvature);
         if wheel.steers {
             steering.push(pack_wheel_steering(angle));
         }
@@ -894,10 +1005,10 @@ mod tests {
     }
 
     #[test]
-    fn steers_its_wheels_as_its_keys_turn_them() {
+    fn steers_its_wheels_where_they_go() {
 
-        // Six wheels, those in front and behind steering, 15° at a standstill and 5° at
-        // its top speed, the rear ones against the front ones.
+        // Six wheels, those in front and behind steering, the rear ones against the front
+        // ones, 15° at their lock.
         let wheels = GeneralWheels::new(&[
             wheel(-1.1, -2.0, -15.0, -5.0),
             wheel(1.1, -2.0, -15.0, -5.0),
@@ -908,38 +1019,42 @@ mod tests {
         ], false);
         let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility());
 
-        // Turned right all the way at a standstill: those in front at 15° right, those
-        // behind left.
-        hull.wheels_turn = 1.0;
+        // Straight.
         let (steering, scroll) = wheels_motion(&hull, &wheels);
-        assert_eq!(steering, [pack_wheel_steering(-15f32.to_radians()); 2].into_iter().chain([pack_wheel_steering(15f32.to_radians()); 2]).collect::<Vec<_>>());
+        assert!(steering.iter().all(|&steering| steering == pack_wheel_steering(0.0)), "{steering:?}");
         assert!(scroll.iter().all(|&scroll| scroll == 127), "{scroll:?}");
 
-        // Half way, at half its top speed, turning right: 5° in front, the right wheels
-        // rolling slower.
-        hull.wheels_turn = 0.5;
-        hull.speed = hull.mobility.speed_forward / 2.0;
-        hull.yaw_rate = 0.3;
+        // Turning right on its tightest circle: those in front steer right, the inner
+        // right one at its lock, more than the outer left one; those behind left; the
+        // right wheels roll slower.
+        hull.speed = 5.0;
+        hull.wheels_steer = wheels.steering(true);
+        hull.yaw_rate = 5.0 * wheels.turning(true);
         let (steering, scroll) = wheels_motion(&hull, &wheels);
-        assert_eq!(steering[2], pack_wheel_steering(5f32.to_radians()));
+        assert_eq!(steering[3], pack_wheel_steering(15f32.to_radians()));
+        assert!(steering[2] > 128 && steering[2] < steering[3], "{steering:?}");
+        assert!(steering[0] < 127 && steering[1] < steering[0], "{steering:?}");
         assert!(scroll[0] > scroll[1] && scroll[2] > scroll[3] && scroll[4] > scroll[5], "{scroll:?}");
 
-        // Backing up, they all roll backward.
-        hull.speed = -hull.mobility.speed_backward / 2.0;
-        let (_, scroll) = wheels_motion(&hull, &wheels);
+        // Backing up so, its hull turning left, they steer as they did, and all roll
+        // backward.
+        hull.speed = -5.0;
+        hull.yaw_rate = -5.0 * wheels.turning(true);
+        let (backing, scroll) = wheels_motion(&hull, &wheels);
+        assert_eq!(backing, steering);
         assert!(scroll.iter().all(|&scroll| scroll < 127), "{scroll:?}");
 
     }
 
-    /// A wheel `x` metres right and `z` ahead, 0.6 m up and as wide, its axle's locks
-    /// at a standstill and at its top speed in degrees, steering if any.
-    fn wheel(x: f32, z: f32, lock: f32, lock_at_speed: f32) -> GeneralWheel {
+    /// A wheel `x` metres right and `z` ahead, 0.6 m up and as wide, its axle's lock and
+    /// how far it steers driving, in degrees, steering if any.
+    fn wheel(x: f32, z: f32, lock: f32, on_move: f32) -> GeneralWheel {
         GeneralWheel {
             center: Vec3::new(x, 0.6, z),
             radius: 0.6,
             steers: lock != 0.0,
             lock: lock.to_radians(),
-            lock_at_speed: lock_at_speed.to_radians(),
+            on_move: on_move.to_radians(),
         }
     }
 

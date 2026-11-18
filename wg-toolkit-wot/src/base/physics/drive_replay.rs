@@ -6,8 +6,9 @@
 //!
 //! A drive is extracted from a capture's trace by `wot replay`, whose trace gives each
 //! record's capture time. Its lines are its capture time in seconds, then either
-//! `flags,<vehicle_moveWith flags>` the client sent, or `pos,x,y,z,roll,pitch,yaw` the
-//! server gave the vehicle. Its header, lines starting with `#`, gives:
+//! `flags,<vehicle_moveWith flags>` the client sent, `pos,x,y,z,roll,pitch,yaw` the
+//! server gave the vehicle, or `siege,<0|1>` as the server switched its siege mode off
+//! or on, in which it moves as its siege mode's definition says. Its header, lines starting with `#`, gives:
 //! - `# descr,<bytes>`: the vehicle's compact descriptor;
 //! - `# space,<name>`: the map it drove on, whose grounds the hull is given, firm
 //!   without;
@@ -128,6 +129,19 @@ struct CapturedDrive {
     controls: Vec<(f64, u8)>,
     updates: Vec<Update>,
     others: Vec<OtherTrack>,
+    /// When the server switched its siege mode on or off.
+    siege: Vec<(f64, bool)>,
+}
+
+impl CapturedDrive {
+
+    /// How its vehicle moves at `t`: as `siege` says in its siege mode, else as
+    /// `mobility` does.
+    fn mobility_at(&self, t: f64, mobility: MobilityDef, siege: Option<MobilityDef>) -> MobilityDef {
+        let on = self.siege.iter().rev().find(|&&(at, _)| at <= t).is_some_and(|&(_, on)| on);
+        siege.filter(|_| on).unwrap_or(mobility)
+    }
+
 }
 
 /// Another vehicle the hull collides with where the real server had it, as heavy as
@@ -177,6 +191,7 @@ fn parse(csv: &str) -> CapturedDrive {
         controls: Vec::new(),
         updates: Vec::new(),
         others: Vec::new(),
+        siege: Vec::new(),
     };
     let floats = |values: &str| values.split(',').map(|value| value.parse::<f32>().unwrap()).collect::<Vec<_>>();
     for line in csv.lines() {
@@ -215,6 +230,7 @@ fn parse(csv: &str) -> CapturedDrive {
         let float = |index: usize| fields[index].parse::<f32>().unwrap();
         match fields[1] {
             "flags" => drive.controls.push((t, fields[2].parse().unwrap())),
+            "siege" => drive.siege.push((t, fields[2] == "1")),
             "pos" => drive.updates.push(Update {
                 t,
                 position: Vec3::new(float(2), float(3), float(4)),
@@ -304,9 +320,20 @@ impl Errors {
 }
 
 /// Replay the drive in windows of `window` seconds, each from the real state, through
-/// the hull of this mobility, in its space and within its map's bounds, colliding with
-/// the other vehicles.
-fn replay(drive: &CapturedDrive, mobility: MobilityDef, aiming: &AimingDef, others: &[Other], space: &Arc<Space>, bounds: Option<(Vec2, Vec2)>, window: f64, delay: f64) -> Errors {
+/// the hull of these mobilities, out of its siege mode and in it, in its space and
+/// within its map's bounds, colliding with the other vehicles.
+#[allow(clippy::too_many_arguments)]
+fn replay(
+    drive: &CapturedDrive,
+    (mobility, siege): (MobilityDef, Option<MobilityDef>),
+    aiming: &AimingDef,
+    others: &[Other],
+    space: &Arc<Space>,
+    bounds: Option<(Vec2, Vec2)>,
+    window: f64,
+    delay: f64,
+) -> Errors {
+
 
     let updates = &drive.updates;
     let mut errors = Errors::default();
@@ -325,7 +352,7 @@ fn replay(drive: &CapturedDrive, mobility: MobilityDef, aiming: &AimingDef, othe
         // The real state: where it is, and how fast it moves and turns.
         let dt = ticks_between(before.t, from.t);
         let mut world = World::new(space.clone(), bounds);
-        let me = world.add(Vehicle::new(from.position, from.direction, mobility, aiming.clone()));
+        let me = world.add(Vehicle::new(from.position, from.direction, drive.mobility_at(from.t, mobility, siege), aiming.clone()));
         let hull = &mut world.vehicle_mut(me).hull;
         let heading = Vec3::new(from.direction.z.sin(), 0.0, from.direction.z.cos());
         let right = Vec3::new(from.direction.z.cos(), 0.0, -from.direction.z.sin());
@@ -353,6 +380,7 @@ fn replay(drive: &CapturedDrive, mobility: MobilityDef, aiming: &AimingDef, othe
         for pair in updates[start..=end].windows(2) {
             let dt = ticks_between(pair[0].t, pair[1].t);
             world.vehicle_mut(me).hull.flags = controls_at(pair[0].t);
+            world.vehicle_mut(me).hull.mobility = drive.mobility_at(pair[0].t, mobility, siege);
             for (other, id) in others.iter().zip(&mut present) {
                 match (other.at(pair[0].t), *id) {
                     (Some(vehicle), Some(known)) => *world.vehicle_mut(known) = vehicle,
@@ -436,6 +464,7 @@ fn hull_follows_the_real_server() {
             drive.updates.len(), drive.updates.last().unwrap().t - drive.updates[0].t, def.mobility);
 
         let mobility = drive.setup.apply(def.mobility);
+        let mobilities = (mobility, def.siege.map(|siege| drive.setup.apply(siege.mobility)));
         let space = drive.space.as_ref()
             .map(|space| Space::load(&res, &format!("spaces/{space}"), STANDARD_GAMEPLAY).unwrap())
             .unwrap_or_default();
@@ -461,12 +490,12 @@ fn hull_follows_the_real_server() {
             })
             .collect::<Vec<_>>();
         for delay in [-0.1, -0.08, -0.06, -0.04, -0.02, 0.0] {
-            replay(&drive, mobility, &def.aiming, &others, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
+            replay(&drive, mobilities, &def.aiming, &others, &space, bounds, 1.0, delay).report(&format!("  delay {delay}"));
         }
         if !others.is_empty() {
             for window in [1.0, 3.0] {
-                let (alone, with) = (replay(&drive, mobility, &def.aiming, &[], &space, bounds, window, CONTROL_DELAY),
-                    replay(&drive, mobility, &def.aiming, &others, &space, bounds, window, CONTROL_DELAY));
+                let (alone, with) = (replay(&drive, mobilities, &def.aiming, &[], &space, bounds, window, CONTROL_DELAY),
+                    replay(&drive, mobilities, &def.aiming, &others, &space, bounds, window, CONTROL_DELAY));
                 for (from, to) in [(254.0, 258.0), (267.0, 271.0), (272.0, 282.0)] {
                     let ((alone, alone_yaw, count), (with, with_yaw, _)) = (alone.median_between(from, to), with.median_between(from, to));
                     println!("  {window} s windows from {from} to {to} s: {alone:.2} m {alone_yaw:.1}° alone, {with:.2} m {with_yaw:.1}° with the others ({count})");
@@ -474,7 +503,7 @@ fn hull_follows_the_real_server() {
             }
         }
         for &(window, max) in &drive.max_median_error {
-            let errors = replay(&drive, mobility, &def.aiming, &others, &space, bounds, window, CONTROL_DELAY);
+            let errors = replay(&drive, mobilities, &def.aiming, &others, &space, bounds, window, CONTROL_DELAY);
             errors.report(&format!("  {window} s windows"));
             errors.report_worst(6);
             assert!(errors.median_distance() <= max, "{name}: median error over {window} s windows: {} m", errors.median_distance());
@@ -483,4 +512,3 @@ fn hull_follows_the_real_server() {
     }
 
 }
-

@@ -59,6 +59,10 @@ const ROAD_WHEEL_RISE: f32 = 0.25;
 /// the same axle. Our choice.
 const AXLE_SPREAD: f32 = 0.1;
 
+/// How long a vehicle takes to switch to its siege mode, or back, in seconds, when its
+/// `siege_mode` section doesn't say: `_readSiegeModeParams`' default.
+const SIEGE_SWITCH_TIME: f32 = 2.0;
+
 
 /// What it takes to give a vehicle to an account: its descriptor with the default
 /// modules, its crew and its default ammunition.
@@ -82,6 +86,19 @@ pub struct VehicleDef {
     pub vision: VisionDef,
     /// The default modules' collision models.
     pub collision: Arc<VehicleCollision>,
+    /// Its siege mode, if it has one: a wheeled vehicle's fast one.
+    pub siege: Option<SiegeDef>,
+}
+
+/// A vehicle's siege mode, which vehicles tagged `siegeMode` switch to and back: how it
+/// moves in it, from its own definition, `<name>_siege_mode.xml`, and how long it takes
+/// to switch to it and back, in seconds, `siege_mode/switchOnTime` and `switchOffTime`.
+/// A wheeled vehicle's is its fast one: faster, steering less.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SiegeDef {
+    pub mobility: MobilityDef,
+    pub switch_on: f32,
+    pub switch_off: f32,
 }
 
 /// How a vehicle moves with its default modules: the values the game derives its
@@ -184,19 +201,19 @@ pub struct GeneralWheel {
     pub radius: f32,
     pub steers: bool,
     /// How far its axle steers it at most, in radians, positive to the right, the
-    /// vehicle turning right: at a standstill, its axle's `axleSteeringLockAngles`, and
-    /// at its top speed, its `axleSteeringAngles`. Negative for an axle steering
-    /// against the front's, none for one that doesn't steer.
+    /// vehicle turning right, the inner wheel's: turning with no way asked, its axle's
+    /// `axleSteeringLockAngles`, and driving, its `axleSteeringAngles`. Negative for an
+    /// axle steering against the front's, none for one that doesn't steer.
     pub lock: f32,
-    pub lock_at_speed: f32,
+    pub on_move: f32,
 }
 
 impl GeneralWheel {
 
-    /// How far its axle steers it at most at this share of its top speed, in radians,
-    /// from its lock at a standstill to its lock at its top speed.
-    pub fn lock_at(&self, share: f32) -> f32 {
-        self.lock + (self.lock_at_speed - self.lock) * share.clamp(0.0, 1.0)
+    /// The radius of the circle it turns the vehicle on at its lock, the centre `level`
+    /// metres ahead, in metres, see [`GeneralWheels`].
+    fn radius_at_lock(&self, level: f32) -> f32 {
+        (self.center.z - level).abs() / self.lock.abs().tan() + self.center.x.abs()
     }
 
 }
@@ -207,6 +224,21 @@ impl GeneralWheel {
 /// `steeringProcessor`, and `wheelsScroll`, one for each. How far their axles steer
 /// comes from its physics section, and whether it turns on the spot, as tracks do,
 /// `isWheeledOnSpotRotation`.
+///
+/// They steer as a car's: each pointing where it goes as the vehicle turns about a
+/// centre level with its axles that don't steer, between them, else with its middle,
+/// those on the inside of the turn more than those outside.
+///
+/// ```text
+///   seen from above, front up, turning right about the centre ·, R from the middle:
+///
+///     / /     front axle, z ahead of the centre's level
+///     | |  ·  axles that don't steer, level with it
+///     \ \     rear axle, steering against the front
+///
+///   a wheel at (x, z) points at atan((z − level) · c / (1 − x · c)), c = 1 / R, the
+///   curvature, signed as the turn: the inner one, nearer the centre, the most
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeneralWheels {
     wheels: [GeneralWheel; MAX_GENERAL_WHEELS],
@@ -229,34 +261,69 @@ impl GeneralWheels {
         general
     }
 
-    /// How fast they let the vehicle turn at most, in rad/s for each m/s it goes, at this
-    /// share of its top speed, its wheels rolling where they point: one over the radius
-    /// of the circle its steering axles' locks put it on. Its centre is level with its
-    /// axles that don't steer, between them, else with its middle.
+    /// The tightest they turn the vehicle, its curvature, in rad/s for each m/s it
+    /// goes, on their locks, else as they steer driving, see [`Self::curvature`].
+    pub fn turning(&self, locked: bool) -> f32 {
+        self.curvature(self.steering(locked))
+    }
+
+    /// How far their keys steer them, on their locks, else driving, by the angle of the
+    /// wheel that turns the vehicle the tightest, which [`Self::curvature`] takes, in
+    /// radians.
+    pub fn steering(&self, locked: bool) -> f32 {
+        self.tightest().map_or(0.0, |wheel| if locked { wheel.lock.abs() } else { wheel.on_move.abs() })
+    }
+
+    /// The vehicle's curvature, in rad/s for each m/s it goes, positive to the right,
+    /// its tightest turning wheel pointing at this angle, positive to the right: one
+    /// over the radius of the circle it puts it on, see [`GeneralWheels`].
     ///
     /// ```text
-    ///   seen from above, front up, steering right:
-    ///
-    ///     / /    front axle, its lock δ, z ahead of the centre's level
-    ///     | |    axles that don't steer, level with the centre ·
-    ///     \ \    rear axle, steering against it
-    ///
-    ///   per m/s = max over the steering axles of |tan δ| / |z − level|
+    ///   R = |z − level| / tan |δ| + |x|
     /// ```
-    pub fn turning(&self, share: f32) -> f32 {
+    pub fn curvature(&self, angle: f32) -> f32 {
+        let Some(wheel) = self.tightest().filter(|_| angle != 0.0) else { return 0.0 };
+        angle.signum() / ((wheel.center.z - self.level()).abs() / angle.abs().tan() + wheel.center.x.abs())
+    }
 
+    /// How far its tightest turning wheel steers for the vehicle to turn with this
+    /// curvature, in rad/s for each m/s, positive to the right, see [`Self::curvature`],
+    /// in radians, no further than its lock.
+    #[cfg(test)]
+    pub fn steering_for(&self, curvature: f32) -> f32 {
+        let Some(wheel) = self.tightest().filter(|_| curvature != 0.0) else { return 0.0 };
+        let radius = (1.0 / curvature.abs() - wheel.center.x.abs()).max(1e-3);
+        curvature.signum() * ((wheel.center.z - self.level()).abs() / radius).atan().min(wheel.lock.abs())
+    }
+
+    /// Where a wheel points, in radians, positive to the right, the vehicle turning
+    /// with this curvature, in rad/s for each m/s, positive to the right, see
+    /// [`GeneralWheels`]. Without steering, straight ahead.
+    pub fn angle(&self, wheel: &GeneralWheel, curvature: f32) -> f32 {
+        if !wheel.steers {
+            return 0.0;
+        }
+        ((wheel.center.z - self.level()) * curvature).atan2(1.0 - wheel.center.x * curvature)
+    }
+
+    /// The wheel that turns the vehicle the tightest at its lock, the inner one of its
+    /// axles that steer, if any steers.
+    fn tightest(&self) -> Option<&GeneralWheel> {
+        let level = self.level();
+        self.all().iter()
+            .filter(|wheel| wheel.steers && wheel.lock != 0.0)
+            .min_by(|a, b| a.radius_at_lock(level).total_cmp(&b.radius_at_lock(level)))
+    }
+
+    /// How far ahead the centre they turn about is level with, in metres: between its
+    /// axles that don't steer, else its middle.
+    fn level(&self) -> f32 {
         let (mut sum, mut count) = (0.0, 0);
-        for wheel in self.all().iter().filter(|wheel| wheel.lock == 0.0 && wheel.lock_at_speed == 0.0) {
+        for wheel in self.all().iter().filter(|wheel| wheel.lock == 0.0 && wheel.on_move == 0.0) {
             sum += wheel.center.z;
             count += 1;
         }
-        let level = if count == 0 { 0.0 } else { sum / count as f32 };
-
-        self.all().iter()
-            .map(|wheel| (wheel.lock_at(share).tan() / (wheel.center.z - level)).abs())
-            .filter(|per_speed| per_speed.is_finite())
-            .fold(0.0, f32::max)
-
+        if count == 0 { 0.0 } else { sum / count as f32 }
     }
 
     /// Its wheels, by their index.
@@ -505,12 +572,13 @@ impl VehicleDef {
         let nation_id = NATIONS.iter().position(|n| *n == nation)
             .ok_or_else(|| invalid(format!("unknown nation {nation}")))? as u8;
 
-        let (dir, type_id) = vehicle_dirs(fs, nation).into_iter()
+        let (dir, type_id, siege_mode) = vehicle_dirs(fs, nation).into_iter()
             .find_map(|dir| {
-                let id = read_xml(fs, &format!("{dir}/list.xml")).ok()?
-                    .get_child_element(name)?
-                    .get_child_integer("id")?;
-                Some((dir, id))
+                let list = read_xml(fs, &format!("{dir}/list.xml")).ok()?;
+                let entry = list.get_child_element(name)?;
+                let siege_mode = entry.get_child_string("tags")
+                    .is_some_and(|tags| tags.split_whitespace().any(|tag| tag == "siegeMode"));
+                Some((dir, entry.get_child_integer("id")?, siege_mode))
             })
             .ok_or_else(|| invalid(format!("no vehicle {name} in {nation}")))?;
 
@@ -642,11 +710,6 @@ impl VehicleDef {
             .map(|(hull, turret)| (hull + turret) as u32)
             .ok_or_else(|| invalid(format!("{name} has no health")))?;
 
-        let speed_limit = |direction| vehicle.get_child_element("speedLimits")
-            .and_then(|limits| limits.get_child_float(direction))
-            .map(|kmh| kmh / 3.6)
-            .ok_or_else(|| invalid(format!("{name} has no {direction} speed")));
-
         // The vehicle may set its own values for a shared gun.
         let gun_float = |path: &[&str]| [guns.get_child_element(&gun_name), Some(gun_def)].into_iter().flatten()
             .find_map(|gun| gun.get_child_value_at(path).and_then(pxml::Value::as_float))
@@ -743,8 +806,22 @@ impl VehicleDef {
             chassis_bounds[1].max(hull_bounds[1] + collision.hull_position),
         ];
         let turret_bounds = collision.parts[2].bounds.map(|corner| corner + aiming.turret_position);
+        // Its siege mode's definition differs in how it moves, its modules the same.
+        let siege = if siege_mode {
+            let siege_vehicle = read_xml(fs, &format!("{dir}/{name}_siege_mode.xml"))?;
+            let params = vehicle.get_child_element("siege_mode");
+            Some(SiegeDef {
+                mobility: mobility(fs, &dir, name, &siege_vehicle, turret, guns.get_child_element(&gun_name), gun_def,
+                    speed_limit(&siege_vehicle, name, "forward")?, speed_limit(&siege_vehicle, name, "backward")?, [bounds, turret_bounds])?,
+                switch_on: siege_switch_time(params, "switchOnTime"),
+                switch_off: siege_switch_time(params, "switchOffTime"),
+            })
+        } else {
+            None
+        };
+
         let mobility = mobility(fs, &dir, name, &vehicle, turret, guns.get_child_element(&gun_name), gun_def,
-            speed_limit("forward")?, speed_limit("backward")?, [bounds, turret_bounds])?;
+            speed_limit(&vehicle, name, "forward")?, speed_limit(&vehicle, name, "backward")?, [bounds, turret_bounds])?;
 
         let crew_roles = vehicle.get_child_element("crew")
             .into_iter()
@@ -792,7 +869,21 @@ impl VehicleDef {
             camouflage_at_shot: gun_float(&["invisibilityFactorAtShot"])?,
         };
 
-        Ok(Self { name: name.to_string(), descr, crew_roles, shells, shots, max_ammo, max_health, mobility, aiming, magazine, vision, collision })
+        Ok(Self {
+            name: name.to_string(),
+            descr,
+            crew_roles,
+            shells,
+            shots,
+            max_ammo,
+            max_health,
+            mobility,
+            aiming,
+            magazine,
+            vision,
+            collision,
+            siege,
+        })
 
     }
 
@@ -839,6 +930,21 @@ fn read_armor(materials: &Element, armor: &Element) -> HashMap<String, ArmorMate
             Some((name.clone(), material))
         })
         .collect()
+}
+
+/// A vehicle's top speed one way, `forward` or `backward`, in m/s, from its
+/// `speedLimits` in km/h.
+fn speed_limit(vehicle: &Element, name: &str, direction: &str) -> io::Result<f32> {
+    vehicle.get_child_element("speedLimits")
+        .and_then(|limits| limits.get_child_float(direction))
+        .map(|kmh| kmh / 3.6)
+        .ok_or_else(|| invalid(format!("{name} has no {direction} speed")))
+}
+
+/// How long switching its siege mode takes one way, by its `siege_mode` section's `key`,
+/// in seconds, else [`SIEGE_SWITCH_TIME`].
+fn siege_switch_time(params: Option<&Element>, key: &str) -> f32 {
+    params.and_then(|params| params.get_child_float(key)).unwrap_or(SIEGE_SWITCH_TIME)
 }
 
 /// A pair of floats, `readFloatPair`'s: two space-separated, or one for both.
@@ -940,7 +1046,7 @@ fn mobility(
 /// A chassis' general wheels, see [`GeneralWheels`], how far their axles steer from
 /// its section of the vehicle's physics, `physics`: none if its definition has none.
 /// Its axles are its wheels' places along it, from the rearmost, as the physics section
-/// lists them; without lock angles, an axle's lock is its angle at speed.
+/// lists them; without lock angles, an axle's lock is its angle driving.
 fn read_general_wheels(chassis: &Element, physics: Option<&Element>) -> Option<GeneralWheels> {
 
     let wheels = chassis.get_child_element("wheels")?;
@@ -965,7 +1071,7 @@ fn read_general_wheels(chassis: &Element, physics: Option<&Element>) -> Option<G
             radius,
             steers,
             lock: 0.0,
-            lock_at_speed: 0.0,
+            on_move: 0.0,
         }));
     }
     indexed.sort_by_key(|&(index, _)| index);
@@ -978,12 +1084,12 @@ fn read_general_wheels(chassis: &Element, physics: Option<&Element>) -> Option<G
         }
     }
     axles.sort_by(f32::total_cmp);
-    let at_speed = physics.and_then(|physics| physics.get_child_value("axleSteeringAngles")).and_then(floats).unwrap_or_default();
-    let lock = physics.and_then(|physics| physics.get_child_value("axleSteeringLockAngles")).and_then(floats).unwrap_or_else(|| at_speed.clone());
+    let on_move = physics.and_then(|physics| physics.get_child_value("axleSteeringAngles")).and_then(floats).unwrap_or_default();
+    let lock = physics.and_then(|physics| physics.get_child_value("axleSteeringLockAngles")).and_then(floats).unwrap_or_else(|| on_move.clone());
     for (_, wheel) in &mut indexed {
         let Some(axle) = axles.iter().position(|&z| (z - wheel.center.z).abs() < AXLE_SPREAD) else { continue };
         wheel.lock = lock.get(axle).copied().unwrap_or(0.0).to_radians();
-        wheel.lock_at_speed = at_speed.get(axle).copied().unwrap_or(0.0).to_radians();
+        wheel.on_move = on_move.get(axle).copied().unwrap_or(0.0).to_radians();
     }
 
     let turns_on_spot = physics.and_then(|physics| physics.get_child_value("isWheeledOnSpotRotation"))
@@ -1150,9 +1256,9 @@ mod tests {
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: the EBR's six wheels, by their
-    /// index, the rear and front pairs steering, 15° at a standstill and 4.6° at its top
-    /// speed, the rear against the front, not on the spot; the Concept No. 5's front
-    /// pair alone, 6° at any speed, and it turns on the spot.
+    /// index, the rear and front pairs steering, locked 15° and 4.6° driving, the rear
+    /// against the front, not on the spot; the Concept No. 5's front pair alone, 6°
+    /// either way, and it turns on the spot.
     #[test]
     fn real_general_wheels() {
         let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
@@ -1163,7 +1269,7 @@ mod tests {
         assert_eq!(steers, [true, true, false, false, true, true]);
         assert!(wheels.all().iter().all(|wheel| wheel.radius == 0.608 && wheel.center.y == 0.618));
         assert_eq!(wheels.all()[4].center, Vec3::new(-1.119, 0.618, 2.005));
-        let locks: Vec<[f32; 2]> = wheels.all().iter().map(|wheel| [wheel.lock, wheel.lock_at_speed].map(|lock| lock.to_degrees().round())).collect();
+        let locks: Vec<[f32; 2]> = wheels.all().iter().map(|wheel| [wheel.lock, wheel.on_move].map(|lock| lock.to_degrees().round())).collect();
         assert_eq!(locks, [[-15.0, -5.0], [-15.0, -5.0], [0.0, 0.0], [0.0, 0.0], [15.0, 5.0], [15.0, 5.0]]);
         assert!(!wheels.turns_on_spot);
 
@@ -1172,6 +1278,35 @@ mod tests {
         let locks: Vec<f32> = wheels.all().iter().filter(|wheel| wheel.steers).map(|wheel| wheel.lock.to_degrees().round()).collect();
         assert_eq!(locks, [6.0, 6.0]);
         assert!(wheels.turns_on_spot);
+        assert!(VehicleDef::load(&fs, "france", "F107_Hotchkiss_EBR").unwrap().siege.is_none());
+    }
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: the EBR 105's siege mode, its
+    /// fast one, at 91 and 65 km/h where it goes 70 and 50 out of it, its wheels locked
+    /// 15° where they lock 33°, switched at once.
+    #[test]
+    fn real_siege_mode() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let def = VehicleDef::load(&fs, "france", "F108_Panhard_EBR_105").unwrap();
+        let siege = def.siege.unwrap();
+        assert_eq!(top_speeds_kmh(&def.mobility), [70.0, 50.0]);
+        assert_eq!(top_speeds_kmh(&siege.mobility), [91.0, 65.0]);
+        assert_eq!(front_lock_degrees(&def.mobility), 33.0);
+        assert_eq!(front_lock_degrees(&siege.mobility), 15.0);
+        assert_eq!([siege.switch_on, siege.switch_off], [0.0; 2]);
+    }
+
+    /// Its top speeds forward and backward, in km/h, rounded.
+    fn top_speeds_kmh(mobility: &MobilityDef) -> [f32; 2] {
+        [mobility.speed_forward, mobility.speed_backward].map(|speed| (speed * 3.6).round())
+    }
+
+    /// The most its general wheels steer at a standstill, to the right, in degrees,
+    /// rounded.
+    fn front_lock_degrees(mobility: &MobilityDef) -> f32 {
+        let wheels = mobility.general_wheels.unwrap();
+        wheels.all().iter().map(|wheel| wheel.lock).fold(0.0, f32::max).to_degrees().round()
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: story mode's Pershing, from the
