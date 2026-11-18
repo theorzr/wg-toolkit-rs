@@ -58,18 +58,18 @@ impl Participant {
     }
 
     /// Show it the battle's vehicles, or hide them, as its team spots them at game time
-    /// `now`, see [`Spotting`]: its allies always, its enemies once spotted. Its own it
-    /// always sees, and a wreck stays as it was when destroyed.
+    /// `now`, see [`Spotting`]: its allies always, its enemies once spotted, and wrecks
+    /// always, from when they are destroyed. Its own it always sees.
     pub fn spot(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], spotting: &Spotting, now: f64) -> io::Result<()> {
         
         let team = vehicles[self.vehicle].team;
         for (index, vehicle) in vehicles.iter().enumerate() {
             
-            if index == self.vehicle || !vehicle.alive() {
+            if index == self.vehicle {
                 continue;
             }
 
-            let spotted = vehicle.team == team || spotting.spotted(team, index, now);
+            let spotted = !vehicle.alive() || vehicle.team == team || spotting.spotted(team, index, now);
             if spotted == self.spotted[index] {
                 continue;
             }
