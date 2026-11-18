@@ -83,7 +83,7 @@ label {
     margin-left: 10rem;
 }
 
-input, textarea {
+input {
     display: block;
     width: 100%;
     box-sizing: border-box;
@@ -93,11 +93,6 @@ input, textarea {
     background: rgba(0, 0, 0, 0.5);
     color: #e9e2bf;
     font-size: 14rem;
-}
-
-textarea {
-    height: 110rem;
-    font-size: 11rem;
 }
 
 #actions {

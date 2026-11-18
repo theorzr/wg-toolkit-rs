@@ -66,7 +66,8 @@ function pick(index) {
     field('shortName').value = server.shortName;
     field('name').value = server.name;
     field('address').value = server.address;
-    field('key').value = server.key;
+    // On one line, its line breaks spaces: the mod rebuilds its lines as it saves it.
+    field('key').value = server.key.replace(/\s+/g, ' ').trim();
     field('remove').style.visibility = selected >= 0 ? 'visible' : 'hidden';
     // The form is for a new one already: no new one to make.
     field('new').classList.toggle('disabled', selected < 0);

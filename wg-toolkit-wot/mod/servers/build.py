@@ -6,8 +6,8 @@ client reads mods.
     python3 wg-toolkit-wot/mod/servers/build.py [--install <game folder>]
 
 With `--install`, the mod is copied into the game's `mods/<version>` folder, its version
-read from the game's `version.xml`. Python 2.7 runs as `micromamba run -n py27 python`,
-or as the `WGTK_PY27` variable says.
+read from the game's `version.xml`, in place of its other versions there. Python 2.7
+runs as `micromamba run -n py27 python`, or as the `WGTK_PY27` variable says.
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MOD_ID = 'wgtk_servers'
-MOD_VERSION = '0.1.0'
+MOD_VERSION = '0.2.0'
 MOD_DESCRIPTION = 'wg-toolkit for the client: servers of our own in the login screen, each with its address and key.'
 
 # Where the client loads mods' scripts from, in a mod's `res`.
@@ -99,6 +99,11 @@ def main() -> None:
     if args.install is not None:
         target = args.install / 'mods' / game_version(args.install)
         target.mkdir(parents=True, exist_ok=True)
+        # The game would load every version of it there: the others go.
+        for old in target.glob(f'{MOD_ID}_*.wotmod'):
+            if old.name != wotmod.name:
+                old.unlink()
+                print(f'Removed {old}')
         shutil.copy2(wotmod, target / wotmod.name)
         print(f'Installed {target / wotmod.name}')
 

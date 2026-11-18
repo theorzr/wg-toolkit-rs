@@ -12,8 +12,10 @@ As the client's own, in `scripts_config.xml`: a server has a short name, and a n
 login screen's, its short name if none.
 
 A server's key is written in `res_mods/wgtk_servers/keys`, which the client reads the key of
-the server it logs into from, by a resource path out of its resources, `../`. A server
-without one has none: the client logs into it without encrypting its login.
+the server it logs into from, by a resource path out of its resources, `../`, and purged
+from the client's cache of its resources. A key is kept in PEM however it was pasted, see
+[`pem_key`]. A server without one has none: the client logs into it without encrypting
+its login.
 
 The client reads its server list once, `_PreDefinedHostList.readScriptConfig`, from
 `scripts_config.xml` and the player's preferences: ours are added after, see
@@ -42,6 +44,10 @@ CONFIG_NAME = 'servers.json'
 KEYS_DIR = 'keys'
 # How often the servers file is looked at for changes, in seconds.
 WATCH_PERIOD = 2.0
+# What a key's markers name when it has none, and how long its lines of base64 are, as
+# PEM has them.
+PEM_LABEL = 'PUBLIC KEY'
+PEM_LINE = 64
 # The periphery id of our first server, the next ones following: the lobby's server
 # switch lists only servers of a periphery, and finds the one to log into by its id. Our
 # choice, far past the game's own.
@@ -115,8 +121,9 @@ def save_server(index, short_name, name, address, key):
     }
     if name.strip():
         server['name'] = name.strip()
-    if key.strip():
-        server['public_key'] = key.strip()
+    key = pem_key(key)
+    if key:
+        server['public_key'] = key
     if 0 <= index < len(servers):
         servers[index] = server
     else:
@@ -134,6 +141,20 @@ def remove_server(index):
 
 # -- Keys --
 
+def pem_key(text):
+    """A public key in PEM, from one pasted however its lines came, lost, doubled or
+    flattened to spaces: its base64, between its markers if it has them, in lines of
+    `PEM_LINE`, under its markers' label. Empty if it has no base64."""
+    label = re.search(r'BEGIN ([A-Z ]*KEY)', text)
+    label = label.group(1).strip() if label else PEM_LABEL
+    body = re.sub(r'-*\s*(BEGIN|END) [A-Z ]*KEY\s*-*', '', text)
+    body = re.sub(r'[^A-Za-z0-9+/=]', '', body)
+    if not body:
+        return ''
+    lines = [body[start:start + PEM_LINE] for start in range(0, len(body), PEM_LINE)]
+    return '\n'.join(['-----BEGIN %s-----' % label] + lines + ['-----END %s-----' % label])
+
+
 def _slug(name):
     return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_') or 'server'
 
@@ -141,7 +162,7 @@ def _slug(name):
 def key_path(server):
     """The resource path of a server's key, written in the mod's folder, none if it
     gives none or it can't be written."""
-    key = server.get('public_key')
+    key = pem_key(server.get('public_key') or '')
     if not key:
         return None
     name = '%s.pubkey' % _slug(server.get('short_name') or server.get('name') or server['address'])
@@ -150,11 +171,15 @@ def key_path(server):
         if not os.path.isdir(os.path.dirname(file_path)):
             os.makedirs(os.path.dirname(file_path))
         with open(file_path, 'w') as key_file:
-            key_file.write(key.strip() + '\n')
+            key_file.write(key + '\n')
     except Exception:
         LOG_CURRENT_EXCEPTION()
         return None
+    # The client caches what res_mods holds as it starts: a key written since is seen
+    # once its folder and itself are purged from the cache.
     path = '%s/%s/%s' % (DATA_RES, KEYS_DIR, name)
+    ResMgr.purge('%s/%s' % (DATA_RES, KEYS_DIR), True)
+    ResMgr.purge(path)
     log('Wrote a server key', file_path, 'seen by the client:', ResMgr.isFile(path))
     return path
 
