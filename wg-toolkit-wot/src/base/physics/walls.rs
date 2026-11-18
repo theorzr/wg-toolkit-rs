@@ -35,9 +35,9 @@ const EDGE_FRICTION: f32 = 0.25;
 impl Hull {
 
     /// The destructible triangles still standing it will be in by the end of a tick of
-    /// `dt` seconds, as its speeds on the ground plane take it, its box grown by `reach`:
-    /// what it rams, see `Hull::ram`, with which way it goes into each on the ground
-    /// plane.
+    /// `dt` seconds, as its speeds on the ground plane take it, its collision box grown
+    /// by `reach`: what it rams, see `Hull::ram`, with which way it goes into each on the
+    /// ground plane.
     pub fn rammed<'a>(&self, dt: f32, reach: f32, space: &'a Space, rubble: &Rubble) -> SmallVec<[(&'a StaticTriangle, Vec2); 8]> {
         let position = self.position + self.velocity() * dt;
         let orientation = (Quat::from_rotation_y(self.yaw_rate * dt) * self.orientation).normalize();
@@ -56,14 +56,16 @@ impl Hull {
             .collect()
     }
 
-    /// Its collision box, were it at `position` turned by `orientation`: its boxes
-    /// together, its belly's, its upper hull's and its turret's, see the `contacts`
-    /// module.
+    /// Its collision box, were it at `position` turned by `orientation`: around all it
+    /// touches with but its springs, its boxes, its belly's, its upper hull's and its
+    /// turret's, and the spheres of its wheels, a wheeled hull's sticking out of its
+    /// sides, see the `contacts` module.
     fn hull_box(&self, position: Vec3, orientation: Quat) -> Cuboid {
         let (low, high) = self.contacts.iter()
             .filter_map(|contact| match contact.shape {
                 Shape::Box { center, half } => Some((center - half, center + half)),
-                _ => None,
+                Shape::Sphere { center, radius, .. } => Some((center - radius, center + radius)),
+                Shape::Spring { .. } => None,
             })
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(low, high), (min, max)| (low.min(min), high.max(max)));
         Cuboid {

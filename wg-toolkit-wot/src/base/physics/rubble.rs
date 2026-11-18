@@ -33,7 +33,8 @@
 //! # Ramming
 //!
 //! [`Hull::ram`] runs before its body moves, looking ahead: the pieces it rams are those
-//! its box will be in by the end of the tick, as its speeds take it, grown by
+//! its collision box, around its wheels too, will be in by the end of the tick, as its
+//! speeds take it, grown by
 //! [`RAM_REACH`], so that one it presses against counts. Its body's walls would stop
 //! it against a house's module before it could see how fast it hit it. For each piece
 //! it is closing on, or its controls drive it into, its damage grows by, with `m` the
@@ -57,6 +58,9 @@
 //! `rubble.fresh` for the battle to tell its clients. The hull keeps its speed, less
 //! [`RAM_COST`] of the health it took. Since the broken module no longer blocks, its
 //! body drives on through it in the same tick.
+//!
+//! What it breaks falls halfway between the way it goes and the way from its middle to
+//! where it hit it, as the real server's trees do, see [`fall_yaw`]: never onto it.
 //!
 //! # Shells
 //!
@@ -126,6 +130,10 @@ const RAM_REACH: f32 = 0.05;
 /// The weight of a vehicle that destructibles' health is measured against, in kg:
 /// `unitVehicleMass` in the game's `scripts/destructibles.xml`.
 const UNIT_VEHICLE_MASS: f32 = 35_000.0;
+/// How fast a vehicle must go, in m/s, for the way it goes to count fully in which way
+/// what it breaks falls, less below, as its share of it, see [`fall_yaw`]: pressing
+/// from a standstill, it pushes it away from itself. Our choice.
+const FALL_TRAVEL_SPEED: f32 = 1.0;
 
 impl Hull {
 
@@ -184,12 +192,20 @@ impl Hull {
             if speed > 0.0 {
                 self.set_velocity(velocity * (kept / speed));
             }
-            rubble.break_piece(destructible, piece, velocity.x.atan2(velocity.z), speed, false);
+            rubble.break_piece(destructible, piece, fall_yaw(velocity.xz(), center), speed, false);
 
         }
 
     }
 
+}
+
+/// Which way what a vehicle broke falls, its yaw: halfway between the way it goes, at
+/// `velocity`, counting less below [`FALL_TRAVEL_SPEED`], and the way from its middle
+/// to where it hit it, `center`.
+fn fall_yaw(velocity: Vec2, center: Vec2) -> f32 {
+    let way = (velocity / FALL_TRAVEL_SPEED).clamp_length_max(1.0) + center.normalize_or_zero();
+    way.x.atan2(way.y)
 }
 
 /// The force a vehicle presses against a destructible with, in newtons: its engine's
@@ -229,7 +245,8 @@ pub struct DestructiblePiece {
 pub struct Breakage {
     pub piece: DestructiblePiece,
     pub kind: DestructibleKind,
-    /// Which way it falls, the yaw the vehicle or the shell went, in radians.
+    /// Which way it falls, in radians: the shell's, or away from the vehicle, see
+    /// [`fall_yaw`].
     pub yaw: f32,
     /// How fast the vehicle went, in m/s.
     pub speed: f32,
@@ -347,6 +364,8 @@ impl Rubble {
 #[cfg(test)]
 mod tests {
 
+    use std::f32::consts::FRAC_PI_2;
+
     use glam::Vec3;
 
     use wgtk::space::statics::{trunk, BodyKind};
@@ -354,7 +373,7 @@ mod tests {
     use wgtk::space::destructibles::Module;
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, nose, quad, wall};
+    use super::super::fixtures::{chieftain, ebr, nose, quad, wall};
     use super::super::movement_flag;
     use super::*;
 
@@ -456,7 +475,7 @@ mod tests {
         // Against a big maple, 173 health, stopped: a 16 t light tank of 550 hp pushes it
         // down in about 4 s, as a 55 t heavy does in about 3 s.
         for (weight, horsepower, within) in [(16_000.0, 550.0, 45), (55_000.0, 750.0, 35)] {
-            let space = tree(173.0);
+            let space = tree(173.0, 0.0);
             let mut rubble = Rubble::default();
             let mut hull = chieftain();
             hull.mobility.weight = weight;
@@ -468,17 +487,56 @@ mod tests {
                 !rubble.fresh.is_empty()
             });
             assert!(broken.is_some_and(|tick| tick < within), "{weight} kg broke it at {broken:?}");
+            // It falls away from it, ahead, however it rocked pressing it.
+            let yaw = rubble.fresh[0].yaw;
+            assert!(yaw.abs() < 0.2, "{weight} kg: fell at {yaw}");
         }
 
     }
 
-    /// A tree of this health standing at z = 10 in the way, the 4th of its chunk, on
-    /// flat ground.
-    fn tree(health: f32) -> Space {
+    #[test]
+    fn breaks_a_tree_only_its_wheel_meets() {
+
+        // A tree 1.5 m right of its way, out of its hull's sides but in its wheels' way,
+        // rammed at 20 km/h too slowly to break it: it stops at its trunk, and pushes it
+        // down, then drives on.
+        let space = tree(60.0, 1.5);
+        let mut rubble = Rubble::default();
+        let mut hull = ebr();
+        hull.speed = 20.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        let broken = (0..40).position(|_| {
+            hull.advance(0.1, &space, None, &mut rubble);
+            !rubble.fresh.is_empty()
+        });
+        assert!(broken.is_some_and(|tick| tick < 30), "broke it at {broken:?}");
+        for _ in 0..30 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        assert!(hull.position.z > 12.0, "{}", hull.position.z);
+
+        // Rammed fast enough to break it at once, it falls ahead and right, away from it.
+        let space = tree(10.0, 1.5);
+        let mut rubble = Rubble::default();
+        let mut hull = ebr();
+        hull.speed = 40.0 / 3.6;
+        hull.flags = movement_flag::FORWARD;
+        for _ in 0..20 {
+            hull.advance(0.1, &space, None, &mut rubble);
+        }
+        let broken: Vec<Breakage> = rubble.take_breakages().collect();
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0].yaw > 0.2 && broken[0].yaw < FRAC_PI_2, "fell at {}", broken[0].yaw);
+
+    }
+
+    /// A tree of this health standing at z = 10, `x` aside of the way, the 4th of its
+    /// chunk, on flat ground.
+    fn tree(health: f32, x: f32) -> Space {
         let instance = TREE_INSTANCE | 12;
         let mut triangles = Vec::new();
         quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
-        triangles.extend(trunk(Vec3::new(0.0, 0.0, 10.0), 1.0, instance));
+        triangles.extend(trunk(Vec3::new(x, 0.0, 10.0), 1.0, instance));
         let mut space = Space {
             statics: Statics::from_triangles(triangles),
             ..Space::default()
@@ -497,7 +555,7 @@ mod tests {
     fn stops_at_a_tree_too_strong_and_breaks_a_bush() {
 
         // A tree too strong for it, rammed at 20 km/h, stops it at its trunk.
-        let space = tree(1000.0);
+        let space = tree(1000.0, 0.0);
         let mut rubble = Rubble::default();
         let mut hull = chieftain();
         hull.speed = 20.0 / 3.6;
@@ -509,7 +567,7 @@ mod tests {
         assert!(front > 9.5 && front < 10.0 && rubble.fresh.is_empty(), "front at {front}");
 
         // A bush, it breaks, falling the way it went, and drives on through.
-        let space = tree(3.0);
+        let space = tree(3.0, 0.0);
         let mut rubble = Rubble::default();
         let mut hull = chieftain();
         hull.speed = 20.0 / 3.6;
