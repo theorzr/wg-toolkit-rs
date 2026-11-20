@@ -10,7 +10,8 @@
 //! the next, each vehicle from a random one first; the wiki has them take turns every
 //! 2 s, our choice is every tick. It is looked at by six
 //! checkpoints: its two ports, the middles of its hull's front and rear, and of its
-//! turret's left and right sides, all [`POINT_INSET`] inside its boxes, see [`Viewed`].
+//! turret's left and right sides, halfway up what of the turret rises over its hull,
+//! its box reaching down into it, all [`POINT_INSET`] inside its boxes, see [`Viewed`].
 //! An observer spots a vehicle once it spots one of its checkpoints: a turret over a
 //! hedge is spotted, the hull behind it hidden, and the foliage hides a vehicle only if
 //! it covers all its checkpoints.
@@ -61,10 +62,11 @@
 use std::cmp::Ordering;
 
 use rand::Rng;
-use glam::Vec3;
+use glam::{Vec3, Vec4};
 
 use crate::base::physics::World;
 
+use super::debug::{DebugChannel, DebugFrame};
 use super::vehicle::BattleVehicle;
 use super::{TEAMS, VIEW_RANGE};
 
@@ -96,6 +98,25 @@ const FIRED_FOLIAGE: f32 = 0.3;
 /// on doesn't hide them. Our choice.
 const POINT_INSET: f32 = 0.1;
 
+/// The colours of a vehicle's text in the debug drawing, of 255, pure for contrast, none
+/// a team's, neither red, green, gold nor purple: spotted, magenta, not, cyan, and with
+/// no enemy looking, white. See [`Spotting::debug_draw`].
+const DEBUG_SPOTTED: Vec4 = Vec4::new(255.0, 64.0, 255.0, 255.0);
+const DEBUG_HIDDEN: Vec4 = Vec4::new(64.0, 224.0, 255.0, 255.0);
+const DEBUG_UNSEEN: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
+/// How big a vehicle's checkpoints are in the debug drawing, its ports among them, as
+/// radii in metres. See [`Spotting::debug_draw`].
+const DEBUG_POINT_RADIUS: f32 = 0.08;
+const DEBUG_PORT_RADIUS: f32 = 0.15;
+/// How its enemies' best line of sight to a vehicle is drawn in the debug drawing: a line
+/// in the colour of their team, of 255, the first blue, the second orange, darker by
+/// [`DEBUG_HIDDEN_SHADE`] if it doesn't spot it, see [`Spotting::debug_draw`].
+const DEBUG_TEAM_COLORS: [Vec4; 2] = [
+    Vec4::new(80.0, 150.0, 255.0, 255.0),
+    Vec4::new(255.0, 150.0, 40.0, 255.0),
+];
+const DEBUG_HIDDEN_SHADE: f32 = 0.6;
+
 
 /// See the module's documentation.
 #[derive(Debug)]
@@ -106,6 +127,9 @@ pub struct Spotting {
     /// For each of the battle's vehicles, by index, its enemies' best look at it this
     /// tick, see [`Self::look`].
     looks: Vec<Option<Look>>,
+    /// For each of the battle's vehicles, by index, its checkpoints in the world this
+    /// tick, its ports first, see [`Viewed`].
+    points: Vec<[Vec3; 6]>,
     /// For each of the battle's vehicles, by index, which of its view range ports it
     /// looks from this tick, see the module's documentation.
     ports: Vec<usize>,
@@ -130,6 +154,10 @@ pub struct Look {
     pub plants: usize,
     /// How far the observer spots it, so hidden, in metres on the ground plane.
     pub range: f32,
+    /// Where the observer looks from, its port, and at, the checkpoint, in the world, or
+    /// near, the middles of their hulls' boxes.
+    pub eye: Vec3,
+    pub at: Vec3,
 }
 
 /// What is in the way of a [`Look`], as far as it was looked at.
@@ -157,7 +185,8 @@ pub enum Point {
     /// The middles of its hull's front and rear.
     Front,
     Rear,
-    /// The middles of its turret's left and right sides.
+    /// The middles of its turret's left and right sides, halfway up what of it rises
+    /// over its hull.
     Left,
     Right,
 }
@@ -197,6 +226,7 @@ impl Spotting {
         Self {
             sightings: vec![None; vehicles],
             looks: vec![None; vehicles],
+            points: vec![[Vec3::ZERO; 6]; vehicles],
             ports: (0..vehicles).map(|_| rng.gen_range(0..2)).collect(),
         }
     }
@@ -222,6 +252,9 @@ impl Spotting {
 
         // 1. Where each vehicle looks from and is looked at, as it stands now.
         let viewed = vehicles.iter().map(|vehicle| viewed(world, vehicle)).collect::<Vec<_>>();
+        for (points, seen) in self.points.iter_mut().zip(&viewed) {
+            *points = seen.points;
+        }
 
         for (index, target) in vehicles.iter().enumerate() {
 
@@ -306,6 +339,54 @@ impl Spotting {
         self.looks.get(index)?.as_ref()
     }
 
+    /// Draw, for each of the battle's vehicles alive, how its enemies best looked at it
+    /// this tick, see [`Self::update`], in the channels the frame draws:
+    ///
+    /// - [`DebugChannel::Spotting`]: a text where it stands, following it:
+    ///
+    ///   ```text
+    ///     Bot 3                          its name
+    ///     camo 0.31 -> 0.66, 2 plants    its camouflage, then hidden by the foliage
+    ///     312 m of 230 m: clear, top     how far, of how far it is spotted, what is in
+    ///                                    the way, of which of its checkpoints, or of its
+    ///                                    hull if near
+    ///   ```
+    ///
+    ///   magenta if spotted, cyan if not, white if no enemy looks at it.
+    /// - [`DebugChannel::SpotPoints`]: its checkpoints, following it, its ports bigger,
+    ///   and the line of sight of that look, in the world, in its enemies' colour,
+    ///   darker if it doesn't spot it, see [`DEBUG_TEAM_COLORS`].
+    pub fn debug_draw(&self, frame: &mut DebugFrame, vehicles: &[BattleVehicle], world: &World) {
+
+        for (index, vehicle) in vehicles.iter().enumerate().filter(|(_, vehicle)| vehicle.alive()) {
+
+            let hull = &world.vehicle(vehicle.id).hull;
+            let entity_id = vehicle.entity.id().0;
+            let look = self.look(index);
+
+            if let Some(mut group) = frame.on(DebugChannel::Spotting, entity_id, hull.position, hull.orientation) {
+                let (text, color) = debug_spotting_text(vehicle, look);
+                group.text(hull.position, text, color);
+            }
+
+            if let Some(mut group) = frame.on(DebugChannel::SpotPoints, entity_id, hull.position, hull.orientation) {
+                for (number, &point) in self.points[index].iter().enumerate() {
+                    group.sphere(point, if number < 2 { DEBUG_PORT_RADIUS } else { DEBUG_POINT_RADIUS });
+                }
+            }
+
+            if let Some(look) = look
+                && let Some(mut group) = frame.world(DebugChannel::SpotPoints)
+            {
+                let enemies = if vehicle.team == TEAMS[0] { 1 } else { 0 };
+                let shade = if look.spots() { 1.0 } else { DEBUG_HIDDEN_SHADE };
+                group.line(look.eye, look.at, DEBUG_TEAM_COLORS[enemies] * shade);
+            }
+
+        }
+
+    }
+
     /// Where `team` last spotted the enemies it no longer does at game time `now`, and
     /// hasn't searched yet, see [`Self::update`].
     pub fn last_seen(&self, team: u8, now: f64) -> impl Iterator<Item = Vec3> + '_ {
@@ -355,6 +436,16 @@ fn viewed(world: &World, vehicle: &BattleVehicle) -> Viewed {
     let top = chassis.transform_point3(top);
     let mount = Vec3::from(gun.translation);
 
+    // Its turret's sides, halfway up what of it rises over its hull, its box reaching
+    // down into it.
+    let side_height = if turret_max.y > hull_max.y {
+        (turret_min.y.max(hull_max.y) + turret_max.y) / 2.0
+    } else {
+        turret_middle.y
+    };
+    let left = turret_middle.with_x(turret_min.x).with_y(side_height);
+    let right = turret_middle.with_x(turret_max.x).with_y(side_height);
+
     Viewed {
         center: chassis.transform_point3(hull_middle),
         ports: [top, mount],
@@ -363,8 +454,8 @@ fn viewed(world: &World, vehicle: &BattleVehicle) -> Viewed {
             mount,
             chassis.transform_point3(hull_middle.with_z(hull_max.z)),
             chassis.transform_point3(hull_middle.with_z(hull_min.z)),
-            turret.transform_point3(turret_middle.with_x(turret_min.x) - pivot),
-            turret.transform_point3(turret_middle.with_x(turret_max.x) - pivot),
+            turret.transform_point3(left - pivot),
+            turret.transform_point3(right - pivot),
         ],
     }
 
@@ -383,6 +474,8 @@ fn near(view_range: f32, observer: &Viewed, target: &Viewed, camouflage: f32) ->
         hidden: camouflage,
         plants: 0,
         range: range(view_range, camouflage),
+        eye: observer.center,
+        at: target.center,
     })
 }
 
@@ -418,6 +511,8 @@ fn look(world: &World, eye: Vec3, view_range: f32, point: Point, at: Vec3, camou
         hidden: camouflage,
         plants: 0,
         range: range(view_range, camouflage),
+        eye,
+        at,
     };
     if distance > look.range {
         return look;
@@ -440,6 +535,42 @@ fn look(world: &World, eye: Vec3, view_range: f32, point: Point, at: Vec3, camou
 /// camouflage, in metres on the ground plane.
 fn range(view_range: f32, camouflage: f32) -> f32 {
     (MIN_RADIUS + (view_range - MIN_RADIUS) * (1.0 - camouflage)).min(VIEW_RANGE)
+}
+
+/// A vehicle's text in the debug drawing, of how its enemies best look at it, if any
+/// do, and its colour, see [`Spotting::debug_draw`].
+fn debug_spotting_text(vehicle: &BattleVehicle, look: Option<&Look>) -> (String, Vec4) {
+
+    let Some(look) = look else {
+        return (vehicle.info.name.clone(), DEBUG_UNSEEN);
+    };
+
+    let sight = match look.sight {
+        Sight::Near => "near",
+        Sight::Far => "far",
+        Sight::Blocked => "blocked",
+        Sight::Clear => "clear",
+    };
+    let point = match look.point {
+        None => "hull",
+        Some(Point::Top) => "top",
+        Some(Point::Gun) => "gun",
+        Some(Point::Front) => "front",
+        Some(Point::Rear) => "rear",
+        Some(Point::Left) => "left",
+        Some(Point::Right) => "right",
+    };
+    let text = format!(
+        "{}\ncamo {:.2} -> {:.2}, {} plants\n{:.0} m of {:.0} m: {sight}, {point}",
+        vehicle.info.name,
+        look.camouflage,
+        look.hidden,
+        look.plants,
+        look.distance,
+        look.range,
+    );
+    (text, if look.spots() { DEBUG_SPOTTED } else { DEBUG_HIDDEN })
+
 }
 
 /// How much the foliage between an observer's port at `eye` and a checkpoint at `at`,

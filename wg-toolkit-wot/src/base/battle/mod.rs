@@ -74,6 +74,8 @@ use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
 use debug::DebugDraw;
 
+pub use debug::{DebugChannel, DebugChannels};
+
 
 /// The two teams, as the clients know them.
 const TEAMS: [u8; 2] = [1, 2];
@@ -146,8 +148,9 @@ pub struct BattleOptions {
     ///
     /// [`Bot::drive`]: bot::Bot::drive
     pub bots_drive: bool,
-    /// Whether it draws what it debugs in its clients' world, see [`DebugDraw`].
-    pub debug_draw: bool,
+    /// What it draws to be debugged in its clients' world, none if empty, see
+    /// [`DebugDraw`].
+    pub debug_draw: DebugChannels,
     /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
     /// Where the first team starts, if not at its spawn, and its yaw in radians.
@@ -317,11 +320,11 @@ impl Battle {
         let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
         
-        let debug = if options.debug_draw {
-            let center = (map.bounds.0 + map.bounds.1) / 2.0;
-            Some(DebugDraw::new(app, space, Vec3::new(center.x, 0.0, center.y))?)
-        } else {
+        let debug = if options.debug_draw.is_empty() {
             None
+        } else {
+            let center = (map.bounds.0 + map.bounds.1) / 2.0;
+            Some(DebugDraw::new(app, space, Vec3::new(center.x, 0.0, center.y), options.debug_draw)?)
         };
 
         Ok(Self {
@@ -639,8 +642,11 @@ impl Battle {
         for participant in participants.iter_mut() {
             participant.spot(app, vehicles, spotting, now)?;
         }
+        
         if let Some(debug) = debug {
-            debug.show(app, vehicles, world, spotting)?;
+            let mut frame = debug.frame();
+            spotting.debug_draw(&mut frame, vehicles, world);
+            debug.show(app, frame)?;
         }
 
         for index in 0..vehicles.len() {

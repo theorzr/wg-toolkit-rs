@@ -26,7 +26,7 @@ use clap::{Args, Parser, Subcommand};
 use wgtk::res::fs::ResFilesystem;
 use wgtk::script::{self, Script};
 
-use crate::base::AdvertiseRule;
+use crate::base::{AdvertiseRule, DebugChannel};
 
 
 /// World of Tanks server tools.
@@ -248,10 +248,11 @@ pub struct BaseArgs {
     /// Whether bots drive toward their enemies, else they stay where they start.
     #[arg(long)]
     pub bots_drive: bool,
-    /// Whether battles draw what they debug in their clients' world: how each vehicle is
-    /// spotted, over it.
-    #[arg(long)]
-    pub debug_draw: bool,
+    /// What battles draw to be debugged in their clients' world, as a list of channels,
+    /// `spotting,spot-points`: how each vehicle is spotted, under it, and its checkpoints
+    /// and its enemies' best line of sight to them. Alone, `spotting`.
+    #[arg(long, value_enum, value_delimiter = ',', num_args = 0..=1, default_missing_value = "spotting")]
+    pub debug_draw: Vec<DebugChannel>,
     /// Start the second team this many metres in front of the first instead of at its
     /// spawn, facing it.
     #[arg(long)]

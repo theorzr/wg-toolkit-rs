@@ -212,8 +212,8 @@ entity_schema! {
     /// What the server draws in its clients' world to be debugged, groups of lines,
     /// boxes, spheres and texts: the client's `DebugDrawEntity.py`, which redraws a group
     /// once its version changes. The retail client lacks the models of its lines, boxes
-    /// and spheres, `helpers/models/unit_cube.model` and `unit_sphere.model`: only its
-    /// texts are drawn as it is.
+    /// and spheres, `helpers/models/unit_cube.model` and `unit_sphere.model`: our client
+    /// mod gives it others the game has, see its `debug_draw`.
     pub DebugDrawEntity {
         cell {
             drawObjects: Vec<DebugDrawObject>,
@@ -238,7 +238,8 @@ script_dict! {
 }
 
 script_dict! {
-    /// A line of a [`DebugDrawObject`] through its points, as wide as `width`, in metres.
+    /// A line of a [`DebugDrawObject`] through its points, as wide as `width`, in metres:
+    /// our client mod draws it thin, its width its colour, see its `debug_draw`.
     #[derive(Debug, Clone)]
     pub struct DebugLine {
         pub points: Vec<Vec3>,
@@ -247,8 +248,9 @@ script_dict! {
 }
 
 script_dict! {
-    /// A box of a [`DebugDrawObject`]: its bottom's middle, its size, and its yaw,
-    /// pitch and roll.
+    /// A box of a [`DebugDrawObject`]: its size, its yaw, pitch and roll, and where the
+    /// middle of its top is, as our client mod's model of it draws it, see its
+    /// `debug_draw`.
     #[derive(Debug, Clone)]
     pub struct DebugBox {
         pub position: Vec3,

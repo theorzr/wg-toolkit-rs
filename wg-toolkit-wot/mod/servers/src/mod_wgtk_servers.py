@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """wg-toolkit for the client: our servers in the login screen's server list, each with
 its address and public key, see `wgtk_servers.servers`, and a button on the login screen
-opening their editor, see `wgtk_servers.ui`. In battle, their debug drawing easier to
-read, see `wgtk_servers.debug_draw`.
+opening their editor, see `wgtk_servers.ui`.
 
 The client loads this script at its start, before the login screen: it hooks into the
 client there.
@@ -57,10 +56,6 @@ _PreDefinedHostList.readScriptConfig = _readScriptConfig
 _PreDefinedHostList.getSimpleHostsList = _getSimpleHostsList
 LoginView._populate = _populate
 LoginView._dispose = _dispose
-try:
-    import gui.mods.wgtk_servers.debug_draw
-except Exception:
-    LOG_CURRENT_EXCEPTION()
 if g_preDefinedHosts._isDataLoaded:
     g_serverList.add(g_preDefinedHosts)
 BigWorld.callback(WATCH_PERIOD, g_serverList.watch)

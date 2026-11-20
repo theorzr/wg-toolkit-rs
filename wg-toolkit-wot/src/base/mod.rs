@@ -58,12 +58,14 @@ use crate::game::items::{TankmanDescr, VehicleDescr};
 use crate::game::collision::VehicleCollision;
 use crate::game::item_prices::ItemPrices;
 
-use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering};
+use battle::{Arrival, Battle, BattleOptions, BattleSetup, DebugChannels, Gathering};
 use garage::player::{AccountIds, Player};
 use garage::account::{self, Garage};
 use ballistics::gun::GunLoader;
 use garage::shop::Shop;
+
 pub use advertise::AdvertiseRule;
+pub use battle::DebugChannel;
 
 
 /// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.
@@ -245,13 +247,13 @@ impl BaseThread {
             bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
             bots_fire: args.bots_fire,
             bots_drive: args.bots_drive,
-            debug_draw: args.debug_draw,
+            debug_draw: DebugChannels::of(&args.debug_draw),
             enemy_distance: args.enemy_distance,
             spawn: args.spawn.map(|(x, z, yaw)| (Vec2::new(x, z), yaw.to_radians())),
         };
 
         info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
-            bots_drive = args.bots_drive, debug_draw = args.debug_draw, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
+            bots_drive = args.bots_drive, debug_draw = ?args.debug_draw, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
         
         let garage = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
