@@ -201,13 +201,14 @@ use wgtk::space::Space;
 
 use crate::game::item_defs::{AimingDef, MobilityDef};
 
-use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
+use self::body::{blocking, DebugTouched, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::ground::ground_at;
 use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
+pub use self::body::DebugTouchKind;
 pub use self::fall::TreeFall;
 pub use self::turret::{Dispersion, Turret};
 
@@ -501,6 +502,13 @@ impl<S: Deref<Target = Space>> World<S> {
 
     }
 
+    /// Where its vehicles touched each other in the last step of their bodies, see
+    /// `Touching::debug_touch`: each point, the way out of the second toward the first,
+    /// and whether they pushed apart there.
+    pub fn debug_touchings(&self) -> impl Iterator<Item = (Vec3, Vec3, bool)> + '_ {
+        self.touching.iter().map(Touching::debug_touch)
+    }
+
     /// The fall of a tree knocked down, see [`TreeFall`].
     pub fn tree_fall(&self, piece: DestructiblePiece) -> Option<&TreeFall> {
         self.falls.get(&piece)
@@ -602,7 +610,7 @@ impl<S: Deref<Target = Space>> World<S> {
         // 6. Each moves.
         for (_, placed) in self.vehicles.iter_mut() {
             let Some(step) = placed.step.take() else { continue };
-            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), &step);
+            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), step);
         }
 
     }
@@ -747,6 +755,9 @@ pub struct Hull {
     /// Where its suspension and its body touch the ground, in its own frame, made once
     /// from its mobility, see [`contacts::contacts_of`].
     contacts: Contacts,
+    /// Where its contacts touched the space in its body's last step, see
+    /// [`Self::debug_touches`].
+    debug_touched: DebugTouched,
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,
     pub mobility: MobilityDef,
@@ -771,6 +782,7 @@ impl Hull {
             still: 0,
             depths: [f32::NAN; MAX_CONTACTS],
             contacts: contacts_of(&mobility),
+            debug_touched: DebugTouched::default(),
             flags: 0,
             mobility,
         }

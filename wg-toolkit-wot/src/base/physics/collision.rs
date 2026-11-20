@@ -201,6 +201,16 @@ pub struct Touching {
     friction: Vec3,
 }
 
+impl Touching {
+
+    /// Where it is, the way out of the second toward the first, and whether they pushed
+    /// apart there, rather than only being near: to be debugged.
+    pub fn debug_touch(&self) -> (Vec3, Vec3, bool) {
+        (self.point, self.normal, self.stop > 0.0)
+    }
+
+}
+
 /// One pass of holding two vehicles apart where they touch, each its hull and its step
 /// under way, see the module's documentation: what they close at there stopped, shared
 /// by their masses, their rubbing held back by [`VEHICLE_FRICTION`], and what they are

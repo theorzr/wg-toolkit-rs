@@ -54,6 +54,8 @@ pub enum DebugChannel {
     Spotting,
     /// Each vehicle's checkpoints, and its enemies' best line of sight to one of them.
     SpotPoints,
+    /// Where each vehicle touches the space and the others, see `debug_contacts`.
+    Contacts,
 }
 
 /// A set of [`DebugChannel`]s.
@@ -103,6 +105,7 @@ impl DebugChannel {
         match self {
             DebugChannel::Spotting => "spotting",
             DebugChannel::SpotPoints => "spot-points",
+            DebugChannel::Contacts => "contacts",
         }
     }
 

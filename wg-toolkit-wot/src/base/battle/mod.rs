@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::{Affine3A, Vec2, Vec3};
+use glam::{Affine3A, Vec2, Vec3, Vec4};
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::entity::{AnyEntity, Audience, EntityId, EntityKey};
@@ -60,7 +60,7 @@ use crate::base::{
 use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::base::physics::{Vehicle, VehicleId, World};
+use crate::base::physics::{DebugTouchKind, Vehicle, VehicleId, World};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
@@ -72,7 +72,7 @@ use participant::Participant;
 use spotting::Spotting;
 use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
-use debug::DebugDraw;
+use debug::{DebugDraw, DebugFrame};
 
 pub use debug::{DebugChannel, DebugChannels};
 
@@ -91,6 +91,19 @@ const VIEW_RANGE: f32 = 445.0;
 /// How long a battle waits for the clients switched into it to enter before it is made
 /// with those that did. Our choice: a client logs in again within a second or two.
 const GATHER_WAIT: Duration = Duration::from_secs(20);
+
+/// How the contacts are drawn in the debug drawing, see [`debug_contacts`]: a spring
+/// from its top down to where it touches, as long as it is, green, cyan past its
+/// travel; any other a line along its normal, this long, in metres, of the colour of
+/// what touches, of 255, a track's end's yellow, a box's red, between vehicles magenta;
+/// darker by this shade where it doesn't push.
+const DEBUG_NORMAL_LENGTH: f32 = 0.5;
+const DEBUG_SPRING: Vec4 = Vec4::new(90.0, 230.0, 90.0, 255.0);
+const DEBUG_SPRING_STOPPED: Vec4 = Vec4::new(60.0, 220.0, 255.0, 255.0);
+const DEBUG_TRACK: Vec4 = Vec4::new(250.0, 220.0, 60.0, 255.0);
+const DEBUG_BOX: Vec4 = Vec4::new(255.0, 70.0, 70.0, 255.0);
+const DEBUG_VEHICLES: Vec4 = Vec4::new(240.0, 80.0, 240.0, 255.0);
+const DEBUG_IDLE_SHADE: f32 = 0.4;
 
 
 /// A battle, with its clients, see the module's documentation.
@@ -646,6 +659,7 @@ impl Battle {
         if let Some(debug) = debug {
             let mut frame = debug.frame();
             spotting.debug_draw(&mut frame, vehicles, world);
+            debug_contacts(&mut frame, vehicles, world);
             debug.show(app, frame)?;
         }
 
@@ -952,4 +966,45 @@ fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world
     targets.extend(vehicles.iter()
         .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
         .map(|vehicle| vehicle.shot_target(world)));
+}
+
+/// Draw, in the channel [`DebugChannel::Contacts`], where each vehicle alive touched the
+/// space in its body's last step, following it, and where they touched each other, in
+/// the world: each a line, a spring as long as it is, any other along its normal, see
+/// [`DEBUG_NORMAL_LENGTH`].
+fn debug_contacts(frame: &mut DebugFrame, vehicles: &[BattleVehicle], world: &World) {
+
+    if !frame.draws(DebugChannel::Contacts) {
+        return;
+    }
+
+    for vehicle in vehicles.iter().filter(|vehicle| vehicle.alive()) {
+        let hull = &world.vehicle(vehicle.id).hull;
+        let entity_id = vehicle.entity.id().0;
+        let Some(mut group) = frame.on(
+            DebugChannel::Contacts,
+            entity_id,
+            hull.position,
+            hull.orientation,
+        ) else { continue };
+        for touch in hull.debug_touches() {
+            let normal = touch.point + touch.normal * DEBUG_NORMAL_LENGTH;
+            let (from, color) = match touch.kind {
+                DebugTouchKind::Spring { top, stopped: false } => (top, DEBUG_SPRING),
+                DebugTouchKind::Spring { top, stopped: true } => (top, DEBUG_SPRING_STOPPED),
+                DebugTouchKind::Track => (normal, DEBUG_TRACK),
+                DebugTouchKind::Box => (normal, DEBUG_BOX),
+            };
+            let shade = if touch.pushed { 1.0 } else { DEBUG_IDLE_SHADE };
+            group.line(from, touch.point, color * shade);
+        }
+    }
+
+    let Some(mut group) = frame.world(DebugChannel::Contacts) else { return };
+    for (point, normal, pushed) in world.debug_touchings() {
+        let shade = if pushed { 1.0 } else { DEBUG_IDLE_SHADE };
+        let end = normal * DEBUG_NORMAL_LENGTH / 2.0;
+        group.line(point - end, point + end, DEBUG_VEHICLES * shade);
+    }
+
 }
