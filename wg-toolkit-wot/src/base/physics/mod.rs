@@ -200,15 +200,15 @@ use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
 use crate::game::item_defs::{AimingDef, MobilityDef};
+use crate::base::debug::{self, DebugPlace};
 
-use self::body::{blocking, DebugTouched, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
+use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::ground::ground_at;
 use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
-pub use self::body::DebugTouchKind;
 pub use self::fall::TreeFall;
 pub use self::turret::{Dispersion, Turret};
 
@@ -454,11 +454,12 @@ impl<S: Deref<Target = Space>> World<S> {
         }
         self.wake(dt);
 
-        // 3. Their bodies, together.
+        // 3. Their bodies, together, drawn to be debugged in the last step only.
         let step = dt / SUBSTEPS as f32;
-        for _ in 0..SUBSTEPS {
-            self.step_bodies(step);
+        for _ in 1..SUBSTEPS {
+            debug::muted(|| self.step_bodies(step));
         }
+        self.step_bodies(step);
 
         // 4. Each: its speeds read back from its body, held within the map, its turret
         //    turned on it.
@@ -500,13 +501,6 @@ impl<S: Deref<Target = Space>> World<S> {
             
         }
 
-    }
-
-    /// Where its vehicles touched each other in the last step of their bodies, see
-    /// `Touching::debug_touch`: each point, the way out of the second toward the first,
-    /// and whether they pushed apart there.
-    pub fn debug_touchings(&self) -> impl Iterator<Item = (Vec3, Vec3, bool)> + '_ {
-        self.touching.iter().map(Touching::debug_touch)
     }
 
     /// The fall of a tree knocked down, see [`TreeFall`].
@@ -551,7 +545,7 @@ impl<S: Deref<Target = Space>> World<S> {
     ///      its weight and its springs accelerating it
     ///   4. its springs on the others push them back
     ///   5. CONTACT_PASSES passes: each one's contacts with the space held, then where
-    ///      they touch each other, held apart
+    ///      they touch each other, held apart; those drawn to be debugged
     ///   6. each moves
     /// ```
     fn step_bodies(&mut self, step: f32) {
@@ -575,11 +569,14 @@ impl<S: Deref<Target = Space>> World<S> {
             }
         }
 
-        // 3. Each begins its step.
+        // 3. Each begins its step, drawing in its own frame.
         for (index, solid) in self.solids.iter().enumerate() {
             let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
             let tick = placed.tick.as_ref().expect("a tick under way");
-            placed.step = Some(placed.vehicle.hull.begin_step(tick, space, &keep, &self.solids, Some(index)));
+            let hull = &mut placed.vehicle.hull;
+            let place = DebugPlace::on(VehicleId(solid.key), hull.position, hull.orientation);
+            let step = debug::at(place, || hull.begin_step(tick, space, &keep, &self.solids, Some(index)));
+            placed.step = Some(step);
         }
 
         // 4. Its springs on the others push them back.
@@ -606,11 +603,14 @@ impl<S: Deref<Target = Space>> World<S> {
                 hold_apart(touching, body, other_body, step);
             }
         }
+        for touching in &self.touching {
+            touching.debug_draw();
+        }
 
         // 6. Each moves.
         for (_, placed) in self.vehicles.iter_mut() {
             let Some(step) = placed.step.take() else { continue };
-            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), step);
+            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), &step);
         }
 
     }
@@ -755,9 +755,6 @@ pub struct Hull {
     /// Where its suspension and its body touch the ground, in its own frame, made once
     /// from its mobility, see [`contacts::contacts_of`].
     contacts: Contacts,
-    /// Where its contacts touched the space in its body's last step, see
-    /// [`Self::debug_touches`].
-    debug_touched: DebugTouched,
     /// The latest `vehicle_moveWith` flags.
     pub flags: u8,
     pub mobility: MobilityDef,
@@ -782,7 +779,6 @@ impl Hull {
             still: 0,
             depths: [f32::NAN; MAX_CONTACTS],
             contacts: contacts_of(&mobility),
-            debug_touched: DebugTouched::default(),
             flags: 0,
             mobility,
         }

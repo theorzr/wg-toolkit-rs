@@ -62,12 +62,14 @@
 //! where `n` is the way out of B, toward A, `d` how deep they are, negative apart, `h`
 //! a step, and `r_A`, `r_B` the arms from each one's centre of mass to the point.
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec3, Vec4};
 use smallvec::SmallVec;
 
 use wgtk::app::slots::SlotKey;
 
-use super::body::{Mass, Step, CONTACT_MARGIN, STOP_RECOVERY, STOP_SPEED};
+use crate::base::debug::{self, DebugChannel};
+
+use super::body::{Mass, Step, CONTACT_MARGIN, DEBUG_IDLE_SHADE, DEBUG_NORMAL_LENGTH, STOP_RECOVERY, STOP_SPEED};
 use super::contacts::Shape;
 use super::Hull;
 
@@ -78,6 +80,9 @@ const EDGE_AXIS_BIAS: f32 = 0.05;
 /// How much two vehicles rubbing hold each other back, as a share of how hard they are
 /// pressed together. From the game: `CONTACT_FRICTION_VEHICLES` in `physics_shared.py`.
 const VEHICLE_FRICTION: f32 = 0.3;
+/// The colour two vehicles touching are drawn in to be debugged, see
+/// [`Touching::debug_draw`], magenta, of 255.
+const DEBUG_VEHICLES: Vec4 = Vec4::new(240.0, 80.0, 240.0, 255.0);
 
 /// A vehicle's body where its step starts, for the others to touch: its boxes and its
 /// tracks' ends' spheres, a sphere around them all, and the most any of its points
@@ -203,10 +208,13 @@ pub struct Touching {
 
 impl Touching {
 
-    /// Where it is, the way out of the second toward the first, and whether they pushed
-    /// apart there, rather than only being near: to be debugged.
-    pub fn debug_touch(&self) -> (Vec3, Vec3, bool) {
-        (self.point, self.normal, self.stop > 0.0)
+    /// Draw it to be debugged, in the world, in [`DebugChannel::Contacts`]: a line across
+    /// where they touch, along the way out, half `DEBUG_NORMAL_LENGTH` each way, darker
+    /// by `DEBUG_IDLE_SHADE` where they didn't push apart, only near.
+    pub fn debug_draw(&self) {
+        let shade = if self.stop > 0.0 { 1.0 } else { DEBUG_IDLE_SHADE };
+        let half = self.normal * DEBUG_NORMAL_LENGTH / 2.0;
+        debug::line(DebugChannel::Contacts, self.point - half, self.point + half, DEBUG_VEHICLES * shade);
     }
 
 }

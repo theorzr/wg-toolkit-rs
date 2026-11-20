@@ -24,7 +24,6 @@
 //!   shells       its shells in flight, and their tracers
 //!   hit          what a shell does to a vehicle, as the clients are told
 //!   areas        what broke of its destructibles, by chunk
-//!   debug        what it draws in its clients' world to be debugged
 //!   spawn        where its vehicles start
 //! ```
 
@@ -36,7 +35,6 @@ mod bot;
 mod shells;
 mod hit;
 mod areas;
-mod debug;
 mod spawn;
 
 use std::time::{Duration, Instant};
@@ -44,7 +42,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::{Affine3A, Vec2, Vec3, Vec4};
+use glam::{Affine3A, Vec2, Vec3};
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::entity::{AnyEntity, Audience, EntityId, EntityKey};
@@ -60,7 +58,8 @@ use crate::base::{
 use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::base::physics::{DebugTouchKind, Vehicle, VehicleId, World};
+use crate::base::physics::{Vehicle, VehicleId, World};
+use crate::base::debug::{DebugChannels, DebugFrame};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
@@ -72,9 +71,7 @@ use participant::Participant;
 use spotting::Spotting;
 use period::{ArenaPeriod, NO_WINNER};
 use spawn::TeamStart;
-use debug::{DebugDraw, DebugFrame};
 
-pub use debug::{DebugChannel, DebugChannels};
 
 
 /// The two teams, as the clients know them.
@@ -91,19 +88,6 @@ const VIEW_RANGE: f32 = 445.0;
 /// How long a battle waits for the clients switched into it to enter before it is made
 /// with those that did. Our choice: a client logs in again within a second or two.
 const GATHER_WAIT: Duration = Duration::from_secs(20);
-
-/// How the contacts are drawn in the debug drawing, see [`debug_contacts`]: a spring
-/// from its top down to where it touches, as long as it is, green, cyan past its
-/// travel; any other a line along its normal, this long, in metres, of the colour of
-/// what touches, of 255, a track's end's yellow, a box's red, between vehicles magenta;
-/// darker by this shade where it doesn't push.
-const DEBUG_NORMAL_LENGTH: f32 = 0.5;
-const DEBUG_SPRING: Vec4 = Vec4::new(90.0, 230.0, 90.0, 255.0);
-const DEBUG_SPRING_STOPPED: Vec4 = Vec4::new(60.0, 220.0, 255.0, 255.0);
-const DEBUG_TRACK: Vec4 = Vec4::new(250.0, 220.0, 60.0, 255.0);
-const DEBUG_BOX: Vec4 = Vec4::new(255.0, 70.0, 70.0, 255.0);
-const DEBUG_VEHICLES: Vec4 = Vec4::new(240.0, 80.0, 240.0, 255.0);
-const DEBUG_IDLE_SHADE: f32 = 0.4;
 
 
 /// A battle, with its clients, see the module's documentation.
@@ -138,7 +122,7 @@ pub struct Battle {
     /// The destructibles' entities of its map's chunks, telling the clients what broke.
     areas: DestructibleAreas,
     /// What it draws in its clients' world to be debugged, if its options say so.
-    debug: Option<DebugDraw>,
+    debug: Option<DebugFrame>,
     /// What shells hit, refilled by each shooter, kept to reuse its memory.
     targets: Vec<ShotTarget>,
     /// Whether a client has its vehicle: it runs from then on.
@@ -162,7 +146,7 @@ pub struct BattleOptions {
     /// [`Bot::drive`]: bot::Bot::drive
     pub bots_drive: bool,
     /// What it draws to be debugged in its clients' world, none if empty, see
-    /// [`DebugDraw`].
+    /// [`DebugFrame`].
     pub debug_draw: DebugChannels,
     /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
@@ -337,7 +321,7 @@ impl Battle {
             None
         } else {
             let center = (map.bounds.0 + map.bounds.1) / 2.0;
-            Some(DebugDraw::new(app, space, Vec3::new(center.x, 0.0, center.y), options.debug_draw)?)
+            Some(DebugFrame::new(app, space, Vec3::new(center.x, 0.0, center.y), options.debug_draw)?)
         };
 
         Ok(Self {
@@ -634,6 +618,10 @@ impl Battle {
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
         let Self { participants, vehicles, world, spotting, starts, shells, targets, debug, .. } = self;
+        
+        if let Some(frame) = debug.take() {
+            frame.begin();
+        }
 
         for vehicle in vehicles.iter_mut() {
             vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
@@ -656,11 +644,9 @@ impl Battle {
             participant.spot(app, vehicles, spotting, now)?;
         }
         
-        if let Some(debug) = debug {
-            let mut frame = debug.frame();
-            spotting.debug_draw(&mut frame, vehicles, world);
-            debug_contacts(&mut frame, vehicles, world);
-            debug.show(app, frame)?;
+        spotting.debug_draw(vehicles, world);
+        if let Some(frame) = DebugFrame::end() {
+            debug.insert(frame).show(app, |id| debug_entity_id(vehicles, id))?;
         }
 
         for index in 0..vehicles.len() {
@@ -968,43 +954,9 @@ fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world
         .map(|vehicle| vehicle.shot_target(world)));
 }
 
-/// Draw, in the channel [`DebugChannel::Contacts`], where each vehicle alive touched the
-/// space in its body's last step, following it, and where they touched each other, in
-/// the world: each a line, a spring as long as it is, any other along its normal, see
-/// [`DEBUG_NORMAL_LENGTH`].
-fn debug_contacts(frame: &mut DebugFrame, vehicles: &[BattleVehicle], world: &World) {
-
-    if !frame.draws(DebugChannel::Contacts) {
-        return;
-    }
-
-    for vehicle in vehicles.iter().filter(|vehicle| vehicle.alive()) {
-        let hull = &world.vehicle(vehicle.id).hull;
-        let entity_id = vehicle.entity.id().0;
-        let Some(mut group) = frame.on(
-            DebugChannel::Contacts,
-            entity_id,
-            hull.position,
-            hull.orientation,
-        ) else { continue };
-        for touch in hull.debug_touches() {
-            let normal = touch.point + touch.normal * DEBUG_NORMAL_LENGTH;
-            let (from, color) = match touch.kind {
-                DebugTouchKind::Spring { top, stopped: false } => (top, DEBUG_SPRING),
-                DebugTouchKind::Spring { top, stopped: true } => (top, DEBUG_SPRING_STOPPED),
-                DebugTouchKind::Track => (normal, DEBUG_TRACK),
-                DebugTouchKind::Box => (normal, DEBUG_BOX),
-            };
-            let shade = if touch.pushed { 1.0 } else { DEBUG_IDLE_SHADE };
-            group.line(from, touch.point, color * shade);
-        }
-    }
-
-    let Some(mut group) = frame.world(DebugChannel::Contacts) else { return };
-    for (point, normal, pushed) in world.debug_touchings() {
-        let shade = if pushed { 1.0 } else { DEBUG_IDLE_SHADE };
-        let end = normal * DEBUG_NORMAL_LENGTH / 2.0;
-        group.line(point - end, point + end, DEBUG_VEHICLES * shade);
-    }
-
+/// The entity id of the battle's vehicle of this id, if any, for its debug drawing.
+fn debug_entity_id(vehicles: &[BattleVehicle], id: VehicleId) -> Option<u32> {
+    vehicles.iter()
+        .find(|vehicle| vehicle.id == id)
+        .map(|vehicle| vehicle.entity.id().0)
 }

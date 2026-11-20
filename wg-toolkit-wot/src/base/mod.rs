@@ -9,6 +9,7 @@
 //!   battle      its battles, each with its vehicles and bots
 //!   physics     how vehicles move in a battle's world
 //!   ballistics  what shells do: guns, flights, armour
+//!   debug       what a battle draws in its clients' world to be debugged, as it computes
 //! ```
 
 mod advertise;
@@ -16,6 +17,7 @@ mod garage;
 mod battle;
 mod physics;
 mod ballistics;
+mod debug;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4};
@@ -58,14 +60,15 @@ use crate::game::items::{TankmanDescr, VehicleDescr};
 use crate::game::collision::VehicleCollision;
 use crate::game::item_prices::ItemPrices;
 
-use battle::{Arrival, Battle, BattleOptions, BattleSetup, DebugChannels, Gathering};
+use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering};
 use garage::player::{AccountIds, Player};
 use garage::account::{self, Garage};
 use ballistics::gun::GunLoader;
+use debug::DebugChannels;
 use garage::shop::Shop;
 
 pub use advertise::AdvertiseRule;
-pub use battle::DebugChannel;
+pub use debug::DebugChannel;
 
 
 /// `ARENA_BONUS_TYPE.REGULAR` and `ARENA_GUI_TYPE.RANDOM`: a random battle.

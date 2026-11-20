@@ -238,11 +238,12 @@ script_dict! {
 }
 
 script_dict! {
-    /// A line of a [`DebugDrawObject`] through its points, as wide as `width`, in metres:
-    /// our client mod draws it thin, its width its colour, see its `debug_draw`.
+    /// A line of a [`DebugDrawObject`] between its two points, as wide as `width`, in
+    /// metres: our client mod draws it thin, its width its colour, see its `debug_draw`.
+    /// The client's takes any number of points, joining them with spheres as big.
     #[derive(Debug, Clone)]
     pub struct DebugLine {
-        pub points: Vec<Vec3>,
+        pub points: [Vec3; 2],
         pub width: f32,
     }
 }

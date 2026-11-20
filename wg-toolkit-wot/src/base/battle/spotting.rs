@@ -64,9 +64,9 @@ use std::cmp::Ordering;
 use rand::Rng;
 use glam::{Vec3, Vec4};
 
+use crate::base::debug::{self, DebugChannel, DebugPlace};
 use crate::base::physics::World;
 
-use super::debug::{DebugChannel, DebugFrame};
 use super::vehicle::BattleVehicle;
 use super::{TEAMS, VIEW_RANGE};
 
@@ -340,7 +340,7 @@ impl Spotting {
     }
 
     /// Draw, for each of the battle's vehicles alive, how its enemies best looked at it
-    /// this tick, see [`Self::update`], in the channels the frame draws:
+    /// this tick, see [`Self::update`], in the channels drawn, see the `debug` module:
     ///
     /// - [`DebugChannel::Spotting`]: a text where it stands, following it:
     ///
@@ -356,31 +356,28 @@ impl Spotting {
     /// - [`DebugChannel::SpotPoints`]: its checkpoints, following it, its ports bigger,
     ///   and the line of sight of that look, in the world, in its enemies' colour,
     ///   darker if it doesn't spot it, see [`DEBUG_TEAM_COLORS`].
-    pub fn debug_draw(&self, frame: &mut DebugFrame, vehicles: &[BattleVehicle], world: &World) {
+    pub fn debug_draw(&self, vehicles: &[BattleVehicle], world: &World) {
 
         for (index, vehicle) in vehicles.iter().enumerate().filter(|(_, vehicle)| vehicle.alive()) {
 
             let hull = &world.vehicle(vehicle.id).hull;
-            let entity_id = vehicle.entity.id().0;
             let look = self.look(index);
 
-            if let Some(mut group) = frame.on(DebugChannel::Spotting, entity_id, hull.position, hull.orientation) {
-                let (text, color) = debug_spotting_text(vehicle, look);
-                group.text(hull.position, text, color);
-            }
-
-            if let Some(mut group) = frame.on(DebugChannel::SpotPoints, entity_id, hull.position, hull.orientation) {
-                for (number, &point) in self.points[index].iter().enumerate() {
-                    group.sphere(point, if number < 2 { DEBUG_PORT_RADIUS } else { DEBUG_POINT_RADIUS });
+            debug::at(DebugPlace::on(vehicle.id, hull.position, hull.orientation), || {
+                if debug::draws(DebugChannel::Spotting) {
+                    let (text, color) = debug_spotting_text(vehicle, look);
+                    debug::text(DebugChannel::Spotting, hull.position, text, color);
                 }
-            }
+                for (number, &point) in self.points[index].iter().enumerate() {
+                    let radius = if number < 2 { DEBUG_PORT_RADIUS } else { DEBUG_POINT_RADIUS };
+                    debug::sphere(DebugChannel::SpotPoints, point, radius);
+                }
+            });
 
-            if let Some(look) = look
-                && let Some(mut group) = frame.world(DebugChannel::SpotPoints)
-            {
+            if let Some(look) = look {
                 let enemies = if vehicle.team == TEAMS[0] { 1 } else { 0 };
                 let shade = if look.spots() { 1.0 } else { DEBUG_HIDDEN_SHADE };
-                group.line(look.eye, look.at, DEBUG_TEAM_COLORS[enemies] * shade);
+                debug::line(DebugChannel::SpotPoints, look.eye, look.at, DEBUG_TEAM_COLORS[enemies] * shade);
             }
 
         }

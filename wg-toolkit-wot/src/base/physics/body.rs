@@ -195,12 +195,14 @@
 //! to a stop there. Where nothing is under it at all, off the terrain, its tracks drive
 //! it as if they gripped without slipping.
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec3, Vec4};
 use smallvec::SmallVec;
 
 use wgtk::space::Cuboid;
 use wgtk::space::statics::{BodyKind, StaticTriangle};
 use wgtk::space::Space;
+
+use crate::base::debug::{self, DebugChannel};
 
 use super::contacts::{Contact, Shape, MAX_CONTACTS};
 use super::collision::Solid;
@@ -234,7 +236,7 @@ pub const CONTACT_MARGIN: f32 = 0.05;
 /// its contacts touches anything: none at all, it is off the terrain.
 const GROUND_SEARCH: f32 = 1000.0;
 /// The most of a hull's contacts touching the space in a step that stay on the stack.
-pub const MAX_TOUCHES: usize = 64;
+const MAX_TOUCHES: usize = 64;
 /// How a contact past its travel is pushed back out: this share of how far past it is,
 /// a step, no faster than this, in m/s. A contact is past it on landing, or meeting a
 /// step: pushed out at once, the hull would be thrown off it. Its ground's rise under it
@@ -309,6 +311,17 @@ const ROLLER_FLAT: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// meeting a house's step on Live Oaks at 15 m/s rolled over; at 0.25, the T110E4 climbs
 /// the Ruinberg debris it lost a third of its speed to.
 const CLIMB_GRIP: f32 = 0.25;
+/// How a hull's contacts are drawn to be debugged, in [`DebugChannel::Contacts`], see
+/// [`debug_spring`] and [`debug_touch`]: a spring from its top down to where it touches,
+/// as long as it is, green, cyan past its travel; a track's end or a box as a line along
+/// its normal, this long, in metres, yellow or red, darker by this shade where it doesn't
+/// push. Of 255.
+pub const DEBUG_NORMAL_LENGTH: f32 = 0.5;
+pub const DEBUG_IDLE_SHADE: f32 = 0.4;
+const DEBUG_SPRING: Vec4 = Vec4::new(90.0, 230.0, 90.0, 255.0);
+const DEBUG_SPRING_STOPPED: Vec4 = Vec4::new(60.0, 220.0, 255.0, 255.0);
+const DEBUG_TRACK: Vec4 = Vec4::new(250.0, 220.0, 60.0, 255.0);
+const DEBUG_BOX: Vec4 = Vec4::new(255.0, 70.0, 70.0, 255.0);
 
 impl Hull {
 
@@ -612,8 +625,8 @@ impl Hull {
                 side: contact.side,
                 load: push * step,
                 hold,
-                debug_top: arm - down * hit.distance,
             });
+            debug_spring(hit.point - down * hit.distance, hit.point, past > 0.0);
             if let Some(other) = hit.on {
                 loads.reactions.push(Reaction {
                     other,
@@ -685,8 +698,8 @@ impl Hull {
                     hold: Hold::Out {
                         depth: depth - travel,
                     },
-                    debug_top: arm,
                 });
+                debug_touch(touch.point, normal, contact.side.is_some(), load > 0.0 || depth > travel);
 
             }
         }
@@ -747,49 +760,14 @@ impl Hull {
     }
 
     /// End a step of its body: its belts' speeds set, see [`Self::spin_tracks`], it moves
-    /// at its velocity, and by what pushed its contacts out. Its touches are kept, see
-    /// [`Self::debug_touches`].
-    pub fn end_step(&mut self, tick: &Tick, step: Step) {
-
+    /// at its velocity, and by what pushed its contacts out.
+    pub fn end_step(&mut self, tick: &Tick, step: &Step) {
         if !step.unheld {
             self.spin_tracks(&step.touches, &step.traction, &step.pushed, tick.step);
         }
         let mass_center = step.mass_center + (self.linear_velocity + step.push_velocity) * tick.step;
         self.orientation = (Quat::from_scaled_axis((self.angular_velocity + step.push_spin) * tick.step) * step.rotation).normalize();
         self.position = mass_center - self.orientation * tick.center;
-
-        self.debug_touched = DebugTouched {
-            mass_center: step.mass_center,
-            touches: step.touches,
-        };
-
-    }
-
-    /// Where its contacts touched the space in its body's last step, see [`DebugTouch`].
-    pub fn debug_touches(&self) -> impl Iterator<Item = DebugTouch> + '_ {
-        let DebugTouched { mass_center, touches } = &self.debug_touched;
-        touches.iter().map(move |touch| {
-            
-            let top = *mass_center + touch.debug_top;
-            let (kind, pushed) = match touch.hold {
-                Hold::Free => 
-                    (DebugTouchKind::Spring { top, stopped: false }, true),
-                Hold::Up { .. } => 
-                    (DebugTouchKind::Spring { top, stopped: true }, true),
-                Hold::Out { depth } if touch.side.is_some() =>
-                    (DebugTouchKind::Track, touch.load > 0.0 || depth > 0.0),
-                Hold::Out { depth } => 
-                    (DebugTouchKind::Box, depth > 0.0),
-            };
-
-            DebugTouch {
-                point: *mass_center + touch.arm,
-                normal: touch.normal,
-                kind,
-                pushed,
-            }
-
-        })
     }
 
     /// Its tracks' speeds after a step: rolling at the ground's speed where they touch it
@@ -1220,9 +1198,7 @@ struct Loads {
 /// A [`Contact`] touching the space in a step, see [`Hull::solve_pass`]: where it is from the
 /// hull's centre of mass, the normal of what it touches, its springs' together for a
 /// spring, which track it is of, if any, how hard its spring pushed it out in the step,
-/// as an impulse, and how it is held off what it touches. And, to be debugged, where a
-/// spring's top is from the centre of mass, its wheel's centre as high as the spring is
-/// long, see [`Hull::debug_touches`]: where it is for any other.
+/// as an impulse, and how it is held off what it touches.
 #[derive(Debug, Clone, Copy)]
 struct Touch {
     arm: Vec3,
@@ -1230,43 +1206,6 @@ struct Touch {
     side: Option<Side>,
     load: f32,
     hold: Hold,
-    debug_top: Vec3,
-}
-
-/// Where a hull's contacts touched the space in its body's last step, see
-/// [`Hull::debug_touches`]: its centre of mass as the step began, and its touches.
-#[derive(Debug, Clone, Default)]
-pub struct DebugTouched {
-    mass_center: Vec3,
-    touches: SmallVec<[Touch; MAX_TOUCHES]>,
-}
-
-/// A contact of a hull touching the space in its body's last step, to be debugged, see
-/// [`Hull::debug_touches`]: where, in the world, the normal of what it touches, its
-/// springs' together for a spring, what it is, and whether it pushed, rather than only
-/// being within [`CONTACT_MARGIN`] of it.
-#[derive(Debug, Clone, Copy)]
-pub struct DebugTouch {
-    pub point: Vec3,
-    pub normal: Vec3,
-    pub kind: DebugTouchKind,
-    pub pushed: bool,
-}
-
-/// What a [`DebugTouch`] is of its hull.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DebugTouchKind {
-    /// A spring, under a road wheel: its top, on the hull, in the world, as far above
-    /// where it touches as it is long, shorter as it sinks; and whether it is past its
-    /// travel, stopped hard.
-    Spring {
-        top: Vec3,
-        stopped: bool,
-    },
-    /// A track's end, or a wheel.
-    Track,
-    /// One of its boxes.
-    Box,
 }
 
 /// How a [`Touch`] is held off what it touches.
@@ -1423,6 +1362,23 @@ fn grip(angle: f32, (full, least, least_grip): (f32, f32, f32)) -> f32 {
     } else {
         least_grip + (1.0 - least_grip) * (cos - least) / (full - least)
     }
+}
+
+/// Draw a spring pushing to be debugged, see [`DEBUG_SPRING`]: from its top, its wheel's
+/// centre as high as it is long, down to where it touches, and whether it is past its
+/// travel.
+fn debug_spring(top: Vec3, point: Vec3, stopped: bool) {
+    let color = if stopped { DEBUG_SPRING_STOPPED } else { DEBUG_SPRING };
+    debug::line(DebugChannel::Contacts, top, point, color);
+}
+
+/// Draw where a track's end or a box touches the space to be debugged, see
+/// [`DEBUG_TRACK`]: the normal of what it touches, whether it is a track's, and whether
+/// it pushes, rather than only being within [`CONTACT_MARGIN`] of it.
+fn debug_touch(point: Vec3, normal: Vec3, track: bool, pushed: bool) {
+    let color = if track { DEBUG_TRACK } else { DEBUG_BOX };
+    let shade = if pushed { 1.0 } else { DEBUG_IDLE_SHADE };
+    debug::line(DebugChannel::Contacts, point + normal * DEBUG_NORMAL_LENGTH, point, color * shade);
 }
 
 
