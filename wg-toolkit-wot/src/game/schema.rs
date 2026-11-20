@@ -109,10 +109,16 @@ entity_schema! {
             /// The battle is over: won by a team, none for a draw, and why, as
             /// `FINISH_REASON`.
             fn onRoundFinished(winner_team: i8, reason: u8);
+            /// A chat action of the server, `MESSENGER_ACTION_IDS`, for the client's
+            /// request of this id, 0 for none, see the battle's `chat` module.
+            fn messenger_onActionByServer_chat2(action_id: i16, request_id: u16, args: ChatArgs);
         }
         base {
             fn setClientReady();
             fn leaveArena();
+            /// A chat action of the client, `MESSENGER_ACTION_IDS`, as its request of
+            /// this id, see the battle's `chat` module.
+            fn messenger_onActionByClient_chat2(action_id: i16, request_id: u16, args: ChatArgs);
         }
         cell {
             fn vehicle_shoot();
@@ -637,6 +643,21 @@ script_dict! {
         pub weeklyPlayLimit: i32,
         pub dailyPlayLimit: i32,
         pub sessionLimit: i32,
+    }
+}
+
+script_dict! {
+    /// `GENERIC_MESSENGER_ARGS_chat2`: the arguments of a chat action, each meaning what
+    /// its action says, see the battle's `chat` module. Its strings are bytes: a text in
+    /// UTF-8, or a zlib-compressed pickle.
+    #[derive(Debug, Clone, Default)]
+    pub struct ChatArgs {
+        pub int32Arg1: i32,
+        pub int64Arg1: i64,
+        pub floatArg1: f64,
+        pub strArg1: Bytes,
+        pub strArg2: Bytes,
+        pub int8Arg1: i8,
     }
 }
 

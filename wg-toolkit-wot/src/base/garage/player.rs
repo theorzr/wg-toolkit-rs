@@ -13,6 +13,9 @@ pub struct Player {
     pub name: String,
     /// The revision of the account's data, which each update brings to the next.
     pub revision: i64,
+    /// Whether it may use the server's dev commands, `/debug` in a battle's chat: every
+    /// player, for now.
+    pub dev: bool,
 }
 
 /// The account ids given to names, see the module's documentation.
@@ -32,6 +35,7 @@ impl AccountIds {
             id,
             name: name.to_string(),
             revision: 1,
+            dev: true,
         }
     }
 

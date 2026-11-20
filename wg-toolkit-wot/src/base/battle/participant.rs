@@ -33,11 +33,14 @@ pub struct Participant {
     spotted: Vec<bool>,
     /// Whether its client is done loading, ready for the countdown.
     pub ready: bool,
+    /// Whether its player may use the server's dev commands, see `Player::dev`.
+    pub dev: bool,
 }
 
 impl Participant {
 
-    /// A client in a battle of `vehicles` vehicles, with its avatar and its vehicle's.
+    /// A client in a battle of `vehicles` vehicles, with its avatar and its vehicle's,
+    /// and whether its player is a dev.
     pub fn new(
         client: ClientKey,
         avatar: EntityKey<Avatar>,
@@ -45,6 +48,7 @@ impl Participant {
         vehicle: usize,
         vehicles_info: ComponentKey<AvatarVehiclesInfo>,
         vehicles: usize,
+        dev: bool,
     ) -> Self {
         Self {
             client,
@@ -54,6 +58,7 @@ impl Participant {
             vehicles_info,
             spotted: vec![false; vehicles],
             ready: false,
+            dev,
         }
     }
 

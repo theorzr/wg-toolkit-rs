@@ -25,6 +25,7 @@
 //!   hit          what a shell does to a vehicle, as the clients are told
 //!   areas        what broke of its destructibles, by chunk
 //!   spawn        where its vehicles start
+//!   chat         its clients' messages, and the server's commands
 //! ```
 
 mod participant;
@@ -36,6 +37,7 @@ mod shells;
 mod hit;
 mod areas;
 mod spawn;
+mod chat;
 
 use std::time::{Duration, Instant};
 use std::sync::Arc;
@@ -43,13 +45,14 @@ use std::io;
 
 use tracing::{debug, info, warn};
 use glam::{Affine3A, Vec2, Vec3};
+use clap::ValueEnum;
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
 use wgtk::app::entity::{AnyEntity, Audience, EntityId, EntityKey};
 use wgtk::space::Space;
 
 use crate::game::schema::{
-    Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, ShotResult, VehicleCell,
+    Avatar, AvatarCell, AvatarComponentsData, AvatarInfo, AvatarVehiclesInfo, ChatArgs, ShotResult, VehicleCell,
 };
 use crate::base::{
     avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, SETTING_SIEGE_MODE,
@@ -59,7 +62,7 @@ use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget}
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
 use crate::base::physics::{Vehicle, VehicleId, World};
-use crate::base::debug::{DebugChannels, DebugFrame};
+use crate::base::debug::{DebugChannel, DebugChannels, DebugFrame};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
@@ -145,8 +148,8 @@ pub struct BattleOptions {
     ///
     /// [`Bot::drive`]: bot::Bot::drive
     pub bots_drive: bool,
-    /// What it draws to be debugged in its clients' world, none if empty, see
-    /// [`DebugFrame`].
+    /// What it draws to be debugged in its clients' world as it starts, see
+    /// [`DebugFrame`]: its clients' `/debug` changes it, see [`Battle::command`].
     pub debug_draw: DebugChannels,
     /// How far in front of the first team the second starts, if not at its spawn.
     pub enemy_distance: Option<f32>,
@@ -299,7 +302,7 @@ impl Battle {
         // Each client's arena info entity, its own only, created right away as entities
         // without an alias are, with the vehicles.
         let mut participants = Vec::with_capacity(arrivals.len());
-        for (index, Arrival { client, avatar, loadout, .. }) in arrivals.into_iter().enumerate() {
+        for (index, Arrival { client, avatar, player, loadout }) in arrivals.into_iter().enumerate() {
             let info = app.create_entity::<AvatarInfo>(space, EntityInit {
                 controlled_by: Some(avatar.any()),
                 visibility: Visibility::Interest,
@@ -310,19 +313,23 @@ impl Battle {
             let mut vehicles_info = entity.add_component::<AvatarVehiclesInfo>(Audience::AllClients)?;
             vehicles_info.set_vehiclesInfo(vehicles.iter().map(|vehicle| vehicle.info.clone()).collect())?;
             info!(battle = id, %client, entity_id = %info.id(), "Created the arena info");
-            participants.push(Participant::new(client, avatar, loadout, index, vehicles_info.key(), vehicles.len()));
+            participants.push(Participant::new(
+                client,
+                avatar,
+                loadout,
+                index,
+                vehicles_info.key(),
+                vehicles.len(),
+                player.dev,
+            ));
         }
 
         let starts = starts.map(|start| start.position);
         let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
         
-        let debug = if options.debug_draw.is_empty() {
-            None
-        } else {
-            let center = (map.bounds.0 + map.bounds.1) / 2.0;
-            Some(DebugFrame::new(app, space, Vec3::new(center.x, 0.0, center.y), options.debug_draw)?)
-        };
+        let center = (map.bounds.0 + map.bounds.1) / 2.0;
+        let debug = DebugFrame::new(app, space, Vec3::new(center.x, 0.0, center.y), options.debug_draw)?;
 
         Ok(Self {
             id,
@@ -337,7 +344,7 @@ impl Battle {
             world,
             shells: Shells::default(),
             areas,
-            debug,
+            debug: Some(debug),
             targets: Vec::new(),
             running: false,
         })
@@ -418,7 +425,8 @@ impl Battle {
         let period = self.period;
         let Some(participant) = self.participants.iter_mut().find(|participant| participant.client == client) else { return Ok(()) };
         participant.ready = true;
-        participant.show_period(app, period)
+        participant.show_period(app, period)?;
+        chat::init(app, participant.avatar)
     }
 
     /// A client leaves it: its vehicle stops, and stands there, nobody driving it.
@@ -567,6 +575,118 @@ impl Battle {
             }
             VehicleCell::StopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
+
+    }
+
+    // -- Its chat --
+
+    /// A chat action of a client, see the `chat` module: its battle chat set up again, or
+    /// a message, to its team or to all, shown to each it is for, or a command to the
+    /// server, a line starting with `/`, see [`Self::command`], its request answered.
+    pub fn chat(
+        &mut self,
+        app: &mut base::App,
+        client: ClientKey,
+        action_id: i16,
+        request_id: u16,
+        args: ChatArgs,
+    ) -> io::Result<()> {
+
+        let Some(from) = self.participants.iter().position(|participant| participant.client == client) else {
+            return Ok(());
+        };
+        let avatar = self.participants[from].avatar;
+
+        match action_id {
+            chat::REINIT_BATTLE_CHAT => chat::init(app, avatar),
+            chat::BROADCAST_BATTLE_MESSAGE => {
+
+                let text = String::from_utf8_lossy(&args.strArg1.0);
+                let common = args.int32Arg1 != 0;
+                match text.strip_prefix('/') {
+                    Some(line) => self.command(app, from, line)?,
+                    None => self.broadcast(app, from, &text, common)?,
+                }
+
+                chat::answer(app, avatar, request_id, action_id)
+
+            }
+            _ => {
+                debug!(battle = self.id, %client, action_id, ?args, "Ignored a chat action");
+                Ok(())
+            }
+        }
+
+    }
+
+    /// Show a participant's message to its team, or to all if `common`, as from its
+    /// vehicle.
+    fn broadcast(&self, app: &mut base::App, from: usize, text: &str, common: bool) -> io::Result<()> {
+
+        let sender = &self.vehicles[self.participants[from].vehicle];
+        info!(battle = self.id, entity_id = %sender.entity.id(), common, "Sent a chat message: {text}");
+
+        let shown = self.participants.iter()
+            .filter(|participant| common || self.vehicles[participant.vehicle].team == sender.team);
+        for participant in shown {
+            chat::message(app, participant.avatar, sender.entity.id(), common, text)?;
+        }
+        Ok(())
+
+    }
+
+    /// A participant's command to the server, its chat line after its `/`, answered to it
+    /// alone, as a message of the server, see `chat::server_message`:
+    ///
+    /// ```text
+    ///   /debug                 the debug drawing's channels, see `debug_command`
+    ///   /debug <channel>...    each of these channels drawn if it wasn't, else no more
+    ///   /debug off             none drawn
+    /// ```
+    fn command(&mut self, app: &mut base::App, from: usize, line: &str) -> io::Result<()> {
+
+        let mut words = line.split_whitespace();
+        let reply = match words.next() {
+            Some("debug") => self.debug_command(from, words),
+            Some(name) => Err(format!("Unknown command: /{name}")),
+            None => Err("No command after /".to_string()),
+        };
+
+        let avatar = self.participants[from].avatar;
+        match reply {
+            Ok(text) => chat::server_message(app, avatar, &text, false),
+            Err(text) => chat::server_message(app, avatar, &text, true),
+        }
+
+    }
+
+    /// The `/debug` command of a participant, with the words after it, see
+    /// [`Self::command`], for devs only: the channels drawn after it, of all, else what
+    /// is wrong. None changes if one of its words is no channel.
+    fn debug_command<'a>(&mut self, from: usize, words: impl Iterator<Item = &'a str>) -> Result<String, String> {
+
+        if !self.participants[from].dev {
+            return Err("Only devs may use /debug".to_string());
+        }
+        let Some(frame) = &mut self.debug else {
+            return Err("No debug drawing in this battle".to_string());
+        };
+
+        let mut channels = frame.channels();
+        for word in words {
+            if word == "off" {
+                channels = DebugChannels::default();
+                continue;
+            }
+            match DebugChannel::from_str(word, true) {
+                Ok(channel) => channels.toggle(channel),
+                Err(_) => return Err(format!("Unknown debug channel: {word}, of {}", DebugChannels::all())),
+            }
+        }
+
+        frame.set_channels(channels);
+        info!(battle = self.id, %channels, "Changed the debug drawing's channels");
+        Ok(format!("Debug drawing: {channels}, of {}", DebugChannels::all()))
 
     }
 

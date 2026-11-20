@@ -1,15 +1,17 @@
 //! What a battle draws in its clients' world to be debugged, by channel, those chosen
-//! with `--debug-draw`: a [`DebugDrawEntity`], every client seeing it.
+//! with `--debug-draw`, then by its clients' `/debug`: a [`DebugDrawEntity`], every
+//! client seeing it.
 //!
 //! A battle has a [`DebugFrame`], kept from a tick to the next. Each tick, it opens it
 //! on its thread, cleared, see [`DebugFrame::begin`], then whatever has something to
 //! debug draws in it as it computes, however deep, channel by channel, see
-//! [`DebugChannel`]: a [`sphere`], a [`line`] or a [`text`], nothing if the channel
-//! isn't drawn, no frame is open, or what draws is [`muted`]. Then the battle takes it
-//! back and shows it, see [`DebugFrame::end`] and [`DebugFrame::show`]. The frame keeps
-//! its groups and their room from a tick to the next: drawing the same as the last tick
-//! takes no memory, only what changed and is sent does. Between ticks, the battle opens
-//! it as it is, see [`DebugFrame::open`], for what happens then, a client's shot.
+//! [`DebugChannel`]: a [`sphere`], a [`line`], a [`cross`] or a [`text`], nothing if
+//! the channel isn't drawn, no frame is open, or what draws is [`muted`]. Then the
+//! battle takes it back and shows it, see [`DebugFrame::end`] and [`DebugFrame::show`].
+//! The frame keeps its groups and their room from a tick to the next: drawing the same
+//! as the last tick takes no memory, only what changed and is sent does. Between ticks,
+//! the battle opens it as it is, see [`DebugFrame::open`], for what happens then, a
+//! client's shot.
 //!
 //! What is drawn [`lasting`] is kept by the frame for that long, drawn again each tick:
 //! a shell's flight, drawn once as it is worked out, when it is fired.
@@ -39,6 +41,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::cell::RefCell;
+use std::fmt;
 use std::io;
 
 use clap::ValueEnum;
@@ -57,6 +60,8 @@ const SNAP: f32 = 0.01;
 /// behind its own vehicle. Our client mod ignores it, drawing its texts on the screen as
 /// big as their font however far, see its `debug_draw`.
 const TEXT_SIZE: f32 = 2.0;
+/// How big a cross is along each axis, in metres, see [`cross`].
+const CROSS_SIZE: f32 = 0.3;
 
 thread_local! {
     /// The frame open on this thread, see [`DebugFrame::begin`].
@@ -64,8 +69,8 @@ thread_local! {
 }
 
 
-/// What a battle may draw to be debugged, each chosen with `--debug-draw`, see the
-/// module's documentation.
+/// What a battle may draw to be debugged, each chosen with `--debug-draw` or `/debug`,
+/// see the module's documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DebugChannel {
     /// Under each vehicle, how its enemies best look at it, see `Spotting::debug_draw`.
@@ -160,8 +165,8 @@ struct Drawn {
 
 impl DebugChannel {
 
-    /// Its name, as `--debug-draw` takes it.
-    fn name(self) -> &'static str {
+    /// Its name, as `--debug-draw` and `/debug` take it.
+    pub fn name(self) -> &'static str {
         match self {
             DebugChannel::Spotting => "spotting",
             DebugChannel::SpotPoints => "spot-points",
@@ -179,16 +184,48 @@ impl DebugChannels {
         Self(channels.iter().fold(0, |set, &channel| set | 1 << channel as u32))
     }
 
+    /// Every channel.
+    pub fn all() -> Self {
+        Self::of(DebugChannel::value_variants())
+    }
+
     /// Whether it has no channel.
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Whether it has this channel.
-    fn contains(self, channel: DebugChannel) -> bool {
+    pub fn contains(self, channel: DebugChannel) -> bool {
         self.0 & 1 << channel as u32 != 0
     }
 
+    /// Take this channel out if it has it, else put it in.
+    pub fn toggle(&mut self, channel: DebugChannel) {
+        self.0 ^= 1 << channel as u32;
+    }
+
+}
+
+/// Its channels' names, `none` if it has none.
+impl fmt::Display for DebugChannels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+
+        if self.is_empty() {
+            return f.write_str("none");
+        }
+
+        let channels = DebugChannel::value_variants()
+            .iter()
+            .filter(|&&channel| self.contains(channel));
+        for (index, channel) in channels.enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str(channel.name())?;
+        }
+        Ok(())
+
+    }
 }
 
 impl DebugPlace {
@@ -231,6 +268,16 @@ impl DebugFrame {
             drawing: Vec::new(),
         })
 
+    }
+
+    /// The channels it draws.
+    pub fn channels(&self) -> DebugChannels {
+        self.channels
+    }
+
+    /// Draw these channels from now on.
+    pub fn set_channels(&mut self, channels: DebugChannels) {
+        self.channels = channels;
     }
 
     /// Open it on this thread, for a tick at game time `now` to draw in, cleared: the
@@ -447,6 +494,15 @@ pub fn line(channel: DebugChannel, from: Vec3, to: Vec3, color: Vec4) {
         width: (red << 16 | green << 8 | blue) as f32,
     }));
 
+}
+
+/// A cross at `at`, in the world, in this colour, see [`line`]: a line along each axis,
+/// [`CROSS_SIZE`] long, through it.
+pub fn cross(channel: DebugChannel, at: Vec3, color: Vec4) {
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let half = axis * CROSS_SIZE / 2.0;
+        line(channel, at - half, at + half, color);
+    }
 }
 
 /// A text at `at`, in the world, of several lines, in this colour, red, green, blue and

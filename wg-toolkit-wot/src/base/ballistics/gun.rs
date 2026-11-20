@@ -33,12 +33,11 @@ const RICOCHET_STANDOFF: f32 = 0.001;
 
 /// How a shell's flight is drawn to be debugged, in [`DebugChannel::Shells`], see
 /// [`fly`]: for this long, in seconds of game time, a line every this many of its steps,
-/// yellow from its gun, orange off a ricochet; a cross this big, in metres, where it
-/// broke through a destructible, violet, and where it ends, red on a vehicle, green on
-/// the terrain, blue on a static model, white out of range. Of 255.
+/// yellow from its gun, orange off a ricochet; a cross where it broke through a
+/// destructible, violet, and where it ends, red on a vehicle, green on the terrain, blue
+/// on a static model, white out of range. Of 255.
 const DEBUG_SHOT_SECONDS: f32 = 5.0;
 const DEBUG_PATH_STEPS: u32 = 5;
-const DEBUG_CROSS: f32 = 0.3;
 const DEBUG_FIRED: Vec4 = Vec4::new(255.0, 230.0, 60.0, 255.0);
 const DEBUG_RICOCHET: Vec4 = Vec4::new(255.0, 140.0, 30.0, 255.0);
 const DEBUG_THROUGH: Vec4 = Vec4::new(190.0, 110.0, 255.0, 255.0);
@@ -657,7 +656,7 @@ fn follow(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehic
             let left = obstacles.space.destructibles.shoot_through_loss.apply(pen);
             pen_factor = if pen > 0.0 { pen_factor * left / pen } else { 0.0 };
             through.push(piece);
-            debug_cross(position.lerp(next, t), DEBUG_THROUGH);
+            debug::cross(DebugChannel::Shells, position.lerp(next, t), DEBUG_THROUGH);
         }
 
         if let Some((t, landing)) = first {
@@ -673,7 +672,6 @@ fn follow(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehic
                 pen_factor,
             };
         }
-        
         if (next - start).length() >= range {
             debug::line(DebugChannel::Shells, debug_from, next, debug_color);
             debug_landing(next, &ShotLanding::Range);
@@ -709,15 +707,7 @@ fn debug_landing(at: Vec3, landing: &ShotLanding) {
         ShotLanding::Static { .. } => DEBUG_STATIC,
         ShotLanding::Range => DEBUG_RANGE,
     };
-    debug_cross(at, color);
-}
-
-/// Draw a cross at `at` to be debugged, [`DEBUG_CROSS`] big along each axis.
-fn debug_cross(at: Vec3, color: Vec4) {
-    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
-        let half = axis * DEBUG_CROSS / 2.0;
-        debug::line(DebugChannel::Shells, at - half, at + half, color);
-    }
+    debug::cross(DebugChannel::Shells, at, color);
 }
 
 /// The static triangles a step of a shell from `from` to `to`, starting `time` after its

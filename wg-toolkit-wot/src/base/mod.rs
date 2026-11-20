@@ -44,8 +44,8 @@ use wgtk::pxml;
 
 use crate::game::schema::{
     self, Account, AccountBase, AmmoViews, Avatar, AvatarBase, AvatarCell, AvatarCellData, AvatarData, BattleChatRestriction,
-    GunReloadTime, PlayLimits, RemoteCamera, ServerStats, TargetingInfo, VehicleAmmo, VehicleCell, VehicleHealthInfo,
-    VehicleSetting,
+    ChatArgs, GunReloadTime, PlayLimits, RemoteCamera, ServerStats, TargetingInfo, VehicleAmmo, VehicleCell,
+    VehicleHealthInfo, VehicleSetting,
 };
 use crate::game::account_commands::{
     token_type, CMD_ADD_INT_USER_SETTINGS, CMD_DEQUEUE_FROM_BATTLE_QUEUE, CMD_ENQUEUE_IN_BATTLE_QUEUE, CMD_LOG_CLIENT_XMPP_EVENTS,
@@ -420,6 +420,11 @@ impl BaseThread {
                         Some((_, AvatarBase::LeaveArena {})) => {
                             if let Err(e) = self.leave_battle(event.client) {
                                 warn!(client = %event.client, "Failed to leave the battle: {e}");
+                            }
+                        }
+                        Some((_, AvatarBase::MessengerOnActionByClientChat2 { action_id, request_id, args })) => {
+                            if let Err(e) = self.battle_chat(event.client, action_id, request_id, args) {
+                                warn!(client = %event.client, action_id, "Failed to answer a chat action: {e}");
                             }
                         }
                         None => match self.app.decode::<AccountBase>(event.entity, &event.call) {
@@ -809,6 +814,13 @@ impl BaseThread {
         let Self { app, battle_clients, battles, .. } = self;
         let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
         battle.ready(app, client)
+    }
+
+    /// A chat action of the client in its battle, see `Battle::chat`.
+    fn battle_chat(&mut self, client: ClientKey, action_id: i16, request_id: u16, args: ChatArgs) -> io::Result<()> {
+        let Self { app, battle_clients, battles, .. } = self;
+        let Some(battle) = battle_clients.get(&client).and_then(|c| battles.get_mut(&c.battle)) else { return Ok(()) };
+        battle.chat(app, client, action_id, request_id, args)
     }
 
     /// A request of the client's account, those we don't know being left unanswered. The
