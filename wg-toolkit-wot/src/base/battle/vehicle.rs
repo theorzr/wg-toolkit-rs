@@ -615,7 +615,7 @@ impl BattleVehicle {
     /// It takes a shell's damage at game time `now`, in this battle, varied by up to
     /// [`DAMAGE_SPREAD`] either way: its health drops, in its `OwnVehicle` too when a
     /// client drives it, and the clients see the hit, as the captured server shows one. A
-    /// damaging hit sets it on fire, which a kill puts out. Whether it is killed.
+    /// damaging hit sets it on fire, which a kill puts out. The damage it took.
     pub fn take_damage(
         &mut self,
         app: &mut base::App,
@@ -624,7 +624,7 @@ impl BattleVehicle {
         shot: &Shot,
         shell_hit: &ShellHit,
         now: f64,
-    ) -> io::Result<bool> {
+    ) -> io::Result<i64> {
 
         let entity_id = self.entity.id();
         let amount = spread_damage(shell_hit.damage);
@@ -666,7 +666,7 @@ impl BattleVehicle {
                 info!(battle, %entity_id, "Set a vehicle on fire");
             }
         }
-        Ok(killed)
+        Ok(amount)
 
     }
 

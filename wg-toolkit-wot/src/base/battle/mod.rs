@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::{Affine3A, Vec2, Vec3};
+use glam::{Affine3A, Vec2, Vec3, Vec4};
 use clap::ValueEnum;
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
@@ -58,11 +58,11 @@ use crate::base::{
     avatar_cell_data, VehicleLoadout, EXPLOSION_STEP, GROUND_EFFECT_MATERIAL, NO_PREFAB_EFFECTS, SETTING_SIEGE_MODE,
     TICK,
 };
-use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget};
+use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotTarget, DEBUG_SHOT_SECONDS};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
 use crate::base::physics::{Vehicle, VehicleId, World};
-use crate::base::debug::{DebugChannel, DebugChannels, DebugFrame};
+use crate::base::debug::{self, DebugChannel, DebugChannels, DebugFrame};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
@@ -91,6 +91,11 @@ const VIEW_RANGE: f32 = 445.0;
 /// How long a battle waits for the clients switched into it to enter before it is made
 /// with those that did. Our choice: a client logs in again within a second or two.
 const GATHER_WAIT: Duration = Duration::from_secs(20);
+
+/// How a shell's hit on a vehicle is drawn to be debugged, in [`DebugChannel::Shells`],
+/// see [`debug_hit`]: a text this many metres above where it hit, white.
+const DEBUG_HIT_RISE: f32 = 1.0;
+const DEBUG_HIT_TEXT: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
 
 
 /// A battle, with its clients, see the module's documentation.
@@ -894,7 +899,8 @@ impl Battle {
                 info!(battle = id, shot = shot.id, entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
-                self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
+                let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
+                debug_hit(shot.end, &impact.trace, impact.damage, dealt);
                 if impact.outcome == ImpactOutcome::Ricochet {
                     let direction = impact::reflect(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, direction, Some((entity_id, transforms)))?;
@@ -945,8 +951,15 @@ impl Battle {
 
     /// A vehicle of it alive takes a shell's damage, see [`BattleVehicle::take_damage`],
     /// every client listing it destroyed once killed, and the client that fired it, if
-    /// any, learns the hit's result.
-    fn hit(&mut self, app: &mut base::App, shooter: EntityId, entity_id: u32, shot: &Shot, shell_hit: &ShellHit) -> io::Result<()> {
+    /// any, learns the hit's result. The damage it took, if it was alive.
+    fn hit(
+        &mut self,
+        app: &mut base::App,
+        shooter: EntityId,
+        entity_id: u32,
+        shot: &Shot,
+        shell_hit: &ShellHit,
+    ) -> io::Result<Option<i64>> {
 
         let id = self.id;
         let now = self.game_time();
@@ -956,15 +969,16 @@ impl Battle {
             .and_then(|vehicle| vehicle.client_driver())
             .map(|driver| driver.avatar());
         let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
-            return Ok(());
+            return Ok(None);
         };
 
-        let killed = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
+        let dealt = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
+        let killed = !vehicle.alive();
         if killed {
             vehicle.mark_killed(app, &vehicles_infos, shooter)?;
         }
 
-        let Some(shooter_avatar) = shooter_avatar else { return Ok(()) };
+        let Some(shooter_avatar) = shooter_avatar else { return Ok(Some(dealt)) };
         let mut flags = shell_hit.flags;
         if killed {
             flags |= HIT_FLAG_VEHICLE_KILLED;
@@ -973,7 +987,8 @@ impl Battle {
             gunInstallationIndex: 0,
             hitFlags: flags,
             vehicleID: vehicle.entity.id(),
-        }])
+        }])?;
+        Ok(Some(dealt))
 
     }
 
@@ -1019,15 +1034,43 @@ impl Battle {
     /// An HE shell explodes on the ground: the vehicles in its reach take its damage,
     /// but the shooter's own.
     fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+
         let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
-            .filter_map(|target| Some((target.entity_id, impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?)))
+            .filter_map(|target| {
+                let explosion = impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?;
+                let reached = target.transforms[explosion.hit.part as usize].transform_point3(explosion.hit.local_point);
+                Some((target.entity_id, explosion, reached))
+            })
             .collect();
-        for (entity_id, explosion) in explosions {
+
+        for (entity_id, explosion, reached) in explosions {
             info!(battle = self.id, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
-            self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
+            let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
+            debug_hit(reached, &explosion.trace, explosion.damage, dealt);
         }
         Ok(())
+
     }
+
+}
+
+/// Draw a shell's hit on a vehicle to be debugged, above `at`, for as long as its
+/// flight: how it went, see [`impact::Impact::trace`], then its damage and the damage
+/// the vehicle took, after its spread, unless it was destroyed already.
+fn debug_hit(at: Vec3, trace: &[String], damage: f32, dealt: Option<i64>) {
+
+    if !debug::draws(DebugChannel::Shells) {
+        return;
+    }
+
+    let dealt = match dealt {
+        Some(dealt) => format!("{damage:.0} damage, {dealt} dealt"),
+        None => format!("{damage:.0} damage, already destroyed"),
+    };
+    let text = format!("{}\n{dealt}", trace.join("\n"));
+    debug::lasting(DEBUG_SHOT_SECONDS, || {
+        debug::text(DebugChannel::Shells, at + Vec3::Y * DEBUG_HIT_RISE, text, DEBUG_HIT_TEXT);
+    });
 
 }
 

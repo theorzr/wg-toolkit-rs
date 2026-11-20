@@ -36,7 +36,7 @@ const RICOCHET_STANDOFF: f32 = 0.001;
 /// yellow from its gun, orange off a ricochet; a cross where it broke through a
 /// destructible, violet, and where it ends, red on a vehicle, green on the terrain, blue
 /// on a static model, white out of range. Of 255.
-const DEBUG_SHOT_SECONDS: f32 = 5.0;
+pub const DEBUG_SHOT_SECONDS: f32 = 10.0;
 const DEBUG_PATH_STEPS: u32 = 5;
 const DEBUG_FIRED: Vec4 = Vec4::new(255.0, 230.0, 60.0, 255.0);
 const DEBUG_RICOCHET: Vec4 = Vec4::new(255.0, 140.0, 30.0, 255.0);
@@ -299,7 +299,9 @@ impl GunLoader {
             range,
             pen_factor: 1.0,
         };
+        
         let flight = fly(&def, launch, obstacles, vehicles);
+
         Some(Shot {
             id,
             def,
@@ -483,13 +485,16 @@ impl Shot {
     /// `pen_factor` of its penetration. None once it ricocheted [`MAX_RICOCHETS`] times,
     /// or out of range.
     pub fn ricochet(&self, direction: Vec3, pen_factor: f32, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Option<Shot> {
+        
         if self.ricochets >= MAX_RICOCHETS {
             return None;
         }
+
         let range = self.range - self.start.distance(self.end);
         if range <= 0.0 {
             return None;
         }
+
         let start = self.end - self.end_velocity.normalize_or_zero() * RICOCHET_STANDOFF;
         let velocity = direction.normalize() * self.end_velocity.length();
         let launch = Launch {
@@ -499,7 +504,9 @@ impl Shot {
             range,
             pen_factor: self.pen_factor * pen_factor,
         };
+
         let flight = fly(&self.def, launch, obstacles, vehicles);
+
         Some(Shot {
             id: self.id,
             def: self.def.clone(),
@@ -516,6 +523,7 @@ impl Shot {
             through: flight.through,
             burst: None,
         })
+
     }
 
     /// How far it flew from its gun to `end`, in metres.
@@ -672,6 +680,7 @@ fn follow(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehic
                 pen_factor,
             };
         }
+
         if (next - start).length() >= range {
             debug::line(DebugChannel::Shells, debug_from, next, debug_color);
             debug_landing(next, &ShotLanding::Range);
