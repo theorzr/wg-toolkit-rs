@@ -450,7 +450,7 @@ impl Battle {
 
         match call {
             AvatarCell::VehicleShoot {} => {
-                if let Err(e) = self.shoot(app, client) {
+                if let Err(e) = self.debugging(|battle| battle.shoot(app, client)) {
                     warn!(%client, "Failed to shoot: {e}");
                 }
                 return;
@@ -479,6 +479,19 @@ impl Battle {
             AvatarCell::VehicleStopTrackingWithGun { yaw, pitch } => hold_gun(client, driven, yaw, pitch),
         }
 
+    }
+
+    /// Run `call` between ticks with its frame open to be debugged, as it is, see
+    /// [`DebugFrame::open`].
+    fn debugging<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
+        if let Some(frame) = self.debug.take() {
+            frame.open();
+        }
+        let result = call(self);
+        if let Some(frame) = DebugFrame::end() {
+            self.debug = Some(frame);
+        }
+        result
     }
 
     /// Fire a client's gun, if loaded and the battle is on: the shell's tracer and the
@@ -561,10 +574,15 @@ impl Battle {
 
     /// End a tick: go to its next period when due, over once a team is exterminated, see
     /// [`Self::exterminated`], step it, once a client has its vehicle, break what shells
-    /// got through, land the shells due, then tell what broke.
+    /// got through, land the shells due, then tell what broke. All drawing to be
+    /// debugged, see the `debug` module.
     pub fn tick(&mut self, app: &mut base::App) {
 
         let id = self.id;
+        if let Some(frame) = self.debug.take() {
+            frame.begin(self.game_time());
+        }
+
         let ready = self.participants.iter().all(|participant| participant.ready);
         if let Some(period) = self.period.next(ready, self.exterminated()) {
             self.period = period;
@@ -596,6 +614,14 @@ impl Battle {
             warn!(battle = id, "Failed to tell the destructibles broken: {e}");
         }
 
+        if let Some(frame) = DebugFrame::end() {
+            let vehicles = &self.vehicles;
+            let shown = self.debug.insert(frame).show(app, |vehicle| debug_entity_id(vehicles, vehicle));
+            if let Err(e) = shown {
+                warn!(battle = id, "Failed to draw to be debugged: {e}");
+            }
+        }
+
     }
 
     /// Step it by a tick: every vehicle moves as its driver drives it, a bot by what its
@@ -617,11 +643,7 @@ impl Battle {
         let drives = fighting && self.options.bots_drive;
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, spotting, starts, shells, targets, debug, .. } = self;
-        
-        if let Some(frame) = debug.take() {
-            frame.begin();
-        }
+        let Self { participants, vehicles, world, spotting, starts, shells, targets, .. } = self;
 
         for vehicle in vehicles.iter_mut() {
             vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
@@ -645,9 +667,6 @@ impl Battle {
         }
         
         spotting.debug_draw(vehicles, world);
-        if let Some(frame) = DebugFrame::end() {
-            debug.insert(frame).show(app, |id| debug_entity_id(vehicles, id))?;
-        }
 
         for index in 0..vehicles.len() {
 

@@ -8,7 +8,11 @@
 //! isn't drawn, no frame is open, or what draws is [`muted`]. Then the battle takes it
 //! back and shows it, see [`DebugFrame::end`] and [`DebugFrame::show`]. The frame keeps
 //! its groups and their room from a tick to the next: drawing the same as the last tick
-//! takes no memory, only what changed and is sent does.
+//! takes no memory, only what changed and is sent does. Between ticks, the battle opens
+//! it as it is, see [`DebugFrame::open`], for what happens then, a client's shot.
+//!
+//! What is drawn [`lasting`] is kept by the frame for that long, drawn again each tick:
+//! a shell's flight, drawn once as it is worked out, when it is fired.
 //!
 //! What is drawn is given in the world, where it is as it is drawn, and goes where
 //! [`at`] says: in the world, by default, or in a vehicle's frame, see
@@ -71,6 +75,9 @@ pub enum DebugChannel {
     /// Where each vehicle touches the space and the others, as its body steps, see the
     /// physics' `body` and `collision` modules.
     Contacts,
+    /// Each shell's flight, as it is worked out, and where it ends, see the ballistics'
+    /// `gun` module.
+    Shells,
 }
 
 /// A set of [`DebugChannel`]s.
@@ -97,6 +104,12 @@ pub struct DebugFrame {
     place: DebugPlace,
     /// Whether what is drawn now is dropped, see [`muted`].
     muted: bool,
+    /// The game time of the tick it is open for, see [`Self::begin`].
+    now: f64,
+    /// Until when what is drawn now is kept, if it is, see [`lasting`].
+    until: Option<f64>,
+    /// What is drawn lasting, see [`lasting`].
+    lasting: Vec<Lasting>,
     /// Its groups, those drawn in this tick and those kept from the last, cleared, for
     /// their room.
     groups: Vec<Group>,
@@ -114,6 +127,24 @@ struct Group {
     vehicle: Option<VehicleId>,
     object: DebugDrawObject,
     used: bool,
+}
+
+/// A shape a [`DebugFrame`] keeps, see [`lasting`]: until when, its channel, the vehicle
+/// it follows, if any, and itself, in the frame it is drawn in.
+#[derive(Debug)]
+struct Lasting {
+    until: f64,
+    channel: DebugChannel,
+    vehicle: Option<VehicleId>,
+    shape: Shape,
+}
+
+/// A shape drawn, in the frame it is drawn in.
+#[derive(Debug, Clone)]
+enum Shape {
+    Sphere(DebugSphere),
+    Line(DebugLine),
+    Text(DebugText),
 }
 
 /// A group a [`DebugFrame`] draws: which of its groups, the id of the entity it follows,
@@ -135,6 +166,7 @@ impl DebugChannel {
             DebugChannel::Spotting => "spotting",
             DebugChannel::SpotPoints => "spot-points",
             DebugChannel::Contacts => "contacts",
+            DebugChannel::Shells => "shells",
         }
     }
 
@@ -173,7 +205,12 @@ impl DebugFrame {
 
     /// Its entity, in a battle's space, at `center`, seen by every client, drawing these
     /// channels.
-    pub fn new(app: &mut base::App, space: SpaceKey, center: Vec3, channels: DebugChannels) -> io::Result<Self> {
+    pub fn new(
+        app: &mut base::App,
+        space: SpaceKey,
+        center: Vec3,
+        channels: DebugChannels,
+    ) -> io::Result<Self> {
 
         let entity = app.create_entity::<DebugDrawEntity>(space, EntityInit {
             position: center,
@@ -186,6 +223,9 @@ impl DebugFrame {
             channels,
             place: DebugPlace::World,
             muted: false,
+            now: 0.0,
+            until: None,
+            lasting: Vec::new(),
             groups: Vec::new(),
             drawn: Vec::new(),
             drawing: Vec::new(),
@@ -193,9 +233,11 @@ impl DebugFrame {
 
     }
 
-    /// Open it on this thread, for a tick to draw in, cleared: the groups drawn in the
-    /// last kept, empty, the others gone. See [`Self::end`].
-    pub fn begin(mut self) {
+    /// Open it on this thread, for a tick at game time `now` to draw in, cleared: the
+    /// groups drawn in the last kept, empty, the others gone, but what lasts. See
+    /// [`Self::end`].
+    pub fn begin(mut self, now: f64) {
+
         self.groups.retain(|group| group.used);
         for group in &mut self.groups {
             let DebugDrawObject { lines, boxes, spheres, texts, .. } = &mut group.object;
@@ -205,8 +247,18 @@ impl DebugFrame {
             texts.clear();
             group.used = false;
         }
+
+        self.now = now;
+        self.open();
+
+    }
+
+    /// Open it on this thread as it is, between ticks: what is drawn then goes with the
+    /// next tick's, if lasting, see [`lasting`]. See [`Self::end`].
+    pub fn open(mut self) {
         self.place = DebugPlace::World;
         self.muted = false;
+        self.until = None;
         FRAME.set(Some(self));
     }
 
@@ -218,12 +270,29 @@ impl DebugFrame {
     /// Draw it in the clients' world, each vehicle's groups by its entity's id, as
     /// `entity_id` gives it, those of a vehicle without dropped: the groups that changed
     /// since the last tick, or came, drawn anew, a version more, those gone taken away.
-    /// Nothing is sent if none did; what is sent is moved out of its groups.
-    pub fn show(&mut self, app: &mut base::App, entity_id: impl Fn(VehicleId) -> Option<u32>) -> io::Result<()> {
+    /// Nothing is sent if none did; what is sent is moved out of its groups. What lasts
+    /// is drawn again, until it is over.
+    pub fn show(
+        &mut self,
+        app: &mut base::App,
+        entity_id: impl Fn(VehicleId) -> Option<u32>,
+    ) -> io::Result<()> {
 
+        // What lasts, drawn again.
+        let now = self.now;
+        self.lasting.retain(|lasting| lasting.until > now);
+        for lasting in &self.lasting {
+            let object = group_in(&mut self.groups, lasting.channel, lasting.vehicle);
+            add(object, lasting.shape.clone());
+        }
+
+        // Each group drawn, by its name, a version more if it changed.
         self.drawing.clear();
         let mut changed = false;
-        for (index, group) in self.groups.iter().enumerate().filter(|(_, group)| group.used) {
+        let used = self.groups.iter()
+            .enumerate()
+            .filter(|(_, group)| group.used);
+        for (index, group) in used {
 
             let entity_id = match group.vehicle {
                 None => None,
@@ -232,6 +301,7 @@ impl DebugFrame {
                     None => continue,
                 },
             };
+
             let name = hash_of(&(group.channel as u32, entity_id));
             let shapes = shapes_hash(&group.object);
             let version = match self.drawn.iter().find(|before| before.name == name) {
@@ -262,45 +332,27 @@ impl DebugFrame {
             return Ok(());
         }
 
+        // Sent, moved out of the groups.
         let objects = self.drawn.iter()
             .map(|drawn| {
+
                 let group = &mut self.groups[drawn.group];
                 let name = match drawn.entity_id {
                     None => group.channel.name().to_string(),
                     Some(entity_id) => format!("entity:{entity_id}:{}", group.channel.name()),
                 };
+
                 DebugDrawObject {
                     name,
                     version: drawn.version,
                     destroyTime: -1.0,
                     ..std::mem::take(&mut group.object)
                 }
+
             })
             .collect();
+
         app.entity(self.entity)?.set_drawObjects(objects)
-
-    }
-
-    /// The group of a channel, following a vehicle, if any, made if new.
-    fn group(&mut self, channel: DebugChannel, vehicle: Option<VehicleId>) -> &mut DebugDrawObject {
-
-        let index = match self.groups.iter()
-            .position(|group| group.channel == channel && group.vehicle == vehicle) {
-                Some(index) => index,
-                None => {
-                    self.groups.push(Group {
-                        channel,
-                        vehicle,
-                        object: DebugDrawObject::default(),
-                        used: false,
-                    });
-                    self.groups.len() - 1
-                }
-            };
-
-        let group = &mut self.groups[index];
-        group.used = true;
-        &mut group.object
 
     }
 
@@ -309,39 +361,72 @@ impl DebugFrame {
 /// Whether what is drawn now in a channel is kept: a frame is open, drawing it, not
 /// muted. To make no text that would be dropped.
 pub fn draws(channel: DebugChannel) -> bool {
-    FRAME.with_borrow(|frame| frame.as_ref()
-        .is_some_and(|frame| !frame.muted && frame.channels.contains(channel)))
+    FRAME.with_borrow(|frame| {
+        frame.as_ref().is_some_and(|frame| !frame.muted && frame.channels.contains(channel))
+    })
 }
 
 /// Draw in this place while `draw` runs, see [`DebugPlace`], then where it was.
 pub fn at<R>(place: DebugPlace, draw: impl FnOnce() -> R) -> R {
-    let before = FRAME.with_borrow_mut(|frame| frame.as_mut()
-        .map(|frame| std::mem::replace(&mut frame.place, place)));
+
+    let before = FRAME.with_borrow_mut(|frame| {
+        frame.as_mut().map(|frame| std::mem::replace(&mut frame.place, place))
+    });
+
     let result = draw();
+
     if let Some(before) = before {
         FRAME.with_borrow_mut(|frame| if let Some(frame) = frame {
             frame.place = before;
         });
     }
     result
+
+}
+
+/// Keep what is drawn while `draw` runs for `seconds` of game time, drawn again each
+/// tick, see the module's documentation.
+pub fn lasting<R>(seconds: f32, draw: impl FnOnce() -> R) -> R {
+
+    let before = FRAME.with_borrow_mut(|frame| {
+        frame.as_mut().map(|frame| {
+            let until = frame.now + f64::from(seconds);
+            std::mem::replace(&mut frame.until, Some(until))
+        })
+    });
+
+    let result = draw();
+
+    if let Some(before) = before {
+        FRAME.with_borrow_mut(|frame| if let Some(frame) = frame {
+            frame.until = before;
+        });
+    }
+    result
+
 }
 
 /// Drop what is drawn while `draw` runs, wherever.
 pub fn muted<R>(draw: impl FnOnce() -> R) -> R {
-    let before = FRAME.with_borrow_mut(|frame| frame.as_mut()
-        .map(|frame| std::mem::replace(&mut frame.muted, true)));
+
+    let before = FRAME.with_borrow_mut(|frame| {
+        frame.as_mut().map(|frame| std::mem::replace(&mut frame.muted, true))
+    });
+
     let result = draw();
+
     if let Some(before) = before {
         FRAME.with_borrow_mut(|frame| if let Some(frame) = frame {
             frame.muted = before;
         });
     }
     result
+
 }
 
 /// A sphere at `center`, in the world, of this radius, in metres.
 pub fn sphere(channel: DebugChannel, center: Vec3, radius: f32) {
-    draw(channel, |object, local| object.spheres.push(DebugSphere {
+    draw(channel, |local| Shape::Sphere(DebugSphere {
         position: snap(local.transform_point3(center)),
         radius: Vec3::splat(radius),
     }));
@@ -350,21 +435,24 @@ pub fn sphere(channel: DebugChannel, center: Vec3, radius: f32) {
 /// A line from `from` to `to`, in the world, in this colour, red, green and blue, of
 /// 255, see the module's documentation.
 pub fn line(channel: DebugChannel, from: Vec3, to: Vec3, color: Vec4) {
+
     let [red, green, blue, _] = color.to_array()
         .map(|channel| channel.clamp(0.0, 255.0) as u32);
-    draw(channel, |object, local| object.lines.push(DebugLine {
+
+    draw(channel, |local| Shape::Line(DebugLine {
         points: [
             snap(local.transform_point3(from)),
             snap(local.transform_point3(to)),
         ],
         width: (red << 16 | green << 8 | blue) as f32,
     }));
+
 }
 
 /// A text at `at`, in the world, of several lines, in this colour, red, green, blue and
 /// alpha, of 255. Made only if [`draws`] says it is kept.
 pub fn text(channel: DebugChannel, at: Vec3, text: String, color: Vec4) {
-    draw(channel, |object, local| object.texts.push(DebugText {
+    draw(channel, |local| Shape::Text(DebugText {
         position: snap(local.transform_point3(at)),
         text,
         color,
@@ -372,20 +460,72 @@ pub fn text(channel: DebugChannel, at: Vec3, text: String, color: Vec4) {
     }));
 }
 
-/// Add to the group of a channel where the frame open draws now, if kept, see
-/// [`draws`], given it and how to put what is in the world in its frame.
-fn draw(channel: DebugChannel, add: impl FnOnce(&mut DebugDrawObject, &Affine3A)) {
+/// Draw a shape in a channel, where the frame open draws now, if kept, see [`draws`],
+/// made by `shape` from how to put what is in the world in that frame: in its group, or
+/// kept, see [`lasting`].
+fn draw(channel: DebugChannel, shape: impl FnOnce(&Affine3A) -> Shape) {
     FRAME.with_borrow_mut(|frame| {
+
         let Some(frame) = frame else { return };
         if frame.muted || !frame.channels.contains(channel) {
             return;
         }
+
         let (vehicle, local) = match frame.place {
             DebugPlace::World => (None, Affine3A::IDENTITY),
             DebugPlace::On(vehicle, local) => (Some(vehicle), local),
         };
-        add(frame.group(channel, vehicle), &local);
+        let shape = shape(&local);
+
+        match frame.until {
+            Some(until) => frame.lasting.push(Lasting {
+                until,
+                channel,
+                vehicle,
+                shape,
+            }),
+            None => add(group_in(&mut frame.groups, channel, vehicle), shape),
+        }
+
     });
+}
+
+/// The group of a channel among these, following a vehicle, if any, made if new, see
+/// [`DebugFrame`].
+fn group_in(
+    groups: &mut Vec<Group>,
+    channel: DebugChannel,
+    vehicle: Option<VehicleId>,
+) -> &mut DebugDrawObject {
+
+    let found = groups.iter()
+        .position(|group| group.channel == channel && group.vehicle == vehicle);
+    let index = match found {
+        Some(index) => index,
+        None => {
+            groups.push(Group {
+                channel,
+                vehicle,
+                object: DebugDrawObject::default(),
+                used: false,
+            });
+            groups.len() - 1
+        }
+    };
+
+    let group = &mut groups[index];
+    group.used = true;
+    &mut group.object
+
+}
+
+/// Add a shape to what a group draws.
+fn add(object: &mut DebugDrawObject, shape: Shape) {
+    match shape {
+        Shape::Sphere(sphere) => object.spheres.push(sphere),
+        Shape::Line(line) => object.lines.push(line),
+        Shape::Text(text) => object.texts.push(text),
+    }
 }
 
 /// A point rounded to [`SNAP`].

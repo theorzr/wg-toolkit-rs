@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use glam::{Affine3A, Vec3};
+use glam::{Affine3A, Vec3, Vec4};
 use rand::Rng;
 
 use wgtk::space::statics::BodyKind;
@@ -15,6 +15,7 @@ use crate::game::collision::{segment_triangle, VehicleCollision, VehicleIntersec
 use crate::game::item_defs::{MagazineDef, ShellKind, ShotDef};
 
 use crate::base::physics::{DestructiblePiece, Dispersion, Rubble};
+use crate::base::debug::{self, DebugChannel};
 
 
 /// How many σ of its shots' normal distribution the dispersion's radius is, stopped, see
@@ -29,6 +30,22 @@ const MAX_RICOCHETS: u32 = 3;
 /// How far before the point it ricochets off a shell goes on from, in metres, as the
 /// server shows ricochets: for it not to meet what it ricochets off again.
 const RICOCHET_STANDOFF: f32 = 0.001;
+
+/// How a shell's flight is drawn to be debugged, in [`DebugChannel::Shells`], see
+/// [`fly`]: for this long, in seconds of game time, a line every this many of its steps,
+/// yellow from its gun, orange off a ricochet; a cross this big, in metres, where it
+/// broke through a destructible, violet, and where it ends, red on a vehicle, green on
+/// the terrain, blue on a static model, white out of range. Of 255.
+const DEBUG_SHOT_SECONDS: f32 = 5.0;
+const DEBUG_PATH_STEPS: u32 = 5;
+const DEBUG_CROSS: f32 = 0.3;
+const DEBUG_FIRED: Vec4 = Vec4::new(255.0, 230.0, 60.0, 255.0);
+const DEBUG_RICOCHET: Vec4 = Vec4::new(255.0, 140.0, 30.0, 255.0);
+const DEBUG_THROUGH: Vec4 = Vec4::new(190.0, 110.0, 255.0, 255.0);
+const DEBUG_VEHICLE: Vec4 = Vec4::new(255.0, 60.0, 60.0, 255.0);
+const DEBUG_TERRAIN: Vec4 = Vec4::new(120.0, 220.0, 70.0, 255.0);
+const DEBUG_STATIC: Vec4 = Vec4::new(70.0, 150.0, 255.0, 255.0);
+const DEBUG_RANGE: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
 
 
 #[derive(Debug, Clone)]
@@ -576,8 +593,14 @@ struct Flight {
 /// Follow a shell from its launch until the first thing that stops it: a vehicle, the
 /// terrain, a static model, or its range. Each step is a segment that is tested against
 /// all of them, the nearest along it winning. Destructibles weak enough are flown
-/// through, see [`ShotPiece`].
+/// through, see [`ShotPiece`]. Drawn to be debugged as it goes, lasting, see
+/// [`DEBUG_SHOT_SECONDS`].
 fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Flight {
+    debug::lasting(DEBUG_SHOT_SECONDS, || follow(def, launch, obstacles, vehicles))
+}
+
+/// Follow a shell's flight, see [`fly`].
+fn follow(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles: &[ShotTarget]) -> Flight {
 
     let Launch { start, velocity, flown, range, mut pen_factor } = launch;
     let mut position = start;
@@ -585,6 +608,11 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles
     let mut time = 0.0;
     let mut through = Vec::new();
     let mut crossed = Vec::new();
+
+    // Its path drawn from there, every DEBUG_PATH_STEPS steps.
+    let debug_color = if flown > 0.0 { DEBUG_RICOCHET } else { DEBUG_FIRED };
+    let mut debug_from = start;
+    let mut steps = 0;
 
     loop {
 
@@ -629,11 +657,15 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles
             let left = obstacles.space.destructibles.shoot_through_loss.apply(pen);
             pen_factor = if pen > 0.0 { pen_factor * left / pen } else { 0.0 };
             through.push(piece);
+            debug_cross(position.lerp(next, t), DEBUG_THROUGH);
         }
 
         if let Some((t, landing)) = first {
+            let end = position.lerp(next, t);
+            debug::line(DebugChannel::Shells, debug_from, end, debug_color);
+            debug_landing(end, &landing);
             return Flight {
-                end: position.lerp(next, t),
+                end,
                 end_velocity: velocity.lerp(next_velocity, t),
                 flight_time: time + FLIGHT_STEP * t,
                 landing,
@@ -641,7 +673,10 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles
                 pen_factor,
             };
         }
+        
         if (next - start).length() >= range {
+            debug::line(DebugChannel::Shells, debug_from, next, debug_color);
+            debug_landing(next, &ShotLanding::Range);
             return Flight {
                 end: next,
                 end_velocity: next_velocity,
@@ -655,9 +690,34 @@ fn fly(def: &ShotDef, launch: Launch, obstacles: Option<ShotObstacles>, vehicles
         position = next;
         velocity = next_velocity;
         time += FLIGHT_STEP;
+        steps += 1;
+        if steps % DEBUG_PATH_STEPS == 0 {
+            debug::line(DebugChannel::Shells, debug_from, position, debug_color);
+            debug_from = position;
+        }
 
     }
 
+}
+
+/// Draw where a shell ends to be debugged, a cross of the colour of what it lands on,
+/// see [`DEBUG_VEHICLE`].
+fn debug_landing(at: Vec3, landing: &ShotLanding) {
+    let color = match landing {
+        ShotLanding::Vehicle { .. } => DEBUG_VEHICLE,
+        ShotLanding::Terrain => DEBUG_TERRAIN,
+        ShotLanding::Static { .. } => DEBUG_STATIC,
+        ShotLanding::Range => DEBUG_RANGE,
+    };
+    debug_cross(at, color);
+}
+
+/// Draw a cross at `at` to be debugged, [`DEBUG_CROSS`] big along each axis.
+fn debug_cross(at: Vec3, color: Vec4) {
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let half = axis * DEBUG_CROSS / 2.0;
+        debug::line(DebugChannel::Shells, at - half, at + half, color);
+    }
 }
 
 /// The static triangles a step of a shell from `from` to `to`, starting `time` after its
