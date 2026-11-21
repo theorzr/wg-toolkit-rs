@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::io;
 
 use tracing::{debug, info, warn};
-use glam::{Affine3A, Vec2, Vec3, Vec4};
+use glam::{Vec2, Vec3, Vec4};
 use clap::ValueEnum;
 
 use wgtk::app::base::{self, CellPlayerInit, ClientKey, EntityInit, Interest, SpaceKey, Visibility};
@@ -131,7 +131,7 @@ pub struct Battle {
     areas: DestructibleAreas,
     /// What it draws in its clients' world to be debugged, if its options say so.
     debug: Option<DebugFrame>,
-    /// What shells hit, refilled by each shooter, kept to reuse its memory.
+    /// What shells hit, refilled as they fly, kept to reuse its memory.
     targets: Vec<ShotTarget>,
     /// Whether a client has its vehicle: it runs from then on.
     running: bool,
@@ -417,9 +417,10 @@ impl Battle {
 
     /// The vehicles the shells of `shooter` can hit: every one alive but its own.
     fn shell_targets(&self, shooter: EntityId) -> Vec<ShotTarget> {
-        let mut targets = Vec::with_capacity(self.vehicles.len());
-        fill_targets(&mut targets, &self.vehicles, &self.world, shooter);
-        targets
+        self.vehicles.iter()
+            .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
+            .map(|vehicle| vehicle.shot_target(&self.world))
+            .collect()
     }
 
     // -- Its clients --
@@ -463,7 +464,7 @@ impl Battle {
 
         match call {
             AvatarCell::VehicleShoot {} => {
-                if let Err(e) = self.debugging(|battle| battle.shoot(app, client)) {
+                if let Err(e) = self.shoot(app, client) {
                     warn!(%client, "Failed to shoot: {e}");
                 }
                 return;
@@ -494,19 +495,6 @@ impl Battle {
 
     }
 
-    /// Run `call` between ticks with its frame open to be debugged, as it is, see
-    /// [`DebugFrame::open`].
-    fn debugging<R>(&mut self, call: impl FnOnce(&mut Self) -> R) -> R {
-        if let Some(frame) = self.debug.take() {
-            frame.open();
-        }
-        let result = call(self);
-        if let Some(frame) = DebugFrame::end() {
-            self.debug = Some(frame);
-        }
-        result
-    }
-
     /// Fire a client's gun, if loaded and the battle is on: the shell's tracer and the
     /// gun's effects, of its whole burst, then one shell fewer, the shell it loads next
     /// and the reload, once the burst's other shells are fired too, see [`Self::step`].
@@ -520,21 +508,16 @@ impl Battle {
         }
         let Some(own) = self.own(client).filter(|&own| self.vehicles[own].alive()) else { return Ok(()) };
         let own_id = self.vehicles[own].entity.id();
-        let targets = self.shell_targets(own_id);
         let avatars = self.avatars();
         let Self { vehicles, world, shells, .. } = self;
         let own = &mut vehicles[own];
         let driven = world.vehicle(own.id);
         let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
-        let obstacles = ShotObstacles {
-            space: world.space(),
-            rubble: world.rubble(),
-        };
-        let Some(shot) = own.gun.fire(now, position, velocity, dispersion, Some(obstacles), &targets) else {
+        let Some(shot) = own.gun.fire(now, position, velocity, dispersion) else {
             debug!(%client, "Refused a shot: not loaded, or out of shells");
             return Ok(());
         };
-        info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+        info!(%client, shot = shot.id, burst = shot.burst, "Fired a shell from {:?} at {:?}", shot.start, shot.velocity);
         own.fired(now);
         own.show_gun(app, now)?;
         show_shot(app, &avatars, own.entity, &shot)?;
@@ -698,9 +681,10 @@ impl Battle {
     // -- Its tick --
 
     /// End a tick: go to its next period when due, over once a team is exterminated, see
-    /// [`Self::exterminated`], step it, once a client has its vehicle, break what shells
-    /// got through, land the shells due, then tell what broke. All drawing to be
-    /// debugged, see the `debug` module.
+    /// [`Self::exterminated`], step it, once a client has its vehicle, fly its shells on
+    /// against its vehicles where they are now, see [`Shells::step`], breaking what they
+    /// get through and landing those that hit something, then tell what broke. All
+    /// drawing to be debugged, see the `debug` module.
     pub fn tick(&mut self, app: &mut base::App) {
 
         let id = self.id;
@@ -725,14 +709,32 @@ impl Battle {
             }
         }
 
+        // Ricochets fly on from where they start in the same tick, against the same
+        // vehicles: those they ricocheted off as they were.
         let now = self.game_time();
-        for (through, yaw) in self.shells.take_through(now) {
-            self.world.break_shot(through.instance, through.piece, yaw);
-        }
-        for (at, shooter, shot) in self.shells.take_landed(now) {
-            if let Err(e) = self.land(app, at, shooter, &shot) {
-                warn!(battle = id, shot = shot.id, "Failed to land a shot: {e}");
+        loop {
+
+            let Self { shells, world, vehicles, targets, .. } = self;
+            fill_targets(targets, vehicles, world);
+            let obstacles = ShotObstacles {
+                space: world.space(),
+                rubble: world.rubble(),
+            };
+            let (through, landed) = shells.step(now, obstacles, targets);
+
+            for (piece, yaw) in through {
+                self.world.break_shot(piece.instance, piece.piece, yaw);
             }
+            if landed.is_empty() {
+                break;
+            }
+
+            for (at, shooter, shot, landing) in landed {
+                if let Err(e) = self.land(app, at, shooter, &shot, landing) {
+                    warn!(battle = id, shot = shot.id, "Failed to land a shot: {e}");
+                }
+            }
+
         }
         let breakages = self.world.take_breakages().collect::<Vec<_>>();
         if let Err(e) = self.areas.show(app, id, breakages, &self.world) {
@@ -768,7 +770,7 @@ impl Battle {
         let drives = fighting && self.options.bots_drive;
         let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, spotting, starts, shells, targets, .. } = self;
+        let Self { participants, vehicles, world, spotting, starts, shells, .. } = self;
 
         for vehicle in vehicles.iter_mut() {
             vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
@@ -812,8 +814,7 @@ impl Battle {
                 vehicles[index].show_wreck(app, world.vehicle(vehicles[index].id))?;
                 continue;
             }
-            
-            fill_targets(targets, vehicles, world, vehicles[index].entity.id());
+
             let allies = allies_of(vehicles, world, index);
             let vehicle = &mut vehicles[index];
             let driven = world.vehicle(vehicle.id);
@@ -821,22 +822,17 @@ impl Battle {
             vehicle.put_out_fire(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
-            let obstacles = Some(ShotObstacles {
-                space: world.space(),
-                rubble: world.rubble(),
-            });
-            
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
-            let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion, obstacles, targets);
+            let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion);
             if let (None, Driver::Bot(bot), true) = (&shot, &vehicle.driver, bots_fire) {
                 if bot.fires(driven, &allies) {
-                    shot = vehicle.gun.fire(now, position, velocity, dispersion, obstacles, targets);
+                    shot = vehicle.gun.fire(now, position, velocity, dispersion);
                 }
             }
 
             if let Some(shot) = shot {
-                info!(battle = id, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?}, landing at {:?} in {:.2} s", shot.start, shot.end, shot.flight_time);
+                info!(battle = id, entity_id = %vehicle.entity.id(), shot = shot.id, "Fired a shell from {:?} at {:?}", shot.start, shot.velocity);
                 vehicle.fired(now);
                 vehicle.show_burst(app)?;
                 show_shot(app, &avatars, vehicle.entity, &shot)?;
@@ -860,14 +856,22 @@ impl Battle {
     /// in its explosion's reach, see [`impact::explosion`]. A shell ricocheting off a
     /// vehicle or the ground goes on, see [`Self::ricochet`]; a static model stops it
     /// whole.
-    fn land(&mut self, app: &mut base::App, at: f64, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+    fn land(
+        &mut self,
+        app: &mut base::App,
+        at: f64,
+        shooter: EntityId,
+        shot: &Shot,
+        landing: ShotLanding,
+    ) -> io::Result<()> {
 
         let id = self.id;
         let avatars = self.avatars();
+        debug!(battle = id, shot = shot.id, "Landed a shell at {:?} after {:.2} s", shot.end, shot.flight_time);
 
         // What a destructible hit breaks the clients break as the shell explodes.
         let mut damaged = Vec::new();
-        if let ShotLanding::Static { piece: Some(hit), .. } = shot.landing {
+        if let ShotLanding::Static { piece: Some(hit), .. } = landing {
             let yaw = shot.end_velocity.x.atan2(shot.end_velocity.z);
             let damage = shot.def.damage_at(shot.distance());
             let broken = self.world.shoot(hit.instance, hit.piece, damage, yaw);
@@ -888,7 +892,7 @@ impl Battle {
             app.entity(avatar)?.stopTracer(shot.id, shot.end)?;
         }
 
-        match shot.landing {
+        match landing {
             ShotLanding::Vehicle { entity_id, hit, transforms } => {
                 let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id().0 == entity_id);
                 let Some(collision) = vehicle.map(|vehicle| vehicle.collision.clone()) else { return Ok(()) };
@@ -903,12 +907,12 @@ impl Battle {
                 debug_hit(shot.end, &impact.trace, impact.damage, dealt);
                 if impact.outcome == ImpactOutcome::Ricochet {
                     let direction = impact::reflect(shot.end_velocity, impact.hit.normal);
-                    self.ricochet(app, at, shooter, shot, direction, Some((entity_id, transforms)))?;
+                    self.ricochet(app, at, shooter, shot, direction)?;
                 }
                 Ok(())
             }
             ShotLanding::Terrain | ShotLanding::Static { .. } => {
-                if let ShotLanding::Static { normal, .. } = shot.landing {
+                if let ShotLanding::Static { normal, .. } = landing {
                     debug!(battle = id, shot = shot.id, "Hit a static model at {:?}, facing {normal:?}", shot.end);
                 }
                 // EXPERIMENT: the explosion comes for a shot the client does not know, so
@@ -929,7 +933,7 @@ impl Battle {
                     )?;
                 }
                 // Off the ground only: a static model stops a shell whole.
-                let skims = match shot.landing {
+                let skims = match landing {
                     ShotLanding::Terrain => {
                         let normal = self.world.space().terrain.normal_at(shot.end.x, shot.end.z).unwrap_or(Vec3::Y);
                         impact::ricochets_off_ground(def, shot.end_velocity, normal, &impact::GROUND).then_some(normal)
@@ -938,7 +942,7 @@ impl Battle {
                 };
                 if let Some(normal) = skims {
                     let direction = impact::reflect(shot.end_velocity, normal);
-                    self.ricochet(app, at, shooter, shot, direction, None)?;
+                    self.ricochet(app, at, shooter, shot, direction)?;
                 } else if def.kind() == ShellKind::HighExplosive {
                     self.splash(app, shooter, shot)?;
                 }
@@ -994,9 +998,8 @@ impl Battle {
 
     /// A shell ricochets off what it landed on, at game time `at`, along `direction`,
     /// losing penetration as [`impact::ricochet_pen_factor`] says, see
-    /// [`Shot::ricochet`]: the players see it go on, as the server shows it, with a tracer
-    /// of the same shot. `landed` is the vehicle it ricochets off, placed as it hit it,
-    /// which it leaves from.
+    /// [`Shot::ricochet`]: it flies on from there, and the players see it go on, as the
+    /// server shows it, with a tracer of the same shot.
     fn ricochet(
         &mut self,
         app: &mut base::App,
@@ -1004,27 +1007,16 @@ impl Battle {
         shooter: EntityId,
         shot: &Shot,
         direction: Vec3,
-        landed: Option<(u32, [Affine3A; 4])>,
     ) -> io::Result<()> {
 
         let id = self.id;
-        let mut vehicles = self.shell_targets(shooter);
-        if let Some((entity_id, transforms)) = landed {
-            for vehicle in vehicles.iter_mut().filter(|vehicle| vehicle.entity_id == entity_id) {
-                vehicle.transforms = transforms;
-            }
-        }
-        let obstacles = ShotObstacles {
-            space: self.world.space(),
-            rubble: self.world.rubble(),
-        };
-        let Some(next) = shot.ricochet(direction, impact::ricochet_pen_factor(&shot.def), Some(obstacles), &vehicles) else {
+        let Some(next) = shot.ricochet(direction, impact::ricochet_pen_factor(&shot.def)) else {
             debug!(battle = id, shot = shot.id, ricochets = shot.ricochets, "Stopped a shell's ricochets: too many, or out of range");
             return Ok(());
         };
+
         info!(battle = id, shot = next.id, ricochets = next.ricochets,
-            "Ricocheted a shell off {}, {:.0}% of its penetration left, landing at {:?} in {:.2} s",
-            if landed.is_some() { "a vehicle" } else { "the ground" }, next.pen_factor * 100.0, next.end, next.flight_time);
+            "Ricocheted a shell from {:?}, {:.0}% of its penetration left", next.start, next.pen_factor * 100.0);
         show_tracer(app, &self.avatars(), shooter, &next, true)?;
         self.shells.fly(at, shooter, next);
         Ok(())
@@ -1127,12 +1119,12 @@ fn allies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<(Ve
         .collect()
 }
 
-/// Replace `targets` with the vehicles the shells of `shooter` can hit, as
-/// [`Battle::shell_targets`], reusing its memory.
-fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world: &World, shooter: EntityId) {
+/// Replace `targets` with the vehicles shells can hit: every one alive, reusing its
+/// memory.
+fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world: &World) {
     targets.clear();
     targets.extend(vehicles.iter()
-        .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
+        .filter(|vehicle| vehicle.alive())
         .map(|vehicle| vehicle.shot_target(world)));
 }
 

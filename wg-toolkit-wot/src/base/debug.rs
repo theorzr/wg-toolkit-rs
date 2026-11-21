@@ -9,12 +9,10 @@
 //! the channel isn't drawn, no frame is open, or what draws is [`muted`]. Then the
 //! battle takes it back and shows it, see [`DebugFrame::end`] and [`DebugFrame::show`].
 //! The frame keeps its groups and their room from a tick to the next: drawing the same
-//! as the last tick takes no memory, only what changed and is sent does. Between ticks,
-//! the battle opens it as it is, see [`DebugFrame::open`], for what happens then, a
-//! client's shot.
+//! as the last tick takes no memory, only what changed and is sent does.
 //!
 //! What is drawn [`lasting`] is kept by the frame for that long, drawn again each tick:
-//! a shell's flight, drawn once as it is worked out, when it is fired.
+//! a shell's flight, drawn as it flies on, tick by tick.
 //!
 //! What is drawn is given in the world, where it is as it is drawn, and goes where
 //! [`at`] says: in the world, by default, or in a vehicle's frame, see
@@ -296,17 +294,11 @@ impl DebugFrame {
         }
 
         self.now = now;
-        self.open();
-
-    }
-
-    /// Open it on this thread as it is, between ticks: what is drawn then goes with the
-    /// next tick's, if lasting, see [`lasting`]. See [`Self::end`].
-    pub fn open(mut self) {
         self.place = DebugPlace::World;
         self.muted = false;
         self.until = None;
         FRAME.set(Some(self));
+
     }
 
     /// Close the frame open on this thread, if any, see [`Self::begin`].

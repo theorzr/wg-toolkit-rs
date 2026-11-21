@@ -1,12 +1,13 @@
-//! A battle's shells in flight: when each lands, and what it flies through on its way,
-//! which breaks as it gets there; and their tracers, as the clients are shown them.
+//! A battle's shells in flight, flown on each tick against its vehicles where they are
+//! then, what they fly through breaking as they get there; and their tracers, as the
+//! clients are shown them.
 
 use std::io;
 
 use wgtk::app::entity::{EntityId, EntityKey};
 use wgtk::app::base;
 
-use crate::base::ballistics::gun::{Shot, ShotPiece};
+use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotPiece, ShotTarget};
 use crate::game::schema::{self, Avatar};
 use crate::base::NO_PREFAB_EFFECTS;
 
@@ -14,43 +15,53 @@ use crate::base::NO_PREFAB_EFFECTS;
 /// The shells in flight of a battle, see the module's documentation.
 #[derive(Debug, Default)]
 pub struct Shells {
-    /// Each shell, with the game time it lands at and who fired it.
+    /// Each shell, with the game time it started flying at and who fired it.
     flying: Vec<(f64, EntityId, Shot)>,
-    /// What they fly through, with the game time they get there and the yaw they go:
-    /// it breaks then, see [`Shot::through`].
-    through: Vec<(f64, ShotPiece, f32)>,
 }
 
 impl Shells {
 
     /// A shell fired by `shooter` at game time `fired`, or ricocheting then: it flies
-    /// until it lands.
+    /// until it lands, see [`Self::step`].
     pub fn fly(&mut self, fired: f64, shooter: EntityId, shot: Shot) {
-        let yaw = shot.velocity.x.atan2(shot.velocity.z);
-        for &through in &shot.through {
-            self.through.push((fired + f64::from(through.time), through, yaw));
+        self.flying.push((fired, shooter, shot));
+    }
+
+    /// Fly the shells on until game time `now`, see [`Shot::fly`], against these
+    /// vehicles, where they are now: what they flew through since, each with the yaw its
+    /// shell went, and those that landed, each with the game time it landed at, who fired
+    /// it, and what it landed on.
+    pub fn step(
+        &mut self,
+        now: f64,
+        obstacles: ShotObstacles,
+        vehicles: &[ShotTarget],
+    ) -> (Vec<(ShotPiece, f32)>, Vec<(f64, EntityId, Shot, ShotLanding)>) {
+
+        let mut through = Vec::new();
+        let mut landed = Vec::new();
+        let mut index = 0;
+
+        while index < self.flying.len() {
+
+            let (fired, shooter, shot) = &mut self.flying[index];
+            let crossed = shot.through.len();
+            let landing = shot.fly((now - *fired) as f32, Some(obstacles), vehicles, shooter.0);
+
+            let yaw = shot.velocity.x.atan2(shot.velocity.z);
+            through.extend(shot.through[crossed..].iter().map(|&piece| (piece, yaw)));
+
+            if let Some(landing) = landing {
+                let (fired, shooter, shot) = self.flying.swap_remove(index);
+                landed.push((fired + f64::from(shot.flight_time), shooter, shot, landing));
+            } else {
+                index += 1;
+            }
+
         }
-        self.flying.push((fired + f64::from(shot.flight_time), shooter, shot));
-    }
 
-    /// What the shells flew through by game time `now`, since last asked, with the yaw
-    /// they went.
-    pub fn take_through(&mut self, now: f64) -> Vec<(ShotPiece, f32)> {
-        let (reached, ahead): (Vec<_>, _) = std::mem::take(&mut self.through)
-            .into_iter()
-            .partition(|&(at, _, _)| at <= now);
-        self.through = ahead;
-        reached.into_iter().map(|(_, through, yaw)| (through, yaw)).collect()
-    }
+        (through, landed)
 
-    /// The shells landed by game time `now`, since last asked, with the game time each
-    /// landed at and who fired it.
-    pub fn take_landed(&mut self, now: f64) -> Vec<(f64, EntityId, Shot)> {
-        let (landed, flying): (Vec<_>, _) = std::mem::take(&mut self.flying)
-            .into_iter()
-            .partition(|&(at, _, _)| at <= now);
-        self.flying = flying;
-        landed
     }
 
 }
