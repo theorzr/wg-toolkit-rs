@@ -87,7 +87,7 @@ pub enum DebugChannel {
     /// physics' `body` and `collision` modules.
     Contacts,
     /// Each shell's flight, as it is worked out, and where it ends, see the ballistics'
-    /// `gun` module.
+    /// `shot` module.
     Shells,
 }
 
