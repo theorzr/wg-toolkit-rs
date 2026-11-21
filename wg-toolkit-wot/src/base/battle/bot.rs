@@ -2,14 +2,16 @@
 //! spots, see `Spotting`, finds its way to it over the map, see `World::path`, or, while
 //! its team spots none, searches where they were last seen, else their team's start. It
 //! drives as a client would, with its controls, until close to its target, then stops
-//! facing it, keeps its turret on it and says when it fires: it sees it itself, its gun
-//! on it, and no ally in the way.
+//! facing it, keeps its turret on it, leading it, and says when it fires: it sees it
+//! itself, its gun on it, its aim settled, and no ally in the way.
 //!
 //! ```text
 //!   each tick:
 //!     0. its target, among those its team spots: the one it has while it sees it
 //!          itself, within VIEW_RANGE and nothing of the map in the way, else the
 //!          nearest it sees, else the one it has, else the nearest
+//!        its aim: where its target will be once a shell fired gets there, see
+//!          Bot::lead, while it sees it
 //!     1. close to its target: it stops and turns to face it; close to where it
 //!          searches, it stops
 //!     2. else, its way: planned again once it has none, its goal moved off its end,
@@ -17,11 +19,16 @@
 //!     3. it drives to the next point: turning toward it, and driving on only when
 //!          headed near enough it
 //!     4. stuck, driving and not moving: it backs off a little, then plans again
+//!
+//!   it fires once it sees its target, its gun on its aim, see Turret::aim_error,
+//!   its shells landing within FIT_RADIUS of it or its aim settled, see Bot::aimed,
+//!   and no ally in the way
 //! ```
 
 use glam::Vec3;
 
-use crate::base::physics::{movement_flag, wrap_angle, Vehicle, VehicleId, World};
+use crate::base::physics::{movement_flag, wrap_angle, Dispersion, Vehicle, VehicleId, World};
+use crate::base::TICK;
 
 use super::VIEW_RANGE;
 
@@ -36,8 +43,18 @@ const SEARCH_RANGE: f32 = 10.0;
 const TURN_WHILE_DRIVING: f32 = 0.6;
 /// How far off its heading its way may be before the bot turns at all.
 const HEADING_TOLERANCE: f32 = 0.1;
-/// How close the gun must point to the enemy to fire, in radians.
-const AIM_TOLERANCE: f32 = 0.02;
+/// How close the gun must point to its aim to fire, in radians, see
+/// [`Turret::aim_error`](crate::base::physics::Turret::aim_error).
+const AIM_TOLERANCE: f32 = 0.002;
+/// How far from its aim the bot's shells may stray for it to fire, in metres: about half
+/// a hull's height. Our choice.
+const FIT_RADIUS: f32 = 1.0;
+/// How settled the bot's aim must be, its dispersion of its gun's best, for it to fire at
+/// a target too far for [`FIT_RADIUS`]. Our choice.
+const SETTLED_AIM: f32 = 1.1;
+/// How many times the bot works out where its target will be, from where the last time
+/// said, see [`Bot::lead`].
+const LEAD_PASSES: u32 = 3;
 /// How close to a point of its way the bot gets before heading for the next, in metres.
 /// Our choice: as close as it can turn short of it.
 const ARRIVE: f32 = 4.0;
@@ -84,12 +101,14 @@ impl Bot {
     pub fn drive(&mut self, world: &mut World, id: VehicleId, enemies: &[(VehicleId, Vec3)], search: Vec3, drives: bool) {
 
         self.spot(world, id, enemies);
+        self.lead(world, id);
 
         let (goal, range) = match self.target {
             Some(target) => (target.at, ENGAGE_RANGE),
             None => (search, SEARCH_RANGE),
         };
-        world.vehicle_mut(id).turret.track(goal);
+        let aim = self.target.map_or(goal, |target| target.aim);
+        world.vehicle_mut(id).turret.track(aim);
 
         let flags = if drives {
             self.controls(world, id, goal, range)
@@ -118,6 +137,7 @@ impl Bot {
         }
         if let (Some(target), Some((_, at))) = (&mut self.target, current) {
             target.at = at;
+            target.aim = at;
             target.seen = in_sight(world, eye, at);
             if target.seen {
                 return;
@@ -132,6 +152,7 @@ impl Bot {
             self.target = Some(Target {
                 vehicle,
                 at,
+                aim: at,
                 seen: true,
             });
             return;
@@ -144,8 +165,29 @@ impl Bot {
             self.target = nearest.map(|&(vehicle, at)| Target {
                 vehicle,
                 at,
+                aim: at,
                 seen: false,
             });
+        }
+
+    }
+
+    /// Aim where its target will be once a shell it fires gets there, while it sees it:
+    /// its hull's centre moved on at its velocity for a tick, the battle firing after
+    /// its step, then for the shell's flight to there, worked out again from there
+    /// [`LEAD_PASSES`] times. The flight is the distance at the shell's speed, as near
+    /// as its low arc is to a line.
+    fn lead(&mut self, world: &World, id: VehicleId) {
+
+        let Some(target) = self.target.as_mut().filter(|target| target.seen) else { return };
+        let vehicle = world.vehicle(id);
+        let (eye, _, _) = vehicle.turret.gun_marker(&vehicle.hull);
+        let speed = vehicle.turret.aiming.shot_speed.max(f32::EPSILON);
+        let velocity = world.vehicle(target.vehicle).hull.velocity();
+
+        for _ in 0..LEAD_PASSES {
+            let flight = TICK.as_secs_f32() + target.aim.distance(eye) / speed;
+            target.aim = target.at + velocity * flight;
         }
 
     }
@@ -209,25 +251,43 @@ impl Bot {
     }
 
     /// Whether it fires its vehicle's gun now: at its target, which it sees, its gun on
-    /// it, and none of its `allies` in the way, each its hull's centre and how far round
-    /// it a shell would hit it, see [`in_the_way`].
+    /// its aim, see [`Self::lead`], its aim settled, see [`Self::aimed`], and none of
+    /// its `allies` in the way, each its hull's centre and how far round it a shell
+    /// would hit it, see [`in_the_way`].
     pub fn fires(&self, vehicle: &Vehicle, allies: &[(Vec3, f32)]) -> bool {
-        let Some(target) = self.sighted() else { return false };
-        let (position, velocity, _) = vehicle.turret.gun_marker(&vehicle.hull);
-        velocity.angle_between(target - position) < AIM_TOLERANCE
-            && !allies.iter().any(|&(center, radius)| in_the_way(position, target, center, radius))
+
+        let Some(target) = self.target.filter(|target| target.seen) else { return false };
+        let (position, _, dispersion) = vehicle.turret.gun_marker(&vehicle.hull);
+        if vehicle.turret.aim_error(&vehicle.hull) >= AIM_TOLERANCE {
+            return false;
+        }
+
+        Self::aimed(vehicle, dispersion, target.aim.distance(position))
+            && !allies.iter().any(|&(center, radius)| in_the_way(position, target.aim, center, radius))
+
+    }
+
+    /// Whether its vehicle's aim is settled enough to fire at `distance` metres with this
+    /// `dispersion`: its shells landing within [`FIT_RADIUS`] of its aim, or, too far for
+    /// that, its dispersion within [`SETTLED_AIM`] of its gun's best.
+    fn aimed(vehicle: &Vehicle, dispersion: Dispersion, distance: f32) -> bool {
+        let best = vehicle.turret.aiming.dispersion_angle;
+        dispersion.angle.tan() * distance <= FIT_RADIUS || dispersion.angle <= best * SETTLED_AIM
     }
 
 }
 
 /// An enemy a bot aims at, see [`Bot::spot`]: its vehicle, where its hull's centre is,
-/// and whether the bot sees it itself.
+/// where the bot aims, and whether the bot sees it itself.
 #[derive(Debug, Clone, Copy)]
 struct Target {
     /// Its vehicle, in the world.
     vehicle: VehicleId,
     /// Where its hull's centre is, as the bot's team spots it.
     at: Vec3,
+    /// Where the bot aims: where it will be once a shell fired gets there while the bot
+    /// sees it, see [`Bot::lead`], else where it is.
+    aim: Vec3,
     /// Whether the bot sees it itself, which it fires at only then.
     seen: bool,
 }
@@ -265,6 +325,7 @@ fn in_the_way(from: Vec3, to: Vec3, center: Vec3, radius: f32) -> bool {
 #[cfg(test)]
 mod tests {
 
+    use std::f32::consts::FRAC_PI_2;
     use std::sync::Arc;
 
     use glam::Vec2;
@@ -349,6 +410,67 @@ mod tests {
         }
         let distance = (search - world.vehicle(id).hull.position).with_y(0.0).length();
         assert!(distance <= SEARCH_RANGE + 5.0, "stopped {distance} m away");
+    }
+
+    #[test]
+    fn leads_a_moving_target() {
+
+        // An enemy 300 m ahead, crossing at 10 m/s to the right.
+        let mut world = World::new(Arc::new(blocks(&[])), None);
+        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let enemy = world.add(Vehicle::new(
+            Vec3::new(0.0, 0.0, 300.0),
+            Vec3::new(0.0, 0.0, FRAC_PI_2),
+            chieftain_mobility(),
+            chieftain_aiming(),
+        ));
+        world.vehicle_mut(enemy).hull.speed = 10.0;
+        let at = Vec3::new(0.0, HULL_CENTER, 300.0);
+        let mut bot = Bot::default();
+        bot.drive(&mut world, id, &[(enemy, at)], at, false);
+
+        // It aims ahead of it by as far as it goes in a tick and the shell's flight.
+        let velocity = world.vehicle(enemy).hull.velocity();
+        let target = bot.target.unwrap();
+        let (eye, _, _) = world.vehicle(id).turret.gun_marker(&world.vehicle(id).hull);
+        let flight = TICK.as_secs_f32() + target.aim.distance(eye) / chieftain_aiming().shot_speed;
+        assert!((target.aim - (at + velocity * flight)).length() < 0.01, "{}", target.aim);
+        assert!(target.aim.x > 4.0, "{}", target.aim);
+
+    }
+
+    #[test]
+    fn waits_for_its_aim_to_settle() {
+
+        // An enemy 300 m off to its right: its turret turns to it, its aim spreading.
+        let mut world = World::new(Arc::new(blocks(&[])), None);
+        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let at = Vec3::new(300.0, 0.0, 0.0);
+        let enemy = world.add(Vehicle::new(at, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
+        let enemies = [(enemy, at + Vec3::Y * HULL_CENTER)];
+        let mut bot = Bot::default();
+
+        let mut on_target = None;
+        let mut fired = None;
+        for tick in 0..200 {
+            bot.drive(&mut world, id, &enemies, at, false);
+            world.step(TICK.as_secs_f32());
+            let vehicle = world.vehicle(id);
+            if on_target.is_none() && vehicle.turret.aim_error(&vehicle.hull) < AIM_TOLERANCE {
+                on_target = Some(tick);
+            }
+            if bot.fires(vehicle, &[]) {
+                fired = Some(tick);
+                break;
+            }
+        }
+
+        // On it after turning a quarter, it fires only seconds later, settled.
+        let (on_target, fired) = (on_target.unwrap(), fired.unwrap());
+        assert!(fired > on_target + 20, "on target at {on_target}, fired at {fired}");
+        let (_, _, dispersion) = world.vehicle(id).turret.gun_marker(&world.vehicle(id).hull);
+        assert!(dispersion.angle <= chieftain_aiming().dispersion_angle * SETTLED_AIM);
+
     }
 
     #[test]

@@ -142,6 +142,15 @@ impl Turret {
         };
     }
 
+    /// How far its gun points off where it aims, in radians, see [`Self::aimed_angles`]:
+    /// the shell's drop taken in, none once it is on it.
+    pub fn aim_error(&self, hull: &Hull) -> f32 {
+        let (yaw, pitch) = self.aimed_angles(hull);
+        let aimed = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch) * Vec3::Z;
+        let gun = Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch) * Vec3::Z;
+        gun.angle_between(aimed)
+    }
+
     /// The yaw and pitch it aims at, on the hull: those held, or those that drop the
     /// shell onto the point it tracks, in the hull's frame, which the turret and gun
     /// turn in.
