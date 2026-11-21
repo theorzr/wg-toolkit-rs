@@ -16,4 +16,4 @@ pub mod impact;
 pub mod ricochet;
 
 #[cfg(test)]
-mod fixtures;
+pub mod fixtures;

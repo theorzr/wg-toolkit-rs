@@ -336,15 +336,16 @@ impl<S: Deref<Target = Space>> World<S> {
 
     /// A way for a tank `radius` wide from one point to another over its map, or to as
     /// near it as it can get: the points it turns at, then its end. None without bounds,
-    /// or starting out of them. See the `nav` module.
-    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32) -> Option<Vec<Vec3>> {
+    /// or starting out of them, kept off what stands `around`, each its centre and
+    /// radius, as off walls. See the `nav` module.
+    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32, around: &[(Vec3, f32)]) -> Option<Vec<Vec3>> {
         let nav = self.nav.as_mut()?;
         let broken = self.rubble.broken_count();
         if broken != self.nav_broken {
             nav.forget();
             self.nav_broken = broken;
         }
-        nav.path(from, to, radius, &self.space, &blocking(&self.space, &self.rubble))
+        nav.path(from, to, radius, around, &self.space, &blocking(&self.space, &self.rubble))
     }
 
     /// Whether nothing of its map stands between two points: the terrain and static

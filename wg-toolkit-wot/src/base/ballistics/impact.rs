@@ -51,6 +51,22 @@ const EXPLOSION_DAMAGE_ABSORPTION_FACTOR: f32 = 1.3;
 /// explosion to go through that armour.
 const EXPLOSION_STANDOFF: f32 = 0.01;
 
+/// The share of a shell's penetration randomization a gun marker is unsure within,
+/// either way, see [`indicate`]: `_PP_RANDOM_ADJUSTMENT_MIN` and `_MAX`.
+const INDICATION_RANDOMIZATION: f32 = 0.5;
+
+
+/// What a player's gun marker shows of a shot at a vehicle, see [`indicate`]: red, then
+/// yellow, then green, `SHOT_RESULT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Indication {
+    /// Red: it doesn't pierce, or ricochets.
+    NotPierced,
+    /// Yellow: it may pierce.
+    LittlePierced,
+    /// Green: it pierces.
+    GreatPierced,
+}
 
 /// What a shell does when it hits a vehicle.
 #[derive(Debug, Clone, PartialEq)]
@@ -234,6 +250,79 @@ pub fn explosion(
         distance,
         trace,
     })
+
+}
+
+/// What a player's gun marker shows of a shell fired from `from` at `to` into a
+/// vehicle, placed in the world by `transforms`, as `__shotResultDefault` in the
+/// client's `gun_marker_ctrl.py` works it out: the shell's penetration at the distance,
+/// as the game's table gives it, against the thickness of each armour on its way, in
+/// percents of it, its main armour's within half its randomization either way unsure.
+/// None when its way meets no armour of it, as the client's undefined result.
+pub fn indicate(
+    shot: &ShotDef,
+    from: Vec3,
+    to: Vec3,
+    collision: &VehicleCollision,
+    transforms: &[Affine3A; 4],
+) -> Option<Indication> {
+
+    let direction = (to - from).normalize_or_zero();
+    let hits = collision.hits(transforms, from, to + direction * TRACE_FORWARD);
+    let full = shot.pen_at(hits.first()?.distance);
+    let sure = 100.0 * (1.0 - shot.pen_randomization * INDICATION_RANDOMIZATION);
+    let unsure = 100.0 * (1.0 + shot.pen_randomization * INDICATION_RANDOMIZATION);
+
+    let mut pen = full;
+    let mut jet: Option<f32> = None;
+    let mut seen = HashSet::<(VehiclePart, u32)>::new();
+    for hit in &hits {
+
+        // A jet loses some of its penetration from the armour it last went through.
+        if let Some(start) = jet {
+            pen *= 1.0 - (hit.distance - start).max(0.0) * shot.jet_pen_loss;
+        }
+
+        let Some(material) = hit.material else { continue };
+        if !seen.insert((hit.part, hit.material_kind)) && material.collide_once_only {
+            continue;
+        }
+
+        let hit_angle_cos = if material.use_hit_angle {
+            (-direction).dot(hit.normal).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if jet.is_none() && ricochets(shot, &material, hit_angle_cos) {
+            return Some(Indication::NotPierced);
+        }
+
+        // Its thickness, in percents of the shell's penetration, past what it pierced.
+        let mut percent = 1000.0;
+        if pen > 0.0 && full > 0.0 {
+            let thickness = penetration_armor(shot, &material, hit_angle_cos);
+            percent = 100.0 + (thickness - pen) / full * 100.0;
+            pen -= thickness;
+        }
+        if material.is_main_armor() {
+            return Some(if percent <= sure {
+                Indication::GreatPierced
+            } else if percent < unsure {
+                Indication::LittlePierced
+            } else {
+                Indication::NotPierced
+            });
+        }
+
+        if pen <= 0.0 {
+            break;
+        }
+        if shot.kind() == ShellKind::HollowCharge {
+            jet = Some(hit.distance + material.armor * 0.001);
+        }
+
+    }
+    Some(Indication::NotPierced)
 
 }
 
@@ -499,55 +588,11 @@ mod tests {
 
     use wgtk::res::fs::ResFilesystem;
 
-    use crate::game::collision::{ArmorGroup, ArmorMaterial, CollisionModel};
+    use crate::game::collision::ArmorGroup;
     use crate::game::item_defs::VehicleDef;
 
-    use super::super::fixtures::shot;
+    use super::super::fixtures::{material, plate, shot, vehicle};
     use super::*;
-
-    fn material(armor: f32, main: bool) -> ArmorMaterial {
-        ArmorMaterial {
-            armor,
-            vehicle_damage_factor: if main { 1.0 } else { 0.0 },
-            use_hit_angle: true,
-            may_ricochet: true,
-            check_caliber_for_ricochet: true,
-            check_caliber_for_hit_angle_norm: true,
-            collide_once_only: false,
-        }
-    }
-
-    /// A square plate across `z`, 4 m wide, in a group of its own.
-    fn plate(z: f32, material: ArmorMaterial) -> ArmorGroup {
-        let a = Vec3::new(-2.0, -2.0, z);
-        let b = Vec3::new(2.0, -2.0, z);
-        let c = Vec3::new(2.0, 2.0, z);
-        let d = Vec3::new(-2.0, 2.0, z);
-        ArmorGroup {
-            name: "armor".into(),
-            material_kind: 1,
-            material: Some(material),
-            triangles: vec![[a, b, c], [a, c, d]],
-        }
-    }
-
-    /// A part's collision model of these groups.
-    fn model(groups: Vec<ArmorGroup>) -> CollisionModel {
-        CollisionModel {
-            groups,
-            radius: 10.0,
-            bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)],
-        }
-    }
-
-    /// A vehicle of these plates on its hull, at the origin.
-    fn vehicle(plates: Vec<ArmorGroup>) -> (VehicleCollision, [Affine3A; 4]) {
-        let collision = VehicleCollision {
-            parts: [model(vec![]), model(plates), model(vec![]), model(vec![])],
-            hull_position: Vec3::ZERO,
-        };
-        (collision, [Affine3A::IDENTITY; 4])
-    }
 
     /// A shell coming down `z` at this angle from the plates' normal, at full speed,
     /// onto the origin's plate at `z`.
@@ -580,6 +625,32 @@ mod tests {
         // At 82% of its speed, 135 mm.
         let slow = hit(&ap, 100.0, 0.818, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut rng).unwrap();
         assert_eq!(slow.outcome, ImpactOutcome::NotPierced);
+
+    }
+
+    #[test]
+    fn indicates_as_a_players_gun_marker() {
+
+        // 200 mm of penetration, 25% randomized: sure up to 175 mm, unsure up to 225 mm.
+        let mut ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
+        ap.pen_randomization = 0.25;
+        let (from, to) = (Vec3::new(0.0, 0.0, 100.0), Vec3::ZERO);
+        for (armor, shown) in [
+            (170.0, Indication::GreatPierced),
+            (200.0, Indication::LittlePierced),
+            (230.0, Indication::NotPierced),
+        ] {
+            let (collision, transforms) = vehicle(vec![plate(1.0, material(armor, true))]);
+            assert_eq!(indicate(&ap, from, to, &collision, &transforms), Some(shown), "{armor} mm");
+        }
+
+        // Off it at a grazing angle, and nothing past its side.
+        let (collision, transforms) = vehicle(vec![plate(1.0, material(50.0, true))]);
+        let grazing = Vec3::new(100.0, 0.0, 1.0 + 100.0 * 10f32.to_radians().tan());
+        let off = indicate(&ap, grazing, Vec3::new(0.0, 0.0, 1.0), &collision, &transforms);
+        assert_eq!(off, Some(Indication::NotPierced));
+        let aside = Vec3::new(10.0, 0.0, 0.0);
+        assert_eq!(indicate(&ap, aside + Vec3::Z * 100.0, aside, &collision, &transforms), None);
 
     }
 

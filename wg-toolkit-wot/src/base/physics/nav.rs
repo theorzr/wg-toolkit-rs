@@ -119,8 +119,17 @@ impl NavGrid {
     /// The shortest way over the grid, by A* from cell to cell and to their diagonals,
     /// each step costing its length, more near walls; then pulled straight: from each
     /// point, on along the way as far as the line there keeps as far off walls as the way
-    /// did, see [`Self::clear`].
-    pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> Option<Vec<Vec3>> {
+    /// did, see [`Self::clear`]. What stands `around`, each its centre and radius, other
+    /// vehicles say, is kept off as walls are, for this way only.
+    pub fn path(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        radius: f32,
+        around: &[(Vec3, f32)],
+        space: &Space,
+        keep: &impl Fn(&StaticTriangle) -> bool,
+    ) -> Option<Vec<Vec3>> {
 
         let start = self.cell_of(from)?;
         let goal = self.nearest_cell(to);
@@ -139,7 +148,7 @@ impl NavGrid {
             cell: start,
         });
         let mut nearest = (self.distance(start, goal), start);
-        let squeezed = self.clearance(start, space, keep) < radius;
+        let squeezed = self.clearance_among(start, around, space, keep) < radius;
         while let Some(Open { estimate, cell }) = open.pop() {
             if cell == goal {
                 nearest = (0.0, cell);
@@ -155,7 +164,7 @@ impl NavGrid {
                     continue;
                 }
                 let next = (column, row);
-                let clearance = self.clearance(next, space, keep);
+                let clearance = self.clearance_among(next, around, space, keep);
                 let escaping = squeezed && clearance > 0.0 && self.distance(start, next) < radius;
                 if clearance < radius && !escaping {
                     continue;
@@ -195,10 +204,10 @@ impl NavGrid {
         let mut at = 0;
         while at + 1 < cells.len() {
             let mut furthest = at + 1;
-            let mut kept = (radius + WALL_MARGIN).min(self.clearance(cells[at], space, keep));
+            let mut kept = (radius + WALL_MARGIN).min(self.clearance_among(cells[at], around, space, keep));
             for next in at + 1..cells.len() {
-                kept = kept.min(self.clearance(cells[next], space, keep));
-                if !self.clear(cells[at], cells[next], kept.max(radius), space, keep) {
+                kept = kept.min(self.clearance_among(cells[next], around, space, keep));
+                if !self.clear(cells[at], cells[next], kept.max(radius), around, space, keep) {
                     break;
                 }
                 furthest = next;
@@ -290,14 +299,39 @@ impl NavGrid {
     }
 
     /// Whether a tank goes straight from one cell to another without leaving those of
-    /// `clearance` at least: every cell on the line between them, at half a cell's steps.
-    fn clear(&mut self, from: (usize, usize), to: (usize, usize), clearance: f32, space: &Space, keep: &impl Fn(&StaticTriangle) -> bool) -> bool {
+    /// `clearance` at least, what stands `around` taken in, see [`Self::clearance_among`]:
+    /// every cell on the line between them, at half a cell's steps.
+    fn clear(
+        &mut self,
+        from: (usize, usize),
+        to: (usize, usize),
+        clearance: f32,
+        around: &[(Vec3, f32)],
+        space: &Space,
+        keep: &impl Fn(&StaticTriangle) -> bool,
+    ) -> bool {
         let (from, to) = (cell_vec(from), cell_vec(to));
         let steps = (from.distance(to) * 2.0).ceil().max(1.0) as usize;
         (0..=steps).all(|step| {
             let point = from.lerp(to, step as f32 / steps as f32).round();
-            self.clearance((point.x as usize, point.y as usize), space, keep) >= clearance
+            self.clearance_among((point.x as usize, point.y as usize), around, space, keep) >= clearance
         })
+    }
+
+    /// A cell's clearance, see [`Self::clearance`], less what stands `around` it, each
+    /// its centre and radius: how far its middle is off the nearest's edge, if nearer.
+    fn clearance_among(
+        &mut self,
+        cell: (usize, usize),
+        around: &[(Vec3, f32)],
+        space: &Space,
+        keep: &impl Fn(&StaticTriangle) -> bool,
+    ) -> f32 {
+        let middle = self.origin + (cell_vec(cell) + 0.5) * CELL;
+        let near = around.iter()
+            .map(|&(center, radius)| Vec2::new(center.x, center.z).distance(middle) - radius)
+            .fold(f32::INFINITY, f32::min);
+        self.clearance(cell, space, keep).min(near)
     }
 
     /// The middle of a cell, on its surface, as last asked.
@@ -371,7 +405,7 @@ mod tests {
         let keep = blocking(&space, &rubble);
         let mut grid = NavGrid::new(bounds);
         let start = Instant::now();
-        let way = grid.path(from, to, 2.0, &space, &keep).unwrap();
+        let way = grid.path(from, to, 2.0, &[], &space, &keep).unwrap();
         println!("Found a way of {} points in {:?}", way.len(), start.elapsed());
         // It ends at the other spawn, and keeps its width off walls all the way.
         assert!((*way.last().unwrap() - to).with_y(0.0).length() < 2.0);
