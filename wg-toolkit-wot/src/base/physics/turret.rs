@@ -45,6 +45,9 @@ pub struct Turret {
     pub pitch: f32,
     pub aiming: AimingDef,
     target: Aim,
+    /// The last point in the world it tracked, kept once it holds angles instead: where a
+    /// client's gun marker last was, see [`Self::marked`].
+    marked: Option<Vec3>,
     /// How fast the turret turned in the last step, in rad/s.
     yaw_rate: f32,
     /// The dispersion as a factor of the gun's base one, shrinking back to its ideal
@@ -71,6 +74,7 @@ impl Turret {
             pitch: 0.0,
             aiming,
             target: Aim::Angles(0.0, 0.0),
+            marked: None,
             yaw_rate: 0.0,
             dispersion_factor: 1.0,
         }
@@ -79,6 +83,7 @@ impl Turret {
     /// Turn toward a point in the world.
     pub fn track(&mut self, point: Vec3) {
         self.target = Aim::Point(point);
+        self.marked = Some(point);
     }
 
     /// Turn to angles relative to the hull, and stay there.
@@ -86,13 +91,11 @@ impl Turret {
         self.target = Aim::Angles(yaw, pitch);
     }
 
-    /// The point in the world it turns toward, if it tracks one, see [`Self::track`]: a
-    /// client's, where its gun marker is.
-    pub fn tracked(&self) -> Option<Vec3> {
-        match self.target {
-            Aim::Point(point) => Some(point),
-            Aim::Angles(..) => None,
-        }
+    /// The last point in the world it tracked, see [`Self::track`], even once it holds
+    /// angles: a client's, where its gun marker last was. A client holds its gun as its
+    /// player opens the chat, say.
+    pub fn marked(&self) -> Option<Vec3> {
+        self.marked
     }
 
     /// Advance by `dt` seconds on the given hull, already advanced: turn toward the aim,

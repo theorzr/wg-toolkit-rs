@@ -745,7 +745,7 @@ impl Battle {
                 let travel = if order == "goto" {
                     match option {
                         Some("here") => BotTravel::Goto(driven.hull.position),
-                        None => BotTravel::Goto(driven.turret.tracked().ok_or("No point under your gun marker")?),
+                        None => BotTravel::Goto(driven.turret.marked().ok_or("No point under your gun marker")?),
                         Some(word) => return Err(format!("Unknown goto option: {word}, of here")),
                     }
                 } else {
@@ -901,13 +901,13 @@ impl Battle {
 
     /// The vehicle alive under the gun marker of the `from`th participant, by index, if
     /// any, where on it, see [`VehicleIntersection`], and where its hull sits on its
-    /// chassis: the first its gun's line to the point its client tracks crosses, that
+    /// chassis: the first its gun's line to the point its client last tracked crosses, that
     /// line going [`MARKED_DEPTH`] past it.
     fn marked_spot(&self, from: usize) -> Option<(usize, VehicleIntersection, Vec3)> {
 
         let own = self.participants[from].vehicle;
         let driven = self.world.vehicle(self.vehicles[own].id);
-        let marked = driven.turret.tracked()?;
+        let marked = driven.turret.marked()?;
         let (eye, _, _) = driven.turret.gun_marker(&driven.hull);
         let to = marked + (marked - eye).normalize_or_zero() * MARKED_DEPTH;
 
@@ -950,7 +950,7 @@ impl Battle {
             Some("stop") => route.recorder = None,
             Some("add") => {
                 let driven = self.world.vehicle(self.vehicles[self.participants[from].vehicle].id);
-                let point = driven.turret.tracked().ok_or("No point under your gun marker")?;
+                let point = driven.turret.marked().ok_or("No point under your gun marker")?;
                 route.points.push(point);
             }
             Some("clear") => *route = BotRoute::default(),
