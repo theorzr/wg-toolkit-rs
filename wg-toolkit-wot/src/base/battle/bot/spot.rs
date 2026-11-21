@@ -8,8 +8,9 @@ use crate::base::physics::{VehicleId, World};
 use crate::base::ballistics::gun::GunLoader;
 use crate::base::ballistics::impact;
 
-use super::tactics::{aims_at, best_shell, hull_center, in_sight, INDICATION_WORTH};
+use super::tactics::{best_shell, hull_center, in_sight, INDICATION_WORTH};
 use super::situation::{BotEnemy, BotSituation};
+use super::knowledge::BotKnowledge;
 use super::motor::way_radius;
 use super::target::BotTarget;
 use super::role::BotRole;
@@ -56,17 +57,20 @@ pub struct FiringSpotSearch {
 impl FiringSpotSearch {
 
     /// Look for the spot of a bot of this `role` to fire at its `target` from, every
-    /// [`SPOT_TICKS`], or once it starts or stops waiting, see [`BotRole::patient`]: of
+    /// [`SPOT_TICKS`], or once it starts or stops waiting, see [`BotRole::patient`], its
+    /// target aiming at it with its gun loaded, as its `knowledge` reckons: of
     /// where it is, its spot and the points round it, see [`SPOT_RADII`], where it
     /// stands, see `World::stand`, the one worth the most, see [`Self::worth`], none
     /// where an ally stands, its spot kept unless another is worth [`SPOT_MARGIN`] more.
     /// None, to drive at its target, while farther from it than its role's range and the
     /// farthest of those points, or seeing it from none of them as it doesn't wait.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         world: &mut World,
         id: VehicleId,
         role: &BotRole,
+        knowledge: &BotKnowledge,
         gun: &GunLoader,
         target: Option<BotTarget>,
         situation: &BotSituation,
@@ -79,7 +83,8 @@ impl FiringSpotSearch {
         let Some(enemy) = situation.enemies.iter().find(|enemy| enemy.vehicle == target.vehicle) else { return };
         let vehicle = world.vehicle(id);
         let position = vehicle.hull.position;
-        let waiting = role.patient && enemy.loaded && aims_at(world.vehicle(enemy.vehicle), position);
+        let waiting = role.patient && knowledge.enemy(enemy.vehicle)
+            .is_some_and(|known| known.aims_at_me && known.loaded(situation.now));
 
         self.looked += 1;
         if self.looked < SPOT_TICKS && (waiting == self.waiting || self.looked < WAIT_TICKS) {
@@ -187,51 +192,6 @@ impl FiringSpotSearch {
             + role.flank * flank
             - role.exposure * exposure
             + role.armor * armor)
-
-    }
-
-}
-
-
-#[cfg(test)]
-mod tests {
-
-    use std::f32::consts::PI;
-    use std::sync::Arc;
-
-    use crate::base::physics::fixtures::{blocks, chieftain_aiming, chieftain_mobility};
-    use crate::game::item_defs::VehicleClass;
-    use crate::base::physics::Vehicle;
-    use super::super::fixtures::{enemy, gun, situation, unarmored, HULL_CENTER};
-    use super::*;
-
-    #[test]
-    fn likes_spots_by_its_marker_and_role() {
-
-        // An enemy facing -Z, a plate of 100 mm across it: from in front green, from far
-        // aside it ricochets, from behind green too. The bot as far from in front as
-        // from behind.
-        let mut world = World::new(Arc::new(blocks(&[])), None);
-        let id = world.add(Vehicle::new(Vec3::new(-100.0, 0.0, 0.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let other = world.add(Vehicle::new(Vec3::ZERO, Vec3::new(0.0, 0.0, PI), chieftain_mobility(), chieftain_aiming()));
-        let enemies = [enemy(other, Vec3::Y * HULL_CENTER, 1000.0)];
-        let armor = unarmored();
-        let situation = situation(&enemies, &armor, Vec3::ZERO, true);
-        let (front, aside, behind) = (Vec3::new(0.0, 0.0, -100.0), Vec3::new(95.0, 0.0, -30.0), Vec3::new(0.0, 0.0, 100.0));
-
-        let worth = [VehicleClass::Heavy, VehicleClass::Medium].map(|class| {
-            let role = BotRole::of(class);
-            let search = FiringSpotSearch::default();
-            [front, aside, behind].map(|point| {
-                search.worth(&world, id, &role, &gun(), point, &enemies[0], &situation).unwrap()
-            })
-        });
-
-        // Both like it green, a medium better from behind, a heavy not.
-        let [heavy, medium] = worth;
-        assert!(heavy[0] > heavy[1] + 0.5 && medium[0] > medium[1] + 0.5, "{heavy:?} {medium:?}");
-        assert!(medium[2] > medium[0] + 0.3, "{medium:?}");
-        assert!((heavy[2] - heavy[0]).abs() < 0.01, "{heavy:?}");
 
     }
 

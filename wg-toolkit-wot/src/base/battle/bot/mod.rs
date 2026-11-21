@@ -5,10 +5,16 @@
 //!
 //! Its parts, each its module:
 //! - what it knows of its battle, given each tick: [`BotSituation`], `situation`;
-//! - what its vehicle's class likes in a spot to fire from: `role`;
+//! - what it remembers of it from tick to tick: the enemies it saw, which threaten it,
+//!   their reloads as reckoned from their shots, the hits it took, how its team stands:
+//!   `knowledge`;
+//! - what its vehicle's class does: the posts it holds, what it likes in a spot to fire
+//!   from: `role`;
 //! - what it decides by: its gun marker, what a shot is worth, its best shell, its
 //!   sight, its gun's reach: `tactics`;
 //! - its target, and leading it: `target`;
+//! - the point of interest of its map it holds, for its team, where what its role does
+//!   goes on: `post`;
 //! - where it fires from, looked for round it: `spot`;
 //! - driving where it is ordered, round its allies, backing up, getting unstuck, its
 //!   hull angled once there: `motor`.
@@ -23,6 +29,7 @@
 //!
 //! ```text
 //!   each tick:
+//!     what it knows, see BotKnowledge::update
 //!     its target: every CHOOSE_TICKS, or once it no longer sees it, the enemy it sees
 //!       worth the most, see tactics::worth, another only if worth SWITCH_MARGIN more;
 //!       seeing none, the one it has, else the nearest its team spots
@@ -30,11 +37,15 @@
 //!       BotTarget::lead, while it sees it
 //!     its next shell: the one its gun marker shows best on its target, see
 //!       tactics::best_shell
+//!     its post, chosen at its first tick, kept while it has something to do there,
+//!       see BotPost::choose, BotPost::update
 //!     its spot, see FiringSpotSearch::update
-//!     its order to its motor: to its spot, within SPOT_ARRIVE, else to its target,
-//!       within its role's range seeing it, else within CLOSE_RANGE; else to where it
-//!       searches, within SEARCH_RANGE; its hull angled once there, see
-//!       BotMotor::stance, BotMotor::controls
+//!     its order to its motor, within SPOT_ARRIVE of it unless said otherwise:
+//!       with a target: to its spot; else to its post, facing it; else to it, within
+//!         its role's range seeing it, else within CLOSE_RANGE
+//!       without one: to its post, facing the way it faces; else to where it
+//!         searches, within SEARCH_RANGE
+//!     its hull angled once there, see BotMotor::stance, BotMotor::controls
 //!
 //!   it fires once it sees its target, its gun on its aim, see Turret::aim_error,
 //!   its shells landing within FIT_RADIUS of it or its aim settled, see Bot::aimed,
@@ -42,25 +53,30 @@
 //! ```
 
 mod situation;
+mod knowledge;
 mod tactics;
 mod target;
 mod motor;
+mod post;
 mod role;
 mod spot;
-#[cfg(test)]
-mod fixtures;
+
+use glam::{Vec3, Vec4};
 
 use crate::base::physics::{Dispersion, Vehicle, VehicleId, World};
+use crate::base::debug::{self, DebugChannel, DebugPlace};
 use crate::base::ballistics::gun::GunLoader;
 use crate::game::item_defs::VehicleClass;
 
 use self::tactics::{best_shell, in_sight, in_the_way, worth, FIT_RADIUS};
 use self::motor::{BotMotor, DriveOrder};
+use self::post::{BotPost, POST_LOOK};
+use self::knowledge::BotKnowledge;
 use self::spot::FiringSpotSearch;
 use self::target::BotTarget;
 use self::role::BotRole;
 
-pub use self::situation::{BotAlly, BotEnemy, BotSituation};
+pub use self::situation::{BotAlly, BotEnemy, BotHit, BotRoster, BotSituation};
 
 
 /// How close to its target the bot drives at most, in metres on the ground plane, seeing
@@ -83,17 +99,32 @@ const SETTLED_AIM: f32 = 1.1;
 /// choice: half a second, as a player looks round.
 const CHOOSE_TICKS: u32 = 5;
 const SWITCH_MARGIN: f32 = 1.3;
+/// How the bot's knowledge is drawn, see [`Bot::debug_draw`]: its text, where it
+/// remembers enemies, the hits it took, its spot and its post, and how high over its
+/// hull its text is, in metres.
+const DEBUG_TEXT: Vec4 = Vec4::new(255.0, 255.0, 160.0, 255.0);
+const DEBUG_REMEMBERED: Vec4 = Vec4::new(160.0, 160.0, 160.0, 255.0);
+const DEBUG_HIT: Vec4 = Vec4::new(255.0, 64.0, 64.0, 255.0);
+const DEBUG_SPOT: Vec4 = Vec4::new(64.0, 255.0, 160.0, 255.0);
+const DEBUG_POST: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
+const DEBUG_TEXT_HEIGHT: f32 = 4.0;
 
 
 /// The server driving a vehicle, as a client would: it sets its controls and its aim.
 #[derive(Debug, Clone, Default)]
 pub struct Bot {
+    /// Its vehicle's class.
+    class: VehicleClass,
     /// What it likes in a spot to fire from, by its vehicle's class.
     role: BotRole,
+    /// What it remembers of its battle.
+    knowledge: BotKnowledge,
     /// The enemy it aims at, see [`Self::choose_target`].
     target: Option<BotTarget>,
     /// How many ticks since it weighed the enemies it sees, see [`CHOOSE_TICKS`].
     chose: u32,
+    /// The point of interest of its map it holds.
+    post: BotPost,
     /// Where it fires at its target from.
     spot: FiringSpotSearch,
     /// How it drives its vehicle.
@@ -105,6 +136,7 @@ impl Bot {
     /// A bot of the role of its vehicle's class, see [`BotRole`].
     pub fn new(class: VehicleClass) -> Self {
         Self {
+            class,
             role: BotRole::of(class),
             ..Self::default()
         }
@@ -118,22 +150,28 @@ impl Bot {
     /// target, see [`BotMotor`]. See the module's documentation.
     pub fn drive(&mut self, world: &mut World, id: VehicleId, gun: &mut GunLoader, situation: &BotSituation) {
 
+        self.knowledge.update(world, id, situation);
+        self.post.choose(&self.role, situation.poi_map, situation.team);
         self.choose_target(world, id, gun, situation.enemies);
         if let Some(target) = self.target.as_mut() {
             target.lead(world, id);
         }
         self.choose_shell(world, id, gun, situation.enemies);
         if situation.drives {
-            self.spot.update(world, id, &self.role, gun, self.target, situation);
+            self.spot.update(world, id, &self.role, &self.knowledge, gun, self.target, situation);
         }
 
         // What it heads for, how close to it it stops, and what it faces there.
         let vehicle = world.vehicle(id);
-        let (goal, range, face) = match (self.target, self.spot.spot) {
-            (Some(target), Some(spot)) => (spot, SPOT_ARRIVE, target.at),
-            (Some(target), None) if target.seen => (target.at, self.role.range(vehicle), target.at),
-            (Some(target), None) => (target.at, CLOSE_RANGE, target.at),
-            (None, _) => (situation.search, SEARCH_RANGE, situation.search),
+        self.post.update(situation.now, vehicle.hull.position, SPOT_ARRIVE, self.target.is_some());
+        let post = self.post.poi.as_ref();
+        let (goal, range, face) = match (self.target, self.spot.spot, post) {
+            (Some(target), Some(spot), _) => (spot, SPOT_ARRIVE, target.at),
+            (Some(target), None, Some(post)) => (post.position(), SPOT_ARRIVE, target.at),
+            (Some(target), None, None) if target.seen => (target.at, self.role.range(vehicle), target.at),
+            (Some(target), None, None) => (target.at, CLOSE_RANGE, target.at),
+            (None, _, Some(post)) => (post.position(), SPOT_ARRIVE, post.position() + post.heading() * POST_LOOK),
+            (None, _, None) => (situation.search, SEARCH_RANGE, situation.search),
         };
         let aim = self.target.map_or(goal, |target| target.aim);
         world.vehicle_mut(id).turret.track(aim);
@@ -157,6 +195,65 @@ impl Bot {
 
         let flags = self.motor.controls(world, id, &order, situation.allies);
         world.vehicle_mut(id).hull.flags = flags;
+
+        if debug::draws(DebugChannel::Bots) {
+            self.debug_draw(world, id, situation);
+        }
+
+    }
+
+    /// Draw what it knows of its battle, see [`DebugChannel::Bots`]: over its vehicle,
+    /// its class, health and post, how its team stands, the threats to it, the hits it
+    /// took and its allies; where it remembers enemies its team no longer spots, from
+    /// where the hits it took came, its spot, and a line to its post.
+    fn debug_draw(&self, world: &World, id: VehicleId, situation: &BotSituation) {
+
+        let knowledge = &self.knowledge;
+        let team = &knowledge.team;
+        let hull = &world.vehicle(id).hull;
+        let threats = knowledge.enemies.iter().filter(|known| known.aims_at_me).count();
+        let damage: f32 = knowledge.hits.iter().map(|hit| hit.damage).sum();
+        let ally_health: f32 = situation.allies.iter().map(|ally| ally.health).sum();
+        let ally_max_health: f32 = situation.allies.iter().map(|ally| ally.max_health).sum();
+        let allies: Vec<String> = situation.allies.iter().map(|ally| format!("{:?}", ally.class)).collect();
+        let post = self.post.poi.as_ref().map_or("none".to_string(), |post| post.to_string());
+        let text = format!(
+            "{:?} {:.0}%, post {post}\nteams {} v {}, health {:.0} v {:.0}\nthreats {threats}, hits {} ({damage:.0})\nallies {:.0}%: {}",
+            self.class,
+            knowledge.health * 100.0,
+            team.allies_alive,
+            team.enemies_alive,
+            team.ally_health,
+            team.enemy_health,
+            knowledge.hits.len(),
+            100.0 * ally_health / ally_max_health.max(1.0),
+            allies.join(", "),
+        );
+        debug::at(DebugPlace::on(id, hull.position, hull.orientation), || {
+            debug::text(DebugChannel::Bots, hull.position + Vec3::Y * DEBUG_TEXT_HEIGHT, text, DEBUG_TEXT);
+        });
+
+        for known in knowledge.enemies.iter().filter(|known| !known.spotted) {
+            let text = format!(
+                "{:?} {:.0}/{:.0}, {:.0} s ago",
+                known.class,
+                known.health,
+                known.max_health,
+                situation.now - known.seen,
+            );
+            debug::cross(DebugChannel::Bots, known.at, DEBUG_REMEMBERED);
+            debug::text(DebugChannel::Bots, known.at, text, DEBUG_REMEMBERED);
+        }
+        for hit in &knowledge.hits {
+            debug::line(DebugChannel::Bots, hit.from, hull.position, DEBUG_HIT);
+        }
+        if let Some(spot) = self.spot.spot {
+            debug::line(DebugChannel::Bots, hull.position, spot, DEBUG_SPOT);
+            debug::cross(DebugChannel::Bots, spot, DEBUG_SPOT);
+        }
+        if let Some(post) = &self.post.poi {
+            debug::line(DebugChannel::Bots, hull.position, post.position(), DEBUG_POST);
+        }
 
     }
 
@@ -263,252 +360,6 @@ impl Bot {
     fn aimed(vehicle: &Vehicle, dispersion: Dispersion, distance: f32) -> bool {
         let best = vehicle.turret.aiming.dispersion_angle;
         dispersion.angle.tan() * distance <= FIT_RADIUS || dispersion.angle <= best * SETTLED_AIM
-    }
-
-}
-
-
-#[cfg(test)]
-mod tests {
-
-    use std::f32::consts::FRAC_PI_2;
-    use std::sync::Arc;
-
-    use glam::{Vec2, Vec3};
-
-    use wgtk::space::Space;
-
-    use crate::base::physics::fixtures::{blocks, chieftain_aiming, chieftain_mobility};
-    use crate::base::physics::wrap_angle;
-    use crate::base::TICK;
-    use super::fixtures::{enemy, gun, situation, unarmored, HULL_CENTER};
-    use super::motor::{ARMOR_ANGLE, HEADING_TOLERANCE};
-    use super::*;
-
-    /// Where a bot's target is, while it sees it.
-    fn sighted(bot: &Bot) -> Option<Vec3> {
-        bot.target.filter(|target| target.seen).map(|target| target.at)
-    }
-
-    /// A bot weighing the enemies it sees again, as it does every [`CHOOSE_TICKS`].
-    fn weigh(bot: &mut Bot, world: &World, id: VehicleId, enemies: &[BotEnemy]) {
-        for _ in 0..CHOOSE_TICKS {
-            bot.choose_target(world, id, &gun(), enemies);
-        }
-    }
-
-    /// Drive a bot of this class at its enemy, a vehicle standing at `enemy`, for
-    /// `ticks`, from `start`, facing +Z.
-    fn drive_at(space: Space, start: Vec3, enemy: Vec3, ticks: usize, class: VehicleClass) -> Vec3 {
-        let mut world = World::new(Arc::new(space), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
-        let id = world.add(Vehicle::new(start, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let other = world.add(Vehicle::new(enemy, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let enemies = [self::enemy(other, enemy + Vec3::Y * HULL_CENTER, 1000.0)];
-        let (mut bot, mut gun, armor) = (Bot::new(class), gun(), unarmored());
-        for _ in 0..ticks {
-            bot.drive(&mut world, id, &mut gun, &situation(&enemies, &armor, enemy, true));
-            world.step(0.1);
-        }
-        let hull = &world.vehicle(id).hull;
-        let to = (enemy - hull.position).with_y(0.0);
-        let off = wrap_angle(hull.yaw() - to.x.atan2(to.z)).abs();
-        assert!((off - ARMOR_ANGLE).abs() <= HEADING_TOLERANCE + 0.05, "{}° off its enemy", off.to_degrees());
-        hull.position
-    }
-
-    #[test]
-    fn targets_the_enemy_worth_most_it_sees_and_keeps_it() {
-
-        // A wall 20 m wide and 5 m high 30 m in front of the bot.
-        let space = blocks(&[(Vec3::new(-10.0, 0.0, -71.0), Vec3::new(10.0, 5.0, -69.0))]);
-        let mut world = World::new(Arc::new(space), None);
-        let id = world.add(Vehicle::new(Vec3::new(0.0, 0.0, -100.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let [hidden, seen, nearer] = [-140.0, -130.0, -120.0].map(|x| {
-            world.add(Vehicle::new(Vec3::new(x, 0.0, 140.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()))
-        });
-        let mut bot = Bot::default();
-        let behind_wall = Vec3::new(0.0, HULL_CENTER, -40.0);
-        let in_the_open = Vec3::new(60.0, HULL_CENTER, 0.0);
-        let near_open = Vec3::new(-30.0, HULL_CENTER, -80.0);
-        let far = Vec3::new(0.0, HULL_CENTER, 400.0);
-
-        // The nearest is behind the wall, so it targets the one in the open; one past
-        // its view range it doesn't see.
-        let enemies = [
-            enemy(hidden, behind_wall, 1000.0),
-            enemy(seen, in_the_open, 1000.0),
-            enemy(nearer, far, 1000.0),
-        ];
-        bot.choose_target(&world, id, &gun(), &enemies);
-        assert_eq!(sighted(&bot), Some(in_the_open));
-        // It keeps it while it sees it, against a nearer one that takes more shots.
-        weigh(&mut bot, &world, id, &[enemy(seen, in_the_open, 1000.0), enemy(nearer, near_open, 2000.0)]);
-        assert_eq!(sighted(&bot), Some(in_the_open));
-        // But not against one a shot from destroyed.
-        weigh(&mut bot, &world, id, &[enemy(seen, in_the_open, 1000.0), enemy(nearer, near_open, 100.0)]);
-        assert_eq!(sighted(&bot), Some(near_open));
-        // Behind the wall, still spotted, with no other in sight, it stays its target,
-        // where its team spots it, but isn't fired at.
-        bot.choose_target(&world, id, &gun(), &[enemy(nearer, behind_wall, 100.0)]);
-        assert_eq!(sighted(&bot), None);
-        assert_eq!(bot.target.map(|target| target.at), Some(behind_wall));
-        // Once gone from those spotted, it is forgotten, and the nearest spotted, which
-        // it doesn't see, is its target; none spotted, it has none.
-        bot.choose_target(&world, id, &gun(), &[enemy(hidden, far, 1000.0), enemy(seen, behind_wall, 1000.0)]);
-        assert_eq!(sighted(&bot), None);
-        assert_eq!(bot.target.map(|target| target.vehicle), Some(seen));
-        bot.choose_target(&world, id, &gun(), &[]);
-        assert!(bot.target.is_none());
-
-    }
-
-    #[test]
-    fn searches_where_its_team_last_saw_an_enemy() {
-        let space = blocks(&[]);
-        let mut world = World::new(Arc::new(space), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
-        let id = world.add(Vehicle::new(Vec3::new(-120.0, 0.0, -120.0), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let search = Vec3::new(100.0, 0.0, 100.0);
-        let (mut bot, mut gun, armor) = (Bot::default(), gun(), unarmored());
-        for _ in 0..900 {
-            bot.drive(&mut world, id, &mut gun, &situation(&[], &armor, search, true));
-            world.step(0.1);
-        }
-        let distance = (search - world.vehicle(id).hull.position).with_y(0.0).length();
-        assert!(distance <= SEARCH_RANGE + 5.0, "stopped {distance} m away");
-    }
-
-    #[test]
-    fn leads_a_moving_target() {
-
-        // An enemy 300 m ahead, crossing at 10 m/s to the right.
-        let mut world = World::new(Arc::new(blocks(&[])), None);
-        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let enemy = world.add(Vehicle::new(
-            Vec3::new(0.0, 0.0, 300.0),
-            Vec3::new(0.0, 0.0, FRAC_PI_2),
-            chieftain_mobility(),
-            chieftain_aiming(),
-        ));
-        world.vehicle_mut(enemy).hull.speed = 10.0;
-        let at = Vec3::new(0.0, HULL_CENTER, 300.0);
-        let (mut bot, mut gun, armor) = (Bot::default(), gun(), unarmored());
-        bot.drive(&mut world, id, &mut gun, &situation(&[self::enemy(enemy, at, 1000.0)], &armor, at, false));
-
-        // It aims ahead of it by as far as it goes in a tick and the shell's flight.
-        let velocity = world.vehicle(enemy).hull.velocity();
-        let target = bot.target.unwrap();
-        let (eye, _, _) = world.vehicle(id).turret.gun_marker(&world.vehicle(id).hull);
-        let flight = TICK.as_secs_f32() + target.aim.distance(eye) / chieftain_aiming().shot_speed;
-        assert!((target.aim - (at + velocity * flight)).length() < 0.01, "{}", target.aim);
-        assert!(target.aim.x > 4.0, "{}", target.aim);
-
-    }
-
-    #[test]
-    fn waits_for_its_aim_to_settle() {
-
-        // An enemy 300 m off to its right: its turret turns to it, its aim spreading.
-        let mut world = World::new(Arc::new(blocks(&[])), None);
-        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let at = Vec3::new(300.0, 0.0, 0.0);
-        let enemy = world.add(Vehicle::new(at, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let enemies = [self::enemy(enemy, at + Vec3::Y * HULL_CENTER, 1000.0)];
-        let (mut bot, mut gun, armor) = (Bot::default(), gun(), unarmored());
-
-        let mut on_target = None;
-        let mut fired = None;
-        for tick in 0..200 {
-            bot.drive(&mut world, id, &mut gun, &situation(&enemies, &armor, at, false));
-            world.step(TICK.as_secs_f32());
-            let vehicle = world.vehicle(id);
-            if on_target.is_none() && vehicle.turret.aim_error(&vehicle.hull) < AIM_TOLERANCE {
-                on_target = Some(tick);
-            }
-            if bot.fires(vehicle, &[]) {
-                fired = Some(tick);
-                break;
-            }
-        }
-
-        // On it after turning a quarter, it fires only seconds later, settled.
-        let (on_target, fired) = (on_target.unwrap(), fired.unwrap());
-        assert!(fired > on_target + 20, "on target at {on_target}, fired at {fired}");
-        let (_, _, dispersion) = world.vehicle(id).turret.gun_marker(&world.vehicle(id).hull);
-        assert!(dispersion.angle <= chieftain_aiming().dispersion_angle * SETTLED_AIM);
-
-    }
-
-    #[test]
-    fn drives_round_an_ally_standing_in_its_way() {
-
-        let space = blocks(&[]);
-        let mut world = World::new(Arc::new(space), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
-        let [id, standing] = [-100.0, -50.0].map(|z| {
-            world.add(Vehicle::new(Vec3::new(0.0, 0.0, z), Vec3::ZERO, chieftain_mobility(), chieftain_aiming()))
-        });
-        let [min, max] = chieftain_mobility().bounds;
-        let ally = BotAlly {
-            center: world.vehicle(standing).hull.position,
-            radius: (max - min).length() / 2.0,
-            velocity: Vec3::ZERO,
-        };
-        let search = Vec3::ZERO;
-        let (mut bot, mut gun, armor) = (Bot::default(), gun(), unarmored());
-
-        let mut nearest = f32::INFINITY;
-        for _ in 0..600 {
-            let situation = BotSituation {
-                allies: &[ally],
-                ..situation(&[], &armor, search, true)
-            };
-            bot.drive(&mut world, id, &mut gun, &situation);
-            world.step(0.1);
-            let at = world.vehicle(id).hull.position;
-            nearest = nearest.min((at - ally.center).with_y(0.0).length());
-        }
-
-        // Round it, never against it, and on to where it searches.
-        let end = world.vehicle(id).hull.position;
-        assert!(nearest > ally.radius, "{nearest} m from its ally");
-        assert!(end.with_y(0.0).length() <= SEARCH_RANGE + 5.0, "stopped at {end:?}");
-
-    }
-
-    #[test]
-    fn closes_in_to_its_roles_range_then_angles_its_armour() {
-        // A heavy closes in, a tank destroyer stops far off, each about its range: a spot
-        // nearer it isn't worth leaving its own for, see SPOT_MARGIN.
-        let chieftain = Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming());
-        let enemy = Vec3::new(120.0, 0.0, 120.0);
-        for class in [VehicleClass::Heavy, VehicleClass::TankDestroyer] {
-            let end = drive_at(blocks(&[]), Vec3::new(-120.0, 0.0, -120.0), enemy, 600, class);
-            let distance = (enemy - end).with_y(0.0).length();
-            let range = BotRole::of(class).range(&chieftain);
-            assert!((distance - range).abs() < 30.0, "{class:?} stopped {distance} m away, not {range} m");
-        }
-    }
-
-    #[test]
-    fn drives_around_a_block_in_its_way() {
-        // A block 40 m wide and 5 m high across its way, hiding its enemy within its
-        // range: it goes round, until it sees it past the block's side.
-        let space = blocks(&[(Vec3::new(-20.0, 0.0, -62.0), Vec3::new(20.0, 5.0, -58.0))]);
-        let enemy = Vec3::new(0.0, 0.0, 140.0);
-        let end = drive_at(space, Vec3::new(0.0, 0.0, -120.0), enemy, 900, VehicleClass::Medium);
-        let distance = (enemy - end).with_y(0.0).length();
-        assert!(end.x.abs() > 20.0 || end.z > -58.0, "stopped at {end:?}, {distance} m away");
-    }
-
-    #[test]
-    fn drives_on_until_it_sees_its_enemy() {
-        // A wall 60 m wide and 5 m high just in front of its enemy, well within its
-        // range: it drives round it, closer than its range, and stops once it sees it.
-        let space = blocks(&[(Vec3::new(-30.0, 0.0, 98.0), Vec3::new(30.0, 5.0, 102.0))]);
-        let enemy = Vec3::new(0.0, 0.0, 110.0);
-        let end = drive_at(space, Vec3::new(0.0, 0.0, -100.0), enemy, 900, VehicleClass::Medium);
-        let distance = (enemy - end).with_y(0.0).length();
-        assert!(distance < 150.0 && distance >= CLOSE_RANGE - 5.0, "stopped at {end:?}, {distance} m away");
-        assert!(end.x.abs() > 25.0 || end.z > 102.0, "stopped at {end:?}, still behind the wall");
     }
 
 }

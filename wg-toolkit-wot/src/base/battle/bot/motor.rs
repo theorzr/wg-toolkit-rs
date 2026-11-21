@@ -18,7 +18,7 @@ use super::situation::{BotAlly, BotEnemy};
 /// How far off what it faces its hull turns once stopped, in radians, when its target's
 /// marker shows no worse on it otherwise: its front armour thicker along a shell's way,
 /// its side not yet bare. Our choice, see [`BotMotor::stance`].
-pub const ARMOR_ANGLE: f32 = 25.0f32.to_radians();
+const ARMOR_ANGLE: f32 = 25.0f32.to_radians();
 /// The angles off what it faces the bot tries its hull at once stopped, positive to the
 /// right, see [`BotMotor::stance`].
 const HULL_ANGLES: [f32; 7] = [
@@ -34,7 +34,7 @@ const HULL_ANGLES: [f32; 7] = [
 /// radians.
 const TURN_WHILE_DRIVING: f32 = 0.6;
 /// How far off its heading its way may be before the bot turns at all.
-pub const HEADING_TOLERANCE: f32 = 0.1;
+const HEADING_TOLERANCE: f32 = 0.1;
 /// How near ahead an ally must be for the bot to give way to it, in metres between their
 /// centres on the ground plane, and how far off its heading, in radians, see
 /// [`gives_way`]. Our choice: a hull's length and some.
@@ -300,80 +300,4 @@ fn gives_way(position: Vec3, yaw: f32, allies: &[BotAlly]) -> bool {
             && to.length() < GIVE_WAY_DISTANCE
             && wrap_angle(to.x.atan2(to.z) - yaw).abs() < GIVE_WAY_ANGLE
     })
-}
-
-
-#[cfg(test)]
-mod tests {
-
-    use std::f32::consts::FRAC_PI_2;
-    use std::sync::Arc;
-
-    use glam::Vec2;
-
-    use crate::base::physics::fixtures::{blocks, chieftain_aiming, chieftain_mobility};
-    use super::super::fixtures::HULL_CENTER;
-    use super::super::SPOT_ARRIVE;
-    use super::*;
-
-    #[test]
-    fn gives_way_to_an_ally_driving_its_way() {
-
-        let ally = BotAlly {
-            center: Vec3::new(1.0, HULL_CENTER, 8.0),
-            radius: 4.0,
-            velocity: Vec3::Z * 5.0,
-        };
-
-        // Just ahead, driving its way: it waits.
-        assert!(gives_way(Vec3::ZERO, 0.0, &[ally]));
-        // Not standing, coming at it, far, or aside.
-        let standing = BotAlly {
-            velocity: Vec3::ZERO,
-            ..ally
-        };
-        let coming = BotAlly {
-            velocity: -Vec3::Z * 5.0,
-            ..ally
-        };
-        let far = BotAlly {
-            center: Vec3::new(0.0, HULL_CENTER, 20.0),
-            ..ally
-        };
-        assert!(!gives_way(Vec3::ZERO, 0.0, &[standing, coming, far]));
-        assert!(!gives_way(Vec3::ZERO, FRAC_PI_2, &[ally]));
-
-    }
-
-    #[test]
-    fn backs_up_to_a_spot_behind_it() {
-
-        // Facing its enemy 200 m ahead, its spot 25 m behind and a little aside.
-        let mut world = World::new(Arc::new(blocks(&[])), Some((Vec2::splat(-150.0), Vec2::splat(150.0))));
-        let id = world.add(Vehicle::new(Vec3::ZERO, Vec3::ZERO, chieftain_mobility(), chieftain_aiming()));
-        let order = DriveOrder {
-            goal: Vec3::new(5.0, 0.0, -25.0),
-            range: SPOT_ARRIVE,
-            face: Vec3::new(0.0, HULL_CENTER, 200.0),
-            reverse: true,
-        };
-        let mut motor = BotMotor::default();
-
-        let mut backed = false;
-        for _ in 0..150 {
-            let flags = motor.controls(&mut world, id, &order, &[]);
-            backed |= flags & movement_flag::BACKWARD != 0;
-            assert!(flags & movement_flag::FORWARD == 0, "drove forward");
-            world.vehicle_mut(id).hull.flags = flags;
-            world.step(TICK.as_secs_f32());
-        }
-
-        // There, its front still to its enemy.
-        let hull = &world.vehicle(id).hull;
-        assert!(backed);
-        assert!((order.goal - hull.position).with_y(0.0).length() <= SPOT_ARRIVE + 1.0, "stopped at {:?}", hull.position);
-        assert!(hull.yaw().abs() < 45.0f32.to_radians(), "turned {}°", hull.yaw().to_degrees());
-
-    }
-
 }

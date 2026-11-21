@@ -12,8 +12,8 @@ use glam::{Affine3A, Vec2, Vec3};
 
 use tracing::warn;
 
-use wgtk::pxml::{self, Element};
 use wgtk::res::fs::ResFilesystem;
+use wgtk::pxml::{self, Element};
 
 use super::collision::{ArmorMaterial, CollisionModel, VehicleCollision};
 use super::items::{item_type, IntCompactDescr, VehicleDescr};

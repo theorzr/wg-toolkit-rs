@@ -262,6 +262,14 @@ pub struct BaseArgs {
     /// behind.
     #[arg(long, allow_hyphen_values = true, value_parser = parse_spawn)]
     pub spawn: Option<(f32, f32, f32)>,
+    /// Where what the server works out once of the game's data is saved, to be read again:
+    /// each map's sight grid.
+    #[arg(long, default_value = "re-work/cache")]
+    pub cache_dir: PathBuf,
+    /// Where each map's points of interest are, `<map>.json`, which bots go to and the
+    /// dev command `/poi` adds to.
+    #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/poi"))]
+    pub poi_dir: PathBuf,
     /// Tell the clients of a network to reach the base app at this address, as
     /// `<network>/<prefix>=<ip>[:<port>]` (`192.168.1.0/24=192.168.1.10:20017`), the port
     /// the base app's if none. The most specific rule matching a client's address wins,

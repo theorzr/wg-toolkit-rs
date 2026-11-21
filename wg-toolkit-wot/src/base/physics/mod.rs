@@ -176,6 +176,7 @@ mod rubble;
 mod fall;
 mod walls;
 mod collision;
+mod sight_grid;
 mod nav;
 mod turret;
 mod client;
@@ -207,6 +208,7 @@ use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::nav::NavGrid;
 
+pub use self::sight_grid::SightGrid;
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
 pub use self::turret::{Dispersion, Turret};
 pub use self::ground::ground_at;

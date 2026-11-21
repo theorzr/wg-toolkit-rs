@@ -23,16 +23,16 @@ use crate::base::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
+use crate::game::item_defs::{GeneralWheels, MobilityDef, SiegeDef, VehicleClass, VehicleDef, VisionDef};
 use crate::base::physics::{Dispersion, Hull, Vehicle, VehicleId, World};
 use crate::base::ballistics::shot::{Shot, ShotTarget};
 use crate::base::ballistics::gun::GunLoader;
 use crate::game::collision::{VehicleCollision, VehiclePart};
 use crate::base::garage::player::Player;
-use crate::game::item_defs::{GeneralWheels, MobilityDef, SiegeDef, VehicleDef, VisionDef};
 
+use super::bot::{Bot, BotHit};
 use super::spawn::TeamStart;
 use super::hit::ShellHit;
-use super::bot::Bot;
 
 
 /// The fastest a wheel rolls as `wheelsScroll` packs it, in m/s, either way.
@@ -59,6 +59,10 @@ const DAMAGE_SPREAD: f32 = 0.25;
 
 /// How long a vehicle burns after its last hit, in seconds.
 const FIRE_DURATION: f64 = 5.0;
+
+/// How long a vehicle keeps the hits it took, in seconds, as its damage indicator shows
+/// them. Our choice.
+const HIT_MEMORY: f64 = 10.0;
 
 /// `ATTACK_REASON.SHOT`'s index.
 const ATTACK_REASON_SHOT: i8 = 0;
@@ -123,6 +127,10 @@ pub struct BattleVehicle {
     fire: Option<(ComponentKey<Fire>, f64)>,
     /// Its siege mode, if it has one, and where it is in switching it.
     siege: Option<Siege>,
+    /// Its class.
+    pub class: VehicleClass,
+    /// The hits it took within [`HIT_MEMORY`], see [`Self::hits`].
+    hits: Vec<BotHit>,
 }
 
 /// A vehicle's siege mode, see [`SiegeDef`], how it moves out of it, and where it is in
@@ -255,6 +263,8 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             siege: loadout.siege.map(|siege| Siege::new(siege, loadout.mobility)),
+            class: loadout.class,
+            hits: Vec::new(),
         })
 
     }
@@ -315,6 +325,8 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             siege: def.siege.map(|siege| Siege::new(siege, def.mobility)),
+            class: def.class,
+            hits: Vec::new(),
         })
 
     }
@@ -350,6 +362,20 @@ impl BattleVehicle {
     /// [`Self::camouflage`].
     pub fn fired(&mut self, now: f64) {
         self.last_shot = Some(now);
+    }
+
+    /// The game time it last fired at, if it did.
+    pub fn last_shot(&self) -> Option<f64> {
+        self.last_shot
+    }
+
+    /// The hits it took within [`HIT_MEMORY`] before game time `now`, see
+    /// [`Self::take_damage`].
+    pub fn hits(&self, now: f64) -> Vec<BotHit> {
+        self.hits.iter()
+            .filter(|hit| now - hit.at <= HIT_MEMORY)
+            .copied()
+            .collect()
     }
 
     /// Where its hull is in the world.
@@ -617,8 +643,9 @@ impl BattleVehicle {
 
     /// It takes a shell's damage at game time `now`, in this battle, varied by up to
     /// [`DAMAGE_SPREAD`] either way: its health drops, in its `OwnVehicle` too when a
-    /// client drives it, and the clients see the hit, as the captured server shows one. A
-    /// damaging hit sets it on fire, which a kill puts out. The damage it took.
+    /// client drives it, and the clients see the hit, as the captured server shows one,
+    /// which it remembers where from, see [`Self::hits`]. A damaging hit sets it on
+    /// fire, which a kill puts out. The damage it took.
     pub fn take_damage(
         &mut self,
         app: &mut base::App,
@@ -642,6 +669,13 @@ impl BattleVehicle {
                 app.component(own_vehicle)?.set_vehicleHealthInfo(vehicle_health_info(entity_id, new_health))?;
             }
         }
+
+        self.hits.retain(|hit| now - hit.at <= HIT_MEMORY);
+        self.hits.push(BotHit {
+            from: shot.start,
+            at: now,
+            damage: amount as f32,
+        });
 
         let stickers = shell_hit.sticker(shot, bounds).map(|sticker| {
             self.damage_stickers.push(sticker);
