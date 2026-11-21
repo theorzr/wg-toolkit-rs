@@ -24,7 +24,8 @@ use crate::base::{
     SETTING_RESET_FULL_CLIP,
 };
 use crate::base::physics::{Dispersion, Hull, Vehicle, VehicleId, World};
-use crate::base::ballistics::gun::{GunLoader, Shot, ShotTarget};
+use crate::base::ballistics::shot::{Shot, ShotTarget};
+use crate::base::ballistics::gun::GunLoader;
 use crate::game::collision::{VehicleCollision, VehiclePart};
 use crate::base::garage::player::Player;
 use crate::game::item_defs::{GeneralWheels, MobilityDef, SiegeDef, VehicleDef, VisionDef};

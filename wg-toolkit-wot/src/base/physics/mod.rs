@@ -203,14 +203,14 @@ use crate::game::item_defs::{AimingDef, MobilityDef};
 use crate::base::debug::{self, DebugPlace};
 
 use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
-use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::collision::{hold_apart, touching, Pose, Solid, Touching};
-use self::ground::ground_at;
+use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::nav::NavGrid;
 
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
-pub use self::fall::TreeFall;
 pub use self::turret::{Dispersion, Turret};
+pub use self::ground::ground_at;
+pub use self::fall::TreeFall;
 
 
 /// The `vehicle_moveWith` flags, `MOVEMENT_FLAGS` in the client's `Avatar.py`.

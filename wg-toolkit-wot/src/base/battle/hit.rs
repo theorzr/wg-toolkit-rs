@@ -5,7 +5,7 @@ use glam::Vec3;
 
 use crate::base::ballistics::impact::{Impact, Explosion, ImpactOutcome};
 use crate::game::collision::VehicleIntersection;
-use crate::base::ballistics::gun::Shot;
+use crate::base::ballistics::shot::Shot;
 use crate::game::schema::HitPoint;
 
 

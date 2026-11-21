@@ -12,7 +12,10 @@
 //! as the last tick takes no memory, only what changed and is sent does.
 //!
 //! What is drawn [`lasting`] is kept by the frame for that long, drawn again each tick:
-//! a shell's flight, drawn as it flies on, tick by tick.
+//! a shell's flight, drawn as it flies on, tick by tick. No more than
+//! [`MAX_LASTING_LINES`] lines and [`MAX_LASTING_TEXTS`] texts last, the oldest dropped
+//! first: the client draws its lines and texts anew each frame, in a buffer of its own,
+//! and its game ends once that buffer overflows.
 //!
 //! What is drawn is given in the world, where it is as it is drawn, and goes where
 //! [`at`] says: in the world, by default, or in a vehicle's frame, see
@@ -60,6 +63,11 @@ const SNAP: f32 = 0.01;
 const TEXT_SIZE: f32 = 2.0;
 /// How big a cross is along each axis, in metres, see [`cross`].
 const CROSS_SIZE: f32 = 0.3;
+/// How many lines and texts last at most, see the module's documentation. The client
+/// overflowed with about ten vehicles firing bursts for 10 s, their shells' paths and
+/// hit texts lasting.
+const MAX_LASTING_LINES: usize = 500;
+const MAX_LASTING_TEXTS: usize = 8;
 
 thread_local! {
     /// The frame open on this thread, see [`DebugFrame::begin`].
@@ -317,9 +325,10 @@ impl DebugFrame {
         entity_id: impl Fn(VehicleId) -> Option<u32>,
     ) -> io::Result<()> {
 
-        // What lasts, drawn again.
+        // What lasts, drawn again, until it is over, the oldest dropped past the most.
         let now = self.now;
         self.lasting.retain(|lasting| lasting.until > now);
+        drop_oldest(&mut self.lasting);
         for lasting in &self.lasting {
             let object = group_in(&mut self.groups, lasting.channel, lasting.vehicle);
             add(object, lasting.shape.clone());
@@ -536,6 +545,39 @@ fn draw(channel: DebugChannel, shape: impl FnOnce(&Affine3A) -> Shape) {
         }
 
     });
+}
+
+/// Drop the oldest of what lasts past [`MAX_LASTING_LINES`] lines and
+/// [`MAX_LASTING_TEXTS`] texts, these kept in the order they were drawn.
+fn drop_oldest(lasting: &mut Vec<Lasting>) {
+
+    let mut lines = 0usize;
+    let mut texts = 0usize;
+    for lasting in lasting.iter() {
+        match lasting.shape {
+            Shape::Line(_) => lines += 1,
+            Shape::Text(_) => texts += 1,
+            Shape::Sphere(_) => {}
+        }
+    }
+
+    // The first of each kind past its most are the oldest.
+    let mut lines_over = lines.saturating_sub(MAX_LASTING_LINES);
+    let mut texts_over = texts.saturating_sub(MAX_LASTING_TEXTS);
+    lasting.retain(|lasting| {
+        let over = match lasting.shape {
+            Shape::Line(_) => &mut lines_over,
+            Shape::Text(_) => &mut texts_over,
+            Shape::Sphere(_) => return true,
+        };
+        if *over > 0 {
+            *over -= 1;
+            false
+        } else {
+            true
+        }
+    });
+
 }
 
 /// The group of a channel among these, following a vehicle, if any, made if new, see

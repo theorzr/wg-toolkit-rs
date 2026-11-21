@@ -79,8 +79,8 @@
 //! [`crate::havok::collision::CollisionBody::shells_pass`]: every light fence's. It flies
 //! through a destructible of no more than [`Destructibles::shoot_through_health`] (19),
 //! breaking it, and loses [`Destructibles::shoot_through_loss`] of its penetration
-//! (25 mm), unless it is HE, which explodes on it. A stronger one, a house's wall, stops
-//! it whole and takes its damage. With modules of 10 to 80 health
+//! (25 mm), unless it is HE, APHE or HEAT, which explode on it. A stronger one, a
+//! house's wall, stops it whole and takes its damage. With modules of 10 to 80 health
 //! and shells of 100 or more, a module breaks at the first shell.
 
 use std::collections::{HashMap, HashSet};

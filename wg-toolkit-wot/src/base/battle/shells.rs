@@ -7,7 +7,7 @@ use std::io;
 use wgtk::app::entity::{EntityId, EntityKey};
 use wgtk::app::base;
 
-use crate::base::ballistics::gun::{Shot, ShotLanding, ShotObstacles, ShotPiece, ShotTarget};
+use crate::base::ballistics::shot::{Shot, ShotLanding, ShotObstacles, ShotPiece, ShotTarget};
 use crate::game::schema::{self, Avatar};
 use crate::base::NO_PREFAB_EFFECTS;
 
@@ -48,7 +48,7 @@ impl Shells {
             let crossed = shot.through.len();
             let landing = shot.fly((now - *fired) as f32, Some(obstacles), vehicles, shooter.0);
 
-            let yaw = shot.velocity.x.atan2(shot.velocity.z);
+            let yaw = shot.start_velocity.x.atan2(shot.start_velocity.z);
             through.extend(shot.through[crossed..].iter().map(|&piece| (piece, yaw)));
 
             if let Some(landing) = landing {
@@ -92,7 +92,7 @@ pub fn show_tracer(app: &mut base::App, avatars: &[EntityKey<Avatar>], shooter: 
             def.kind_index,
             def.caliber,
             shot.start,
-            shot.velocity,
+            shot.start_velocity,
             def.gravity,
             shot.range,
             0,

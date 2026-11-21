@@ -1,12 +1,26 @@
-//! What a shell does to what it meets: to a vehicle, whether it pierces its armour, stops
-//! or ricochets, and its damage, and off the ground, whether it skims, see
-//! [`GroundMaterial`]. AP, APCR and HEAT shells follow the client's own rules,
-//! `_CrosshairShotResults` in `gun_marker_ctrl.py`. HE shells follow the legacy rules
-//! instead: they explode on the armour they don't pierce, and on the ground near a
-//! vehicle, damaging it by the explosion's distance and the armour it goes through.
+//! What a shell does to a vehicle it hits: whether it pierces its armour, stops on it or
+//! ricochets off it, and its damage, see [`hit`]. AP, APCR and HEAT shells follow the
+//! client's own rules, `_CrosshairShotResults` in `gun_marker_ctrl.py`. HE shells follow
+//! the legacy rules instead: they explode on the armour they don't pierce, and on the
+//! ground near a vehicle, damaging it by the explosion's distance and the armour it
+//! goes through, see [`explosion`].
+//!
+//! A shell's way through a vehicle, see [`penetrate`]:
+//!
+//! ```text
+//!   its penetration    by its speed, see `speed`, varied by its randomization
+//!   each armour met    nearest first, along its way
+//!     a module         damaged, not stopping it
+//!     too shallow      a ricochet, unless overmatched: AP and APCR, armour < caliber / 3
+//!     its thickness    along its way, turned toward the normal by its normalization
+//!     thicker          stopped: not pierced
+//!     main armour      pierced: its damage
+//!     a screen         gone through, a HEAT jet weakening as it flies on behind it
+//!   only screens       through its screens, missing the main armour
+//! ```
 
+use std::f32::consts::{FRAC_PI_2, TAU};
 use std::collections::HashSet;
-use std::f32::consts::FRAC_PI_2;
 
 use glam::{Affine3A, Vec3};
 use rand::Rng;
@@ -14,6 +28,8 @@ use rand::Rng;
 use crate::game::collision::{ArmorMaterial, VehicleCollision, VehicleIntersection, VehiclePart};
 use crate::game::item_defs::{ShellKind, ShotDef};
 use crate::base::debug::{self, DebugChannel};
+
+use super::speed;
 
 
 /// How far before the point a shell first hits a vehicle, and past it, its way through
@@ -35,24 +51,11 @@ const EXPLOSION_DAMAGE_ABSORPTION_FACTOR: f32 = 1.3;
 /// explosion to go through that armour.
 const EXPLOSION_STANDOFF: f32 = 0.01;
 
-/// The ground, every terrain alike until their materials are read.
-pub const GROUND: GroundMaterial = GroundMaterial {
-    ricochet_angle: 8.0 * std::f32::consts::PI / 180.0,
-};
-
-
-/// What a material of the world does to the shells meeting it: AP and APCR shells
-/// skim off it at a grazing angle, which the game itself never does.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GroundMaterial {
-    /// The largest angle between a shell's path and the surface it ricochets off at.
-    pub ricochet_angle: f32,
-}
-
 
 /// What a shell does when it hits a vehicle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Impact {
+    /// Whether it pierced, stopped, ricocheted, or went through screens only.
     pub outcome: ImpactOutcome,
     /// Where the outcome happens: the armour it pierces, stops on or ricochets off.
     pub hit: VehicleIntersection,
@@ -82,6 +85,7 @@ pub enum ImpactOutcome {
 /// The damage an explosion deals a vehicle, see [`explosion`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Explosion {
+    /// The damage it deals, before its spread, the armour on its way taken.
     pub damage: f32,
     /// Where it reaches the vehicle's main armour.
     pub hit: VehicleIntersection,
@@ -92,13 +96,16 @@ pub struct Explosion {
     pub trace: Vec<String>,
 }
 
+
+// -- A hit --
+
 /// What a shell does to a vehicle, placed in the world by `transforms`, which it first
-/// hits at `point`, flying along `direction`, after flying `distance` metres, with this
-/// share of its penetration left off its ricochets, see [`ricochet_pen`].
+/// hits at `point`, flying along `direction`, after flying `distance` metres, at
+/// `speed_factor` of its speed from its gun, see [`speed::pen_at_speed`].
 pub fn hit(
     shot: &ShotDef,
     distance: f32,
-    pen_factor: f32,
+    speed_factor: f32,
     point: Vec3,
     direction: Vec3,
     collision: &VehicleCollision,
@@ -106,24 +113,33 @@ pub fn hit(
     rng: &mut impl Rng,
 ) -> Option<Impact> {
 
+    // Its way through the vehicle, from just before where it first hits it.
     let direction = direction.normalize();
     let from = point - direction * TRACE_BACKWARD;
     let hits = collision.hits(transforms, from, point + direction * TRACE_FORWARD);
-    let pen = randomize(shot.pen_at(distance) * pen_factor, shot.pen_randomization, rng);
+
+    // Its penetration, by its speed, varied as the game varies it.
+    let average = speed::pen_at_speed(shot, speed_factor);
+    let pen = randomize(average, shot.pen_randomization, rng);
 
     let debugging = debug::draws(DebugChannel::Shells);
     let mut trace = Vec::new();
     if debugging {
-        trace.push(debug_pen(shot, distance, pen_factor, pen));
+        trace.push(debug_pen(shot, distance, speed_factor, average, pen));
     }
 
     let (outcome, index) = penetrate(shot, pen, direction, &hits, debugging.then_some(&mut trace))?;
     let hit = hits[index];
 
+    // Its damage once pierced, as much as the armour it pierced lets through.
     let damage = match outcome {
-        ImpactOutcome::Pierced => shot.damage_at(distance) * hit.material.map_or(1.0, |material| material.vehicle_damage_factor),
+        ImpactOutcome::Pierced => {
+            let factor = hit.material.map_or(1.0, |material| material.vehicle_damage_factor);
+            shot.damage_at(distance) * factor
+        }
         _ => 0.0,
     };
+
     let impact = Impact {
         outcome,
         hit,
@@ -160,20 +176,30 @@ pub fn hit(
 /// vehicle's main armour, down to [`EXPLOSION_EDGE_DAMAGE_FACTOR`] of that at its
 /// radius, less what each armour on its way absorbs, screens included. None when its
 /// main armour is out of reach.
-pub fn explosion(shot: &ShotDef, center: Vec3, collision: &VehicleCollision, transforms: &[Affine3A; 4]) -> Option<Explosion> {
+pub fn explosion(
+    shot: &ShotDef,
+    center: Vec3,
+    collision: &VehicleCollision,
+    transforms: &[Affine3A; 4],
+) -> Option<Explosion> {
 
+    // The nearest of its main armour, within its radius.
     let radius = shot.explosion_radius;
-    let (closest, distance) = collision.closest_point(transforms, center, |group| group.material.is_some_and(|m| m.is_main_armor()))?;
+    let (closest, distance) = collision.closest_point(transforms, center, |group| {
+        group.material.is_some_and(|material| material.is_main_armor())
+    })?;
     if distance > radius {
         return None;
     }
 
-    // Its way to the main armour, just past it so that the armour is crossed.
+    // Its way there, just past it so that the armour is crossed.
     let direction = (closest - center).normalize_or_zero();
     if direction == Vec3::ZERO {
         return None;
     }
     let hits = collision.hits(transforms, center, closest + direction * EXPLOSION_STANDOFF * 2.0);
+
+    // Each armour on the way absorbs some of it, up to the main armour.
     let mut seen = HashSet::new();
     let mut absorbed = 0.0;
     let mut reached = None;
@@ -189,13 +215,15 @@ pub fn explosion(shot: &ShotDef, center: Vec3, collision: &VehicleCollision, tra
         }
     }
 
+    // Weaker the farther away, down to its edge's share at its radius.
     let falloff = 1.0 - (1.0 - EXPLOSION_EDGE_DAMAGE_FACTOR) * distance / radius;
     let damage = (EXPLOSION_DAMAGE_FACTOR * shot.damage_near * falloff - absorbed).max(0.0);
 
     let mut trace = Vec::new();
     if debug::draws(DebugChannel::Shells) {
         trace.push(format!(
-            "Exploded {distance:.2} m from the armour, {radius:.2} m radius: {:.0}% of half its damage, {absorbed:.0} absorbed",
+            "Exploded {distance:.2} m from the armour, {radius:.2} m radius: \
+            {:.0}% of half its damage, {absorbed:.0} absorbed",
             falloff * 100.0,
         ));
     }
@@ -209,37 +237,10 @@ pub fn explosion(shot: &ShotDef, center: Vec3, collision: &VehicleCollision, tra
 
 }
 
-/// Whether a shell flying at `velocity` ricochets off the ground, of this material and
-/// this upward `normal` where it meets it: AP and APCR shells only, within its
-/// ricochet angle.
-pub fn ricochets_off_ground(shot: &ShotDef, velocity: Vec3, normal: Vec3, ground: &GroundMaterial) -> bool {
-    if !matches!(shot.kind(), ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr) {
-        return false;
-    }
-    let grazing = (-velocity.normalize_or_zero().dot(normal)).clamp(-1.0, 1.0).asin();
-    (0.0..=ground.ricochet_angle).contains(&grazing)
-}
-
-/// The share of its penetration a shell keeps off a ricochet: [`KINETIC_RICOCHET_PEN`]
-/// for AP and APCR, all of it for HEAT. Its speed and damage stay.
-pub fn ricochet_pen_factor(shot: &ShotDef) -> f32 {
-    match shot.kind() {
-        ShellKind::ArmorPiercing | 
-        ShellKind::ArmorPiercingCr => 0.75,
-        _ => 1.0,
-    }
-}
-
-/// A velocity mirrored off a surface of this normal, as a shell ricochets, at the same
-/// speed.
-pub fn reflect(velocity: Vec3, normal: Vec3) -> Vec3 {
-    velocity - 2.0 * velocity.dot(normal) * normal
-}
-
 /// Follow a shell of this penetration through the armour it meets along `direction`,
-/// `hits`, nearest first, as `__shotResultDefault` does: the outcome, and the index in
-/// `hits` where it happens, each armour met told in `trace`, if any, see
-/// [`Impact::trace`]. None when it meets no armour.
+/// `hits`, nearest first, as `__shotResultDefault` does, see the module's
+/// documentation: the outcome, and the index in `hits` where it happens, each armour
+/// met told in `trace`, if any, see [`Impact::trace`]. None when it meets no armour.
 fn penetrate(
     shot: &ShotDef,
     mut pen: f32,
@@ -248,21 +249,21 @@ fn penetrate(
     mut trace: Option<&mut Vec<String>>,
 ) -> Option<(ImpactOutcome, usize)> {
 
-    let kind = shot.kind();
     let mut seen = HashSet::<(VehiclePart, usize)>::new();
-    // A HEAT shell's jet, once through a screen, and where it started.
+    // Where a HEAT shell's jet started, once through a screen.
     let mut jet: Option<f32> = None;
     let mut last = None;
 
     for (index, hit) in hits.iter().enumerate() {
 
-        // A module the shell can only damage, not stopping it.
+        // A module the shell can only damage, or armour it already went through.
         let Some(material) = hit.material else { continue };
         if material.collide_once_only && !seen.insert((hit.part, hit.group)) {
             continue;
         }
         last = Some(index);
 
+        // A jet loses some of its penetration for each metre it flies.
         if let Some(start) = jet {
             let flown = hit.distance - start;
             if flown > 0.0 {
@@ -274,15 +275,22 @@ fn penetrate(
             }
         }
 
-        let hit_angle_cos = if material.use_hit_angle { (-direction).dot(hit.normal).clamp(0.0, 1.0) } else { 1.0 };
-        if jet.is_none() && ricochets(shot, kind, hit_angle_cos, material.armor, material.may_ricochet, material.check_caliber_for_ricochet) {
+        // Off it at too shallow an angle, but a jet, which goes on whatever its way.
+        let hit_angle_cos = if material.use_hit_angle {
+            (-direction).dot(hit.normal).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        if jet.is_none() && ricochets(shot, &material, hit_angle_cos) {
             if let Some(trace) = &mut trace {
                 trace.push(debug_ricochet(shot, hit, &material, hit_angle_cos));
             }
             return Some((ImpactOutcome::Ricochet, index));
         }
 
-        let thickness = penetration_armor(shot, kind, hit_angle_cos, material.armor, material.use_hit_angle, material.check_caliber_for_hit_angle_norm);
+        // Through it if it pierces its thickness along its way.
+        let thickness = penetration_armor(shot, &material, hit_angle_cos);
         if let Some(trace) = &mut trace {
             trace.push(debug_armor(shot, hit, &material, hit_angle_cos, thickness, pen));
         }
@@ -294,7 +302,9 @@ fn penetrate(
         if material.is_main_armor() {
             return Some((ImpactOutcome::Pierced, index));
         }
-        if kind == ShellKind::HollowCharge && jet.is_none() {
+
+        // Through a screen, a HEAT shell goes on as a jet.
+        if shot.kind() == ShellKind::HollowCharge && jet.is_none() {
             jet = Some(hit.distance);
         }
 
@@ -304,64 +314,49 @@ fn penetrate(
 
 }
 
-/// Whether a shell ricochets off armour it meets at this angle, as `_shouldRicochet`
-/// decides: AP and APCR never off armour thinner than a third of their caliber.
-fn ricochets(shot: &ShotDef, kind: ShellKind, hit_angle_cos: f32, armor: f32, may_ricochet: bool, check_caliber: bool) -> bool {
+/// Whether a shell ricochets off armour of this material it meets at this angle, as
+/// `_shouldRicochet` decides: past its ricochet angle, unless it overmatches the armour,
+/// see [`overmatches`].
+fn ricochets(shot: &ShotDef, material: &ArmorMaterial, hit_angle_cos: f32) -> bool {
 
-    let Some(ricochet_angle_cos) = shot.ricochet_angle_cos else { 
-        return false 
+    let Some(ricochet_angle_cos) = shot.ricochet_angle_cos else {
+        return false
     };
 
-    if !may_ricochet || armor == 0.0 || hit_angle_cos > ricochet_angle_cos {
+    if !material.may_ricochet || material.armor == 0.0 || hit_angle_cos > ricochet_angle_cos {
         return false;
     }
 
-    let kind_checks_caliber = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr);
-    !check_caliber || !kind_checks_caliber || armor * 3.0 >= shot.caliber
-    
+    !overmatches(shot, material)
+
 }
 
-/// The thickness of armour a shell goes through, meeting it at this angle, as
-/// `_computePenetrationArmor` computes it: turned toward its normal by its normalization
-/// angle first, more for a caliber over twice the thickness.
-fn penetration_armor(shot: &ShotDef, kind: ShellKind, hit_angle_cos: f32, armor: f32, use_hit_angle: bool, check_caliber: bool) -> f32 {
+/// The thickness of armour of this material a shell goes through, meeting it at this
+/// angle, as `_computePenetrationArmor` computes it: turned toward its normal by its
+/// normalization angle first, see [`normalization`].
+fn penetration_armor(shot: &ShotDef, material: &ArmorMaterial, hit_angle_cos: f32) -> f32 {
 
-    if !use_hit_angle {
-        return armor;
+    if !material.use_hit_angle {
+        return material.armor;
     }
 
     let mut cos = hit_angle_cos;
-    let normalization = normalization(shot, kind, armor, check_caliber);
+    let normalization = normalization(shot, material);
     if normalization > 0.0 && cos < 1.0 {
         let angle = cos.acos() - normalization;
         cos = if angle < 0.0 { 1.0 } else { angle.min(MAX_HIT_ANGLE).cos() };
     }
-    armor / cos.max(1e-5)
+    material.armor / cos.max(1e-5)
 
 }
 
-/// The angle a shell turns toward the normal of armour of this thickness, in radians:
-/// its normalization angle, AP, APCR and APHE only, more for a caliber over twice the
-/// thickness.
-fn normalization(shot: &ShotDef, kind: ShellKind, armor: f32, check_caliber: bool) -> f32 {
 
-    let normalization = match kind {
-        ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr | ShellKind::ArmorPiercingHe => shot.normalization_angle,
-        _ => 0.0,
-    };
-
-    if normalization > 0.0 && check_caliber && shot.caliber > armor * 2.0 && armor > 0.0 {
-        normalization * 1.4 * shot.caliber / (armor * 2.0)
-    } else {
-        normalization
-    }
-
-}
+// -- Its trace, to be debugged --
 
 /// A line of a shell's trace, see [`Impact::trace`]: its kind, the distance it flew,
-/// its penetration rolled, then its average there, and the share of it a ricochet left
-/// it, if any.
-fn debug_pen(shot: &ShotDef, distance: f32, pen_factor: f32, pen: f32) -> String {
+/// its speed, of its speed from its gun, when it pierces by it, its penetration rolled,
+/// then its average there.
+fn debug_pen(shot: &ShotDef, distance: f32, speed_factor: f32, average: f32, pen: f32) -> String {
 
     let kind = match shot.kind() {
         ShellKind::HollowCharge => "HEAT",
@@ -372,11 +367,10 @@ fn debug_pen(shot: &ShotDef, distance: f32, pen_factor: f32, pen: f32) -> String
         ShellKind::Smoke => "Smoke",
     };
 
-    let average = shot.pen_at(distance) * pen_factor;
-    if pen_factor < 1.0 {
+    if speed::is_kinetic(shot) {
         format!(
-            "{kind} from {distance:.0} m, ricocheted: {pen:.0} mm pen ({average:.0} average, {:.0}% kept)",
-            pen_factor * 100.0,
+            "{kind} from {distance:.0} m at {:.0}% speed: {pen:.0} mm pen ({average:.0} average)",
+            speed_factor * 100.0,
         )
     } else {
         format!("{kind} from {distance:.0} m: {pen:.0} mm pen ({average:.0} average)")
@@ -386,7 +380,12 @@ fn debug_pen(shot: &ShotDef, distance: f32, pen_factor: f32, pen: f32) -> String
 
 /// A line of a shell's trace, see [`Impact::trace`]: armour it ricocheted off, at this
 /// angle from its normal, over the shell's ricochet angle.
-fn debug_ricochet(shot: &ShotDef, hit: &VehicleIntersection, material: &ArmorMaterial, hit_angle_cos: f32) -> String {
+fn debug_ricochet(
+    shot: &ShotDef,
+    hit: &VehicleIntersection,
+    material: &ArmorMaterial,
+    hit_angle_cos: f32,
+) -> String {
     let ricochet = shot.ricochet_angle_cos.map_or(0.0, |cos| cos.acos().to_degrees());
     format!(
         "{} at {:.1}°: ricochet (over {ricochet:.0}°)",
@@ -397,7 +396,7 @@ fn debug_ricochet(shot: &ShotDef, hit: &VehicleIntersection, material: &ArmorMat
 
 /// A line of a shell's trace, see [`Impact::trace`]: armour it meets, at this angle from
 /// its normal, then normalized, and `thickness` that way, then the penetration it has
-/// left of `pen`, or how much it fell short. Overmatched when too thin to ricochet off.
+/// left of `pen`, or how much it fell short.
 fn debug_armor(
     shot: &ShotDef,
     hit: &VehicleIntersection,
@@ -419,21 +418,18 @@ fn debug_armor(
         return format!("{name}: {result}");
     }
 
-    let kind = shot.kind();
     let angle = hit_angle_cos.acos();
-    let normalization = normalization(shot, kind, material.armor, material.check_caliber_for_hit_angle_norm);
+    let normalization = normalization(shot, material);
     let normalized = if normalization > 0.0 {
         format!(" ({:.1}° normalized)", (angle - normalization).max(0.0).to_degrees())
     } else {
         String::new()
     };
 
-    let kinetic = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr);
-    let overmatched = kinetic && material.check_caliber_for_ricochet && material.armor * 3.0 < shot.caliber;
     format!(
         "{name} at {:.1}°{normalized}{}: {thickness:.0} mm effective, {result}",
         angle.to_degrees(),
-        if overmatched { ", overmatched" } else { "" },
+        if overmatches(shot, material) { ", overmatched" } else { "" },
     )
 
 }
@@ -445,50 +441,69 @@ fn debug_armor_name(hit: &VehicleIntersection, material: &ArmorMaterial) -> Stri
     format!("{:?}{screen} {:.0} mm", hit.part, material.armor)
 }
 
+
+// -- The rules shared --
+
+/// The angle a shell turns toward the normal of armour of this material, in radians:
+/// its normalization angle, an AP, APCR or APHE shell's only, as `_SHELL_EXTRA_DATA`
+/// says, more for a caliber over twice the armour's thickness.
+fn normalization(shot: &ShotDef, material: &ArmorMaterial) -> f32 {
+
+    let normalizes = matches!(
+        shot.kind(),
+        ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr | ShellKind::ArmorPiercingHe,
+    );
+    if !normalizes {
+        return 0.0;
+    }
+
+    // More for a caliber over twice the armour's thickness.
+    let normalization = shot.normalization_angle;
+    let armor = material.armor;
+    let big_caliber = material.check_caliber_for_hit_angle_norm && armor > 0.0 && shot.caliber > armor * 2.0;
+    if normalization > 0.0 && big_caliber {
+        normalization * 1.4 * shot.caliber / (armor * 2.0)
+    } else {
+        normalization
+    }
+
+}
+
+/// Whether a shell is too big to ricochet off armour of this material: an AP or APCR
+/// shell over three times its thickness.
+fn overmatches(shot: &ShotDef, material: &ArmorMaterial) -> bool {
+    let checks_caliber = matches!(shot.kind(), ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr);
+    checks_caliber && material.check_caliber_for_ricochet && material.armor * 3.0 < shot.caliber
+}
+
 /// A penetration varied by up to `randomization` of it either way, normally, most shots
 /// within half of that.
 fn randomize(pen: f32, randomization: f32, rng: &mut impl Rng) -> f32 {
-    // Box–Muller.
-    let (u, v): (f32, f32) = (rng.r#gen::<f32>().max(f32::MIN_POSITIVE), rng.r#gen());
-    let normal = (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos();
+
+    // A normal draw, by Box–Muller.
+    let u = rng.r#gen::<f32>().max(f32::MIN_POSITIVE);
+    let v = rng.r#gen::<f32>();
+    let normal = (-2.0 * u.ln()).sqrt() * (TAU * v).cos();
+
+    // Half of it to the randomization, cut at it.
     pen * (1.0 + (normal * 0.5).clamp(-1.0, 1.0) * randomization)
+
 }
 
 
 #[cfg(test)]
 mod tests {
 
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
-    use super::*;
+    use wgtk::res::fs::ResFilesystem;
+
     use crate::game::collision::{ArmorGroup, ArmorMaterial, CollisionModel};
-    use crate::game::items::{item_type, IntCompactDescr};
+    use crate::game::item_defs::VehicleDef;
 
-    fn shot(kind: ShellKind, caliber: f32, pen: f32) -> ShotDef {
-        let ap = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr | ShellKind::ArmorPiercingHe);
-        ShotDef {
-            compact_descr: IntCompactDescr { item_type: item_type::SHELL, nation: 5, id: 1 },
-            kind_index: kind as u8,
-            caliber,
-            effects_index: 0,
-            pierced_sticker: None,
-            prefab_effects_index: None,
-            speed: 800.0,
-            gravity: 9.81,
-            max_distance: 720.0,
-            damage_near: 400.0,
-            damage_far: 400.0,
-            pen_near: pen,
-            pen_far: pen,
-            pen_randomization: 0.0,
-            normalization_angle: if ap { 5f32.to_radians() } else { 0.0 },
-            ricochet_angle_cos: matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr | ShellKind::HollowCharge)
-                .then(|| 70f32.to_radians().cos()),
-            jet_pen_loss: if kind == ShellKind::HollowCharge { 0.5 } else { 0.0 },
-            explosion_radius: caliber * caliber / 5555.0,
-        }
-    }
+    use super::super::fixtures::shot;
+    use super::*;
 
     fn material(armor: f32, main: bool) -> ArmorMaterial {
         ArmorMaterial {
@@ -508,12 +523,25 @@ mod tests {
         let b = Vec3::new(2.0, -2.0, z);
         let c = Vec3::new(2.0, 2.0, z);
         let d = Vec3::new(-2.0, 2.0, z);
-        ArmorGroup { name: "armor".into(), material_kind: 1, material: Some(material), triangles: vec![[a, b, c], [a, c, d]] }
+        ArmorGroup {
+            name: "armor".into(),
+            material_kind: 1,
+            material: Some(material),
+            triangles: vec![[a, b, c], [a, c, d]],
+        }
+    }
+
+    /// A part's collision model of these groups.
+    fn model(groups: Vec<ArmorGroup>) -> CollisionModel {
+        CollisionModel {
+            groups,
+            radius: 10.0,
+            bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)],
+        }
     }
 
     /// A vehicle of these plates on its hull, at the origin.
     fn vehicle(plates: Vec<ArmorGroup>) -> (VehicleCollision, [Affine3A; 4]) {
-        let model = |groups| CollisionModel { groups, radius: 10.0, bounds: [Vec3::splat(-5.0), Vec3::splat(5.0)] };
         let collision = VehicleCollision {
             parts: [model(vec![]), model(plates), model(vec![]), model(vec![])],
             hull_position: Vec3::ZERO,
@@ -521,8 +549,8 @@ mod tests {
         (collision, [Affine3A::IDENTITY; 4])
     }
 
-    /// A shell coming down `z` at this angle from the plates' normal, onto the origin's
-    /// plate at `z`.
+    /// A shell coming down `z` at this angle from the plates' normal, at full speed,
+    /// onto the origin's plate at `z`.
     fn impact(shot: &ShotDef, angle: f32, z: f32, plates: Vec<ArmorGroup>) -> Option<Impact> {
         let (collision, transforms) = vehicle(plates);
         let direction = Vec3::new(angle.to_radians().sin(), 0.0, -angle.to_radians().cos());
@@ -540,37 +568,64 @@ mod tests {
     }
 
     #[test]
+    fn pierces_less_slower_but_damages_as_much() {
+
+        let ap = shot(ShellKind::ArmorPiercing, 120.0, 180.0);
+        let (collision, transforms) = vehicle(vec![plate(1.0, material(150.0, true))]);
+        let mut rng = StdRng::seed_from_u64(1);
+
+        let fast = hit(&ap, 100.0, 1.0, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut rng).unwrap();
+        assert_eq!((fast.outcome, fast.damage), (ImpactOutcome::Pierced, 400.0));
+
+        // At 82% of its speed, 135 mm.
+        let slow = hit(&ap, 100.0, 0.818, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut rng).unwrap();
+        assert_eq!(slow.outcome, ImpactOutcome::NotPierced);
+
+    }
+
+    #[test]
     fn angled_armour_is_thicker() {
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
         // 120 mm at 60°, 55° once normalized: about 209 mm.
         let impact = impact(&ap, 60.0, 1.0, vec![plate(1.0, material(120.0, true))]).unwrap();
         assert_eq!(impact.outcome, ImpactOutcome::NotPierced);
-        assert!((penetration_armor(&ap, ShellKind::ArmorPiercing, 60f32.to_radians().cos(), 120.0, true, true) - 209.2).abs() < 0.5);
+        let thickness = penetration_armor(&ap, &material(120.0, true), 60f32.to_radians().cos());
+        assert!((thickness - 209.2).abs() < 0.5, "{thickness}");
     }
 
     #[test]
     fn ricochets_unless_it_overmatches() {
+
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 400.0);
         let off = impact(&ap, 75.0, 1.0, vec![plate(1.0, material(50.0, true))]).unwrap();
         assert_eq!(off.outcome, ImpactOutcome::Ricochet);
+
         // A caliber of more than 3 times the armour; exactly 3 times still ricochets.
-        assert_eq!(impact(&ap, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, ImpactOutcome::Ricochet);
+        let thrice = impact(&ap, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap();
+        assert_eq!(thrice.outcome, ImpactOutcome::Ricochet);
         let overmatched = impact(&ap, 75.0, 1.0, vec![plate(1.0, material(39.0, true))]).unwrap();
         assert_eq!(overmatched.outcome, ImpactOutcome::Pierced);
+
         // HEAT checks no caliber.
         let heat = shot(ShellKind::HollowCharge, 120.0, 400.0);
-        assert_eq!(impact(&heat, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap().outcome, ImpactOutcome::Ricochet);
+        let off = impact(&heat, 75.0, 1.0, vec![plate(1.0, material(40.0, true))]).unwrap();
+        assert_eq!(off.outcome, ImpactOutcome::Ricochet);
+
     }
 
     #[test]
     fn a_heat_jet_weakens_past_a_screen() {
+
+        // A 10 mm screen, then 150 mm of main armour 1 m behind: half its penetration
+        // lost.
         let heat = shot(ShellKind::HollowCharge, 120.0, 200.0);
-        // A 10 mm screen, then 150 mm of main armour 1 m behind: half its penetration is lost.
         let plates = vec![plate(2.0, material(10.0, false)), plate(1.0, material(150.0, true))];
         assert_eq!(impact(&heat, 0.0, 2.0, plates.clone()).unwrap().outcome, ImpactOutcome::NotPierced);
+
         // An AP shell loses nothing.
         let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
         assert_eq!(impact(&ap, 0.0, 2.0, plates).unwrap().outcome, ImpactOutcome::Pierced);
+
     }
 
     #[test]
@@ -582,88 +637,82 @@ mod tests {
 
     #[test]
     fn he_explodes_on_armour_it_does_not_pierce() {
-        let he = shot(ShellKind::HighExplosive, 152.0, 40.0);
+
         // Half its damage, less 1.3 per millimetre of the 100 mm it stops on.
-        let impact = impact(&he, 0.0, 1.0, vec![plate(1.0, material(100.0, true))]).unwrap();
-        assert_eq!(impact.outcome, ImpactOutcome::NotPierced);
-        assert!(impact.exploded);
+        let he = shot(ShellKind::HighExplosive, 152.0, 40.0);
+        let exploded = impact(&he, 0.0, 1.0, vec![plate(1.0, material(100.0, true))]).unwrap();
+        assert_eq!(exploded.outcome, ImpactOutcome::NotPierced);
+        assert!(exploded.exploded);
         let falloff = 1.0 - 0.95 * EXPLOSION_STANDOFF / he.explosion_radius;
-        assert!((impact.damage - (200.0 * falloff - 130.0)).abs() < 0.1, "{}", impact.damage);
+        assert!((exploded.damage - (200.0 * falloff - 130.0)).abs() < 0.1, "{}", exploded.damage);
+
         // Pierced, the whole damage.
-        let pierced = super::tests::impact(&he, 0.0, 1.0, vec![plate(1.0, material(30.0, true))]).unwrap();
+        let pierced = impact(&he, 0.0, 1.0, vec![plate(1.0, material(30.0, true))]).unwrap();
         assert_eq!((pierced.outcome, pierced.damage), (ImpactOutcome::Pierced, 400.0));
+
+    }
+
+    #[test]
+    fn an_explosion_weakens_with_distance_and_screens() {
+
+        // Halfway to its radius, 20 mm absorbing 26.
+        let he = shot(ShellKind::HighExplosive, 152.0, 40.0);
+        let radius = he.explosion_radius;
+        let (collision, transforms) = vehicle(vec![plate(0.0, material(20.0, true))]);
+        let half = explosion(&he, Vec3::new(0.0, 0.0, radius / 2.0), &collision, &transforms).unwrap();
+        assert!((half.damage - (200.0 * (1.0 - 0.95 * 0.5) - 26.0)).abs() < 0.1, "{half:?}");
+        assert!(explosion(&he, Vec3::new(0.0, 0.0, radius * 1.1), &collision, &transforms).is_none());
+
+        // A 10 mm screen in between absorbs 13 more.
+        let plates = vec![plate(0.0, material(20.0, true)), plate(radius / 4.0, material(10.0, false))];
+        let (screened, transforms) = vehicle(plates);
+        let behind = explosion(&he, Vec3::new(0.0, 0.0, radius / 2.0), &screened, &transforms).unwrap();
+        assert!((half.damage - behind.damage - 13.0).abs() < 0.1, "{behind:?}");
+
+    }
+
+    /// A vehicle's parts placed at the origin, as its definition puts them.
+    fn placed(def: &VehicleDef) -> [Affine3A; 4] {
+        [
+            Vec3::ZERO,
+            def.collision.hull_position,
+            def.aiming.turret_position,
+            def.aiming.turret_position + def.aiming.gun_position,
+        ].map(Affine3A::from_translation)
+    }
+
+    /// A shell fired from 100 m ahead at this height onto a vehicle, at full speed.
+    fn fire_at(shot: &ShotDef, at: &VehicleDef, height: f32) -> Impact {
+        let transforms = placed(at);
+        let from = Vec3::new(0.0, height, 100.0);
+        let to = Vec3::new(0.0, height, -10.0);
+        let first = at.collision.first_hit(&transforms, from, to).unwrap();
+        let point = from.lerp(to, first.fraction);
+        let mut rng = StdRng::seed_from_u64(1);
+        hit(shot, 100.0, 1.0, point, to - from, &at.collision, &transforms, &mut rng).unwrap()
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: the Pz. I's 20 mm against the
     /// Chieftain's front, and the Chieftain's shells against the Pz. I, from 100 m.
     #[test]
     fn real_vehicles_against_each_other() {
-        use crate::game::item_defs::VehicleDef;
-        use wgtk::res::fs::ResFilesystem;
+
         let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
         let fs = ResFilesystem::new(res).unwrap();
         let chieftain = VehicleDef::load(&fs, "uk", "GB98_T95_FV4201_Chieftain").unwrap();
         let pz1 = VehicleDef::load(&fs, "germany", "G53_PzI").unwrap();
-        let placed = |def: &VehicleDef| [
-            Vec3::ZERO, def.collision.hull_position, def.aiming.turret_position, def.aiming.turret_position + def.aiming.gun_position,
-        ].map(Affine3A::from_translation);
-        let fire = |shot: &ShotDef, at: &VehicleDef, height: f32| {
-            let transforms = placed(at);
-            let from = Vec3::new(0.0, height, 100.0);
-            let to = Vec3::new(0.0, height, -10.0);
-            let first = at.collision.first_hit(&transforms, from, to).unwrap();
-            let point = from.lerp(to, first.fraction);
-            hit(shot, 100.0, 1.0, point, to - from, &at.collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap()
-        };
+
         for shot in &pz1.shots {
-            let impact = fire(shot, &chieftain, 1.2);
+            let impact = fire_at(shot, &chieftain, 1.2);
             assert_ne!(impact.outcome, ImpactOutcome::Pierced, "{shot:?}: {impact:?}");
             assert_eq!(impact.damage, 0.0, "{shot:?}: {impact:?}");
         }
+
         for shot in &chieftain.shots {
-            let impact = fire(shot, &pz1, 1.0);
+            let impact = fire_at(shot, &pz1, 1.0);
             assert!(impact.damage > 0.0, "{:?}: {impact:?}", shot.kind());
         }
-    }
 
-    #[test]
-    fn a_ricocheted_shell_pierces_less_but_damages_as_much() {
-        let ap = shot(ShellKind::ArmorPiercing, 120.0, 180.0);
-        let (collision, transforms) = vehicle(vec![plate(1.0, material(150.0, true))]);
-        let fire = |pen_factor| hit(&ap, 100.0, pen_factor, Vec3::Z, -Vec3::Z, &collision, &transforms, &mut StdRng::seed_from_u64(1)).unwrap();
-        assert_eq!((fire(1.0).outcome, fire(1.0).damage), (ImpactOutcome::Pierced, 400.0));
-        // Off one ricochet, 135 mm.
-        assert_eq!(ricochet_pen_factor(&ap), 0.75);
-        assert_eq!(fire(ricochet_pen_factor(&ap)).outcome, ImpactOutcome::NotPierced);
-        assert_eq!(ricochet_pen_factor(&shot(ShellKind::HollowCharge, 120.0, 180.0)), 1.0);
-    }
-
-    #[test]
-    fn skims_off_the_ground_at_a_grazing_angle() {
-        let ap = shot(ShellKind::ArmorPiercing, 120.0, 200.0);
-        let at = |angle: f32| Vec3::new(angle.to_radians().cos(), -angle.to_radians().sin(), 0.0) * 1000.0;
-        assert!(ricochets_off_ground(&ap, at(5.0), Vec3::Y, &GROUND));
-        assert!(!ricochets_off_ground(&ap, at(12.0), Vec3::Y, &GROUND));
-        // Neither HE nor HEAT, which go off on it.
-        assert!(!ricochets_off_ground(&shot(ShellKind::HighExplosive, 120.0, 40.0), at(5.0), Vec3::Y, &GROUND));
-        assert!(!ricochets_off_ground(&shot(ShellKind::HollowCharge, 120.0, 200.0), at(5.0), Vec3::Y, &GROUND));
-        let off = reflect(at(5.0), Vec3::Y);
-        assert!((off.length() - 1000.0).abs() < 0.1 && (off.normalize().y - 5f32.to_radians().sin()).abs() < 1e-4, "{off}");
-    }
-
-    #[test]
-    fn an_explosion_weakens_with_distance_and_screens() {
-        let he = shot(ShellKind::HighExplosive, 152.0, 40.0);
-        let radius = he.explosion_radius;
-        let (collision, transforms) = vehicle(vec![plate(0.0, material(20.0, true))]);
-        // Halfway to its radius, 20 mm absorbing 26.
-        let half = explosion(&he, Vec3::new(0.0, 0.0, radius / 2.0), &collision, &transforms).unwrap();
-        assert!((half.damage - (200.0 * (1.0 - 0.95 * 0.5) - 26.0)).abs() < 0.1, "{half:?}");
-        assert!(explosion(&he, Vec3::new(0.0, 0.0, radius * 1.1), &collision, &transforms).is_none());
-        // A 10 mm screen in between absorbs 13 more.
-        let (screened, transforms) = vehicle(vec![plate(0.0, material(20.0, true)), plate(radius / 4.0, material(10.0, false))]);
-        let behind = explosion(&he, Vec3::new(0.0, 0.0, radius / 2.0), &screened, &transforms).unwrap();
-        assert!((half.damage - behind.damage - 13.0).abs() < 0.1, "{behind:?}");
     }
 
 }
