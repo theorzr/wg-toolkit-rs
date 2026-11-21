@@ -219,23 +219,6 @@ impl NavGrid {
 
     }
 
-    /// Where a tank `radius` wide stands at a point, over `space` of what `keep` says
-    /// stops it: the surface of the cell under it, if its clearance fits the tank, see
-    /// [`Self::clearance`]. None off the grid.
-    pub fn stand(
-        &mut self,
-        point: Vec3,
-        radius: f32,
-        space: &Space,
-        keep: &impl Fn(&StaticTriangle) -> bool,
-    ) -> Option<Vec3> {
-        let cell = self.cell_of(point)?;
-        if self.clearance(cell, space, keep) < radius {
-            return None;
-        }
-        Some(self.center_of(cell))
-    }
-
     /// The cell a point is over, its column and row, if within the grid.
     fn cell_of(&self, point: Vec3) -> Option<(usize, usize)> {
         let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;

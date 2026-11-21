@@ -24,7 +24,6 @@ rsa.workspace = true
 crc32fast.workspace = true
 
 flate2.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 
 clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }

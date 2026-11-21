@@ -88,36 +88,6 @@ pub struct VehicleDef {
     pub collision: Arc<VehicleCollision>,
     /// Its siege mode, if it has one: a wheeled vehicle's fast one.
     pub siege: Option<SiegeDef>,
-    /// Its class, as its vehicle list's tags give it, see [`VehicleClass`].
-    pub class: VehicleClass,
-}
-
-/// A vehicle's class, by the tag its vehicle list gives it: `lightTank`, `mediumTank`,
-/// `heavyTank`, `AT-SPG` or `SPG`. Medium for a vehicle tagged none of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VehicleClass {
-    Light,
-    #[default]
-    Medium,
-    Heavy,
-    TankDestroyer,
-    Artillery,
-}
-
-impl VehicleClass {
-
-    /// The class of the first tag of these, space separated, that names one, if any.
-    pub fn of_tags(tags: &str) -> Option<Self> {
-        tags.split_whitespace().find_map(|tag| match tag {
-            "lightTank" => Some(Self::Light),
-            "mediumTank" => Some(Self::Medium),
-            "heavyTank" => Some(Self::Heavy),
-            "AT-SPG" => Some(Self::TankDestroyer),
-            "SPG" => Some(Self::Artillery),
-            _ => None,
-        })
-    }
-
 }
 
 /// A vehicle's siege mode, which vehicles tagged `siegeMode` switch to and back: how it
@@ -616,7 +586,6 @@ impl VehicleDef {
             })
             .ok_or_else(|| invalid(format!("no vehicle {name} in {nation}")))?;
         let siege_mode = tags.split_whitespace().any(|tag| tag == "siegeMode");
-        let class = VehicleClass::of_tags(&tags).unwrap_or_default();
 
         let vehicle = read_xml(fs, &format!("{dir}/{name}.xml"))?;
         let component_ids = |kind: &str| -> io::Result<Box<Element>> {
@@ -928,7 +897,6 @@ impl VehicleDef {
             vision,
             collision,
             siege,
-            class,
         })
 
     }

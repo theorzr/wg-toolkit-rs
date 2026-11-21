@@ -242,12 +242,6 @@ pub struct BaseArgs {
     /// round, else the player's own. Can be repeated.
     #[arg(long)]
     pub bot_vehicle: Vec<String>,
-    /// Whether bots fire on their enemies.
-    #[arg(long)]
-    pub bots_fire: bool,
-    /// Whether bots drive toward their enemies, else they stay where they start.
-    #[arg(long)]
-    pub bots_drive: bool,
     /// What battles draw to be debugged in their clients' world, as a list of channels,
     /// `spotting,spot-points`: how each vehicle is spotted, under it, and its checkpoints
     /// and its enemies' best line of sight to them. Alone, `spotting`.
@@ -262,14 +256,6 @@ pub struct BaseArgs {
     /// behind.
     #[arg(long, allow_hyphen_values = true, value_parser = parse_spawn)]
     pub spawn: Option<(f32, f32, f32)>,
-    /// Where what the server works out once of the game's data is saved, to be read again:
-    /// each map's sight grid.
-    #[arg(long, default_value = "re-work/cache")]
-    pub cache_dir: PathBuf,
-    /// Where each map's points of interest are, `<map>.json`, which bots go to and the
-    /// dev command `/poi` adds to.
-    #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/poi"))]
-    pub poi_dir: PathBuf,
     /// Tell the clients of a network to reach the base app at this address, as
     /// `<network>/<prefix>=<ip>[:<port>]` (`192.168.1.0/24=192.168.1.10:20017`), the port
     /// the base app's if none. The most specific rule matching a client's address wins,

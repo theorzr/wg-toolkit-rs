@@ -176,7 +176,6 @@ mod rubble;
 mod fall;
 mod walls;
 mod collision;
-mod sight_grid;
 mod nav;
 mod turret;
 mod client;
@@ -208,7 +207,6 @@ use self::collision::{hold_apart, touching, Pose, Solid, Touching};
 use self::contacts::{contacts_of, Contacts, MAX_CONTACTS};
 use self::nav::NavGrid;
 
-pub use self::sight_grid::SightGrid;
 pub use self::rubble::{Breakage, DestructiblePiece, Rubble};
 pub use self::turret::{Dispersion, Turret};
 pub use self::ground::ground_at;
@@ -346,14 +344,6 @@ impl<S: Deref<Target = Space>> World<S> {
         nav.path(from, to, radius, around, &self.space, &blocking(&self.space, &self.rubble))
     }
 
-    /// Where a tank `radius` wide stands at a point of its map: on the surface there, if
-    /// it fits, as its ways go, see [`Self::path`]. None without bounds, or out of them.
-    pub fn stand(&mut self, point: Vec3, radius: f32) -> Option<Vec3> {
-        self.refresh_nav();
-        let nav = self.nav.as_mut()?;
-        nav.stand(point, radius, &self.space, &blocking(&self.space, &self.rubble))
-    }
-
     /// Make its way grid forget what it learnt once more of its rubble broke.
     fn refresh_nav(&mut self) {
         let broken = self.rubble.broken_count();
@@ -411,19 +401,6 @@ impl<S: Deref<Target = Space>> World<S> {
         }
         crossings
 
-    }
-
-    /// How many plants of the map's foliage stand or lie within `radius` of a point on
-    /// the ground plane, as the players see them: the trees knocked down where they fell,
-    /// see [`TreeFall::transform`].
-    pub fn plants_near(&self, at: Vec3, radius: f32) -> usize {
-        let standing = self.space.foliage.near(at, radius)
-            .filter(|plant| !self.falls.values().any(|fall| fall.tree == plant.tree))
-            .count();
-        let fallen = self.falls.values()
-            .filter(|fall| Vec3::from(fall.transform().translation).with_y(at.y).distance(at) <= radius)
-            .count();
-        standing + fallen
     }
 
     // -- Its vehicles --

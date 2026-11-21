@@ -86,6 +86,15 @@ impl Turret {
         self.target = Aim::Angles(yaw, pitch);
     }
 
+    /// The point in the world it turns toward, if it tracks one, see [`Self::track`]: a
+    /// client's, where its gun marker is.
+    pub fn tracked(&self) -> Option<Vec3> {
+        match self.target {
+            Aim::Point(point) => Some(point),
+            Aim::Angles(..) => None,
+        }
+    }
+
     /// Advance by `dt` seconds on the given hull, already advanced: turn toward the aim,
     /// then update the dispersion.
     pub fn step(&mut self, dt: f32, hull: &Hull) {

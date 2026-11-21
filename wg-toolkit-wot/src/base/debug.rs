@@ -89,15 +89,9 @@ pub enum DebugChannel {
     /// Each shell's flight, as it is worked out, and where it ends, see the ballistics'
     /// `shot` module.
     Shells,
-    /// Over each bot, what it knows of its battle, where it remembers enemies, the hits
-    /// it took, and its spot, see `Bot::debug_draw`.
+    /// Over each bot, its orders, its way to its goal and its aim, see `Bot::debug_draw`,
+    /// and the bots' route, see `BotRoute::debug_draw`.
     Bots,
-    /// Round each client's vehicle, the cells of the map's sight grid that see it, see
-    /// `SightGrid::debug_draw`.
-    Sight,
-    /// Round each client's vehicle, the map's points of interest, see
-    /// `PoiMap::debug_draw`.
-    Poi,
 }
 
 /// A set of [`DebugChannel`]s.
@@ -188,8 +182,6 @@ impl DebugChannel {
             DebugChannel::Contacts => "contacts",
             DebugChannel::Shells => "shells",
             DebugChannel::Bots => "bots",
-            DebugChannel::Sight => "sight",
-            DebugChannel::Poi => "poi",
         }
     }
 

@@ -159,26 +159,6 @@ impl Foliage {
         Some(&self.plants[index])
     }
 
-    /// Its plants standing within `radius` of a point on the ground plane, each once, in
-    /// no order.
-    pub fn near(&self, at: Vec3, radius: f32) -> impl Iterator<Item = &Plant> {
-
-        let [low, high] = [at.xz() - radius, at.xz() + radius].map(cell_of);
-        let mut listed = (low.x..=high.x)
-            .flat_map(|x| (low.y..=high.y).map(move |y| IVec2::new(x, y)))
-            .filter_map(|cell| self.cells.get(&cell))
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        listed.sort_unstable();
-        listed.dedup();
-
-        listed.into_iter()
-            .map(|index| &self.plants[index as usize])
-            .filter(move |plant| plant.transform.translation.xz().distance(at.xz()) <= radius)
-
-    }
-
     /// Where the line from `from` to `to` crosses its plants, each once, in no order,
     /// see the module's documentation.
     pub fn crossings(&self, from: Vec3, to: Vec3) -> Vec<FoliageCrossing> {

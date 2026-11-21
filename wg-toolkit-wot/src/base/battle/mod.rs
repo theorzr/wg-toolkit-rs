@@ -20,7 +20,7 @@
 //!   spotting     what each team spots of the other's vehicles
 //!   period       waiting, counting down, fighting
 //!   vehicle      a vehicle of it, a player's or a bot's: shown, its gun, damaged
-//!   bot          the server driving a vehicle: its way, its aim, when it fires
+//!   bot          the server driving a vehicle as a dev orders it: where, at what
 //!   shells       its shells in flight, and their tracers
 //!   hit          what a shell does to a vehicle, as the clients are told
 //!   areas        what broke of its destructibles, by chunk
@@ -40,7 +40,6 @@ mod spawn;
 mod chat;
 
 use std::time::{Duration, Instant};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::io;
 
@@ -60,16 +59,16 @@ use crate::base::{
     TICK,
 };
 use crate::base::ballistics::shot::{Shot, ShotLanding, ShotObstacles, ShotTarget, DEBUG_SHOT_SECONDS};
-use crate::base::physics::{ground_at, SightGrid, Vehicle, VehicleId, World};
 use crate::base::debug::{self, DebugChannel, DebugChannels, DebugFrame};
+use crate::base::physics::{ground_at, Vehicle, VehicleId, World};
 use crate::base::ballistics::ricochet::{self, GroundMaterial};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::base::poi::{Poi, PoiActivity, PoiMap};
+use crate::game::collision::VehicleIntersection;
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
-use bot::{BotAlly, BotEnemy, BotRoster, BotSituation};
+use bot::{Bot, BotAlly, BotFire, BotFireMode, BotRoute, BotTravel};
 use areas::{explosion_obstacle, DestructibleAreas};
 use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
@@ -96,9 +95,10 @@ pub const VIEW_RANGE: f32 = 445.0;
 /// with those that did. Our choice: a client logs in again within a second or two.
 const GATHER_WAIT: Duration = Duration::from_secs(20);
 
-/// How near its vehicle the point `/poi remove` removes must be, in metres on the
-/// ground plane.
-const POI_REMOVE_RADIUS: f32 = 15.0;
+/// How far past the point under a participant's gun marker its gun's line goes to find
+/// the vehicle there, in metres, see [`Battle::marked_spot`]: the client gives a point
+/// on its surface.
+const MARKED_DEPTH: f32 = 2.0;
 
 /// How a shell's hit on a vehicle is drawn to be debugged, in [`DebugChannel::Shells`],
 /// see [`debug_hit`]: a text this many metres above where it hit, white.
@@ -115,8 +115,6 @@ pub struct Battle {
     space: SpaceKey,
     /// When it was made, at 0: the battle's clock.
     clock: Instant,
-    /// How big its teams are, and what bots do.
-    options: BattleOptions,
     /// Its clients, each driving one of its vehicles.
     participants: Vec<Participant>,
     /// Its period: waiting for its clients, counting down, fighting or over, see
@@ -130,15 +128,8 @@ pub struct Battle {
     world: World,
     /// What each team spots of the other's vehicles, which its clients see.
     spotting: Spotting,
-    /// Which parts of its map see which others.
-    sight: Arc<SightGrid>,
-    /// Its map's points of interest, which its bots hold and `/poi` adds to, and where
-    /// they are saved.
-    poi_map: PoiMap,
-    poi_path: PathBuf,
-    /// Where each team started, in [`TEAMS`] order: where the other's bots search once
-    /// they know of no enemy, see [`search_of`].
-    starts: [Vec3; 2],
+    /// The route its bots follow, which its devs trace with `/route`.
+    route: BotRoute,
     /// The shells in flight, until they land.
     shells: Shells,
     /// The destructibles' entities of its map's chunks, telling the clients what broke.
@@ -151,22 +142,14 @@ pub struct Battle {
     running: bool,
 }
 
-/// How big a battle's teams are, and what its bots do, as the server is launched with.
+/// How big a battle's teams are, and what it draws to be debugged, as the server is
+/// launched with.
 #[derive(Debug, Clone)]
 pub struct BattleOptions {
     /// How many vehicles each team has, its clients' then bots.
     pub team_size: u32,
     /// The vehicles bots drive, each the next, round: the first client's own when none.
     pub bot_vehicles: Vec<VehicleDef>,
-    /// Whether bots fire at their target, see [`Bot::fires`].
-    ///
-    /// [`Bot::fires`]: bot::Bot::fires
-    pub bots_fire: bool,
-    /// Whether bots drive to their enemies, else only turn their turret to them, see
-    /// [`Bot::drive`].
-    ///
-    /// [`Bot::drive`]: bot::Bot::drive
-    pub bots_drive: bool,
     /// What it draws to be debugged in its clients' world as it starts, see
     /// [`DebugFrame`]: its clients' `/debug` changes it, see [`Battle::command`].
     pub debug_draw: DebugChannels,
@@ -183,12 +166,7 @@ pub struct BattleSetup<'a> {
     pub map: &'a ArenaTypeDef,
     /// The map's space, which its vehicles move in: its terrain and static models.
     pub space: Arc<Space>,
-    /// Which parts of the map see which others.
-    pub sight: Arc<SightGrid>,
-    /// The map's points of interest, and where they are saved.
-    pub poi_map: PoiMap,
-    pub poi_path: PathBuf,
-    /// How big its teams are, and what its bots do.
+    /// How big its teams are, and what it draws to be debugged.
     pub options: BattleOptions,
     /// The vehicle bots drive when the options give none: the first client's.
     pub own_def: Option<VehicleDef>,
@@ -247,7 +225,7 @@ impl Battle {
     /// allies and the enemies its team spots, see [`Participant::spot`].
     pub fn new(app: &mut base::App, setup: BattleSetup, space: SpaceKey, id: u32, arrivals: Vec<Arrival>) -> io::Result<Self> {
 
-        let BattleSetup { map, space: map_space, sight, poi_map, poi_path, options, own_def } = setup;
+        let BattleSetup { map, space: map_space, options, own_def } = setup;
         let terrain = &map_space.terrain;
         let mut world = World::new(map_space.clone(), Some(map.bounds));
 
@@ -360,7 +338,6 @@ impl Battle {
             ));
         }
 
-        let starts = starts.map(|start| start.position);
         let areas = DestructibleAreas::new(app, space, &world.space().statics)?;
         info!(battle = id, chunks = areas.len(), "Created the destructibles' areas");
         
@@ -371,14 +348,10 @@ impl Battle {
             id,
             space,
             clock: Instant::now(),
-            options,
             participants,
             period: ArenaPeriod::new(),
             spotting: Spotting::new(vehicles.len()),
-            sight,
-            poi_map,
-            poi_path,
-            starts,
+            route: BotRoute::default(),
             vehicles,
             world,
             shells: Shells::default(),
@@ -664,14 +637,16 @@ impl Battle {
     ///   /debug                 the debug drawing's channels, see `debug_command`
     ///   /debug <channel>...    each of these channels drawn if it wasn't, else no more
     ///   /debug off             none drawn
-    ///   /poi ...               the map's points of interest, see `poi_command`
+    ///   /bot ...               orders to bots, see `bot_command`
+    ///   /route ...             the route bots follow, see `route_command`
     /// ```
     fn command(&mut self, app: &mut base::App, from: usize, line: &str) -> io::Result<()> {
 
         let mut words = line.split_whitespace();
         let reply = match words.next() {
             Some("debug") => self.debug_command(from, words),
-            Some("poi") => self.poi_command(from, words),
+            Some("bot") => self.bot_command(from, words),
+            Some("route") => self.route_command(from, words),
             Some(name) => Err(format!("Unknown command: /{name}")),
             None => Err("No command after /".to_string()),
         };
@@ -714,77 +689,282 @@ impl Battle {
 
     }
 
-    /// The `/poi` command of a participant, with the words after it, see
-    /// [`Self::command`], for devs only: what it did, else what is wrong.
+    /// The `/bot` command of a participant, with the words after it, see
+    /// [`Self::command`], for devs only: the orders of the bots it names after it, else
+    /// what is wrong.
     ///
     /// ```text
-    ///   /poi                                  how many points the map has
-    ///   /poi <activities> [<lane>] [<note>...]
-    ///                                         a point where its vehicle stands, facing
-    ///                                         where its gun points, for its team, of
-    ///                                         these activities, `long_range_fire,support`;
-    ///                                         lane `-` for none, with a note
-    ///   /poi remove                           the point nearest its vehicle, within
-    ///                                         POI_REMOVE_RADIUS
+    ///   /bot <who> <order>
+    ///     who: a bot's number, as the players' list names it, `aimed` for the one under
+    ///       its gun marker, `all`, `allies` or `enemies`, see `bots_named`
+    ///     order:
+    ///       goto [here] [<km/h>]   drive where its gun marker is, or to its vehicle, and
+    ///                              stay there
+    ///       follow [loop] [<km/h>] drive along the route, see `route_command`, once or
+    ///                              round
+    ///       speed <km/h>|off       drive at most this fast, from now on, or as fast as
+    ///                              it can: a speed after goto or follow sets it too
+    ///       fire [once|hold|off]   fire at the spot under its gun marker, on the vehicle
+    ///                              there, see `marked_spot`: each time loaded, once,
+    ///                              only aim at it, or no more
+    ///       shell <n>              load its gun's nth shell, from 1
+    ///       stop                   stand still holding fire, its orders kept
+    ///       start                  carry them out again
+    ///       clear                  no orders
     /// ```
-    ///
-    /// The points are saved at once, see [`PoiMap::save`], and battles made from then on
-    /// read them.
-    fn poi_command<'a>(&mut self, from: usize, mut words: impl Iterator<Item = &'a str>) -> Result<String, String> {
+    fn bot_command<'a>(&mut self, from: usize, mut words: impl Iterator<Item = &'a str>) -> Result<String, String> {
 
         if !self.participants[from].dev {
-            return Err("Only devs may use /poi".to_string());
+            return Err("Only devs may use /bot".to_string());
         }
-        let vehicle = &self.vehicles[self.participants[from].vehicle];
-        let driven = self.world.vehicle(vehicle.id);
-        let names: Vec<_> = PoiActivity::ALL.iter().map(|activity| activity.name()).collect();
+        let Some(who) = words.next() else {
+            return Err(
+                "/bot <number|aimed|all|allies|enemies> <goto [here] [km/h]|follow [loop] [km/h]|\
+                speed <km/h|off>|fire [once|hold|off]|shell <n>|stop|start|clear>".to_string(),
+            );
+        };
+        let bots = self.bots_named(from, who)?;
+        let order = words.next().ok_or("No order after the bots")?;
+        let now = self.game_time();
 
-        let message = match words.next() {
-            None => {
-                return Ok(format!(
-                    "{} points on this map. /poi <activity,...> [lane|-] [note], or /poi remove. Activities: {}",
-                    self.poi_map.pois.len(),
-                    names.join(", "),
-                ));
-            }
-            Some("remove") => {
-                let index = self.poi_map.nearest(driven.hull.position, POI_REMOVE_RADIUS)
-                    .ok_or_else(|| format!("No point within {POI_REMOVE_RADIUS} m"))?;
-                let poi = self.poi_map.pois.remove(index);
-                format!("Removed the point {poi}")
-            }
-            Some(activities) => {
+        match order {
+            "goto" | "follow" => {
 
-                let activities = activities.split(',')
-                    .map(|name| {
-                        PoiActivity::of_name(name)
-                            .ok_or_else(|| format!("Unknown activity: {name}, of {}", names.join(", ")))
-                    })
-                    .collect::<Result<_, _>>()?;
-                let lane = words.next().filter(|&lane| lane != "-").map(str::to_string);
-                let note = words.collect::<Vec<_>>().join(" ");
+                // Its options, in any order: a speed, and `here` or `loop`.
+                let mut option = None;
+                let mut speed = None;
+                for word in words {
+                    match word.parse::<f32>() {
+                        Ok(kmh) if kmh > 0.0 => speed = Some(kmh / 3.6),
+                        Ok(_) => return Err(format!("Not a speed: {word} km/h")),
+                        Err(_) => option = Some(word),
+                    }
+                }
 
-                let (_, gun, _) = driven.turret.gun_marker(&driven.hull);
-                let position = driven.hull.position;
-                let poi = Poi {
-                    activities,
-                    team: Some(vehicle.team),
-                    lane,
-                    at: position.to_array(),
-                    facing: gun.x.atan2(gun.z).to_degrees(),
-                    note: Some(note).filter(|note| !note.is_empty()),
+                let driven = self.world.vehicle(self.vehicles[self.participants[from].vehicle].id);
+                let travel = if order == "goto" {
+                    match option {
+                        Some("here") => BotTravel::Goto(driven.hull.position),
+                        None => BotTravel::Goto(driven.turret.tracked().ok_or("No point under your gun marker")?),
+                        Some(word) => return Err(format!("Unknown goto option: {word}, of here")),
+                    }
+                } else {
+                    match option {
+                        _ if self.route.points.is_empty() => {
+                            return Err("No route: /route start, drive, then /route stop".to_string());
+                        }
+                        None | Some("loop") => BotTravel::Follow {
+                            points: self.route.points.clone(),
+                            next: 0,
+                            looped: option.is_some(),
+                        },
+                        Some(word) => return Err(format!("Unknown follow option: {word}, of loop")),
+                    }
                 };
-                let message = format!("Added the point {poi}, team {}", vehicle.team);
-                self.poi_map.pois.push(poi);
-                message
 
+                for &index in &bots {
+                    if let Some(bot) = self.vehicles[index].as_bot_mut() {
+                        bot.set_travel(Some(travel.clone()));
+                        if speed.is_some() {
+                            bot.set_speed(speed);
+                        }
+                    }
+                }
+
+            }
+            "speed" => {
+                let speed = match words.next() {
+                    Some("off") => None,
+                    Some(word) => {
+                        let kmh = word.parse::<f32>()
+                            .ok()
+                            .filter(|&kmh| kmh > 0.0)
+                            .ok_or_else(|| format!("Not a speed: {word} km/h"))?;
+                        Some(kmh / 3.6)
+                    }
+                    None => return Err("No speed after speed: km/h, or off".to_string()),
+                };
+                for &index in &bots {
+                    if let Some(bot) = self.vehicles[index].as_bot_mut() {
+                        bot.set_speed(speed);
+                    }
+                }
+            }
+            "fire" => {
+                let mode = match words.next() {
+                    None => Some(BotFireMode::Repeat),
+                    Some("once") => Some(BotFireMode::Once),
+                    Some("hold") => Some(BotFireMode::Hold),
+                    Some("off") => None,
+                    Some(word) => return Err(format!("Unknown fire mode: {word}, of once, hold, off")),
+                };
+                let fire = match mode {
+                    Some(mode) => {
+                        let (target, hit, hull_position) = self.marked_spot(from)
+                            .ok_or("No vehicle under your gun marker")?;
+                        let target = self.vehicles[target].id;
+                        Some(BotFire::new(target, hit.part, hit.local_point, hull_position, mode))
+                    }
+                    None => None,
+                };
+                for &index in &bots {
+                    let vehicle = &mut self.vehicles[index];
+                    let own = fire.is_some_and(|fire| fire.vehicle == vehicle.id);
+                    if let (Some(bot), false) = (vehicle.as_bot_mut(), own) {
+                        bot.set_fire(fire);
+                    }
+                }
+            }
+            "shell" => {
+                let number = words.next()
+                    .and_then(|number| number.parse::<usize>().ok())
+                    .filter(|&number| number >= 1)
+                    .ok_or("No shell number after shell, from 1")?;
+                for &index in &bots {
+                    let vehicle = &mut self.vehicles[index];
+                    let Some((def, _)) = vehicle.gun.ammo.get(number - 1) else {
+                        return Err(format!("No shell {number}: {} has {}", vehicle.info.name, vehicle.gun.ammo.len()));
+                    };
+                    let compact_descr = def.compact_descr.to_int();
+                    vehicle.gun.change_loaded(now, compact_descr);
+                }
+            }
+            "stop" | "start" => {
+                for &index in &bots {
+                    if let Some(bot) = self.vehicles[index].as_bot_mut() {
+                        bot.set_stopped(order == "stop");
+                    }
+                }
+            }
+            "clear" => {
+                for &index in &bots {
+                    if let Some(bot) = self.vehicles[index].as_bot_mut() {
+                        *bot = Bot::default();
+                    }
+                }
+            }
+            _ => return Err(format!("Unknown bot order: {order}, of goto, follow, speed, fire, shell, stop, start, clear")),
+        }
+
+        let orders: Vec<_> = bots.iter()
+            .map(|&index| {
+                let vehicle = &self.vehicles[index];
+                let orders = vehicle.as_bot().map(|bot| bot.to_string()).unwrap_or_default();
+                format!("{}: {orders}", vehicle.info.name)
+            })
+            .collect();
+        info!(battle = self.id, order, bots = bots.len(), "Ordered bots");
+        Ok(orders.join("; "))
+
+    }
+
+    /// The indices of the bots alive `who` names, for the `from`th participant, see
+    /// [`Self::bot_command`]: by its number in the players' list, `Bot <number>`, the one
+    /// under its gun marker, see [`Self::marked_spot`], all, its team's or the other's.
+    fn bots_named(&self, from: usize, who: &str) -> Result<Vec<usize>, String> {
+
+        let team = self.vehicles[self.participants[from].vehicle].team;
+        let aimed = match who {
+            "aimed" => {
+                let (index, _, _) = self.marked_spot(from).ok_or("No vehicle under your gun marker")?;
+                Some(index)
+            }
+            _ => None,
+        };
+        let name = match who {
+            "aimed" | "all" | "allies" | "enemies" => None,
+            number => {
+                let number = number.parse::<u32>()
+                    .map_err(|_| format!("Unknown bots: {who}, of a number, aimed, all, allies, enemies"))?;
+                Some(format!("Bot {number}"))
             }
         };
 
-        self.poi_map.save(&self.poi_path)
-            .map_err(|e| format!("Failed to save the points: {e}"))?;
-        info!(battle = self.id, path = %self.poi_path.display(), pois = self.poi_map.pois.len(), "{message}");
-        Ok(format!("{message}: {} points on this map", self.poi_map.pois.len()))
+        let named: Vec<_> = self.vehicles.iter()
+            .enumerate()
+            .filter(|(_, vehicle)| matches!(vehicle.driver, Driver::Bot(_)) && vehicle.alive())
+            .filter(|&(index, vehicle)| match who {
+                "aimed" => aimed == Some(index),
+                "all" => true,
+                "allies" => vehicle.team == team,
+                "enemies" => vehicle.team != team,
+                _ => name.as_ref() == Some(&vehicle.info.name),
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if named.is_empty() {
+            return Err(format!("No bot alive: {who}"));
+        }
+        Ok(named)
+
+    }
+
+    /// The vehicle alive under the gun marker of the `from`th participant, by index, if
+    /// any, where on it, see [`VehicleIntersection`], and where its hull sits on its
+    /// chassis: the first its gun's line to the point its client tracks crosses, that
+    /// line going [`MARKED_DEPTH`] past it.
+    fn marked_spot(&self, from: usize) -> Option<(usize, VehicleIntersection, Vec3)> {
+
+        let own = self.participants[from].vehicle;
+        let driven = self.world.vehicle(self.vehicles[own].id);
+        let marked = driven.turret.tracked()?;
+        let (eye, _, _) = driven.turret.gun_marker(&driven.hull);
+        let to = marked + (marked - eye).normalize_or_zero() * MARKED_DEPTH;
+
+        self.vehicles.iter()
+            .enumerate()
+            .filter(|&(index, vehicle)| index != own && vehicle.alive())
+            .filter_map(|(index, vehicle)| {
+                let target = vehicle.shot_target(&self.world);
+                let hit = target.collision.first_hit(&target.transforms, eye, to)?;
+                Some((index, hit, target.collision.hull_position))
+            })
+            .min_by(|(_, a, _), (_, b, _)| a.distance.total_cmp(&b.distance))
+
+    }
+
+    /// The `/route` command of a participant, with the words after it, see
+    /// [`Self::command`], for devs only: what its bots' route is after it, else what is
+    /// wrong.
+    ///
+    /// ```text
+    ///   /route                 how many points it has
+    ///   /route start           record its vehicle's way as it drives, see BotRoute::record
+    ///   /route stop            no more
+    ///   /route add             add the point under its gun marker
+    ///   /route clear           no points, and no more recording
+    /// ```
+    fn route_command<'a>(&mut self, from: usize, mut words: impl Iterator<Item = &'a str>) -> Result<String, String> {
+
+        if !self.participants[from].dev {
+            return Err("Only devs may use /route".to_string());
+        }
+
+        let route = &mut self.route;
+        match words.next() {
+            None => {
+                let count = route.points.len();
+                return Ok(format!("{count} points on the route. /route start|stop|add|clear"));
+            }
+            Some("start") => route.recorder = Some(from),
+            Some("stop") => route.recorder = None,
+            Some("add") => {
+                let driven = self.world.vehicle(self.vehicles[self.participants[from].vehicle].id);
+                let point = driven.turret.tracked().ok_or("No point under your gun marker")?;
+                route.points.push(point);
+            }
+            Some("clear") => *route = BotRoute::default(),
+            Some(word) => return Err(format!("Unknown route command: {word}, of start, stop, add, clear")),
+        }
+
+        let recording = if route.recorder.is_some() { ", recording" } else { "" };
+        info!(
+            battle = self.id,
+            points = route.points.len(),
+            recording = route.recorder.is_some(),
+            "Changed the bots' route",
+        );
+        Ok(format!("{} points on the route{recording}", route.points.len()))
 
     }
 
@@ -861,26 +1041,22 @@ impl Battle {
 
     }
 
-    /// Step it by a tick: every vehicle moves as its driver drives it, a bot by what its
-    /// team spots, see [`Bot::drive`], a wreck or one nobody drives stopping where it was
-    /// shoved, and those that ran into each other are pushed apart, see [`World::step`].
-    /// Then each team spots the other's vehicles, see [`Spotting`], each client is shown
-    /// those its team spots, and each vehicle fires the rest of its burst, a bot once its
-    /// gun is on its target too, which it sees itself, with no ally in the way, see
-    /// [`Bot::fires`], as its options say, and the clients see each where it is, see
+    /// Step it by a tick: every vehicle moves as its driver drives it, a bot as it is
+    /// ordered, see [`Bot::drive`], its fire order dropped once its target is destroyed,
+    /// a wreck or one nobody drives stopping where it was shoved, and those that ran into
+    /// each other are pushed apart, see [`World::step`]. Then the bots' route gets where
+    /// its recorder is, see [`BotRoute::record`], each team spots the other's vehicles,
+    /// see [`Spotting`], each client is shown those its team spots, and each vehicle
+    /// fires the rest of its burst, a bot as it is ordered too, while the battle fights,
+    /// see [`Bot::fires`], and the clients see each where it is, see
     /// [`BattleVehicle::show`].
-    ///
-    /// [`Bot::drive`]: bot::Bot::drive
-    /// [`Bot::fires`]: bot::Bot::fires
     fn step(&mut self, app: &mut base::App) -> io::Result<()> {
 
         let id = self.id;
         let now = self.game_time();
         let fighting = self.period.fighting();
-        let drives = fighting && self.options.bots_drive;
-        let bots_fire = fighting && self.options.bots_fire;
         let avatars = self.avatars();
-        let Self { participants, vehicles, world, spotting, sight, poi_map, starts, shells, .. } = self;
+        let Self { participants, vehicles, world, spotting, route, shells, .. } = self;
 
         for vehicle in vehicles.iter_mut() {
             vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
@@ -895,32 +1071,30 @@ impl Battle {
                 continue;
             }
 
-            let enemies = enemies_of(vehicles, world, spotting, index, now);
             let allies = allies_of(vehicles, world, index);
-            let roster = roster_of(vehicles, index);
-            let hits = vehicles[index].hits(now);
-            let armor = vehicles[index].shot_target(world);
-            let situation = BotSituation {
-                now,
-                team: vehicles[index].team,
-                poi_map,
-                enemies: &enemies,
-                allies: &allies,
-                roster: &roster,
-                hits: &hits,
-                armor: &armor,
-                health: vehicles[index].health as f32,
-                max_health: vehicles[index].max_health as f32,
-                search: search_of(vehicles, world, spotting, starts, index, now),
-                drives,
-            };
-            let vehicle = &mut vehicles[index];
-            if let Driver::Bot(bot) = &mut vehicle.driver {
-                bot.drive(world, vehicle.id, &mut vehicle.gun, &situation);
+            let lost = vehicles[index].as_bot()
+                .and_then(|bot| bot.target())
+                .is_some_and(|target| {
+                    !vehicles.iter().any(|vehicle| vehicle.id == target && vehicle.alive())
+                });
+            let vehicle_id = vehicles[index].id;
+            if let Some(bot) = vehicles[index].as_bot_mut() {
+                if lost {
+                    bot.set_fire(None);
+                }
+                bot.drive(world, vehicle_id, &allies, fighting);
             }
 
         }
         world.step(TICK.as_secs_f32());
+
+        if let Some(recorder) = route.recorder {
+            let recording = &vehicles[participants[recorder].vehicle];
+            route.record(world.vehicle(recording.id).hull.position);
+        }
+        if debug::draws(DebugChannel::Bots) {
+            route.debug_draw();
+        }
 
         spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {
@@ -928,18 +1102,6 @@ impl Battle {
         }
         
         spotting.debug_draw(vehicles, world);
-        let driven: Vec<_> = vehicles.iter()
-            .filter(|vehicle| matches!(vehicle.driver, Driver::Client(_)))
-            .map(|vehicle| world.vehicle(vehicle.id).hull.position)
-            .collect();
-        if debug::draws(DebugChannel::Sight) {
-            for &position in &driven {
-                sight.debug_draw(position);
-            }
-        }
-        if debug::draws(DebugChannel::Poi) {
-            poi_map.debug_draw(&driven);
-        }
 
         for index in 0..vehicles.len() {
 
@@ -971,9 +1133,12 @@ impl Battle {
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
             let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion);
-            if let (None, Driver::Bot(bot), true) = (&shot, &vehicle.driver, bots_fire) {
+            if let (None, Driver::Bot(bot), true) = (&shot, &mut vehicle.driver, fighting) {
                 if bot.fires(driven, &allies) {
                     shot = vehicle.gun.fire(now, position, velocity, dispersion);
+                    if shot.is_some() {
+                        bot.fired();
+                    }
                 }
             }
 
@@ -1242,46 +1407,6 @@ fn debug_outcome(impact: &impact::Impact) -> &'static str {
     }
 }
 
-/// The enemies alive the team of the `index`th vehicle spots at game time `now`, as a
-/// bot sees them, see [`BotEnemy`]. None for a vehicle no bot drives.
-fn enemies_of(vehicles: &[BattleVehicle], world: &World, spotting: &Spotting, index: usize, now: f64) -> Vec<BotEnemy> {
-    let vehicle = &vehicles[index];
-    if !matches!(vehicle.driver, Driver::Bot(_)) {
-        return Vec::new();
-    }
-    vehicles.iter()
-        .enumerate()
-        .filter(|&(other, enemy)| enemy.alive() && enemy.team != vehicle.team && spotting.spotted(vehicle.team, other, now))
-        .map(|(_, enemy)| BotEnemy {
-            vehicle: enemy.id,
-            class: enemy.class,
-            center: enemy.hull_center(world),
-            health: enemy.health as f32,
-            max_health: enemy.max_health as f32,
-            armor: enemy.shot_target(world),
-            shell: enemy.gun.shells().0.cloned(),
-            fired: enemy.last_shot(),
-            reload: enemy.gun.reload_time(),
-        })
-        .collect()
-}
-
-/// Where the `index`th vehicle searches for enemies once its team spots none at game
-/// time `now`, as a bot does, see [`Bot::drive`]: the nearest place its team last
-/// spotted one, see [`Spotting::last_seen`], else where the enemy team started.
-///
-/// [`Bot::drive`]: bot::Bot::drive
-fn search_of(vehicles: &[BattleVehicle], world: &World, spotting: &Spotting, starts: &[Vec3; 2], index: usize, now: f64) -> Vec3 {
-    let vehicle = &vehicles[index];
-    let position = world.vehicle(vehicle.id).hull.position;
-    let enemy_start = TEAMS.iter()
-        .position(|&team| team != vehicle.team)
-        .map_or(position, |side| starts[side]);
-    spotting.last_seen(vehicle.team, now)
-        .min_by(|a, b| a.distance_squared(position).total_cmp(&b.distance_squared(position)))
-        .unwrap_or(enemy_start)
-}
-
 /// The allies alive of the `index`th vehicle, as a bot drives round them, gives way to
 /// them and doesn't fire through them, see [`BotAlly`]. None for a vehicle no bot drives.
 fn allies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<BotAlly> {
@@ -1296,32 +1421,12 @@ fn allies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<Bot
             let hull = &world.vehicle(ally.id).hull;
             let [min, max] = hull.mobility.bounds;
             BotAlly {
-                class: ally.class,
                 center: ally.hull_center(world),
                 radius: (max - min).length() / 2.0,
                 velocity: hull.velocity(),
-                health: ally.health as f32,
-                max_health: ally.max_health as f32,
             }
         })
         .collect()
-}
-
-/// Both teams as the `index`th vehicle's players' lists and team health bars show them,
-/// see [`BotRoster`].
-fn roster_of(vehicles: &[BattleVehicle], index: usize) -> BotRoster {
-    let team = vehicles[index].team;
-    let mut roster = BotRoster::default();
-    for vehicle in vehicles.iter().filter(|vehicle| vehicle.alive()) {
-        if vehicle.team == team {
-            roster.allies_alive += 1;
-            roster.ally_health += vehicle.health as f32;
-        } else {
-            roster.enemies_alive.push(vehicle.id);
-            roster.enemy_health += vehicle.health as f32;
-        }
-    }
-    roster
 }
 
 /// Replace `targets` with the vehicles shells can hit: every one alive, reusing its

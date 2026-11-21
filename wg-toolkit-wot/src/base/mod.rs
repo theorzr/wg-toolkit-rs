@@ -9,7 +9,6 @@
 //!   battle      its battles, each with its vehicles and bots
 //!   physics     how vehicles move in a battle's world
 //!   ballistics  what shells do: guns, flights, armour
-//!   poi         the maps' points of interest, written by hand, which bots hold
 //!   debug       what a battle draws in its clients' world to be debugged, as it computes
 //! ```
 
@@ -18,7 +17,6 @@ mod garage;
 mod battle;
 mod physics;
 mod ballistics;
-mod poi;
 mod debug;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -54,7 +52,7 @@ use crate::game::account_commands::{
     CMD_REQ_QUEUE_INFO, CMD_REQ_SERVER_STATS, CMD_RESET_SESSION_STAT, CMD_SET_ACTIVE_VEH_SEASON, CMD_SYNC_DATA, CMD_SYNC_DOSSIERS,
     CMD_SYNC_SHOP, REQUEST_ID_NO_RESPONSE, RES_CACHE, RES_STREAM, RES_SUCCESS,
 };
-use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, SiegeDef, VehicleClass, VehicleDef, VisionDef};
+use crate::game::item_defs::{self, AimingDef, MagazineDef, MobilityDef, ShotDef, SiegeDef, VehicleDef, VisionDef};
 use crate::{init_tracing, load_script, AppBaseArgs, BaseArgs, CliResult};
 use crate::game::arena_defs::{ArenaTypeDef, STANDARD_GAMEPLAY};
 use crate::link::{ClientHost, LinkEvent, LinkStream, Message};
@@ -62,14 +60,12 @@ use crate::game::items::{TankmanDescr, VehicleDescr};
 use crate::game::collision::VehicleCollision;
 use crate::game::item_prices::ItemPrices;
 
-use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering, VIEW_RANGE};
+use battle::{Arrival, Battle, BattleOptions, BattleSetup, Gathering};
 use garage::player::{AccountIds, Player};
 use garage::account::{self, Garage};
-use physics::{SightGrid, World};
 use ballistics::gun::GunLoader;
 use debug::DebugChannels;
 use garage::shop::Shop;
-use poi::PoiMap;
 
 pub use advertise::AdvertiseRule;
 pub use debug::DebugChannel;
@@ -165,12 +161,9 @@ pub struct BaseThread {
     required_version: String,
     /// The game, whose vehicle definitions complete what the account says.
     game_dir: PathBuf,
-    /// The battles' map, its space, and which parts of it see which others.
+    /// The battles' map, and its space.
     map: ArenaTypeDef,
     space: Arc<Space>,
-    sight: Arc<SightGrid>,
-    /// Where the map's points of interest are saved, read again for each battle.
-    poi_path: PathBuf,
     /// Who the battles have besides the player.
     battle_options: BattleOptions,
     /// Each logged in client's player.
@@ -245,23 +238,7 @@ impl BaseThread {
 
         info!(triangles = space.statics.len(), trees = space.statics.trees().len(), plants = space.foliage.plants().len(), "Loaded the map {} and its space in {:.1?}", map.name, start.elapsed());
 
-        // Which parts of it see which others, worked out once and saved.
-        let start = Instant::now();
         let space = Arc::new(space);
-        let mut world = World::new(space.clone(), Some(map.bounds));
-        let (sight, saved) = SightGrid::load_or_build(&mut world, map.bounds, VIEW_RANGE, &args.cache_dir, &map.name);
-        match saved {
-            Ok(true) => info!(dir = %args.cache_dir.display(), "Read the sight grid of {} in {:.1?}", map.name, start.elapsed()),
-            Ok(false) => info!(dir = %args.cache_dir.display(), "Built the sight grid of {} in {:.1?}", map.name, start.elapsed()),
-            Err(e) => warn!(dir = %args.cache_dir.display(), "Failed to read or save the sight grid of {}, built it in {:.1?}: {e}", map.name, start.elapsed()),
-        }
-
-        let poi_path = args.poi_dir.join(format!("{}.json", map.name));
-        match PoiMap::load(&poi_path) {
-            Ok(poi_map) => info!(path = %poi_path.display(), "Read the points of interest of {}: {}", map.name, poi_map.pois.len()),
-            Err(e) => warn!(path = %poi_path.display(), "Failed to read the points of interest of {}: {e}", map.name),
-        }
-
         let load_vehicle = |vehicle: &String| {
             let (nation, name) = vehicle.split_once(':')
                 .ok_or_else(|| format!("Expected <nation>:<name>, got {vehicle}"))?;
@@ -272,15 +249,19 @@ impl BaseThread {
         let battle_options = BattleOptions {
             team_size: args.team_size,
             bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
-            bots_fire: args.bots_fire,
-            bots_drive: args.bots_drive,
             debug_draw: DebugChannels::of(&args.debug_draw),
             enemy_distance: args.enemy_distance,
             spawn: args.spawn.map(|(x, z, yaw)| (Vec2::new(x, z), yaw.to_radians())),
         };
 
-        info!(team_size = args.team_size, bot_vehicles = ?args.bot_vehicle, bots_fire = args.bots_fire,
-            bots_drive = args.bots_drive, debug_draw = ?args.debug_draw, enemy_distance = ?args.enemy_distance, spawn = ?args.spawn, "Set up the battles");
+        info!(
+            team_size = args.team_size,
+            bot_vehicles = ?args.bot_vehicle,
+            debug_draw = ?args.debug_draw,
+            enemy_distance = ?args.enemy_distance,
+            spawn = ?args.spawn,
+            "Set up the battles",
+        );
         
         let garage = Garage::new(&fs, &vehicles)
             .map_err(|e| format!("Failed to create the account: {e}"))?;
@@ -318,8 +299,6 @@ impl BaseThread {
             game_dir: game_dir.to_path_buf(),
             map,
             space,
-            sight: Arc::new(sight),
-            poi_path,
             battle_options,
             players: HashMap::new(),
             accounts: HashMap::new(),
@@ -596,7 +575,6 @@ impl BaseThread {
             vision: def.vision,
             collision: def.collision,
             siege: def.siege,
-            class: def.class,
         })
     }
 
@@ -670,9 +648,6 @@ impl BaseThread {
         let setup = BattleSetup {
             map: &self.map,
             space: self.space.clone(),
-            sight: self.sight.clone(),
-            poi_map: self.poi_map(),
-            poi_path: self.poi_path.clone(),
             options: self.battle_options.clone(),
             own_def,
         };
@@ -682,14 +657,6 @@ impl BaseThread {
         info!(battle = id, clients, %space, "Made a battle: {}", self.map.geometry);
         Ok(())
 
-    }
-
-    /// The map's points of interest as saved now, none if they fail to be read.
-    fn poi_map(&self) -> PoiMap {
-        PoiMap::load(&self.poi_path).unwrap_or_else(|e| {
-            warn!(path = %self.poi_path.display(), "Failed to read the points of interest: {e}");
-            PoiMap::default()
-        })
     }
 
     /// Leave the client's battle, as the captured server does: switch it to the base
@@ -1028,8 +995,6 @@ pub struct VehicleLoadout {
     collision: Arc<VehicleCollision>,
     /// Its siege mode, if it has one.
     siege: Option<SiegeDef>,
-    /// Its class.
-    class: VehicleClass,
 }
 
 /// The client version the server requires, which the client checks against the

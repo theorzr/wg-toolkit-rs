@@ -55,9 +55,7 @@
 //!
 //! # A team's sightings
 //!
-//! A team spots what any of its vehicles spots, still for LINGER once none does. It
-//! remembers where it last spotted each enemy, until one of its vehicles' hulls gets
-//! within MIN_RADIUS of there, which the enemy left then: what its bots search.
+//! A team spots what any of its vehicles spots, still for LINGER once none does.
 
 use std::cmp::Ordering;
 
@@ -121,8 +119,8 @@ const DEBUG_HIDDEN_SHADE: f32 = 0.6;
 /// See the module's documentation.
 #[derive(Debug)]
 pub struct Spotting {
-    /// For each of the battle's vehicles, by index, when and where its enemies last
-    /// spotted it, the one team that may: none once searched, or destroyed.
+    /// For each of the battle's vehicles, by index, when its enemies last spotted it, the
+    /// one team that may: none once destroyed.
     sightings: Vec<Option<Sighting>>,
     /// For each of the battle's vehicles, by index, its enemies' best look at it this
     /// tick, see [`Self::look`].
@@ -206,15 +204,13 @@ struct Viewed {
 /// The checkpoints of a vehicle, in the order they are looked at.
 const POINTS: [Point; 6] = [Point::Top, Point::Gun, Point::Front, Point::Rear, Point::Left, Point::Right];
 
-/// When and where a team last spotted an enemy.
+/// When a team last spotted an enemy.
 #[derive(Debug, Clone, Copy)]
 struct Sighting {
     /// The team that spotted it, the enemy's enemies.
     by: u8,
     /// The game time it last did at.
     at: f64,
-    /// Where the middle of the enemy's hull was then.
-    position: Vec3,
 }
 
 impl Spotting {
@@ -231,8 +227,8 @@ impl Spotting {
         }
     }
 
-    /// At game time `now`, what each team spots of the other's vehicles alive, and
-    /// where it searched those it no longer does, see the module's documentation:
+    /// At game time `now`, what each team spots of the other's vehicles alive, see the
+    /// module's documentation:
     ///
     /// 1. Each vehicle's ports and checkpoints in the world, once for the tick.
     /// 2. For each target alive, whether it fired lately, and its camouflage now, cut
@@ -243,8 +239,7 @@ impl Spotting {
     ///    [`look_at`], until one spots one: then the target is spotted, and the look
     ///    kept is that one. Else the look kept is the nearest to spotting it, see
     ///    [`better`].
-    /// 5. Spotted, its enemies' sighting of it is where it is now. Else their last one
-    ///    lingers, until one of them gets within [`MIN_RADIUS`] of it, searched.
+    /// 5. Spotted, its enemies' sighting of it is now. Else their last one lingers.
     /// 6. Each vehicle's other port looks the next tick.
     ///
     /// A destroyed vehicle is forgotten.
@@ -258,7 +253,7 @@ impl Spotting {
 
         for (index, target) in vehicles.iter().enumerate() {
 
-            // 2. A wreck is forgotten: nobody spots it, nobody searches for it.
+            // 2. A wreck is forgotten: nobody spots it.
             self.looks[index] = None;
             if !target.alive() {
                 self.sightings[index] = None;
@@ -299,28 +294,16 @@ impl Spotting {
             }
             self.looks[index] = best;
 
-            // 6. Spotted: its enemies' sighting is where it is now, from now.
+            // 6. Spotted: its enemies' sighting is now. Else their last one lingers,
+            //    spotting it still for LINGER, see `Self::spotted`.
             if best.is_some_and(|best| best.spots()) {
-                self.sightings[index] = Some(Sighting {
-                    by: TEAMS.into_iter().find(|&team| team != target.team).unwrap_or_default(),
-                    at: now,
-                    position: viewed[index].center,
-                });
-                continue;
-            }
-
-            // 7. Not: their last sighting lingers, spotting it still for LINGER, then
-            //    tells their bots where to search, until one of them gets close to it.
-            let Some(sighting) = self.sightings[index] else { continue };
-            let searched = now - sighting.at > LINGER
-                && observers.clone().any(|((_, seen), _)| (sighting.position - seen.center).with_y(0.0).length() <= MIN_RADIUS);
-            if searched {
-                self.sightings[index] = None;
+                let by = TEAMS.into_iter().find(|&team| team != target.team).unwrap_or_default();
+                self.sightings[index] = Some(Sighting { by, at: now });
             }
 
         }
 
-        // 8. Each vehicle's other port looks the next tick.
+        // 7. Each vehicle's other port looks the next tick.
         for port in &mut self.ports {
             *port = 1 - *port;
         }
@@ -382,15 +365,6 @@ impl Spotting {
 
         }
 
-    }
-
-    /// Where `team` last spotted the enemies it no longer does at game time `now`, and
-    /// hasn't searched yet, see [`Self::update`].
-    pub fn last_seen(&self, team: u8, now: f64) -> impl Iterator<Item = Vec3> + '_ {
-        self.sightings.iter()
-            .flatten()
-            .filter(move |sighting| sighting.by == team && now - sighting.at > LINGER)
-            .map(|sighting| sighting.position)
     }
 
 }
