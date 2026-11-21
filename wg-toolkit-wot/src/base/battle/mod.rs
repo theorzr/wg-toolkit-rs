@@ -904,7 +904,7 @@ impl Battle {
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
-                debug_hit(shot.end, &impact.trace, impact.damage, dealt);
+                debug_hit(shot.end, &impact.trace, debug_outcome(&impact), impact.damage, dealt);
                 if impact.outcome == ImpactOutcome::Ricochet {
                     let direction = impact::reflect(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, direction)?;
@@ -1038,7 +1038,7 @@ impl Battle {
         for (entity_id, explosion, reached) in explosions {
             info!(battle = self.id, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
             let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
-            debug_hit(reached, &explosion.trace, explosion.damage, dealt);
+            debug_hit(reached, &explosion.trace, "Splashed", explosion.damage, dealt);
         }
         Ok(())
 
@@ -1047,23 +1047,36 @@ impl Battle {
 }
 
 /// Draw a shell's hit on a vehicle to be debugged, above `at`, for as long as its
-/// flight: how it went, see [`impact::Impact::trace`], then its damage and the damage
-/// the vehicle took, after its spread, unless it was destroyed already.
-fn debug_hit(at: Vec3, trace: &[String], damage: f32, dealt: Option<i64>) {
+/// flight: how it went, see [`impact::Impact::trace`], then its outcome, the damage the
+/// vehicle took, after its spread, unless it was destroyed already, and its alpha,
+/// `damage`, before it.
+fn debug_hit(at: Vec3, trace: &[String], outcome: &str, damage: f32, dealt: Option<i64>) {
 
     if !debug::draws(DebugChannel::Shells) {
         return;
     }
 
-    let dealt = match dealt {
-        Some(dealt) => format!("{damage:.0} damage, {dealt} dealt"),
-        None => format!("{damage:.0} damage, already destroyed"),
+    let result = match dealt {
+        _ if damage <= 0.0 => format!("{outcome}: no damage"),
+        Some(dealt) => format!("{outcome}: {dealt} damage ({damage:.0} alpha)"),
+        None => format!("{outcome}: already destroyed ({damage:.0} alpha)"),
     };
-    let text = format!("{}\n{dealt}", trace.join("\n"));
+    let text = format!("{}\n{result}", trace.join("\n"));
     debug::lasting(DEBUG_SHOT_SECONDS, || {
         debug::text(DebugChannel::Shells, at + Vec3::Y * DEBUG_HIT_RISE, text, DEBUG_HIT_TEXT);
     });
 
+}
+
+/// What a shell did to a vehicle, to be debugged, see [`debug_hit`].
+fn debug_outcome(impact: &impact::Impact) -> &'static str {
+    match (impact.outcome, impact.exploded) {
+        (ImpactOutcome::Pierced, _) => "Pierced",
+        (ImpactOutcome::NotPierced, true) => "Not pierced, exploded",
+        (ImpactOutcome::NotPierced, false) => "Not pierced",
+        (ImpactOutcome::Ricochet, _) => "Ricocheted",
+        (ImpactOutcome::Screens, _) => "Through screens only",
+    }
 }
 
 /// The enemies alive the team of the `index`th vehicle spots at game time `now`, each

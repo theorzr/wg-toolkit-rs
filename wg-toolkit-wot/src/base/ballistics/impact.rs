@@ -62,7 +62,7 @@ pub struct Impact {
     /// Whether it exploded on the armour without piercing it, an HE shell's.
     pub exploded: bool,
     /// How it went, line by line, to be debugged when [`DebugChannel::Shells`] is drawn,
-    /// else empty: its penetration, each armour it met, its outcome, and its explosion.
+    /// else empty: its penetration, each armour it met, and its explosion.
     pub trace: Vec<String>,
 }
 
@@ -119,9 +119,6 @@ pub fn hit(
 
     let (outcome, index) = penetrate(shot, pen, direction, &hits, debugging.then_some(&mut trace))?;
     let hit = hits[index];
-    if debugging {
-        trace.push(format!("{outcome:?}"));
-    }
 
     let damage = match outcome {
         ImpactOutcome::Pierced => shot.damage_at(distance) * hit.material.map_or(1.0, |material| material.vehicle_damage_factor),
@@ -198,7 +195,7 @@ pub fn explosion(shot: &ShotDef, center: Vec3, collision: &VehicleCollision, tra
     let mut trace = Vec::new();
     if debug::draws(DebugChannel::Shells) {
         trace.push(format!(
-            "Exploded {distance:.2} of {radius:.2} m off: {:.0}%, {absorbed:.0} absorbed",
+            "Exploded {distance:.2} m from the armour, {radius:.2} m radius: {:.0}% of half its damage, {absorbed:.0} absorbed",
             falloff * 100.0,
         ));
     }
@@ -272,7 +269,7 @@ fn penetrate(
                 let loss = (1.0 - flown * shot.jet_pen_loss).max(0.0);
                 pen *= loss;
                 if let Some(trace) = &mut trace {
-                    trace.push(format!("Jet {flown:.2} m: {:.0}% kept, {pen:.0} mm", loss * 100.0));
+                    trace.push(format!("Jet over {flown:.2} m: {pen:.0} mm pen left ({:.0}% kept)", loss * 100.0));
                 }
             }
         }
@@ -361,8 +358,9 @@ fn normalization(shot: &ShotDef, kind: ShellKind, armor: f32, check_caliber: boo
 
 }
 
-/// A line of a shell's trace, see [`Impact::trace`]: its kind, its penetration at the
-/// distance it flew, the share of it a ricochet left it, and its penetration rolled.
+/// A line of a shell's trace, see [`Impact::trace`]: its kind, the distance it flew,
+/// its penetration rolled, then its average there, and the share of it a ricochet left
+/// it, if any.
 fn debug_pen(shot: &ShotDef, distance: f32, pen_factor: f32, pen: f32) -> String {
 
     let kind = match shot.kind() {
@@ -374,25 +372,32 @@ fn debug_pen(shot: &ShotDef, distance: f32, pen_factor: f32, pen: f32) -> String
         ShellKind::Smoke => "Smoke",
     };
 
-    let ricochet = if pen_factor < 1.0 { format!(", {:.0}%", pen_factor * 100.0) } else { String::new() };
-    format!("{kind} {:.0} mm at {distance:.0} m{ricochet}: {pen:.0} mm rolled", shot.pen_at(distance))
+    let average = shot.pen_at(distance) * pen_factor;
+    if pen_factor < 1.0 {
+        format!(
+            "{kind} from {distance:.0} m, ricocheted: {pen:.0} mm pen ({average:.0} average, {:.0}% kept)",
+            pen_factor * 100.0,
+        )
+    } else {
+        format!("{kind} from {distance:.0} m: {pen:.0} mm pen ({average:.0} average)")
+    }
 
 }
 
 /// A line of a shell's trace, see [`Impact::trace`]: armour it ricocheted off, at this
-/// angle from its normal, past the shell's ricochet angle.
+/// angle from its normal, over the shell's ricochet angle.
 fn debug_ricochet(shot: &ShotDef, hit: &VehicleIntersection, material: &ArmorMaterial, hit_angle_cos: f32) -> String {
     let ricochet = shot.ricochet_angle_cos.map_or(0.0, |cos| cos.acos().to_degrees());
     format!(
-        "{} at {:.1}°: ricochet, past {ricochet:.0}°",
+        "{} at {:.1}°: ricochet (over {ricochet:.0}°)",
         debug_armor_name(hit, material),
         hit_angle_cos.acos().to_degrees(),
     )
 }
 
-/// A line of a shell's trace, see [`Impact::trace`]: armour it goes through, at this
-/// angle from its normal, less its normalization, `thickness` that way, and its
-/// penetration `pen` before and after. Overmatched when too thin to ricochet off.
+/// A line of a shell's trace, see [`Impact::trace`]: armour it meets, at this angle from
+/// its normal, then normalized, and `thickness` that way, then the penetration it has
+/// left of `pen`, or how much it fell short. Overmatched when too thin to ricochet off.
 fn debug_armor(
     shot: &ShotDef,
     hit: &VehicleIntersection,
@@ -404,18 +409,30 @@ fn debug_armor(
 
     let name = debug_armor_name(hit, material);
     let left = pen - thickness;
+    let result = if left < 0.0 {
+        format!("stopped, {:.0} mm short", -left)
+    } else {
+        format!("{left:.0} mm pen left")
+    };
+
     if !material.use_hit_angle {
-        return format!("{name}: {pen:.0} -> {left:.0} mm");
+        return format!("{name}: {result}");
     }
 
     let kind = shot.kind();
-    let angle = hit_angle_cos.acos().to_degrees();
-    let normalization = normalization(shot, kind, material.armor, material.check_caliber_for_hit_angle_norm).to_degrees();
+    let angle = hit_angle_cos.acos();
+    let normalization = normalization(shot, kind, material.armor, material.check_caliber_for_hit_angle_norm);
+    let normalized = if normalization > 0.0 {
+        format!(" ({:.1}° normalized)", (angle - normalization).max(0.0).to_degrees())
+    } else {
+        String::new()
+    };
+
     let kinetic = matches!(kind, ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr);
     let overmatched = kinetic && material.check_caliber_for_ricochet && material.armor * 3.0 < shot.caliber;
-
     format!(
-        "{name} at {angle:.1}° - {normalization:.1}°{}: {thickness:.0} mm, {pen:.0} -> {left:.0} mm",
+        "{name} at {:.1}°{normalized}{}: {thickness:.0} mm effective, {result}",
+        angle.to_degrees(),
         if overmatched { ", overmatched" } else { "" },
     )
 
