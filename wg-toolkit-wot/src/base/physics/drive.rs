@@ -143,8 +143,6 @@
 //! firm ground, captured with its setup; a stock Type 64, 528 hp for 23 t, on Live Oaks'
 //! mostly medium ground), or our own choice.
 
-use std::f32::consts::PI;
-
 use wgtk::space::terrain::Ground;
 
 use crate::game::item_defs::GeneralWheels;
@@ -229,8 +227,8 @@ const CENTER_ROTATION_SPEED: f32 = 5.6;
 /// How fast its general wheels turn, the one that turns it the tightest, in rad/s: as
 /// far as they steer driving, and back, and slower past it, toward their lock, as the
 /// real EBR 105's do.
-const WHEEL_STEER_SPEED: f32 = 55.0 * PI / 180.0;
-const WHEEL_LOCK_SPEED: f32 = 21.0 * PI / 180.0;
+const WHEEL_STEER_SPEED: f32 = 55.0f32.to_radians();
+const WHEEL_LOCK_SPEED: f32 = 21.0f32.to_radians();
 /// How fast a wheeled vehicle swings with its wheels blocked, as [`HANDBRAKE_ROTATION`]
 /// does on tracks, and how long its swing takes to grow by its turning speed on the
 /// spot, as [`HANDBRAKE_ROTATION_RISE`]: as the real EBR 105, which drifts at about

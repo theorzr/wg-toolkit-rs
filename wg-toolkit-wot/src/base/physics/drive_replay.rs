@@ -20,7 +20,6 @@
 //!   compact descriptor, whose positions are `other,<vehicle>,x,y,z,yaw` lines: the hull
 //!   collides with it where the real server had it, see [`Other`].
 
-use std::f32::consts::PI;
 use std::sync::Arc;
 use std::fs;
 
@@ -283,9 +282,9 @@ impl Errors {
         println!(
             "{label}: {} windows, distance {d50:.2} / {d90:.2} / {dmax:.2} m, height {h50:.2} / {h90:.2} / {hmax:.2} m, yaw {:.1} / {:.1} / {:.1}° (median / 90% / max)",
             self.distance.len(),
-            y50 * 180.0 / PI,
-            y90 * 180.0 / PI,
-            ymax * 180.0 / PI,
+            y50.to_degrees(),
+            y90.to_degrees(),
+            ymax.to_degrees(),
         );
     }
 
@@ -298,7 +297,7 @@ impl Errors {
         }
         let distances = within.iter().map(|&index| self.distance[index]).collect::<Vec<_>>();
         let yaws = within.iter().map(|&index| self.yaw[index]).collect::<Vec<_>>();
-        (Self::stats(&distances).0, Self::stats(&yaws).0 * 180.0 / PI, within.len())
+        (Self::stats(&distances).0, Self::stats(&yaws).0.to_degrees(), within.len())
     }
 
     /// The windows ending furthest from the real server, to look into.
@@ -306,7 +305,7 @@ impl Errors {
         let mut worst = (0..self.distance.len()).collect::<Vec<_>>();
         worst.sort_by(|&a, &b| self.distance[b].total_cmp(&self.distance[a]));
         let worst = worst.iter().take(count)
-            .map(|&i| format!("{:.1} s ({:.1} m, {:.0}°)", self.starts[i], self.distance[i], self.yaw[i] * 180.0 / PI))
+            .map(|&i| format!("{:.1} s ({:.1} m, {:.0}°)", self.starts[i], self.distance[i], self.yaw[i].to_degrees()))
             .collect::<Vec<_>>();
         println!("    worst from: {}", worst.join(", "));
         let mut highest = (0..self.height.len()).collect::<Vec<_>>();
@@ -439,7 +438,7 @@ fn tilt_errors(drive: &CapturedDrive, mobility: MobilityDef, space: &Space) -> [
     }
     [pitch, roll].map(|errors| {
         let (median, p90, _) = Errors::stats(&errors);
-        (median * 180.0 / PI, p90 * 180.0 / PI)
+        (median.to_degrees(), p90.to_degrees())
     })
 }
 

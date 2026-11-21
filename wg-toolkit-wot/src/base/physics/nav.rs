@@ -27,7 +27,6 @@
 //! the space again as ways look, see [`NavGrid::forget`].
 
 use std::collections::BinaryHeap;
-use std::f32::consts::PI;
 use std::cmp::Ordering;
 
 use glam::{Vec2, Vec3};
@@ -41,7 +40,7 @@ use wgtk::space::Space;
 pub const CELL: f32 = 1.0;
 /// How steep a cell's surface may be for a tank to drive on it, in radians. Our choice,
 /// below where its tracks' grip falls, from 27.5°, see `body::SLOPE_GRIP_ALONG`.
-const MAX_SLOPE: f32 = 30.0 * PI / 180.0;
+const MAX_SLOPE: f32 = 30.0f32.to_radians();
 /// How much higher or lower a neighbouring cell may be for a tank to drive onto it, in
 /// metres: as steep as [`MAX_SLOPE`] allows, over a cell, and a curb's height more.
 const MAX_STEP: f32 = 0.6;

@@ -61,8 +61,8 @@ const FALL_SPEED_STEP: f32 = 2.5;
 /// How finely a tree's limit is looked for, in radians, see [`fall_limit`], before it
 /// is refined, and how far it may tip at most. Our choice: a degree, and 135°, past
 /// any tree the captures show, 103° at most.
-const LIMIT_STEP: f32 = PI / 180.0;
-const MAX_LIMIT: f32 = 0.75 * PI;
+const LIMIT_STEP: f32 = 1.0f32.to_radians();
+const MAX_LIMIT: f32 = 135.0f32.to_radians();
 /// How many halvings refine a tree's limit, see [`fall_limit`]: to a 250th of a degree.
 const LIMIT_REFINES: usize = 8;
 /// How far up its trunk a tree looks for what it falls against, in metres, see

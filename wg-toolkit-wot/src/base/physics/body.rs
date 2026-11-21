@@ -304,7 +304,7 @@ const FRICTION_HEIGHT: f32 = 0.7;
 /// `ROLLER_HORIZONTAL_SURFACE_ANGLE` in `physics_shared.py`, which its native physics
 /// takes; that it means this is our reading. A debris pile's ramp on Ruinberg, its foot
 /// 26 to 32° steep, stopped the T110E4 dead from 8 m/s, where the real one climbed it.
-const ROLLER_FLAT: f32 = 35.0 * std::f32::consts::PI / 180.0;
+const ROLLER_FLAT: f32 = 35.0f32.to_radians();
 /// How much a track's end climbs what it meets head on, as a share of how hard it is
 /// held off it: its belt, gripping the face, pulls it up. From the game:
 /// `ROLLER_FRICTION_GAIN_MAX` in `physics_shared.py`, read as this share. At 1, a Type 64
