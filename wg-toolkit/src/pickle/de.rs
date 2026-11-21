@@ -40,7 +40,13 @@ pub enum DeError {
 
 /// Decode a pickle from a reader, reading up to its end, no further.
 pub fn from_reader<R: Read>(read: R) -> Result<Value, DeError> {
-    Decoder { read, nodes: Vec::new(), stack: Vec::new(), marks: Vec::new(), memo: HashMap::new() }.decode()
+    Decoder {
+        read,
+        nodes: Vec::new(),
+        stack: Vec::new(),
+        marks: Vec::new(),
+        memo: HashMap::new(),
+    }.decode()
 }
 
 /// Decode a pickle that is the whole data.
@@ -185,7 +191,9 @@ impl<R: Read> Decoder<R> {
                     let items = self.pop_mark()?;
                     self.push_node(Node::Tuple(items));
                 }
-                op::TUPLE1 | op::TUPLE2 | op::TUPLE3 => {
+                op::TUPLE1 |
+                op::TUPLE2 |
+                op::TUPLE3 => {
                     let len = usize::from(code - op::TUPLE1 + 1);
                     let start = self.stack.len().checked_sub(len).ok_or(DeError::StackUnderflow)?;
                     let items = self.stack.split_off(start);
@@ -243,7 +251,8 @@ impl<R: Read> Decoder<R> {
                     let name = String::from_utf8_lossy(&self.line()?).into_owned();
                     self.push(Value::Global(Global { module, name }));
                 }
-                op::REDUCE | op::NEWOBJ => {
+                op::REDUCE |
+                op::NEWOBJ => {
                     let args = self.pop()?;
                     let class = match self.pop().map(|id| &self.nodes[id])? {
                         Node::Value(Value::Global(global)) => global.clone(),
@@ -253,8 +262,14 @@ impl<R: Read> Decoder<R> {
                     // Python 2 pickles sets as `set([items])`.
                     let set = code == op::REDUCE && class.module == "__builtin__" && items.len() <= 1;
                     let node = match &class.name[..] {
-                        "set" | "frozenset" if set => Node::Set(items.first().copied().unwrap_or(args), class.name == "frozenset"),
-                        _ => Node::Object { class, args, new: code == op::NEWOBJ, state: None },
+                        "set" |
+                        "frozenset" if set => Node::Set(items.first().copied().unwrap_or(args), class.name == "frozenset"),
+                        _ => Node::Object {
+                            class,
+                            args,
+                            new: code == op::NEWOBJ,
+                            state: None,
+                        },
                     };
                     self.push_node(node);
                 }
@@ -270,7 +285,11 @@ impl<R: Read> Decoder<R> {
             }
         }
         let root = self.pop()?;
-        let mut builder = Builder { refs: vec![0; self.nodes.len()], built: Vec::new(), nodes: self.nodes };
+        let mut builder = Builder {
+            refs: vec![0; self.nodes.len()],
+            built: Vec::new(),
+            nodes: self.nodes,
+        };
         builder.count(root);
         builder.built.resize_with(builder.nodes.len(), || None);
         Ok(builder.build(root))
@@ -392,7 +411,8 @@ impl Builder {
         }
         let children: Vec<NodeId> = match &self.nodes[id] {
             Node::Value(_) => return,
-            Node::List(items) | Node::Tuple(items) => items.clone(),
+            Node::List(items) |
+            Node::Tuple(items) => items.clone(),
             Node::Dict(entries) => entries.iter().flat_map(|&(k, v)| [k, v]).collect(),
             &Node::Set(items, _) => vec![items],
             &Node::Object { args, state, .. } => [Some(args), state].into_iter().flatten().collect(),
@@ -414,7 +434,8 @@ impl Builder {
             Node::Dict(entries) => Value::Dict(entries.into_iter().map(|(k, v)| (self.build(k), self.build(v))).collect()),
             Node::Set(items, frozen) => {
                 let items = match self.build(items) {
-                    Value::List(items) | Value::Tuple(items) => items.into_iter().collect(),
+                    Value::List(items) |
+                    Value::Tuple(items) => items.into_iter().collect(),
                     _ => Default::default(),
                 };
                 if frozen { Value::FrozenSet(items) } else { Value::Set(items) }
@@ -422,7 +443,12 @@ impl Builder {
             Node::Object { class, args, new, state } => {
                 let Value::Tuple(args) = self.build(args) else { return Value::None };
                 let state = state.map(|id| self.build(id));
-                Value::Object(Box::new(Object { class, args, new, state }))
+                Value::Object(Box::new(Object {
+                    class,
+                    args,
+                    new,
+                    state,
+                }))
             }
         };
         if self.refs[id] > 1 {

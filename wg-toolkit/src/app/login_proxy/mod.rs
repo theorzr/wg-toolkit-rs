@@ -390,7 +390,10 @@ impl Inner {
         peer.last_request = Some(PeerLastRequest {
             request_id,
             time: Instant::now(),
-            kind: PeerLastRequestKind::Login { blowfish, blowfish_key: login.element.blowfish_key.clone() },
+            kind: PeerLastRequestKind::Login {
+                blowfish,
+                blowfish_key: login.element.blowfish_key.clone(),
+            },
         });
 
         if let Some(encryption_key) = self.real_encryption_key.as_deref() {

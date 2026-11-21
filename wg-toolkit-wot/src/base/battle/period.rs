@@ -127,7 +127,8 @@ impl ArenaPeriod {
     pub fn arena_update(self, game_time: f64) -> io::Result<Option<(u8, Bytes)>> {
 
         let (period, until, length, extra) = match self {
-            Self::Waiting(_) | Self::Exterminated { .. } => return Ok(None),
+            Self::Waiting(_) |
+            Self::Exterminated { .. } => return Ok(None),
             Self::Countdown(until) => (ARENA_PERIOD_PREBATTLE, until, PREBATTLE_LENGTH, PickleValue::List(Vec::new())),
             Self::Battle(until) => (ARENA_PERIOD_BATTLE, until, BATTLE_LENGTH, PickleValue::List(Vec::new())),
             Self::AfterBattle { winner, reason, until } => {

@@ -461,12 +461,16 @@ impl BaseThread {
 
         while let Some(event) = self.link.try_event() {
             match event {
-                LinkEvent::Linked(()) | LinkEvent::Unlinked(()) => self.load = None,
+                LinkEvent::Linked(()) |
+                LinkEvent::Unlinked(()) => self.load = None,
                 LinkEvent::Message((), Message::ClientHost { request_id, client }) => {
                     let player = self.account_ids.player(&client.name);
                     let hosted = login_client(&client, player).map(|login_client| self.login_clients.insert(client.login_key, login_client)).is_some();
                     let base_app = advertise::advertised(&self.advertise, self.addr, client.addr);
-                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(base_app) };
+                    let message = Message::ClientHosted {
+                        request_id,
+                        base_app: hosted.then_some(base_app),
+                    };
                     if let Err(e) = self.link.send(&message) {
                         warn!(addr = %client.addr, "Failed to answer the login app: {e}");
                     }
@@ -1049,8 +1053,16 @@ fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
         denunciationsLeft: DENUNCIATIONS,
         clientCtx: String::new(),
         tkillIsSuspected: false,
-        playLimits: PlayLimits { curfew: -1, weeklyPlayLimit: -1, dailyPlayLimit: -1, sessionLimit: -1 },
-        battleChatRestriction: BattleChatRestriction { isBattleChatDisabled: false, restrictionReasonID: -1 },
+        playLimits: PlayLimits {
+            curfew: -1,
+            weeklyPlayLimit: -1,
+            dailyPlayLimit: -1,
+            sessionLimit: -1,
+        },
+        battleChatRestriction: BattleChatRestriction {
+            isBattleChatDisabled: false,
+            restrictionReasonID: -1,
+        },
         goodiesSnapshot: Vec::new(),
     }
 }
@@ -1226,7 +1238,11 @@ fn targeting_info(loadout: &VehicleLoadout) -> TargetingInfo {
 fn vehicle_settings(entity_id: EntityId, gun: &GunLoader) -> Vec<VehicleSetting> {
     let (loaded, next) = gun.shells();
     [(SETTING_CURRENT_SHELLS, loaded), (SETTING_NEXT_SHELLS, next)].into_iter()
-        .map(|(code, shell)| VehicleSetting { code, value: shell.map_or(0, |def| def.compact_descr.to_int() as i32), vehicleID: entity_id })
+        .map(|(code, shell)| VehicleSetting {
+            code,
+            value: shell.map_or(0, |def| def.compact_descr.to_int() as i32),
+            vehicleID: entity_id,
+        })
         .collect()
 }
 
@@ -1263,5 +1279,10 @@ fn ammo_list(shells: impl Iterator<Item = (i64, u32, u32)>) -> Vec<VehicleAmmo> 
 /// The `vehicleGunReloadTime` of a gun reloading in `base_time` seconds, done at game
 /// time `end_time` with `time_left` seconds to go.
 fn gun_reload_time(base_time: f32, end_time: f32, time_left: f32) -> GunReloadTime {
-    GunReloadTime { baseTime: base_time, clipTime: 0.0, endTime: end_time, timeLeft: time_left }
+    GunReloadTime {
+        baseTime: base_time,
+        clipTime: 0.0,
+        endTime: end_time,
+        timeLeft: time_left,
+    }
 }

@@ -257,7 +257,12 @@ impl BaseProxy {
             dispatch: ScriptDispatch::new(script),
         });
 
-        Ok(Self { app, handler, addr, link: Some(link) })
+        Ok(Self {
+            app,
+            handler,
+            addr,
+            link: Some(link),
+        })
 
     }
 
@@ -291,7 +296,10 @@ impl BaseProxy {
                     let hosted = pending_client(&client)
                         .map(|pending_client| self.handler.pending_clients.insert(client.addr, pending_client))
                         .is_some();
-                    let message = Message::ClientHosted { request_id, base_app: hosted.then_some(self.addr) };
+                    let message = Message::ClientHosted {
+                        request_id,
+                        base_app: hosted.then_some(self.addr),
+                    };
                     if let Err(e) = link.send(&message) {
                         warn!(addr = %client.addr, "Failed to answer the login proxy: {e}");
                     }
@@ -345,7 +353,11 @@ impl VolatilePosition for PackedXyz {
     fn resolve(&self, origin: Vec3, xz_scale: f32) -> Option<WorldPos> {
         let o = self.unpack(xz_scale);
         // `AVATAR_UPDATE_GET_POS_FullPos` adds all three components.
-        Some(WorldPos { x: o.x + origin.x, y: Some(o.y + origin.y), z: o.z + origin.z })
+        Some(WorldPos {
+            x: o.x + origin.x,
+            y: Some(o.y + origin.y),
+            z: o.z + origin.z,
+        })
     }
 }
 

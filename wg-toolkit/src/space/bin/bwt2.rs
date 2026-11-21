@@ -183,7 +183,14 @@ impl SpaceSection for BWT2 {
 
         let tiles_fnv = read.read_vector(|buf| buf.read_u32())?;
 
-        Ok(Self { settings1, settings2, chunks, lod_distances, outland_cascades, tiles_fnv })
+        Ok(Self {
+            settings1,
+            settings2,
+            chunks,
+            lod_distances,
+            outland_cascades,
+            tiles_fnv,
+        })
 
     }
 

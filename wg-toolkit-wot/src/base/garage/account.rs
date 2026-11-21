@@ -79,7 +79,11 @@ impl Garage {
                 free_xp: 0,
                 dossier: Vec::new(),
             }).collect();
-            vehicles.push(GarageVehicle { descr: def.descr.clone(), crew, shells: def.default_ammo() });
+            vehicles.push(GarageVehicle {
+                descr: def.descr.clone(),
+                crew,
+                shells: def.default_ammo(),
+            });
         }
         Ok(Self { vehicles })
     }
@@ -322,7 +326,11 @@ impl Passports {
             }
             Ok(ids)
         };
-        Ok(Self { first_names: ids("firstNames")?, last_names: ids("lastNames")?, icons: ids("icons")? })
+        Ok(Self {
+            first_names: ids("firstNames")?,
+            last_names: ids("lastNames")?,
+            icons: ids("icons")?,
+        })
     }
 
 }

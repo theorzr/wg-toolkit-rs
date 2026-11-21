@@ -580,7 +580,10 @@ impl Message {
                     real_base_app: read_addr(&mut buf)?,
                 },
             },
-            4 => Self::ClientHosted { request_id: buf.read_u32()?, base_app: read_addr(&mut buf)? },
+            4 => Self::ClientHosted {
+                request_id: buf.read_u32()?,
+                base_app: read_addr(&mut buf)?,
+            },
             id => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown message {id}"))),
         };
         if !buf.is_empty() {
@@ -625,9 +628,15 @@ mod tests {
         for message in [
             Message::BaseStatus { load: 3 },
             Message::BaseStop,
-            Message::ClientHost { request_id: 7, client: client(0xDEADBEEF) },
+            Message::ClientHost {
+                request_id: 7,
+                client: client(0xDEADBEEF),
+            },
             Message::ClientHosted { request_id: 7, base_app: None },
-            Message::ClientHosted { request_id: 7, base_app: Some("127.0.0.1:20017".parse().unwrap()) },
+            Message::ClientHosted {
+                request_id: 7,
+                base_app: Some("127.0.0.1:20017".parse().unwrap()),
+            },
         ] {
             let frame = message.encode();
             assert_eq!(u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize, frame.len() - 4);

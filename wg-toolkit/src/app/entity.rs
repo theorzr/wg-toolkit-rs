@@ -179,9 +179,11 @@ impl ScriptType for Bytes {
     }
     fn from_value(value: Value) -> Option<Self> {
         Some(Self(match value {
-            Value::String(StringValue::Raw(raw)) | Value::Python(PythonValue::Raw(raw)) => raw,
+            Value::String(StringValue::Raw(raw)) |
+            Value::Python(PythonValue::Raw(raw)) => raw,
             Value::String(StringValue::String(s)) => s.into_bytes(),
-            Value::String(StringValue::Python(value)) | Value::Python(PythonValue::Decoded(value)) => pickle::to_bytes(&value),
+            Value::String(StringValue::Python(value)) |
+            Value::Python(PythonValue::Decoded(value)) => pickle::to_bytes(&value),
             _ => return None,
         }))
     }
@@ -204,8 +206,10 @@ impl ScriptType for Pickle {
     fn from_value(value: Value) -> Option<Self> {
         let unpickle = |raw: Vec<u8>| pickle::from_bytes(&raw).ok();
         Some(Self(match value {
-            Value::String(StringValue::Python(value)) | Value::Python(PythonValue::Decoded(value)) => value,
-            Value::String(StringValue::Raw(raw)) | Value::Python(PythonValue::Raw(raw)) => unpickle(raw)?,
+            Value::String(StringValue::Python(value)) |
+            Value::Python(PythonValue::Decoded(value)) => value,
+            Value::String(StringValue::Raw(raw)) |
+            Value::Python(PythonValue::Raw(raw)) => unpickle(raw)?,
             _ => return None,
         }))
     }
@@ -521,7 +525,13 @@ pub fn bind<S: Schema>(dispatch: &EntityDispatch) -> Result<Bound, BindError> {
     }).collect();
 
     if errors.is_empty() {
-        Ok(Bound { schema: TypeId::of::<S>(), client_methods, properties, base_methods, cell_methods })
+        Ok(Bound {
+            schema: TypeId::of::<S>(),
+            client_methods,
+            properties,
+            base_methods,
+            cell_methods,
+        })
     } else {
         Err(BindError { schema: S::NAME, errors })
     }
@@ -542,7 +552,10 @@ impl Registry {
     pub fn register<S: Schema>(&mut self, script: &ScriptDispatch) -> Result<(), BindError> {
 
         let Some((type_id, dispatch)) = script.entity_from_name(S::NAME) else {
-            return Err(BindError { schema: S::NAME, errors: vec![format!("no type {}", S::NAME)] });
+            return Err(BindError {
+                schema: S::NAME,
+                errors: vec![format!("no type {}", S::NAME)],
+            });
         };
 
         self.bindings.insert(type_id, bind::<S>(dispatch)?);
@@ -833,7 +846,9 @@ impl EntityEventKind {
         match self {
             &Self::Call { exposed_id, ref args } => {
                 let name = Arc::clone(&dispatch.client_methods[exposed_id as usize].name);
-                let call = EntityMethod { call: MethodCall::Known { exposed_id, name, args: args.clone() } };
+                let call = EntityMethod {
+                    call: MethodCall::Known { exposed_id, name, args: args.clone() },
+                };
                 out.write_selected(call, &dispatch.client_methods)
             }
             &Self::Property { exposed_id, ref value } => {
@@ -934,7 +949,11 @@ impl<'a, C: ComponentSchema> Component<'a, C> {
     /// The component's key.
     pub fn key(&self) -> ComponentKey<C> {
         let raw = self.view.raw();
-        ComponentKey { entity: raw.entity, slot: raw.slot, _schema: PhantomData }
+        ComponentKey {
+            entity: raw.entity,
+            slot: raw.slot,
+            _schema: PhantomData,
+        }
     }
 
 }
@@ -1071,7 +1090,13 @@ impl EntityComponents<'_> {
         });
 
         let state = self.components.get_mut(slot).expect("inserted");
-        Ok(Component::new(RawComponent { entity, slot, state, dispatch, bound }))
+        Ok(Component::new(RawComponent {
+            entity,
+            slot,
+            state,
+            dispatch,
+            bound,
+        }))
 
     }
 
@@ -1161,11 +1186,17 @@ impl ComponentState {
 
         for (index, value) in self.values.iter().enumerate() {
             if let Some(value) = value {
-                add(index, NrlChild::Property { name: Arc::clone(&dispatch.properties[index].name), value: value.clone() });
+                add(index, NrlChild::Property {
+                    name: Arc::clone(&dispatch.properties[index].name),
+                    value: value.clone(),
+                });
             }
         }
         for (method_index, def) in dispatch.client_methods.iter().enumerate() {
-            add(self.values.len() + method_index, NrlChild::Method { name: Arc::clone(&def.name), method_index: method_index as u32 });
+            add(self.values.len() + method_index, NrlChild::Method {
+                name: Arc::clone(&def.name),
+                method_index: method_index as u32,
+            });
         }
         add(count - 1, NrlChild::Trailing);
 
@@ -1319,7 +1350,10 @@ const FIRST_NODE: u16 = 2;
 pub(crate) fn create_entity_node(entity_id: u32, node: u16) -> NrlMessage {
     NrlMessage {
         node_id: node,
-        body: NrlBody::CreateNode { parent_id: ROOT_NODE, node: NrlNode::Entity { entity_id } },
+        body: NrlBody::CreateNode {
+            parent_id: ROOT_NODE,
+            node: NrlNode::Entity { entity_id },
+        },
     }
 }
 
@@ -1759,11 +1793,22 @@ mod tests {
     }
 
     fn method(name: &str, args: Vec<Ty>) -> MethodDef {
-        MethodDef { name: name.into(), args, length: ElementLength::Variable8 }
+        MethodDef {
+            name: name.into(),
+            args,
+            length: ElementLength::Variable8,
+        }
     }
 
     fn property(name: &str, ty: Ty, flags: PropertyFlags) -> PropertyDef {
-        PropertyDef { name: name.into(), ty, length: ElementLength::Variable8, flags, volatile: false, detail_level: None }
+        PropertyDef {
+            name: name.into(),
+            ty,
+            length: ElementLength::Variable8,
+            flags,
+            volatile: false,
+            detail_level: None,
+        }
     }
 
     fn dispatch() -> EntityDispatch {
@@ -1775,8 +1820,16 @@ mod tests {
         let vec3_ty = tys.register(None, TyKind::Vector3);
         let str_ty = tys.register(None, TyKind::String);
         let marker_ty = tys.register(None, TyKind::Dict(TyDict { allow_none: false, properties: vec![
-            TyDictProp { name: "gunPosition".into(), ty: vec3_ty, default: None },
-            TyDictProp { name: "dispersion".into(), ty: f32_ty, default: None },
+            TyDictProp {
+                name: "gunPosition".into(),
+                ty: vec3_ty,
+                default: None,
+            },
+            TyDictProp {
+                name: "dispersion".into(),
+                ty: f32_ty,
+                default: None,
+            },
         ] }));
         let mode_ty = tys.register(None, TyKind::Array(TySeq { ty: u8_ty.clone(), size: Some(2) }));
         let empty = tys.register(None, TyKind::Dict(TyDict::default()));
@@ -1836,7 +1889,10 @@ mod tests {
         let dispatch = dispatch();
         let ty = &dispatch.client_methods[0].args[0];
         assert!(Marker::check(ty));
-        let marker = Marker { gunPosition: Vec3::new(1.0, 2.0, 3.0), dispersion: 0.5 };
+        let marker = Marker {
+            gunPosition: Vec3::new(1.0, 2.0, 3.0),
+            dispersion: 0.5,
+        };
         let value = marker.clone().into_value(ty);
         assert!(ty.is_instance(&value));
         assert_eq!(Marker::from_value(value), Some(marker));

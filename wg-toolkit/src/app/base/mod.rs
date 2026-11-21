@@ -151,7 +151,10 @@ impl App {
         let nrl_type_id = self.dispatch.entity_from_name(C::NAME)
             .and_then(|(type_id, _)| self.dispatch.component_nrl_id(type_id));
         if nrl_type_id.is_none() {
-            return Err(BindError { schema: C::NAME, errors: vec!["no component type the client has a class for".to_string()] });
+            return Err(BindError {
+                schema: C::NAME,
+                errors: vec!["no component type the client has a class for".to_string()],
+            });
         }
 
         self.component_schemas.register::<C>(&self.dispatch)
@@ -391,7 +394,12 @@ impl App {
             return self.skip::<SkippedEntityMethod>(reader);
         };
 
-        let tables = CellTables { entities: &self.entities, entity_keys: &self.entity_keys, dispatch: &self.dispatch, cell_entity };
+        let tables = CellTables {
+            entities: &self.entities,
+            entity_keys: &self.entity_keys,
+            dispatch: &self.dispatch,
+            cell_entity,
+        };
         let method = reader.read::<element::CellEntityMethod, _>(&tables)?.element;
         let entity = match method.entity_id {
             0 => Some(cell_entity),
@@ -522,7 +530,11 @@ impl App {
     /// does right after the login reply. `unknown` is a field of unknown meaning, see
     /// [`client::element::UpdateFrequencyNotification`].
     pub fn update_frequency(&mut self, client: ClientKey, frequency: u8, unknown: u16, game_time: u32) -> io::Result<()> {
-        self.send_simple(client, client::element::UpdateFrequencyNotification { frequency, unknown, game_time })
+        self.send_simple(client, client::element::UpdateFrequencyNotification {
+            frequency,
+            unknown,
+            game_time,
+        })
     }
 
     /// Tell a client where its cell app is, before creating its cell player.
@@ -540,7 +552,10 @@ impl App {
     /// Tell the client to disconnect and reconnect to a (possibly different) base app
     /// address.
     pub fn switch_base_app(&mut self, client: ClientKey, base_addr: SocketAddrV4, reset_entities: bool) -> io::Result<()> {
-        self.send_simple(client, client::element::SwitchBaseApp { base_addr: base_addr.into(), reset_entities })
+        self.send_simple(client, client::element::SwitchBaseApp {
+            base_addr: base_addr.into(),
+            reset_entities,
+        })
     }
 
     /// Push a resource to the client (`ResourceHeader` followed by one or more
@@ -804,7 +819,13 @@ impl App {
         let dispatch = self.dispatch.entity_from_id(type_id)
             .ok_or_else(|| io_invalid_data(format_args!("unknown component type: {type_id}")))?;
 
-        Ok(Component::new(RawComponent { entity: key.entity, slot: key.slot, state, dispatch, bound }))
+        Ok(Component::new(RawComponent {
+            entity: key.entity,
+            slot: key.slot,
+            state,
+            dispatch,
+            bound,
+        }))
 
     }
 
@@ -916,7 +937,9 @@ impl App {
         }
 
         out.write_selected(
-            client::element::EntityMethod { call: MethodCall::Known { exposed_id, name, args } },
+            client::element::EntityMethod {
+                call: MethodCall::Known { exposed_id, name, args },
+            },
             &dispatch.client_methods,
         )
 
@@ -948,7 +971,12 @@ impl App {
 
         let space = cell.as_ref().map(|cell| cell.space);
         let properties = self.dispatch.entity_from_id(type_id).map_or(0, |dispatch| dispatch.properties.len());
-        let slot = self.entities.insert(EntityState { client, type_id, properties: vec![None; properties], cell });
+        let slot = self.entities.insert(EntityState {
+            client,
+            type_id,
+            properties: vec![None; properties],
+            cell,
+        });
         let key = EntityKey::new(slot, id);
         self.entity_keys.insert(id, key);
 
@@ -1125,7 +1153,10 @@ impl App {
     /// Map a geometry (a map, `spaces/08_ruinberg` say) into a space, at the identity
     /// transform: clients get it once in the space, after what was given before.
     pub fn add_space_geometry_mapping(&mut self, space: SpaceKey, entry_id: SocketAddrV4, path: &str) -> io::Result<()> {
-        self.add_space_data(space, SpaceData::GeometryMapping { entry_id, path: path.to_string() })
+        self.add_space_data(space, SpaceData::GeometryMapping {
+            entry_id,
+            path: path.to_string(),
+        })
     }
 
     /// Get a client's base-player entity into a space, with a cell part: the client gets
@@ -1488,7 +1519,12 @@ impl App {
 
         let Some(player) = self.entities.get(witness.entity.slot).and_then(|state| state.cell.as_ref()) else { return Ok(()) };
         let Some(space) = self.spaces.get(player.space.slot) else { return Ok(()) };
-        let view = TickView { entities: &self.entities, space, dispatch: &self.dispatch, player };
+        let view = TickView {
+            entities: &self.entities,
+            space,
+            dispatch: &self.dispatch,
+            player,
+        };
 
         // What was written to it before goes first, the tick opens a bundle.
         self.outbox.flush(client.addr, &mut self.protocol, &self.socket)?;
@@ -1670,7 +1706,10 @@ impl Witness {
 
         for left in left {
 
-            out.write_simple(client::element::LeaveAoi { entity_id: left.entity.id, last_event_numbers: Vec::new() })?;
+            out.write_simple(client::element::LeaveAoi {
+                entity_id: left.entity.id,
+                last_event_numbers: Vec::new(),
+            })?;
 
             if let Some(alias) = left.alias {
                 self.aliases[usize::from(alias)] = false;
@@ -1702,7 +1741,10 @@ impl Witness {
                 false => None,
             };
 
-            out.write_simple(client::element::EnterAoi { entity_id: key.id, id_alias: alias.unwrap_or(NO_ALIAS) })?;
+            out.write_simple(client::element::EnterAoi {
+                entity_id: key.id,
+                id_alias: alias.unwrap_or(NO_ALIAS),
+            })?;
 
             self.known.push(WitnessEntity {
                 entity: key,
@@ -1786,7 +1828,11 @@ impl Witness {
         // player's detailed position, rounded (`detailedPositionReceived`), here the
         // origin, which would offset every packed position by its player's.
         if view.player.moved {
-            out.write_simple(client::element::AvatarUpdatePlayerDetailed { ref_num: 0, position: Vec3::ZERO, direction: Vec3::ZERO })?;
+            out.write_simple(client::element::AvatarUpdatePlayerDetailed {
+                ref_num: 0,
+                position: Vec3::ZERO,
+                direction: Vec3::ZERO,
+            })?;
         }
         let reference = calculate_reference_position(view.player.position);
         out.write_simple(client::element::RelativePosition { position: reference })?;

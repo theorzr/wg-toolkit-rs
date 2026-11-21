@@ -223,7 +223,12 @@ impl Tagfile {
     fn item(&self, index: usize) -> Option<Elements<'_>> {
         let item = self.items.get(index).filter(|_| index != 0)?;
         let count = if item.single { 1 } else { item.count };
-        Some(Elements { file: self, ty: item.ty, offset: item.offset, count })
+        Some(Elements {
+            file: self,
+            ty: item.ty,
+            offset: item.offset,
+            count,
+        })
     }
 
     fn ty(&self, id: usize) -> Option<&Type> {
@@ -343,14 +348,22 @@ impl<'a> Node<'a> {
         }
         chain.iter().rev()
             .flat_map(|ty| &ty.members)
-            .map(|member| (member.name.as_str(), Node { file: self.file, ty: member.ty, offset: self.offset + member.offset }))
+            .map(|member| (member.name.as_str(), Node {
+                file: self.file,
+                ty: member.ty,
+                offset: self.offset + member.offset,
+            }))
             .collect()
     }
 
     /// A record's member.
     pub fn get(&self, name: &str) -> Option<Node<'a>> {
         let member = self.file.member(self.ty, name)?;
-        Some(Node { file: self.file, ty: member.ty, offset: self.offset + member.offset })
+        Some(Node {
+            file: self.file,
+            ty: member.ty,
+            offset: self.offset + member.offset,
+        })
     }
 
     /// What a pointer points to, typed as the object it points to.
@@ -370,9 +383,19 @@ impl<'a> Node<'a> {
             return None;
         }
         if format & format::FIXED_ARRAY != 0 {
-            Some(Elements { file: self.file, ty: self.file.pointee(self.ty), offset: self.offset, count: (format >> 8) as usize })
+            Some(Elements {
+                file: self.file,
+                ty: self.file.pointee(self.ty),
+                offset: self.offset,
+                count: (format >> 8) as usize,
+            })
         } else {
-            self.file.item(self.index()?).or(Some(Elements { file: self.file, ty: 0, offset: 0, count: 0 }))
+            self.file.item(self.index()?).or(Some(Elements {
+                file: self.file,
+                ty: 0,
+                offset: 0,
+                count: 0,
+            }))
         }
     }
 
@@ -435,7 +458,11 @@ impl<'a> Node<'a> {
         let mut node = *self;
         while node.file.format(node.ty) & 0xF == format::RECORD {
             match node.file.ty(node.ty).map(|ty| &ty.members[..]) {
-                Some([member]) => node = Node { file: node.file, ty: member.ty, offset: node.offset + member.offset },
+                Some([member]) => node = Node {
+                    file: node.file,
+                    ty: member.ty,
+                    offset: node.offset + member.offset,
+                },
                 _ => break,
             }
         }
@@ -469,7 +496,11 @@ impl<'a> Elements<'a> {
     }
 
     pub fn get(&self, index: usize) -> Option<Node<'a>> {
-        (index < self.count).then(|| Node { file: self.file, ty: self.ty, offset: self.offset + index * self.file.size(self.ty) })
+        (index < self.count).then(|| Node {
+            file: self.file,
+            ty: self.ty,
+            offset: self.offset + index * self.file.size(self.ty),
+        })
     }
 
 }

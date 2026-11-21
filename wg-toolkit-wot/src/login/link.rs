@@ -107,7 +107,12 @@ impl LoginLinkListener {
             }
 
             let deadline = Instant::now() + REPLY_WAIT;
-            self.hostings.insert(request_id, Hosting { client, link, links, deadline });
+            self.hostings.insert(request_id, Hosting {
+                client,
+                link,
+                links,
+                deadline,
+            });
             return;
 
         }
@@ -124,7 +129,8 @@ impl LoginLinkListener {
                     info!(?link, load, "Registered a base app");
                 }
             }
-            LinkEvent::Message(link, Message::BaseStop) | LinkEvent::Unlinked(link) => {
+            LinkEvent::Message(link, Message::BaseStop) |
+            LinkEvent::Unlinked(link) => {
                 self.unregister(link);
             }
             LinkEvent::Message(_, Message::ClientHosted { request_id, base_app }) => {

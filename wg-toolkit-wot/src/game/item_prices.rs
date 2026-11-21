@@ -86,7 +86,11 @@ impl ItemPrices {
             for (name, vehicle) in elements(Some(&list)) {
                 let id = vehicle.get_child_integer("id")
                     .ok_or_else(|| item_defs::invalid(format!("no id for vehicle {name} in {nation_name}")))?;
-                prices.add(IntCompactDescr { item_type: item_type::VEHICLE, nation, id: id as u16 }, vehicle);
+                prices.add(IntCompactDescr {
+                    item_type: item_type::VEHICLE,
+                    nation,
+                    id: id as u16,
+                }, vehicle);
                 let vehicle = item_defs::read_xml(fs, &format!("{dir}/{name}.xml"))?;
                 for &(section, kind, item_type) in MODULES {
                     for (module_name, def) in local(vehicle.get_child_element(section)) {
@@ -103,7 +107,11 @@ impl ItemPrices {
             let shells = item_defs::read_xml(fs, &format!("{dir}/components/shells.xml"))?;
             for (_, shell) in elements(Some(&shells)) {
                 if let Some(id) = shell.get_child_integer("id") {
-                    prices.add(IntCompactDescr { item_type: item_type::SHELL, nation, id: id as u16 }, shell);
+                    prices.add(IntCompactDescr {
+                        item_type: item_type::SHELL,
+                        nation,
+                        id: id as u16,
+                    }, shell);
                 }
             }
 
@@ -113,7 +121,11 @@ impl ItemPrices {
             let artefacts = item_defs::read_xml(fs, &format!("scripts/item_defs/vehicles/common/{file}.xml"))?;
             for (_, artefact) in elements(Some(&artefacts)) {
                 if let Some(id) = artefact.get_child_integer("id") {
-                    prices.add(IntCompactDescr { item_type, nation: NO_NATION, id: id as u16 }, artefact);
+                    prices.add(IntCompactDescr {
+                        item_type,
+                        nation: NO_NATION,
+                        id: id as u16,
+                    }, artefact);
                 }
             }
         }
@@ -131,7 +143,10 @@ impl ItemPrices {
             Some(price) => (price.as_integer(), None),
             None => (None, None),
         };
-        self.prices.push((cd, Price { currency: currency.unwrap_or("credits"), amount: amount.unwrap_or(0) }));
+        self.prices.push((cd, Price {
+            currency: currency.unwrap_or("credits"),
+            amount: amount.unwrap_or(0),
+        }));
         if def.get_child_boolean("notInShop") == Some(true) {
             self.not_in_shop.push(cd);
         }

@@ -57,7 +57,8 @@ impl Requests {
         let shown_args = args[2..].iter().map(|a| format!("{a:?}")).collect::<Vec<_>>().join(", ");
 
         match i16::try_from(id).ok().and_then(ac::request_id_name) {
-            Some("REQUEST_ID_NO_RESPONSE") | Some("REQUEST_ID_NON_CLIENT") => {
+            Some("REQUEST_ID_NO_RESPONSE") |
+            Some("REQUEST_ID_NON_CLIENT") => {
                 Some(format!("command {label}({shown_args}), no answer expected"))
             }
             // The other predefined ids are answered by a stream of the same id.
@@ -76,7 +77,8 @@ impl Requests {
     /// A client method call sent by the server.
     pub fn on_client_call(&mut self, method: &str, args: &[Value]) -> Option<String> {
         match method {
-            "onCmdResponse" | "onCmdResponseExt" => {
+            "onCmdResponse" |
+            "onCmdResponseExt" => {
 
                 let id = int_arg(args, 0)?;
                 let code = int_arg(args, 1)?;

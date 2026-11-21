@@ -88,6 +88,36 @@ pub struct VehicleDef {
     pub collision: Arc<VehicleCollision>,
     /// Its siege mode, if it has one: a wheeled vehicle's fast one.
     pub siege: Option<SiegeDef>,
+    /// Its class, as its vehicle list's tags give it, see [`VehicleClass`].
+    pub class: VehicleClass,
+}
+
+/// A vehicle's class, by the tag its vehicle list gives it: `lightTank`, `mediumTank`,
+/// `heavyTank`, `AT-SPG` or `SPG`. Medium for a vehicle tagged none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VehicleClass {
+    Light,
+    #[default]
+    Medium,
+    Heavy,
+    TankDestroyer,
+    Artillery,
+}
+
+impl VehicleClass {
+
+    /// The class of the first tag of these, space separated, that names one, if any.
+    pub fn of_tags(tags: &str) -> Option<Self> {
+        tags.split_whitespace().find_map(|tag| match tag {
+            "lightTank" => Some(Self::Light),
+            "mediumTank" => Some(Self::Medium),
+            "heavyTank" => Some(Self::Heavy),
+            "AT-SPG" => Some(Self::TankDestroyer),
+            "SPG" => Some(Self::Artillery),
+            _ => None,
+        })
+    }
+
 }
 
 /// A vehicle's siege mode, which vehicles tagged `siegeMode` switch to and back: how it
@@ -492,7 +522,12 @@ pub struct MagazineDef {
 
 impl Default for MagazineDef {
     fn default() -> Self {
-        Self { size: 1, interval: 0.0, burst_size: 1, burst_interval: 0.0 }
+        Self {
+            size: 1,
+            interval: 0.0,
+            burst_size: 1,
+            burst_interval: 0.0,
+        }
     }
 }
 
@@ -572,15 +607,16 @@ impl VehicleDef {
         let nation_id = NATIONS.iter().position(|n| *n == nation)
             .ok_or_else(|| invalid(format!("unknown nation {nation}")))? as u8;
 
-        let (dir, type_id, siege_mode) = vehicle_dirs(fs, nation).into_iter()
+        let (dir, type_id, tags) = vehicle_dirs(fs, nation).into_iter()
             .find_map(|dir| {
                 let list = read_xml(fs, &format!("{dir}/list.xml")).ok()?;
                 let entry = list.get_child_element(name)?;
-                let siege_mode = entry.get_child_string("tags")
-                    .is_some_and(|tags| tags.split_whitespace().any(|tag| tag == "siegeMode"));
-                Some((dir, entry.get_child_integer("id")?, siege_mode))
+                let tags = entry.get_child_string("tags").unwrap_or_default().to_string();
+                Some((dir, entry.get_child_integer("id")?, tags))
             })
             .ok_or_else(|| invalid(format!("no vehicle {name} in {nation}")))?;
+        let siege_mode = tags.split_whitespace().any(|tag| tag == "siegeMode");
+        let class = VehicleClass::of_tags(&tags).unwrap_or_default();
 
         let vehicle = read_xml(fs, &format!("{dir}/{name}.xml"))?;
         let component_ids = |kind: &str| -> io::Result<Box<Element>> {
@@ -660,7 +696,11 @@ impl VehicleDef {
                 .ok_or_else(|| invalid(format!("no id for shell {shell_name}")))?;
             let shot = shot.as_element().ok_or_else(|| invalid(format!("no shot for shell {shell_name}")))?;
             let portion = shot.get_child_float("defaultPortion").unwrap_or(0.0);
-            let cd = IntCompactDescr { item_type: item_type::SHELL, nation: nation_id, id: shell_id as u16 };
+            let cd = IntCompactDescr {
+                item_type: item_type::SHELL,
+                nation: nation_id,
+                id: shell_id as u16,
+            };
             shells.push((cd, portion));
             let shot_float = |name: &str| shot.get_child_float(name)
                 .ok_or_else(|| invalid(format!("shell {shell_name} has no {name}")));
@@ -855,7 +895,12 @@ impl VehicleDef {
             .transpose();
         let (size, interval) = section("clip")?.unwrap_or((1, 0.0));
         let (burst_size, burst_interval) = section("burst")?.unwrap_or((1, 0.0));
-        let magazine = MagazineDef { size, interval, burst_size, burst_interval };
+        let magazine = MagazineDef {
+            size,
+            interval,
+            burst_size,
+            burst_interval,
+        };
 
         let vision = VisionDef {
             view_range: turret.get_child_float("circularVisionRadius")
@@ -883,6 +928,7 @@ impl VehicleDef {
             vision,
             collision,
             siege,
+            class,
         })
 
     }
@@ -1357,7 +1403,8 @@ mod tests {
             for shot in VehicleDef::load(&fs, nation, name).unwrap().shots {
                 let angle = shot.ricochet_angle_cos.map(|cos| cos.acos().to_degrees().round());
                 let expected = match shot.kind() {
-                    ShellKind::ArmorPiercing | ShellKind::ArmorPiercingCr => Some(70.0),
+                    ShellKind::ArmorPiercing |
+                    ShellKind::ArmorPiercingCr => Some(70.0),
                     ShellKind::HollowCharge => Some(85.0),
                     _ => None,
                 };

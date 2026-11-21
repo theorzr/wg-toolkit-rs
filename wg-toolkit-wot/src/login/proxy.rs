@@ -43,7 +43,10 @@ impl LoginProxy {
             app.set_encryption(encryption_key);
         }
 
-        Ok(Self { app, link_listener: LoginLinkListener::new(link_listener) })
+        Ok(Self {
+            app,
+            link_listener: LoginLinkListener::new(link_listener),
+        })
 
     }
 

@@ -260,7 +260,10 @@ impl Default for Terrain {
 
     /// No terrain: no height or ground anywhere.
     fn default() -> Self {
-        Self { chunk_size: DEFAULT_CHUNK_SIZE, chunks: HashMap::new() }
+        Self {
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            chunks: HashMap::new(),
+        }
     }
 
 }
@@ -448,8 +451,14 @@ mod tests {
         // Rising 1 m per sample along x, and 0.5 m along z.
         let size = 64 + VISIBLE_OFFSET * 2 + 1;
         let heights = (0..size * size).map(|i| (i % size) as f32 + (i / size) as f32 * 0.5).collect();
-        let chunk = Chunk { heights: HeightMap { width: size, height: size, heights }, grounds: None };
-        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), chunk)]) };
+        let chunk = Chunk {
+            heights: HeightMap { width: size, height: size, heights },
+            grounds: None,
+        };
+        let terrain = Terrain {
+            chunk_size: 100.0,
+            chunks: HashMap::from([((0, 0), chunk)]),
+        };
         // A box of 3 by 2 metres covers 3 by 2 cells of 1.5625 m, 2 triangles each, each
         // up, and on the heights: their middles are where the terrain is.
         let mut triangles = Vec::new();
@@ -471,8 +480,14 @@ mod tests {
         // Rising 1 m per sample along x, as above: a 1 in 1.5625 slope.
         let size = 64 + VISIBLE_OFFSET * 2 + 1;
         let heights = (0..size * size).map(|i| (i % size) as f32).collect();
-        let chunk = Chunk { heights: HeightMap { width: size, height: size, heights }, grounds: None };
-        let terrain = Terrain { chunk_size: 100.0, chunks: HashMap::from([((0, 0), chunk)]) };
+        let chunk = Chunk {
+            heights: HeightMap { width: size, height: size, heights },
+            grounds: None,
+        };
+        let terrain = Terrain {
+            chunk_size: 100.0,
+            chunks: HashMap::from([((0, 0), chunk)]),
+        };
         let normal = terrain.normal_at(30.3, 40.7).unwrap();
         let expected = Vec3::new(-1.0, 100.0 / 64.0, 0.0).normalize();
         assert!(normal.distance(expected) < 1e-3, "{normal}");

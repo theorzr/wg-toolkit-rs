@@ -105,7 +105,9 @@ impl NrlTree {
                     }
                 }
                 NrlBody::UnlinkTree => self.unlink(node_id),
-                NrlBody::Lookup | NrlBody::UpdateNode | NrlBody::Other { .. } => {}
+                NrlBody::Lookup |
+                NrlBody::UpdateNode |
+                NrlBody::Other { .. } => {}
             }
         }
     }
@@ -124,9 +126,16 @@ impl NrlTree {
                 for (index, &child_id) in children.ids.iter().enumerate() {
                     let kind = match present.get(&child_id) {
                         Some(NrlChild::Property { value, .. }) =>
-                            NodeKind::Property { type_id: data.type_id, index, value: Some(value.clone()) },
+                            NodeKind::Property {
+                                type_id: data.type_id,
+                                index,
+                                value: Some(value.clone()),
+                            },
                         Some(NrlChild::Method { method_index, .. }) =>
-                            NodeKind::Method { type_id: data.type_id, index: usize::try_from(*method_index).ok() },
+                            NodeKind::Method {
+                                type_id: data.type_id,
+                                index: usize::try_from(*method_index).ok(),
+                            },
                         Some(NrlChild::Trailing) => NodeKind::Other,
                         // A property child's place says which property it is, present or
                         // not, and an absent one holds its default value: lists start empty
@@ -216,7 +225,15 @@ impl NrlTree {
                     if let Some(NodeKind::Property { value, .. }) = self.nodes.get_mut(&key).map(|node| &mut node.kind) {
                         *value = Some(new.clone());
                     }
-                    return Ok(NrlUpdate { node_id, entity_id, type_id, change: NrlChange::Set { property: Arc::clone(&property.name), value: new } });
+                    return Ok(NrlUpdate {
+                        node_id,
+                        entity_id,
+                        type_id,
+                        change: NrlChange::Set {
+                            property: Arc::clone(&property.name),
+                            value: new,
+                        },
+                    });
                 }
 
                 let kind = read.read_u8()?;
@@ -237,11 +254,18 @@ impl NrlTree {
                         if let Some(NodeKind::Property { value, .. }) = self.nodes.get_mut(&key).map(|node| &mut node.kind) {
                             *value = Some(new.clone());
                         }
-                        NrlChange::Set { property: Arc::clone(&property.name), value: new }
+                        NrlChange::Set {
+                            property: Arc::clone(&property.name),
+                            value: new,
+                        }
                     }
                     1 => self.decode_nested(component, type_id, parent, data, true)?,
                     2 => self.decode_nested(component, type_id, parent, data, false)?,
-                    _ => NrlChange::Unknown { property: Arc::clone(&property.name), kind, data: data.to_vec() },
+                    _ => NrlChange::Unknown {
+                        property: Arc::clone(&property.name),
+                        kind,
+                        data: data.to_vec(),
+                    },
                 };
 
                 (type_id, change)
@@ -258,7 +282,12 @@ impl NrlTree {
             _ => return Err(invalid(format!("update to node {node_id}, neither a property nor a method"))),
         };
 
-        Ok(NrlUpdate { node_id, entity_id, type_id, change })
+        Ok(NrlUpdate {
+            node_id,
+            entity_id,
+            type_id,
+            change,
+        })
 
     }
 
@@ -323,9 +352,19 @@ impl NrlTree {
         };
         Ok(match outcome? {
             PathOutcome::Single { mut path, value } =>
-                NrlChange::Nested { property: property(&mut path), path, value },
+                NrlChange::Nested {
+                    property: property(&mut path),
+                    path,
+                    value,
+                },
             PathOutcome::Slice { mut path, start, end, values } =>
-                NrlChange::Slice { property: property(&mut path), path, start, end, values },
+                NrlChange::Slice {
+                    property: property(&mut path),
+                    path,
+                    start,
+                    end,
+                    values,
+                },
         })
 
     }
@@ -369,7 +408,9 @@ fn default_value(ty: &Ty) -> Value {
             .collect()),
         TyKind::Array(_) => Value::Seq(Vec::new()),
         TyKind::Tuple(seq) => Value::Seq((0..seq.size.unwrap_or(0)).map(|_| default_value(&seq.ty)).collect()),
-        TyKind::String | TyKind::Python | TyKind::Mailbox => Value::None,
+        TyKind::String |
+        TyKind::Python |
+        TyKind::Mailbox => Value::None,
     }
 }
 

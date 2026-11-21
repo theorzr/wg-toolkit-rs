@@ -81,7 +81,12 @@ impl CapturedSetup {
 
     /// No equipment, field modifications or perks, and a crew whose skills don't change
     /// its mobility.
-    const STOCK: Self = Self { equipment_weight: 0.0, driver: 1.0, medium_ground: 1.0, top_speed: 0.0 };
+    const STOCK: Self = Self {
+        equipment_weight: 0.0,
+        driver: 1.0,
+        medium_ground: 1.0,
+        top_speed: 0.0,
+    };
 
     /// A stock vehicle's mobility, set up as the drive's was.
     fn apply(&self, mobility: MobilityDef) -> MobilityDef {
@@ -204,7 +209,12 @@ fn parse(csv: &str) -> CapturedDrive {
         }
         if let Some(setup) = line.strip_prefix("# setup,") {
             let [equipment_weight, driver, medium_ground, top_speed] = floats(setup)[..] else { panic!("bad setup: {line}") };
-            drive.setup = CapturedSetup { equipment_weight, driver, medium_ground, top_speed };
+            drive.setup = CapturedSetup {
+                equipment_weight,
+                driver,
+                medium_ground,
+                top_speed,
+            };
             continue;
         }
         if let Some(max) = line.strip_prefix("# max_median_error,") {

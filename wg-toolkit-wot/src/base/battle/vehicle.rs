@@ -300,7 +300,7 @@ impl BattleVehicle {
             team,
             info,
             info_index,
-            driver: Driver::Bot(Bot::default()),
+            driver: Driver::Bot(Bot::new(def.class)),
             id: world.add(driven),
             gun,
             collision: def.collision.clone(),
@@ -472,7 +472,8 @@ impl BattleVehicle {
     pub fn client_driver(&self) -> Option<&ClientDriver> {
         match &self.driver {
             Driver::Client(driver) => Some(driver),
-            Driver::Bot(_) | Driver::Nobody => None,
+            Driver::Bot(_) | 
+            Driver::Nobody => None,
         }
     }
 
@@ -500,7 +501,8 @@ impl BattleVehicle {
     pub fn show_own(&mut self, app: &mut base::App, driven: &Vehicle, marker: (Vec3, Vec3, Dispersion)) -> io::Result<()> {
         match &mut self.driver {
             Driver::Client(driver) => driver.show(app, driven, marker),
-            Driver::Bot(_) | Driver::Nobody => Ok(()),
+            Driver::Bot(_) | 
+            Driver::Nobody => Ok(()),
         }
     }
 
@@ -575,6 +577,24 @@ impl BattleVehicle {
 
     }
 
+    /// Tell the clients where it is in switching its siege mode at game time `now`, its
+    /// own client how long is left of it too.
+    fn show_siege(&self, app: &mut base::App, now: f64) -> io::Result<()> {
+
+        let Some(siege) = &self.siege else { return Ok(()) };
+        app.entity(self.entity)?.set_siegeState(siege.state)?;
+
+        let Some(own_vehicle) = self.client_driver()
+            .and_then(|driver| driver.own_vehicle) else { return Ok(()) };
+        
+        app.component(own_vehicle)?.set_siegeStateStatus(Some(SiegeStateStatus {
+            status: siege.state,
+            endTime: siege.until as f32,
+            timeLeft: (siege.until - now).max(0.0) as f32,
+        }))
+
+    }
+
     /// Once its siege mode's switching ends, by game time `now`, `driven` in the world
     /// moves as in its new mode, and the clients are told.
     pub fn finish_switching(&mut self, app: &mut base::App, driven: &mut Vehicle, now: f64) -> io::Result<()> {
@@ -592,24 +612,6 @@ impl BattleVehicle {
         siege.state = state;
         driven.hull.mobility = mobility;
         self.show_siege(app, now)
-
-    }
-
-    /// Tell the clients where it is in switching its siege mode at game time `now`, its
-    /// own client how long is left of it too.
-    fn show_siege(&self, app: &mut base::App, now: f64) -> io::Result<()> {
-
-        let Some(siege) = &self.siege else { return Ok(()) };
-        app.entity(self.entity)?.set_siegeState(siege.state)?;
-
-        let Some(own_vehicle) = self.client_driver()
-            .and_then(|driver| driver.own_vehicle) else { return Ok(()) };
-        
-        app.component(own_vehicle)?.set_siegeStateStatus(Some(SiegeStateStatus {
-            status: siege.state,
-            endTime: siege.until as f32,
-            timeLeft: (siege.until - now).max(0.0) as f32,
-        }))
 
     }
 
@@ -711,7 +713,11 @@ impl ClientDriver {
         let (client, avatar) = (self.client, self.avatar);
         let Vehicle { hull, turret } = driven;
         if let Some(marker) = self.gun_marker {
-            app.component(marker)?.set_gunMarker(Some(GunMarker { gunPosition: position, shotVector: velocity, dispersion: dispersion.angle }))?;
+            app.component(marker)?.set_gunMarker(Some(GunMarker {
+                gunPosition: position,
+                shotVector: velocity,
+                dispersion: dispersion.angle,
+            }))?;
         }
         // Every tick, to compare with what the client simulates.
         debug!(%client, "Stepped the vehicle: at {:?}, direction {:?}, speed {:.2}, turret {:.4} {:.4}",
@@ -821,7 +827,11 @@ fn public_info(name: String, descr: &[u8], team: u8, max_health: u16, crew: usiz
 fn init_vehicle(entity: &mut Entity<'_, schema::Vehicle>, avatar: EntityId, public: PublicVehicleInfo, gun_angles: u16) -> io::Result<()> {
     entity.set_avatarID(avatar)?;
     entity.set_gunAnglesPacked(gun_angles)?;
-    entity.set_dogTag(BattleDogTag { dogTag: default_dog_tag(), defaultDogTag: default_dog_tag(), showDogTagToKiller: false })?;
+    entity.set_dogTag(BattleDogTag {
+        dogTag: default_dog_tag(),
+        defaultDogTag: default_dog_tag(),
+        showDogTagToKiller: false,
+    })?;
     entity.set_health(public.maxHealth as i16)?;
     entity.set_publicInfo(public)?;
     entity.set_isStrafing(false)?;

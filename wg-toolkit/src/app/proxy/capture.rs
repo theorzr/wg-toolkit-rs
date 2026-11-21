@@ -184,7 +184,12 @@ impl<R: Read> CaptureReader<R> {
         }
 
         let start_unix = Duration::from_micros(inner.read_u64::<LE>()?);
-        Ok(Self { inner, start_unix, truncated: false, done: false })
+        Ok(Self {
+            inner,
+            start_unix,
+            truncated: false,
+            done: false,
+        })
 
     }
 

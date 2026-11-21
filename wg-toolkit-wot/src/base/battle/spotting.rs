@@ -401,7 +401,8 @@ impl Look {
     pub fn spots(&self) -> bool {
         match self.sight {
             Sight::Near => true,
-            Sight::Far | Sight::Blocked => false,
+            Sight::Far |
+            Sight::Blocked => false,
             Sight::Clear => self.distance <= self.range,
         }
     }

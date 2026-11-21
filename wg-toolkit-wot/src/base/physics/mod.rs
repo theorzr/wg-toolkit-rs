@@ -192,10 +192,10 @@ use std::ops::Deref;
 use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles};
 use tracing::{info, warn};
 
-use wgtk::space::destructibles::DestructibleKind;
 use wgtk::space::statics::{BodyKind, StaticTriangle};
+use wgtk::space::destructibles::DestructibleKind;
+use wgtk::space::foliage::FoliageCrossing;
 use wgtk::app::slots::{SlotKey, Slots};
-use wgtk::space::foliage::Crossing;
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
@@ -339,13 +339,26 @@ impl<S: Deref<Target = Space>> World<S> {
     /// or starting out of them, kept off what stands `around`, each its centre and
     /// radius, as off walls. See the `nav` module.
     pub fn path(&mut self, from: Vec3, to: Vec3, radius: f32, around: &[(Vec3, f32)]) -> Option<Vec<Vec3>> {
+        self.refresh_nav();
         let nav = self.nav.as_mut()?;
+        nav.path(from, to, radius, around, &self.space, &blocking(&self.space, &self.rubble))
+    }
+
+    /// Where a tank `radius` wide stands at a point of its map: on the surface there, if
+    /// it fits, as its ways go, see [`Self::path`]. None without bounds, or out of them.
+    pub fn stand(&mut self, point: Vec3, radius: f32) -> Option<Vec3> {
+        self.refresh_nav();
+        let nav = self.nav.as_mut()?;
+        nav.stand(point, radius, &self.space, &blocking(&self.space, &self.rubble))
+    }
+
+    /// Make its way grid forget what it learnt once more of its rubble broke.
+    fn refresh_nav(&mut self) {
         let broken = self.rubble.broken_count();
-        if broken != self.nav_broken {
+        if let Some(nav) = self.nav.as_mut().filter(|_| broken != self.nav_broken) {
             nav.forget();
             self.nav_broken = broken;
         }
-        nav.path(from, to, radius, around, &self.space, &blocking(&self.space, &self.rubble))
     }
 
     /// Whether nothing of its map stands between two points: the terrain and static
@@ -384,7 +397,7 @@ impl<S: Deref<Target = Space>> World<S> {
     /// players see it, see `wgtk::space::foliage`: its plants standing, but the trees
     /// knocked down, which hide where they fall, as far as they fell yet, see
     /// [`TreeFall::transform`]. In no order.
-    pub fn foliage(&self, from: Vec3, to: Vec3) -> Vec<Crossing> {
+    pub fn foliage(&self, from: Vec3, to: Vec3) -> Vec<FoliageCrossing> {
 
         let foliage = &self.space.foliage;
         let mut crossings = foliage.crossings(from, to);
@@ -396,6 +409,19 @@ impl<S: Deref<Target = Space>> World<S> {
         }
         crossings
 
+    }
+
+    /// How many plants of the map's foliage stand or lie within `radius` of a point on
+    /// the ground plane, as the players see them: the trees knocked down where they fell,
+    /// see [`TreeFall::transform`].
+    pub fn plants_near(&self, at: Vec3, radius: f32) -> usize {
+        let standing = self.space.foliage.near(at, radius)
+            .filter(|plant| !self.falls.values().any(|fall| fall.tree == plant.tree))
+            .count();
+        let fallen = self.falls.values()
+            .filter(|fall| Vec3::from(fall.transform().translation).with_y(at.y).distance(at) <= radius)
+            .count();
+        standing + fallen
     }
 
     // -- Its vehicles --

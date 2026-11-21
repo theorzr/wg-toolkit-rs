@@ -93,7 +93,8 @@ impl GroundMaterial {
     /// vehicles drive it.
     pub fn of(ground: Ground) -> Self {
         match ground {
-            Ground::None | Ground::Firm => FIRM_GROUND,
+            Ground::None |
+            Ground::Firm => FIRM_GROUND,
             Ground::Medium => MEDIUM_GROUND,
             Ground::Soft => SOFT_GROUND,
         }

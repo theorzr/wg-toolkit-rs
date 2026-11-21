@@ -42,7 +42,10 @@ impl<T> Slots<T> {
             }
             None => {
                 self.slots.push(Slot { generation: 0, value: Some(value) });
-                SlotKey { index: (self.slots.len() - 1) as u32, generation: 0 }
+                SlotKey {
+                    index: (self.slots.len() - 1) as u32,
+                    generation: 0,
+                }
             }
         }
     }

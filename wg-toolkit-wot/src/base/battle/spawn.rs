@@ -98,7 +98,8 @@ impl TeamStart {
 /// Where a spawn is, a point or a base.
 fn spawn_point(spawn: Spawn) -> Vec2 {
     match spawn {
-        Spawn::Point(at) | Spawn::Base(at) => at,
+        Spawn::Point(at) |
+        Spawn::Base(at) => at,
     }
 }
 

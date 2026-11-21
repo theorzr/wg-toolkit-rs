@@ -66,7 +66,12 @@ impl Value {
     /// An object of the given class, created as protocol 2 does, without arguments,
     /// and with the given state.
     pub fn object(class: Global, state: Value) -> Self {
-        Value::Object(Box::new(Object { class, args: Vec::new(), new: true, state: Some(state) }))
+        Value::Object(Box::new(Object {
+            class,
+            args: Vec::new(),
+            new: true,
+            state: Some(state),
+        }))
     }
 
     fn rank(&self) -> u8 {
@@ -135,8 +140,10 @@ impl Ord for Value {
             (Value::F64(a), Value::F64(b)) => a.total_cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
-            (Value::List(a), Value::List(b)) | (Value::Tuple(a), Value::Tuple(b)) => a.cmp(b),
-            (Value::Set(a), Value::Set(b)) | (Value::FrozenSet(a), Value::FrozenSet(b)) => a.cmp(b),
+            (Value::List(a), Value::List(b)) |
+            (Value::Tuple(a), Value::Tuple(b)) => a.cmp(b),
+            (Value::Set(a), Value::Set(b)) |
+            (Value::FrozenSet(a), Value::FrozenSet(b)) => a.cmp(b),
             (Value::Dict(a), Value::Dict(b)) => a.cmp(b),
             (Value::Global(a), Value::Global(b)) => a.cmp(b),
             (Value::Object(a), Value::Object(b)) => a.cmp(b),

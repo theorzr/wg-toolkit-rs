@@ -122,7 +122,12 @@ impl CollisionModel {
 
         let collision = Collision::load(fs, path)?;
         let groups: Vec<_> = collision.bodies.into_iter()
-            .map(|body| ArmorGroup { name: body.name, material_kind: body.material_kind, material: None, triangles: body.triangles })
+            .map(|body| ArmorGroup {
+                name: body.name,
+                material_kind: body.material_kind,
+                material: None,
+                triangles: body.triangles,
+            })
             .collect();
 
         let radius = groups.iter()

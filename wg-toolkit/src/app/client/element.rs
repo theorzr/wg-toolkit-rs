@@ -157,27 +157,84 @@ pub mod id {
 pub fn known_length(id: u8) -> Option<ElementLength> {
     use id::*;
     Some(match id {
-        CELL_APP_SUSPENDED | CELL_APP_RESUMED | SELECT_PLAYER_ENTITY | NRL_UNLINK_TREE_FLAG | NRL_UPDATE_NODE_FLAG | LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION => ElementLength::Fixed(0),
-        RESET_ENTITIES | TICK_SYNC | RELATIVE_POSITION_REFERENCE | SELECT_ALIASED_ENTITY | LOGGED_OFF => ElementLength::Fixed(1),
-        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH | AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH => ElementLength::Fixed(10),
+        CELL_APP_SUSPENDED |
+        CELL_APP_RESUMED |
+        SELECT_PLAYER_ENTITY |
+        NRL_UNLINK_TREE_FLAG |
+        NRL_UPDATE_NODE_FLAG |
+        LAST_PROXY_MESSAGE_AFTER_DIRECT_CELL_APP_CONNECTION => ElementLength::Fixed(0),
+        RESET_ENTITIES |
+        TICK_SYNC |
+        RELATIVE_POSITION_REFERENCE |
+        SELECT_ALIASED_ENTITY |
+        LOGGED_OFF => ElementLength::Fixed(1),
+        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH |
+        AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH => ElementLength::Fixed(10),
         AVATAR_UPDATE_NO_ALIAS_FULL_POS_NO_DIR => ElementLength::Fixed(11),
-        RELATIVE_POSITION | AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL | AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL => ElementLength::Fixed(12),
+        RELATIVE_POSITION |
+        AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW |
+        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW_PITCH_ROLL |
+        AVATAR_UPDATE_ALIAS_FULL_POS_YAW_PITCH_ROLL => ElementLength::Fixed(12),
         AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH => ElementLength::Fixed(13),
         AVATAR_UPDATE_NO_ALIAS_FULL_POS_YAW_PITCH_ROLL => ElementLength::Fixed(15),
-        TICK_SYNC_PERIODIC | AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR => ElementLength::Fixed(2),
+        TICK_SYNC_PERIODIC |
+        AVATAR_UPDATE_ALIAS_NO_POS_NO_DIR => ElementLength::Fixed(2),
         DETAILED_POSITION => ElementLength::Fixed(24),
         AVATAR_UPDATE_PLAYER_DETAILED => ElementLength::Fixed(25),
         AVATAR_UPDATE_ALIAS_DETAILED => ElementLength::Fixed(26),
         AVATAR_UPDATE_NO_ALIAS_DETAILED => ElementLength::Fixed(29),
         AVATAR_UPDATE_ALIAS_NO_POS_YAW => ElementLength::Fixed(3),
         FORCED_POSITION => ElementLength::Fixed(38),
-        AUTHENTICATE | BANDWIDTH_NOTIFICATION | SET_GAME_TIME | CLIENT_SUSPENSION_DETECTION_ENABLED | SELECT_ENTITY | AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH => ElementLength::Fixed(4),
-        ENTER_AOI | AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR | AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR | CONTROL_ENTITY => ElementLength::Fixed(5),
-        AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW | AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL => ElementLength::Fixed(6),
-        UPDATE_FREQUENCY_NOTIFICATION | AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH => ElementLength::Fixed(7),
-        SET_VEHICLE | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR | AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR => ElementLength::Fixed(8),
-        ENTER_AOI_ON_VEHICLE | AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW | AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL | AVATAR_UPDATE_ALIAS_FULL_POS_YAW | AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL | SWITCH_BASE_APP => ElementLength::Fixed(9),
-        CREATE_BASE_PLAYER | CREATE_CELL_PLAYER | DUMMY_PACKET | SPACE_PROPERTY | ADD_SPACE_GEOMETRY_MAPPING | REMOVE_SPACE_GEOMETRY_MAPPING | CREATE_ENTITY | CREATE_ENTITY_DETAILED | LEAVE_AOI | AVATAR_UPDATE_VOLATILE_PROPERTIES | CHANGE_VOLATILE_PACKER_TYPE | NRL_CREATE_NODE | NRL_UNLINK_TREE | NRL_UPDATE_NODE | NRL_DATA | NRL_MSG_TO_CLIENT | NRL_UNRELIABLE_MSG_TO_CLIENT | VOICE_DATA | RESTORE_CLIENT | RESOURCE_HEADER | RESOURCE_FRAGMENT | NESTED_ENTITY_PROPERTY | SLICE_ENTITY_PROPERTY | UPDATE_ENTITY | SET_CELL_APP_EXT_ADDRESS => ElementLength::Variable16,
+        AUTHENTICATE |
+        BANDWIDTH_NOTIFICATION |
+        SET_GAME_TIME |
+        CLIENT_SUSPENSION_DETECTION_ENABLED |
+        SELECT_ENTITY |
+        AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH => ElementLength::Fixed(4),
+        ENTER_AOI |
+        AVATAR_UPDATE_NO_ALIAS_NO_POS_NO_DIR |
+        AVATAR_UPDATE_ALIAS_ON_GROUND_NO_DIR |
+        CONTROL_ENTITY => ElementLength::Fixed(5),
+        AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW |
+        AVATAR_UPDATE_ALIAS_ON_GROUND_YAW |
+        AVATAR_UPDATE_ALIAS_NO_POS_YAW_PITCH_ROLL => ElementLength::Fixed(6),
+        UPDATE_FREQUENCY_NOTIFICATION |
+        AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH |
+        AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH => ElementLength::Fixed(7),
+        SET_VEHICLE |
+        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_NO_DIR |
+        AVATAR_UPDATE_ALIAS_FULL_POS_NO_DIR => ElementLength::Fixed(8),
+        ENTER_AOI_ON_VEHICLE |
+        AVATAR_UPDATE_NO_ALIAS_ON_GROUND_YAW |
+        AVATAR_UPDATE_NO_ALIAS_NO_POS_YAW_PITCH_ROLL |
+        AVATAR_UPDATE_ALIAS_FULL_POS_YAW |
+        AVATAR_UPDATE_ALIAS_ON_GROUND_YAW_PITCH_ROLL |
+        SWITCH_BASE_APP => ElementLength::Fixed(9),
+        CREATE_BASE_PLAYER |
+        CREATE_CELL_PLAYER |
+        DUMMY_PACKET |
+        SPACE_PROPERTY |
+        ADD_SPACE_GEOMETRY_MAPPING |
+        REMOVE_SPACE_GEOMETRY_MAPPING |
+        CREATE_ENTITY |
+        CREATE_ENTITY_DETAILED |
+        LEAVE_AOI |
+        AVATAR_UPDATE_VOLATILE_PROPERTIES |
+        CHANGE_VOLATILE_PACKER_TYPE |
+        NRL_CREATE_NODE |
+        NRL_UNLINK_TREE |
+        NRL_UPDATE_NODE |
+        NRL_DATA |
+        NRL_MSG_TO_CLIENT |
+        NRL_UNRELIABLE_MSG_TO_CLIENT |
+        VOICE_DATA |
+        RESTORE_CLIENT |
+        RESOURCE_HEADER |
+        RESOURCE_FRAGMENT |
+        NESTED_ENTITY_PROPERTY |
+        SLICE_ENTITY_PROPERTY |
+        UPDATE_ENTITY |
+        SET_CELL_APP_EXT_ADDRESS => ElementLength::Variable16,
         _ => return None,
     })
 }
@@ -330,7 +387,11 @@ impl CreateCellPlayer {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                 format!("{} bytes left after the cell data", read.len())));
         }
-        Ok(CellPlayerData { properties, components_count, components_properties })
+        Ok(CellPlayerData {
+            properties,
+            components_count,
+            components_properties,
+        })
     }
 
 }
@@ -370,7 +431,16 @@ impl SimpleCodec for CreateCellPlayer {
         let direction = read.read_vec3()?;
         let mut cell_data = Vec::new();
         read.read_to_end(&mut cell_data)?;
-        Ok(Self { unk_flag, space_id, unk_short, vehicle_id, position, packed_xz_scale, direction, cell_data })
+        Ok(Self {
+            unk_flag,
+            space_id,
+            unk_short,
+            vehicle_id,
+            position,
+            packed_xz_scale,
+            direction,
+            cell_data,
+        })
     }
 
 }
@@ -587,7 +657,14 @@ impl SimpleCodec for AddSpaceGeometryMapping {
         let unk = read.read_u8()?;
         let mut rest = Vec::new();
         read.read_to_end(&mut rest)?;
-        Ok(Self { space_id, entry_id, path, transform, unk, rest })
+        Ok(Self {
+            space_id,
+            entry_id,
+            path,
+            transform,
+            unk,
+            rest,
+        })
     }
 
 }
@@ -714,7 +791,15 @@ impl SimpleCodec for CreateEntity {
         let direction = SimpleCodec::read(read)?;
         let mut client_data = Vec::new();
         read.read_to_end(&mut client_data)?;
-        Ok(Self { entity_id, entity_type_id, unk_u16, resource_name, position, direction, client_data })
+        Ok(Self {
+            entity_id,
+            entity_type_id,
+            unk_u16,
+            resource_name,
+            position,
+            direction,
+            client_data,
+        })
     }
 
 }
@@ -786,7 +871,15 @@ impl SimpleCodec for CreateEntityDetailed {
         let direction = read.read_vec3()?;
         let mut client_data = Vec::new();
         read.read_to_end(&mut client_data)?;
-        Ok(Self { entity_id, entity_type_id, unk_u16, resource_name, position, direction, client_data })
+        Ok(Self {
+            entity_id,
+            entity_type_id,
+            unk_u16,
+            resource_name,
+            position,
+            direction,
+            client_data,
+        })
     }
 
 }
@@ -1712,7 +1805,10 @@ impl NrlStream {
                 2 => (NrlBody::UnlinkTree, false),
                 5 => (NrlBody::Lookup, false),
                 6 => (NrlBody::UpdateNode, true),
-                3 | 4 => (NrlBody::Other { msg_type }, true),
+                3 |
+                4 => (NrlBody::Other {
+                    msg_type,
+                }, true),
                 _ => break,
             };
 
@@ -1820,7 +1916,10 @@ fn read_component_children(
             continue;
         }
         let child = if let Some(property) = component.properties.get(index) {
-            NrlChild::Property { name: Arc::clone(&property.name), value: Value::read(read, &property.ty)? }
+            NrlChild::Property {
+                name: Arc::clone(&property.name),
+                value: Value::read(read, &property.ty)?,
+            }
         } else if index < properties + methods {
             let method_index = read.read_packed_u24()?;
             let name = usize::try_from(method_index).ok()
@@ -1847,7 +1946,9 @@ fn read_node(buf: &[u8], at: &mut usize, node_type: u8, node_id: u16) -> Option<
         1 => {
             let bytes = buf.get(*at..*at + 4)?;
             *at += 4;
-            (NrlNode::Entity { entity_id: u32::from_le_bytes(bytes.try_into().unwrap()) }, false)
+            (NrlNode::Entity {
+                entity_id: u32::from_le_bytes(bytes.try_into().unwrap()),
+            }, false)
         }
         2 => {
             let type_bytes = buf.get(*at..*at + 2)?;
@@ -1855,7 +1956,12 @@ fn read_node(buf: &[u8], at: &mut usize, node_type: u8, node_id: u16) -> Option<
             let component_type_id = u16::from_le_bytes([type_bytes[0], type_bytes[1]]);
             let name = read_packed_str(buf, at)?;
             let children = NrlIdList::read_from(buf, at, node_id as u32)?;
-            (NrlNode::DynComponent { component_type_id, name, children, data: None }, true)
+            (NrlNode::DynComponent {
+                component_type_id,
+                name,
+                children,
+                data: None,
+            }, true)
         }
         3 => (NrlNode::PrimitiveProperty, true),
         4 => (NrlNode::CompositeProperty, true),
@@ -2058,7 +2164,11 @@ impl SimpleCodec for NrlUpdateNode {
             _ => None,
         };
 
-        Ok(Self { node_id: u16::from_be_bytes(id_bytes), payload, python_value })
+        Ok(Self {
+            node_id: u16::from_be_bytes(id_bytes),
+            payload,
+            python_value,
+        })
     }
 
 }
@@ -2228,13 +2338,27 @@ impl SimpleCodec for NrlUnreliableMsgToClient {
             let dispersion_angle = cur.read_f32()?;
             let mut unk_suffix = [0u8; 2];
             cur.read_exact(&mut unk_suffix)?;
-            NrlUnreliableMsgToClientPayload::GunMarker { unk_prefix, shot_position, shot_velocity, dispersion_angle, unk_suffix }
+            NrlUnreliableMsgToClientPayload::GunMarker {
+                unk_prefix,
+                shot_position,
+                shot_velocity,
+                dispersion_angle,
+                unk_suffix,
+            }
         } else if kind == 0x11 {
             NrlUnreliableMsgToClientPayload::Unchanged(payload_bytes)
         } else {
             NrlUnreliableMsgToClientPayload::Raw(payload_bytes)
         };
-        Ok(Self { unk_id_a, unk_id_b, tick, prev_tick, kind, flags, payload })
+        Ok(Self {
+            unk_id_a,
+            unk_id_b,
+            tick,
+            prev_tick,
+            kind,
+            flags,
+            payload,
+        })
     }
 
 }
@@ -2611,7 +2735,12 @@ fn walk_path<'a>(
             values.push(value);
         }
 
-        out.push(PathOutcome::Slice { path, start, end, values });
+        out.push(PathOutcome::Slice {
+            path,
+            start,
+            end,
+            values,
+        });
 
     } else {
 
@@ -3105,7 +3234,12 @@ impl Element<PropertyPathConfig<'_>> for SliceEntityProperty {
         read.read_exact(&mut data)?;
         match decode_compressed_path(config.table, config.values, &data, true) {
             Ok(PathOutcome::Slice { path, start, end, values }) =>
-                Ok(Self::Known { path, start, end, values }),
+                Ok(Self::Known {
+                    path,
+                    start,
+                    end,
+                    values,
+                }),
             Ok(PathOutcome::Single { .. }) =>
                 unreachable!("decode_compressed_path(is_slice=true) always returns Slice"),
             Err(e) => Ok(Self::Unknown { data, reason: e.to_string() }),
@@ -3222,7 +3356,8 @@ impl Element<[MethodDef]> for EntityMethod {
     fn write(&self, write: &mut dyn Write, config: &[MethodDef]) -> io::Result<u8> {
         
         let exposed_id = match &self.call {
-            MethodCall::Known { exposed_id, .. } | MethodCall::Unknown { exposed_id, .. } => *exposed_id,
+            MethodCall::Known { exposed_id, .. } |
+            MethodCall::Unknown { exposed_id, .. } => *exposed_id,
         };
         
         let (element_id, sub_id) = id::ENTITY_METHOD.from_exposed_id(config.len() as u16, exposed_id);
@@ -3283,7 +3418,11 @@ impl Element<[MethodDef]> for EntityMethod {
         }
 
         let call = match config.get(exposed_id as usize) {
-            Some(def) => MethodCall::Known { exposed_id, name: def.name.clone(), args: def.read_args(read)? },
+            Some(def) => MethodCall::Known {
+                exposed_id,
+                name: def.name.clone(),
+                args: def.read_args(read)?,
+            },
             None => {
                 let mut data = vec![0; len];
                 read.read_exact(&mut data)?;
@@ -3595,15 +3734,37 @@ mod tests {
         let string_ty = sys.find("STRING").unwrap();
         let foo_ty = sys.register(Some("Foo".to_string()), TyKind::Dict(TyDict {
             properties: vec![
-                TyDictProp { name: Arc::from("a"), ty: u8_ty.clone(), default: None },
-                TyDictProp { name: Arc::from("b"), ty: u16_ty.clone(), default: None },
+                TyDictProp {
+                    name: Arc::from("a"),
+                    ty: u8_ty.clone(),
+                    default: None,
+                },
+                TyDictProp {
+                    name: Arc::from("b"),
+                    ty: u16_ty.clone(),
+                    default: None,
+                },
             ],
             allow_none: false,
         }));
         let bar_ty = sys.register(None, TyKind::Array(TySeq { ty: string_ty.clone(), size: None }));
         let properties = vec![
-            PropertyDef { name: Arc::from("foo"), ty: foo_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
-            PropertyDef { name: Arc::from("bar"), ty: bar_ty, length: ElementLength::Variable16, flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef {
+                name: Arc::from("foo"),
+                ty: foo_ty,
+                length: ElementLength::Variable16,
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
+            PropertyDef {
+                name: Arc::from("bar"),
+                ty: bar_ty,
+                length: ElementLength::Variable16,
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
         ];
         (properties, u16_ty, string_ty, u8_ty)
     }
@@ -3624,10 +3785,38 @@ mod tests {
         // AreaOfEffect's client-visible properties, in the order `build_property_table`
         // produces (two 4-byte, then two 8-byte).
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
-            PropertyDef { name: Arc::from("equipmentID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
-            PropertyDef { name: Arc::from("launchTime"), ty: f64_ty.clone(), length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
-            PropertyDef { name: Arc::from("strikeTime"), ty: f64_ty, length: ElementLength::Fixed(8), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef {
+                name: Arc::from("vehicleID"),
+                ty: i32_ty.clone(),
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
+            PropertyDef {
+                name: Arc::from("equipmentID"),
+                ty: i32_ty,
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
+            PropertyDef {
+                name: Arc::from("launchTime"),
+                ty: f64_ty.clone(),
+                length: ElementLength::Fixed(8),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
+            PropertyDef {
+                name: Arc::from("strikeTime"),
+                ty: f64_ty,
+                length: ElementLength::Fixed(8),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
         ];
 
         let data = const_hex("0400e729890001e53600000266666666b66601410366666666e6660141");
@@ -3670,7 +3859,14 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef {
+                name: Arc::from("vehicleID"),
+                ty: i32_ty,
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
         ];
 
         // Three properties promised; the second id (0x62 = 98, as seen live) is past the
@@ -3698,8 +3894,22 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("a"), ty: i32_ty.clone(), length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
-            PropertyDef { name: Arc::from("b"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef {
+                name: Arc::from("a"),
+                ty: i32_ty.clone(),
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
+            PropertyDef {
+                name: Arc::from("b"),
+                ty: i32_ty,
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
         ];
 
         // Two properties, but the second id repeats the first. `addChangedProperties`
@@ -3720,7 +3930,14 @@ mod tests {
         let mut sys = TySystem::default();
         let i32_ty = sys.find("INT32").unwrap();
         let properties = vec![
-            PropertyDef { name: Arc::from("vehicleID"), ty: i32_ty, length: ElementLength::Fixed(4), flags: PropertyFlags::AllClients, volatile: false, detail_level: None },
+            PropertyDef {
+                name: Arc::from("vehicleID"),
+                ty: i32_ty,
+                length: ElementLength::Fixed(4),
+                flags: PropertyFlags::AllClients,
+                volatile: false,
+                detail_level: None,
+            },
         ];
 
         let data = const_hex("0100e7298900ff");

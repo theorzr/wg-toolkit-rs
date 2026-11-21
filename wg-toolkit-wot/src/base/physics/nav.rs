@@ -219,6 +219,23 @@ impl NavGrid {
 
     }
 
+    /// Where a tank `radius` wide stands at a point, over `space` of what `keep` says
+    /// stops it: the surface of the cell under it, if its clearance fits the tank, see
+    /// [`Self::clearance`]. None off the grid.
+    pub fn stand(
+        &mut self,
+        point: Vec3,
+        radius: f32,
+        space: &Space,
+        keep: &impl Fn(&StaticTriangle) -> bool,
+    ) -> Option<Vec3> {
+        let cell = self.cell_of(point)?;
+        if self.clearance(cell, space, keep) < radius {
+            return None;
+        }
+        Some(self.center_of(cell))
+    }
+
     /// The cell a point is over, its column and row, if within the grid.
     fn cell_of(&self, point: Vec3) -> Option<(usize, usize)> {
         let cell = (Vec2::new(point.x, point.z) - self.origin) / CELL;
@@ -399,7 +416,8 @@ mod tests {
         let bounds = arena_defs::read_bounds(&*item_defs::read_xml(&res, "scripts/arena_defs/02_malinovka.xml").unwrap(), "02_malinovka").unwrap();
         let arena = ArenaTypeDef::load(&res, "02_malinovka").unwrap();
         let [from, to] = arena.spawns.map(|spawn| match spawn {
-            Spawn::Point(point) | Spawn::Base(point) => Vec3::new(point.x, 0.0, point.y),
+            Spawn::Point(point) |
+            Spawn::Base(point) => Vec3::new(point.x, 0.0, point.y),
         });
         let rubble = Rubble::default();
         let keep = blocking(&space, &rubble);

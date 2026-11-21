@@ -65,7 +65,13 @@ impl ArenaTypeDef {
         };
         let spawns = [spawn("team1")?, spawn("team2")?];
 
-        Ok(Self { name: name.to_string(), type_id: geometry_id as i32, geometry: geometry.to_string(), bounds, spawns })
+        Ok(Self {
+            name: name.to_string(),
+            type_id: geometry_id as i32,
+            geometry: geometry.to_string(),
+            bounds,
+            spawns,
+        })
 
     }
 

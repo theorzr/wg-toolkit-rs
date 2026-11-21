@@ -609,7 +609,8 @@ impl Controls {
 fn ground_index(ground: Ground) -> usize {
     match ground {
         Ground::Firm => 0,
-        Ground::Medium | Ground::None => 1,
+        Ground::Medium |
+        Ground::None => 1,
         Ground::Soft => 2,
     }
 }

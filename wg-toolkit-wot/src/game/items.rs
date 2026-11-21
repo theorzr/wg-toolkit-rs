@@ -46,7 +46,11 @@ impl IntCompactDescr {
         if item_type == 0 {
             item_type = (cd >> 24 & 255) as u8;
         }
-        Self { item_type, nation: (cd >> 4 & 15) as u8, id: (cd >> 8 & 0xFFFF) as u16 }
+        Self {
+            item_type,
+            nation: (cd >> 4 & 15) as u8,
+            id: (cd >> 8 & 0xFFFF) as u16,
+        }
     }
 
     pub fn to_int(self) -> i64 {
@@ -142,15 +146,27 @@ const MAX_OPTIONAL_DEVICES_SLOTS: usize = 4;
 impl VehicleDescr {
 
     pub fn int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::VEHICLE, nation: self.nation, id: self.type_id }
+        IntCompactDescr {
+            item_type: item_type::VEHICLE,
+            nation: self.nation,
+            id: self.type_id,
+        }
     }
 
     pub fn turret_int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::TURRET, nation: self.nation, id: self.turret }
+        IntCompactDescr {
+            item_type: item_type::TURRET,
+            nation: self.nation,
+            id: self.turret,
+        }
     }
 
     pub fn gun_int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::GUN, nation: self.nation, id: self.gun }
+        IntCompactDescr {
+            item_type: item_type::GUN,
+            nation: self.nation,
+            id: self.gun,
+        }
     }
 
     /// The mounted modules: chassis, engine, fuel tank, radio, turret and gun.
@@ -280,7 +296,11 @@ pub struct TankmanDescr {
 impl TankmanDescr {
 
     pub fn vehicle_int_descr(&self) -> IntCompactDescr {
-        IntCompactDescr { item_type: item_type::VEHICLE, nation: self.nation, id: self.vehicle_type_id }
+        IntCompactDescr {
+            item_type: item_type::VEHICLE,
+            nation: self.nation,
+            id: self.vehicle_type_id,
+        }
     }
 
     pub fn decode(cd: &[u8]) -> Result<Self, DescrError> {
@@ -398,7 +418,11 @@ mod tests {
     fn int_descr() {
         // The T110E4 sent with the vehicle commands.
         let cd = IntCompactDescr::from_int(13089);
-        assert_eq!(cd, IntCompactDescr { item_type: item_type::VEHICLE, nation: 2, id: 51 });
+        assert_eq!(cd, IntCompactDescr {
+            item_type: item_type::VEHICLE,
+            nation: 2,
+            id: 51,
+        });
         assert_eq!(cd.to_int(), 13089);
         let big = IntCompactDescr { item_type: 20, nation: 3, id: 7 };
         assert_eq!(IntCompactDescr::from_int(big.to_int()), big);

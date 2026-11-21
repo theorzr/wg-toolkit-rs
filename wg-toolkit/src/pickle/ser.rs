@@ -83,7 +83,8 @@ fn encode(value: &Value, write: &mut impl Write) -> io::Result<()> {
             Ok(())
         }
         // Python 2 has no set opcodes and pickles `set([items])`.
-        Value::Set(items) | Value::FrozenSet(items) => {
+        Value::Set(items) |
+        Value::FrozenSet(items) => {
             let name = if matches!(value, Value::Set(_)) { "set" } else { "frozenset" };
             encode_global(&Global::new("__builtin__", name), write)?;
             write.write_all(&[op::EMPTY_LIST])?;

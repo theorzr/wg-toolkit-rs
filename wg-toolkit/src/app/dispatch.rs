@@ -273,10 +273,14 @@ fn is_cell_property_exposed(property: &Property) -> bool {
 /// size (e.g. a string, or a sequence/dict containing one).
 fn ty_stream_size(ty: &Ty) -> Option<usize> {
     match ty.kind() {
-        TyKind::Int8 | TyKind::UInt8 => Some(1),
-        TyKind::Int16 | TyKind::UInt16 => Some(2),
-        TyKind::Int32 | TyKind::UInt32 => Some(4),
-        TyKind::Int64 | TyKind::UInt64 => Some(8),
+        TyKind::Int8 |
+        TyKind::UInt8 => Some(1),
+        TyKind::Int16 |
+        TyKind::UInt16 => Some(2),
+        TyKind::Int32 |
+        TyKind::UInt32 => Some(4),
+        TyKind::Int64 |
+        TyKind::UInt64 => Some(8),
         TyKind::Float32 => Some(4),
         TyKind::Float64 => Some(8),
         TyKind::Vector2 => Some(4 * 2),
@@ -300,7 +304,8 @@ fn ty_stream_size(ty: &Ty) -> Option<usize> {
                 .map(|prop| ty_stream_size(&prop.ty))
                 .sum()
         }
-        TyKind::Array(seq) | TyKind::Tuple(seq) =>
+        TyKind::Array(seq) |
+        TyKind::Tuple(seq) =>
             seq.size.map(|len| len as usize)
                 .zip(ty_stream_size(&seq.ty))
                 .map(|(len, element_size)| len * element_size),
@@ -575,7 +580,14 @@ fn build_property_table(
     }
 
     collected.into_iter()
-        .map(|(property, length)| PropertyDef { name: property.name.clone(), ty: property.ty.clone(), length, flags: property.flags, volatile: property.volatile, detail_level: property.detail_level.clone() })
+        .map(|(property, length)| PropertyDef {
+            name: property.name.clone(),
+            ty: property.ty.clone(),
+            length,
+            flags: property.flags,
+            volatile: property.volatile,
+            detail_level: property.detail_level.clone(),
+        })
         .collect()
 
 }
@@ -638,7 +650,11 @@ fn collect_data_props(interfaces: &[Interface], interface: &Interface, exposed: 
     }
     for property in &interface.properties {
         if exposed(property) {
-            out.push(TyDictProp { name: property.name.clone(), ty: property.ty.clone(), default: None });
+            out.push(TyDictProp {
+                name: property.name.clone(),
+                ty: property.ty.clone(),
+                default: None,
+            });
         }
     }
 }
@@ -781,8 +797,18 @@ mod tests {
         pinger.base_methods = vec![method("pingMeAndThenJustTouchMe", vec![u8_ty.clone()])];
 
         let components = vec![
-            Component { name: "Tournament".into(), of_entities: vec!["Account".into()], interface: tournament, has_client_class: true },
-            Component { name: "LaPinger".into(), of_entities: vec!["Account".into()], interface: pinger, has_client_class: true },
+            Component {
+                name: "Tournament".into(),
+                of_entities: vec!["Account".into()],
+                interface: tournament,
+                has_client_class: true,
+            },
+            Component {
+                name: "LaPinger".into(),
+                of_entities: vec!["Account".into()],
+                interface: pinger,
+                has_client_class: true,
+            },
             Component { name: "Elsewhere".into(), of_entities: vec!["Avatar".into()],
                 interface: interface("Elsewhere", &[], vec![method("absent", vec![u8_ty.clone()])]),
                 has_client_class: true },
@@ -844,8 +870,18 @@ mod tests {
         story.base_methods = vec![method("checkPositionForEquipment", vec![u64_ty.clone(), u64_ty.clone()])];
 
         let components = vec![
-            Component { name: "AvatarInBattleVehicleSwitch".into(), of_entities: vec!["Avatar".into()], interface: switcher, has_client_class: true },
-            Component { name: "StoryModeAvatarComponent".into(), of_entities: vec!["Avatar".into()], interface: story, has_client_class: true },
+            Component {
+                name: "AvatarInBattleVehicleSwitch".into(),
+                of_entities: vec!["Avatar".into()],
+                interface: switcher,
+                has_client_class: true,
+            },
+            Component {
+                name: "StoryModeAvatarComponent".into(),
+                of_entities: vec!["Avatar".into()],
+                interface: story,
+                has_client_class: true,
+            },
         ];
 
         let table = build_method_table(&[], &entity, base_methods_of, &components);

@@ -383,7 +383,8 @@ impl Codec<Ty> for Value {
                     Value::Dict(map)
                 }
             }
-            TyKind::Array(seq) | TyKind::Tuple(seq) => {
+            TyKind::Array(seq) |
+            TyKind::Tuple(seq) => {
                 let len = match seq.size {
                     Some(size) => size as usize,
                     None => read.read_packed_u24()? as usize,
