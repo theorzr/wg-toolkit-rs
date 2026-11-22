@@ -255,21 +255,22 @@ pub struct VehicleId(SlotKey);
 
 /// A vehicle in a [`World`], where it was when last remembered, see
 /// [`World::remember`], and in a tick, what holds of its body over it, whether it moves,
-/// and its step under way.
+/// and its step, kept from a step to the next, and whether it is under way.
 #[derive(Debug)]
 struct Placed {
     vehicle: Vehicle,
     pose: Pose,
     tick: Option<Tick>,
     moving: bool,
-    step: Option<Step>,
+    step: Step,
+    stepping: bool,
 }
 
 impl Placed {
 
     /// Its hull and its step under way, if it moves.
     fn body(&mut self) -> Option<(&mut Hull, &mut Step)> {
-        Some((&mut self.vehicle.hull, self.step.as_mut()?))
+        if self.stepping { Some((&mut self.vehicle.hull, &mut self.step)) } else { None }
     }
 
 }
@@ -420,7 +421,8 @@ impl<S: Deref<Target = Space>> World<S> {
             vehicle,
             tick: None,
             moving: false,
-            step: None,
+            step: Step::default(),
+            stepping: false,
         }))
     }
 
@@ -586,29 +588,33 @@ impl<S: Deref<Target = Space>> World<S> {
         // 3. Each begins its step, drawing in its own frame.
         for (index, solid) in self.solids.iter().enumerate() {
             let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
-            let tick = placed.tick.as_ref().expect("a tick under way");
-            let hull = &mut placed.vehicle.hull;
+            let Placed { vehicle, tick, step, stepping, .. } = placed;
+            let tick = tick.as_ref().expect("a tick under way");
+            let hull = &mut vehicle.hull;
             let place = DebugPlace::on(VehicleId(solid.key), hull.position, hull.orientation);
-            let step = debug::at(place, || hull.begin_step(tick, space, &keep, &self.solids, Some(index)));
-            placed.step = Some(step);
+            debug::at(place, || hull.begin_step(tick, space, &keep, &self.solids, Some(index), step));
+            *stepping = true;
         }
 
         // 4. Its springs on the others push them back.
         for solid in &self.solids {
             let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
-            let Some(step) = placed.step.as_mut() else { continue };
+            let Some((_, step)) = placed.body() else { continue };
             let reactions = std::mem::take(&mut step.reactions);
-            for reaction in reactions {
+            for reaction in &reactions {
                 let other = self.vehicles.get_mut(self.solids[reaction.other].key).expect("a vehicle of the world");
                 let Some((hull, step)) = other.body() else { continue };
                 hull.take(reaction.impulse, reaction.point - step.mass_center, &step.body);
             }
+            // Its room kept for its next step.
+            let placed = self.vehicles.get_mut(solid.key).expect("a vehicle of the world");
+            placed.step.reactions = reactions;
         }
 
         // 5. Held off the space, and apart.
         for pass in 0..CONTACT_PASSES {
             for (_, placed) in self.vehicles.iter_mut() {
-                let Placed { vehicle, tick, step: Some(step), .. } = placed else { continue };
+                let Placed { vehicle, tick, step, stepping: true, .. } = placed else { continue };
                 vehicle.hull.solve_pass(tick.as_ref().expect("a tick under way"), step, pass);
             }
             for touching in &mut self.touching {
@@ -623,8 +629,11 @@ impl<S: Deref<Target = Space>> World<S> {
 
         // 6. Each moves.
         for (_, placed) in self.vehicles.iter_mut() {
-            let Some(step) = placed.step.take() else { continue };
-            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), &step);
+            if !placed.stepping {
+                continue;
+            }
+            placed.stepping = false;
+            placed.vehicle.hull.end_step(placed.tick.as_ref().expect("a tick under way"), &placed.step);
         }
 
     }

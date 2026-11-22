@@ -13,7 +13,8 @@
 //!          (see the contacts module), and its springs other vehicles' boxes: its
 //!          springs and its tracks' ends push it up, those past their travel are
 //!          stopped; its boxes are held off what they touch
-//!     3. gravity and the springs accelerate it, against its mass and inertia
+//!     3. gravity and the springs accelerate it, against its mass and inertia, and
+//!          the water it is in drags it (see "In water")
 //!     4. its contacts touching the space are held, as impulses (solve): no deeper,
 //!          its tracks hold it across and pass its drive's push and turning on to the
 //!          ground (see the drive module), the rest scrapes
@@ -24,6 +25,21 @@
 //! In a world, its vehicles' steps go together, see `World::step`: in the same passes
 //! as each is held off the space, they are held apart where they touch, see the
 //! `collision` module.
+//!
+//! # In water
+//!
+//! Where it is in water, see `wgtk::space::water`, as high up its hull as the surface
+//! is over its origin, up to its box's top, the water drags it against how it moves on
+//! the ground plane, as a box of that wet height across the way it moves. It still
+//! drives on the bottom: nothing holds it up. Its turning the water barely drags: its
+//! drive's steering holds it.
+//!
+//! ```text
+//!   h     how high the water is up its hull, ρ the water's density, C its drag
+//!   A     h · (its length · |sin a| + its width · |cos a|), a between its heading and
+//!         the way it moves
+//!   drag  ½ ρ C A v², v its speed on the ground plane
+//! ```
 //!
 //! # Its suspension
 //!
@@ -235,8 +251,6 @@ pub const CONTACT_MARGIN: f32 = 0.05;
 /// How far below its centre of mass the space is looked for, in metres, when none of
 /// its contacts touches anything: none at all, it is off the terrain.
 const GROUND_SEARCH: f32 = 1000.0;
-/// The most of a hull's contacts touching the space in a step that stay on the stack.
-const MAX_TOUCHES: usize = 64;
 /// How a contact past its travel is pushed back out: this share of how far past it is,
 /// a step, no faster than this, in m/s. A contact is past it on landing, or meeting a
 /// step: pushed out at once, the hull would be thrown off it. Its ground's rise under it
@@ -311,6 +325,12 @@ const ROLLER_FLAT: f32 = 35.0f32.to_radians();
 /// meeting a house's step on Live Oaks at 15 m/s rolled over; at 0.25, the T110E4 climbs
 /// the Ruinberg debris it lost a third of its speed to.
 const CLIMB_GRIP: f32 = 0.25;
+/// How dense water is, in kg/m³, and how much it drags a hull in it, as a drag
+/// coefficient of its wet area, see "In water" in the module's documentation. Our
+/// choice: a box's, about 1. A Chieftain tops at 21 km/h in 1 m of water, 16 km/h under
+/// 3 m, against 40 km/h on dry ground.
+const WATER_DENSITY: f32 = 1000.0;
+const WATER_DRAG: f32 = 1.0;
 /// How a hull's contacts are drawn to be debugged, in [`DebugChannel::Contacts`], see
 /// [`debug_spring`] and [`debug_touch`]: a spring from its top down to where it touches,
 /// as long as it is, green, cyan past its travel; a track's end or a box as a line along
@@ -384,8 +404,8 @@ impl Hull {
 
     /// Begin a step of its body, one of [`SUBSTEPS`] in a tick, see `World::step`: where
     /// it touches the space and the `others`' bodies, but its `own` among them, its weight
-    /// and its springs accelerating it, and how its contacts are to be held, see [`Step`],
-    /// then [`Self::solve_pass`] and [`Self::end_step`]. Its body is under its weight at
+    /// and its springs accelerating it, and how its contacts are to be held, into `step`,
+    /// see [`Step`], then [`Self::solve_pass`] and [`Self::end_step`]. Its body is under its weight at
     /// its centre of mass and its suspension at its contacts, see the `contacts` module: a
     /// spring and a damper under each road wheel, pushing it up from what its ray down
     /// finds, as far as it sinks. Its velocity and its spin carry on from a step to the
@@ -424,7 +444,8 @@ impl Hull {
         keep: &impl Fn(&StaticTriangle) -> bool,
         others: &[Solid],
         own: Option<usize>,
-    ) -> Step {
+        step: &mut Step,
+    ) {
 
         // 1. Where its centre of mass is as the step starts.
         let rotation = self.orientation;
@@ -433,7 +454,19 @@ impl Hull {
         // 2. Its weight, and where its contacts touch the space and the others: its
         //    springs' and its tracks' ends' pushes, and how they and its boxes are held
         //    off it.
-        let loads = self.loads(space, keep, &tick.suspension, mass_center, tick.step, others, own);
+        let mut touches = std::mem::take(&mut step.touches);
+        let mut reactions = std::mem::take(&mut step.reactions);
+        let loads = self.loads(
+            space,
+            keep,
+            &tick.suspension,
+            mass_center,
+            tick.step,
+            others,
+            own,
+            &mut touches,
+            &mut reactions,
+        );
         let world_inertia = Mat3::from_quat(rotation) * Mat3::from_diagonal(tick.inertia) * Mat3::from_quat(rotation.inverse());
         let inverse_inertia = world_inertia.inverse();
         let body = Mass {
@@ -443,41 +476,38 @@ impl Hull {
 
         // Off the terrain, nothing under it at all: held as its tracks drive it,
         // neither falling nor tilting.
-        let unheld = loads.touches.is_empty()
+        let unheld = touches.is_empty()
             && space.ray(mass_center, Vec3::NEG_Y, GROUND_SEARCH, keep).is_none();
         let gripping = loads.tracks_touching && (rotation * Vec3::Y).y > TRACKS_UPRIGHT;
         let traction = self.traction(&tick.drive, gripping, loads.tracks_normal);
-        let mut step = Step {
+        *step = Step {
             mass_center,
             rotation,
             body,
             unheld,
+            touches,
             axes: ground_axes(traction.heading, traction.normal),
             traction,
             driving: false,
             push: (0.0, 0.0, 0.0),
-            stops: SmallVec::from_elem(0.0, loads.touches.len()),
-            scrapes: SmallVec::from_elem(Vec3::ZERO, loads.touches.len()),
-            holds: SmallVec::from_elem(0.0, loads.touches.len()),
-            climbs: SmallVec::from_elem(0.0, loads.touches.len()),
-            touches: loads.touches,
             pushed: Pushed::default(),
             push_velocity: Vec3::ZERO,
             push_spin: Vec3::ZERO,
-            reactions: loads.reactions,
+            reactions,
         };
 
         if unheld {
             self.drive_unheld(&tick.drive, mass_center, tick.step);
             self.airborne = false;
             self.touching = true;
-            return step;
+            return;
         }
 
-        // 3. Gravity and its springs accelerate it.
+        // 3. Gravity and its springs accelerate it, and the water it is in drags it.
         let gyroscopic = self.angular_velocity.cross(world_inertia * self.angular_velocity);
         self.linear_velocity += loads.force / tick.mass * tick.step;
         self.angular_velocity += inverse_inertia * (loads.torque - gyroscopic) * tick.step;
+        self.drag_in_water(space, &step.body, tick.step);
         self.airborne = !gripping;
         self.touching = !step.touches.is_empty();
 
@@ -491,13 +521,11 @@ impl Hull {
                 self.roll_on(touch, traction.heading, tick.drive.rolling, &body);
             }
             let (along, across) = step.axes;
-            let (point, load, _) = track_point(&step.touches, &step.stops, (along, across));
+            let (point, load, _) = track_point(&step.touches, (along, across));
             let speed = self.velocity_at(point).dot(along);
             let sliding = self.slide_grip() * grip(along.y.asin(), SLOPE_GRIP_ALONG) * load / tick.step;
             step.push = tick.drive.along(speed, sliding);
         }
-
-        step
 
     }
 
@@ -506,8 +534,9 @@ impl Hull {
     /// `keep` keeps of the space, or to the `others`' boxes, but its `own`, and the
     /// pushes of those in it, those on the others pushing them back; and its tracks'
     /// ends' and its boxes' contacts with the space, its tracks' ends pushing as springs
-    /// as far as they give. Each spring's depth is kept for the next step, its damper
-    /// resisting how fast it sinks.
+    /// as far as they give, into `touches`, and its springs' pushes on the others into
+    /// `reactions`, both cleared first. Each spring's depth is kept for the next step,
+    /// its damper resisting how fast it sinks.
     fn loads(
         &mut self,
         space: &Space,
@@ -517,15 +546,17 @@ impl Hull {
         step: f32,
         others: &[Solid],
         own: Option<usize>,
+        touches: &mut Vec<Touch>,
+        reactions: &mut Vec<Reaction>,
     ) -> Loads {
 
+        touches.clear();
+        reactions.clear();
         let mut loads = Loads {
             force: Vec3::NEG_Y * GRAVITY * self.mobility.weight,
             torque: Vec3::ZERO,
             tracks_touching: false,
             tracks_normal: Vec3::Y,
-            touches: SmallVec::new(),
-            reactions: SmallVec::new(),
         };
         let down = self.orientation * Vec3::NEG_Y;
 
@@ -619,16 +650,10 @@ impl Hull {
             loads.force += normal * push;
             loads.torque += arm.cross(normal * push);
             loads.tracks_touching = true;
-            loads.touches.push(Touch {
-                arm,
-                normal,
-                side: contact.side,
-                load: push * step,
-                hold,
-            });
+            touches.push(Touch::new(arm, normal, contact.side, push * step, hold));
             debug_spring(hit.point - down * hit.distance, hit.point, past > 0.0);
             if let Some(other) = hit.on {
-                loads.reactions.push(Reaction {
+                reactions.push(Reaction {
                     other,
                     impulse: -normal * push * step,
                     point: hit.point,
@@ -690,15 +715,8 @@ impl Hull {
                 }
 
                 loads.tracks_touching |= contact.side.is_some() && depth > 0.0;
-                loads.touches.push(Touch {
-                    arm,
-                    normal,
-                    side: contact.side,
-                    load,
-                    hold: Hold::Out {
-                        depth: depth - travel,
-                    },
-                });
+                let hold = Hold::Out { depth: depth - travel };
+                touches.push(Touch::new(arm, normal, contact.side, load, hold));
                 debug_touch(touch.point, normal, contact.side.is_some(), load > 0.0 || depth > travel);
 
             }
@@ -739,6 +757,33 @@ impl Hull {
         self.tracks = Side::BOTH.map(|side| {
             if drive.blocked[side.index()] { 0.0 } else { speed - side.way() * drive.steer * drive.half_gauge }
         });
+
+    }
+
+    /// The water it is in drags it in a step, see "In water" in the module's
+    /// documentation, never past stopping it.
+    fn drag_in_water(&mut self, space: &Space, body: &Mass, step: f32) {
+
+        let Some(level) = space.water.level_at(self.position.x, self.position.z) else { return };
+        let [min, max] = self.mobility.bounds;
+        let wet = (level - self.position.y).min(max.y);
+        if wet <= 0.0 {
+            return;
+        }
+
+        let velocity = self.linear_velocity.with_y(0.0);
+        let speed = velocity.length();
+        if speed <= 0.0 {
+            return;
+        }
+
+        // As wide across the way it moves as its box is.
+        let size = max - min;
+        let way = velocity / speed;
+        let across = (self.orientation * Vec3::X).dot(way).abs() * size.z
+            + (self.orientation * Vec3::Z).dot(way).abs() * size.x;
+        let drag = 0.5 * WATER_DENSITY * WATER_DRAG * across * wet * speed * speed;
+        self.linear_velocity -= way * (drag / body.mass * step).min(speed);
 
     }
 
@@ -847,10 +892,6 @@ impl Hull {
             axes,
             driving,
             push,
-            stops,
-            scrapes,
-            holds,
-            climbs,
             pushed,
             push_velocity,
             push_spin,
@@ -863,14 +904,14 @@ impl Hull {
         // Its tracks push it along and turn it, as its drive says, first: what it
         // touches holds it after, so that nothing pushes it into a wall last.
         if *driving {
-            self.drive_tracks(touches, stops, *push, &drive, *axes, normal, &body, length, pushed);
+            self.drive_tracks(touches, *push, &drive, *axes, normal, &body, length, pushed);
         }
 
         // Back and forth, so that neither of its sides is held first every time: what
         // is held last takes the rest, and it would lean that way.
         for index in 0..touches.len() {
             let index = if pass % 2 == 0 { index } else { touches.len() - 1 - index };
-            let touch = &touches[index];
+            let mut touch = touches[index];
 
             let arm = touch.arm;
             let out = touch.hold.way(touch.normal);
@@ -883,26 +924,26 @@ impl Hull {
             let velocity = self.velocity_at(arm);
             let held = match touch.hold {
                 Hold::Free => 0.0,
-                Hold::Up { rising, .. } => stops[index] + (rising - velocity.y).max(0.0) / effective,
+                Hold::Up { rising, .. } => touch.stop + (rising - velocity.y).max(0.0) / effective,
                 Hold::Out { depth } => {
                     let closing = (-depth).max(0.0) / length;
-                    (stops[index] - (closing + velocity.dot(out)) / effective).max(0.0)
+                    (touch.stop - (closing + velocity.dot(out)) / effective).max(0.0)
                 }
             };
-            let impulse = held - stops[index];
-            stops[index] = held;
+            let impulse = held - touch.stop;
+            touch.stop = held;
             self.linear_velocity += out * (impulse / body.mass);
             self.angular_velocity += body.inverse_inertia * lever * impulse;
-            let pressed = touch.load + stops[index];
+            let pressed = touch.load + touch.stop;
 
             // 2. Along the ground, in its plane: its tracks hold it from sliding
             //    across, as much as their push along leaves them, else it scrapes.
             if touch.side.is_some() && gripping {
                 let used = if drive.handbrake() { 0.0 } else { pushed.used() };
                 let left = pressed * (1.0 - used * used).max(0.0).sqrt();
-                self.hold_across(touch, drive.handbrake(), *axes, &body, left, &mut holds[index]);
+                self.hold_across(&mut touch, drive.handbrake(), *axes, &body, left);
                 if let Hold::Out { .. } = touch.hold {
-                    self.climb(touch, heading, &body, stops[index], &mut climbs[index]);
+                    self.climb(&mut touch, heading, &body);
                 }
             } else {
                 let (along, across) = ground_axes(heading, touch.normal);
@@ -911,9 +952,9 @@ impl Hull {
                 for axis in [along, across] {
                     impulse -= axis * (velocity.dot(axis) / body.per_impulse(arm, axis));
                 }
-                let friction = (scrapes[index] + impulse).clamp_length_max(SCRAPE_FRICTION * pressed);
-                let change = friction - scrapes[index];
-                scrapes[index] = friction;
+                let friction = (touch.scrape + impulse).clamp_length_max(SCRAPE_FRICTION * pressed);
+                let change = friction - touch.scrape;
+                touch.scrape = friction;
                 self.take(change, arm, &body);
             }
 
@@ -928,6 +969,8 @@ impl Hull {
                     *push_spin += body.inverse_inertia * lever * impulse;
                 }
             }
+
+            touches[index] = touch;
 
         }
 
@@ -948,7 +991,6 @@ impl Hull {
     fn drive_tracks(
         &mut self,
         touches: &[Touch],
-        stops: &[f32],
         (target, low, high): (f32, f32, f32),
         drive: &DriveForces,
         (along, across): (Vec3, Vec3),
@@ -959,7 +1001,7 @@ impl Hull {
     ) {
 
         // How hard they are pressed, where, and how far from their middle.
-        let (point, pressed, couple) = track_point(touches, stops, (along, across));
+        let (point, pressed, couple) = track_point(touches, (along, across));
         if pressed <= 0.0 {
             return;
         }
@@ -1006,18 +1048,17 @@ impl Hull {
     /// plane `axes`, along the track then across it, pressed on it with `pressed`, less
     /// what pushing along takes of its grip: where the track passes under the centre of
     /// mass, so that it holds what slides the hull, not what turns it, which its steering
-    /// does. Its impulse so far is `so_far`. It holds as much as its tracks grip along,
+    /// does. Its impulse so far is the touch's own. It holds as much as its tracks grip along,
     /// [`TRACK_GRIP`]; `blocked`, on its handbrake, sliding, [`SIDE_GRIP`]; on wheels,
     /// [`WHEEL_SIDE_GRIP`], and blocked, [`WHEEL_LOCKED_GRIP`], level with its centre of
     /// mass; all falling with the ground's slope across, as the game's slope grip says.
     fn hold_across(
         &mut self,
-        touch: &Touch,
+        touch: &mut Touch,
         blocked: bool,
         (along, across): (Vec3, Vec3),
         body: &Mass,
         pressed: f32,
-        so_far: &mut f32,
     ) {
 
         let wheeled = self.mobility.general_wheels.is_some();
@@ -1035,9 +1076,9 @@ impl Hull {
         };
 
         let limit = side_grip * grip(across.y.asin(), SLOPE_GRIP_ACROSS) * pressed;
-        let held = (*so_far - slip / body.per_impulse(under, across)).clamp(-limit, limit);
-        let impulse = across * (held - *so_far);
-        *so_far = held;
+        let held = (touch.across - slip / body.per_impulse(under, across)).clamp(-limit, limit);
+        let impulse = across * (held - touch.across);
+        touch.across = held;
 
         self.linear_velocity += impulse / body.mass;
         self.angular_velocity += body.inverse_inertia * under.cross(impulse);
@@ -1052,9 +1093,9 @@ impl Hull {
 
     /// One pass of a track's end climbing what it meets head on, its belt gripping it: up
     /// what it touches, along its `heading`, toward its belt's speed, within
-    /// [`CLIMB_GRIP`] of how hard it is held off it, `held`. Its impulse so far is
-    /// `so_far`. Without, a track's end meeting a step would only be held back off it.
-    fn climb(&mut self, touch: &Touch, heading: Vec3, body: &Mass, held: f32, so_far: &mut f32) {
+    /// [`CLIMB_GRIP`] of how hard it is held off it so far. Its impulse so far is the
+    /// touch's own. Without, a track's end meeting a step would only be held back off it.
+    fn climb(&mut self, touch: &mut Touch, heading: Vec3, body: &Mass) {
         let Some(side) = touch.side else { return };
         let up = (heading - touch.normal * heading.dot(touch.normal)).normalize_or_zero();
         if heading.dot(touch.normal) >= 0.0 || up.y <= 0.0 {
@@ -1062,10 +1103,10 @@ impl Hull {
         }
         let belt = self.tracks[side.index()].max(0.0);
         let short = belt - self.velocity_at(touch.arm).dot(up);
-        let limit = CLIMB_GRIP * held;
-        let climbed = (*so_far + short / body.per_impulse(touch.arm, up)).clamp(-limit, limit);
-        self.take(up * (climbed - *so_far), touch.arm, body);
-        *so_far = climbed;
+        let limit = CLIMB_GRIP * touch.stop;
+        let climbed = (touch.climb + short / body.per_impulse(touch.arm, up)).clamp(-limit, limit);
+        self.take(up * (climbed - touch.climb), touch.arm, body);
+        touch.climb = climbed;
     }
 
     /// Take an impulse, in kg·m/s, at `arm` from its centre of mass: its velocity and its
@@ -1113,25 +1154,23 @@ pub struct Tick {
 /// nothing at all is under it, its contacts touching the space, how its tracks hold the
 /// ground and push it, the impulses held at each contact so far, what moves it out of
 /// what it is in, and its springs' pushes on other vehicles, for the world to give them.
-#[derive(Debug)]
+/// Its hull keeps it from a step to the next, see `World::step`, its lists' room reused:
+/// a step allocates nothing once they have grown.
+#[derive(Debug, Default)]
 pub struct Step {
     pub mass_center: Vec3,
     rotation: Quat,
     pub body: Mass,
     unheld: bool,
-    touches: SmallVec<[Touch; MAX_TOUCHES]>,
+    touches: Vec<Touch>,
     traction: Traction,
     axes: (Vec3, Vec3),
     driving: bool,
     push: (f32, f32, f32),
-    stops: SmallVec<[f32; MAX_TOUCHES]>,
-    scrapes: SmallVec<[Vec3; MAX_TOUCHES]>,
-    holds: SmallVec<[f32; MAX_TOUCHES]>,
-    climbs: SmallVec<[f32; MAX_TOUCHES]>,
     pushed: Pushed,
     pub push_velocity: Vec3,
     pub push_spin: Vec3,
-    pub reactions: SmallVec<[Reaction; 8]>,
+    pub reactions: Vec<Reaction>,
 }
 
 /// A spring's push on another vehicle in a step, which pushes it back: the other, by
@@ -1191,14 +1230,14 @@ struct Loads {
     torque: Vec3,
     tracks_touching: bool,
     tracks_normal: Vec3,
-    touches: SmallVec<[Touch; MAX_TOUCHES]>,
-    reactions: SmallVec<[Reaction; 8]>,
 }
 
 /// A [`Contact`] touching the space in a step, see [`Hull::solve_pass`]: where it is from the
 /// hull's centre of mass, the normal of what it touches, its springs' together for a
 /// spring, which track it is of, if any, how hard its spring pushed it out in the step,
-/// as an impulse, and how it is held off what it touches.
+/// as an impulse, and how it is held off what it touches; then the impulses held at it
+/// so far in the step's passes: off what it touches, scraping along it, across its track,
+/// and climbing what it meets.
 #[derive(Debug, Clone, Copy)]
 struct Touch {
     arm: Vec3,
@@ -1206,6 +1245,29 @@ struct Touch {
     side: Option<Side>,
     load: f32,
     hold: Hold,
+    stop: f32,
+    scrape: Vec3,
+    across: f32,
+    climb: f32,
+}
+
+impl Touch {
+
+    /// A contact touching the space, none of its impulses held yet.
+    fn new(arm: Vec3, normal: Vec3, side: Option<Side>, load: f32, hold: Hold) -> Self {
+        Self {
+            arm,
+            normal,
+            side,
+            load,
+            hold,
+            stop: 0.0,
+            scrape: Vec3::ZERO,
+            across: 0.0,
+            climb: 0.0,
+        }
+    }
+
 }
 
 /// How a [`Touch`] is held off what it touches.
@@ -1250,7 +1312,7 @@ impl Hold {
 /// How a hull's tracks hold the ground in a step, see [`Hull::solve_pass`]: how its drive
 /// pushes them, whether they grip at all, the hull's heading, which they run along, the
 /// ground's normal under them, and each track's mass.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Traction {
     drive: DriveForces,
     gripping: bool,
@@ -1285,7 +1347,7 @@ impl Pushed {
 
 /// A hull's body against impulses, in a step: its mass, and its inertia's inverse in the
 /// world.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Mass {
     pub mass: f32,
     pub inverse_inertia: Mat3,
@@ -1307,12 +1369,12 @@ impl Mass {
 /// contacts as hard as each is pressed, its offset across taken out, so that pushing
 /// there doesn't turn it, raised toward it, see [`raised`]; how hard they are pressed,
 /// as an impulse; and that each times how far it is from their middle.
-fn track_point(touches: &[Touch], stops: &[f32], (along, across): (Vec3, Vec3)) -> (Vec3, f32, f32) {
+fn track_point(touches: &[Touch], (along, across): (Vec3, Vec3)) -> (Vec3, f32, f32) {
     let mut point = Vec3::ZERO;
     let mut pressed = 0.0;
     let mut couple = 0.0;
-    for (touch, stop) in touches.iter().zip(stops).filter(|(touch, _)| touch.side.is_some()) {
-        let load = touch.load + stop;
+    for touch in touches.iter().filter(|touch| touch.side.is_some()) {
+        let load = touch.load + touch.stop;
         point += touch.arm * load;
         pressed += load;
         couple += touch.arm.dot(across).abs() * load;
@@ -1390,7 +1452,7 @@ mod tests {
     use wgtk::space::statics::Statics;
     use wgtk::space::Space;
 
-    use super::super::fixtures::{chieftain, ebr, ground_under, quad};
+    use super::super::fixtures::{chieftain, ebr, ground_under, pond, quad};
     use super::super::{movement_flag, Rubble};
     use super::*;
 
@@ -1594,6 +1656,30 @@ mod tests {
         }
         assert!(ticks_in_air <= 3, "{ticks_in_air} ticks");
         assert!(hull.position.z > 40.0, "{}", hull.position);
+    }
+
+    /// Driving 15 s ahead from a stop on dry ground, in 1 m of water, and under 3 m,
+    /// deeper than its box: about 40, 21 and 16 km/h, the deeper the slower, but it goes
+    /// on.
+    #[test]
+    fn drags_in_water() {
+
+        let speeds: Vec<f32> = [ground_under(None, 0.0), pond(1.0), pond(3.0)].iter()
+            .map(|space| {
+                let mut hull = chieftain();
+                hull.flags = movement_flag::FORWARD;
+                for _ in 0..150 {
+                    hull.advance(0.1, space, None, &mut Rubble::default());
+                }
+                hull.speed * 3.6
+            })
+            .collect();
+
+        let [dry, shallow, deep] = [speeds[0], speeds[1], speeds[2]];
+        assert!((dry - 40.0).abs() < 1.0, "{speeds:?} km/h");
+        assert!((shallow - 21.0).abs() < 1.5, "{speeds:?} km/h");
+        assert!((deep - 16.0).abs() < 1.5, "{speeds:?} km/h");
+
     }
 
     /// How high its lowest contact is, over a flat ground at 0.

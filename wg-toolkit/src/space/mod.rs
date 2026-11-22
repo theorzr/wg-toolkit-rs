@@ -94,9 +94,12 @@
 //! it. A shape touching several triangles of one face, the terrain's cells or a wall's
 //! two, would get their shared edges' points twice and the same normal over and over:
 //! their contacts the same way out of the same surface, the terrain or one placed
-//! model, are one, a sphere's the deepest, a box's `MANIFOLD` points at most, those
+//! model, are one, a sphere's the deepest. A box's are grouped by face, their normals
+//! further apart, `SAME_FACE`, as the terrain's cells under it on rough ground or a
+//! rock's triangles are, each a little apart: `MANIFOLD` points at most of each, those
 //! spanning the most of them. Two models in the same place, as some maps have, each
-//! keep theirs.
+//! keep theirs. A shape keeps `KEPT_CONTACTS` at most, its deepest: a box in a rock or a
+//! pile of debris, of many faces each a different way, would keep a hundred or more.
 
 pub mod bin;
 pub mod terrain;
@@ -209,9 +212,20 @@ pub fn visibility_mask(fs: &ResFilesystem, space_dir: &str, gameplay: &str) -> i
 /// How alike two contacts' normals are, as their dot product, for them to be the same
 /// way out of a surface.
 const SAME_WAY: f32 = 0.999;
-/// The most points a box keeps of its contacts the same way out of a surface: enough
-/// to rest on a face.
+/// How alike two of a box's contacts' normals are, as their dot product, for them to be
+/// on the same face of a surface, see [`Space::cuboid`]: about 18°. Our choice: the
+/// terrain's triangles under a box on rough ground, or a rock's, each a little apart,
+/// are one face, of [`MANIFOLD`] points, where a box would otherwise keep that many of
+/// each, a hundred or more.
+const SAME_FACE: f32 = 0.95;
+/// The most points a box keeps of its contacts on the same face of a surface: enough
+/// to rest on it.
 const MANIFOLD: usize = 4;
+/// The most contacts a sphere or a box keeps, the deepest, see [`keep_deepest`]: a box
+/// in a rock or a pile of debris, of many faces each a different way, would keep a
+/// hundred or more. Our choice: two faces' worth, as many as [`Contacts`] holds on the
+/// stack.
+const KEPT_CONTACTS: usize = 2 * MANIFOLD;
 /// How much deeper than the least deep way out of a triangle, in metres, a box is moved
 /// out along the triangle's own normal: its edges may be inside a face of many
 /// triangles, a rock's say, where a box would catch on them. Our choice.
@@ -259,15 +273,26 @@ pub struct Cuboid {
 
 impl Contact<'_> {
 
-    /// Whether it is the same way out of the same surface as another: of the terrain or
-    /// of the same placed model, their normals alike within [`SAME_WAY`].
+    /// Whether it is the same way out of the same surface as another, their normals alike
+    /// within [`SAME_WAY`].
     fn same_way(&self, other: &Contact) -> bool {
-        let same_surface = match (self.surface, other.surface) {
+        self.same_surface(other) && self.normal.dot(other.normal) > SAME_WAY
+    }
+
+    /// Whether it is on the same face of the same surface as another, as a box groups
+    /// them, their normals alike within [`SAME_FACE`].
+    fn same_face(&self, other: &Contact) -> bool {
+        self.same_surface(other) && self.normal.dot(other.normal) > SAME_FACE
+    }
+
+    /// Whether it is of the same surface as another: the terrain, or the same placed
+    /// model.
+    fn same_surface(&self, other: &Contact) -> bool {
+        match (self.surface, other.surface) {
             (Surface::Terrain, Surface::Terrain) => true,
             (Surface::Static(a), Surface::Static(b)) => a.instance == b.instance,
             _ => false,
-        };
-        same_surface && self.normal.dot(other.normal) > SAME_WAY
+        }
     }
 
 }
@@ -340,7 +365,8 @@ impl Space {
     }
 
     /// Where a sphere touches the surfaces `keep` keeps, grown by `margin`: one contact
-    /// for each way out of them, the deepest, see the module's documentation.
+    /// for each way out of them, the deepest, [`KEPT_CONTACTS`] at most, see the module's
+    /// documentation.
     pub fn sphere<'a>(&'a self, center: Vec3, radius: f32, margin: f32, keep: &impl Fn(&StaticTriangle) -> bool) -> Contacts<'a> {
         let reach = Vec3::splat(radius + margin);
         let mut contacts = Contacts::new();
@@ -361,16 +387,18 @@ impl Space {
                 None => contacts.push(contact),
             }
         });
+        keep_deepest(&mut contacts);
         contacts
     }
 
-    /// Where a box touches the surfaces `keep` keeps, grown by `margin`: for each way
-    /// out of them, `MANIFOLD` points at most, see the module's documentation.
+    /// Where a box touches the surfaces `keep` keeps, grown by `margin`: for each face of
+    /// them, `MANIFOLD` points at most, [`KEPT_CONTACTS`] at most of all, see the module's
+    /// documentation.
     pub fn cuboid<'a>(&'a self, cuboid: &Cuboid, margin: f32, keep: &impl Fn(&StaticTriangle) -> bool) -> Contacts<'a> {
 
         // Every point of every surface it is in, of those within its bounds: each world
         // axis reaches as far as its own axes do along it. A triangle's points all go
-        // one way out, grouped with those going the same way.
+        // one way out, grouped with those on the same face.
         let axes = Mat3::from_quat(cuboid.rotation);
         let reach = Vec3::splat(margin) + Vec3::new(
             cuboid.half.dot(axes.row(0).abs()),
@@ -382,17 +410,18 @@ impl Space {
             let mut points = Contacts::new();
             box_triangle(cuboid, margin, triangle, normal, surface, &mut points);
             let Some(first) = points.first() else { return };
-            match ways.iter_mut().find(|way| way[0].same_way(first)) {
+            match ways.iter_mut().find(|way| way[0].same_face(first)) {
                 Some(way) => way.extend(points),
                 None => ways.push(points),
             }
         });
 
-        // For each way out, the points spanning the most of them.
+        // For each face, the points spanning the most of it.
         let mut contacts = Contacts::new();
         for way in &ways {
             contacts.extend(spanning(way));
         }
+        keep_deepest(&mut contacts);
         contacts
 
     }
@@ -627,6 +656,15 @@ fn spanning<'a>(contacts: &[Contact<'a>]) -> SmallVec<[Contact<'a>; MANIFOLD]> {
     }
     kept
 
+}
+
+/// Keep [`KEPT_CONTACTS`] of these contacts at most, the deepest: those left out are the
+/// shallowest, what a shape only nears, which it meets next if it goes on.
+fn keep_deepest(contacts: &mut Contacts) {
+    if contacts.len() > KEPT_CONTACTS {
+        contacts.sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
+        contacts.truncate(KEPT_CONTACTS);
+    }
 }
 
 fn invalid(message: String) -> io::Error {

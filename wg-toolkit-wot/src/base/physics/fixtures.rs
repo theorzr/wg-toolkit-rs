@@ -3,8 +3,10 @@
 
 use glam::{BVec3, Vec2, Vec3};
 
+use wgtk::space::bin::{WaterBody, WaterVertex, BWWA};
 use wgtk::space::statics::{BodyKind, Statics, StaticTriangle};
 use wgtk::space::terrain::Ground;
+use wgtk::space::water::Water;
 use wgtk::space::Space;
 
 use crate::game::item_defs::{AimingDef, GeneralWheel, GeneralWheels, MobilityDef, PitchCurve, WheelDef, Wheels};
@@ -189,6 +191,43 @@ pub fn ground_under(deck: Option<f32>, drop: f32) -> Space {
         statics: Statics::from_triangles(triangles),
         ..Space::default()
     }
+}
+
+/// Flat ground from z = −50 to 100, under water `depth` deep, as one body of two
+/// triangles over it, from x = −50 to 50.
+pub fn pond(depth: f32) -> Space {
+
+    let mut triangles = Vec::new();
+    quad(&mut triangles, -50.0, 100.0, 0.0, 0.0);
+
+    let corners = [
+        Vec3::new(-50.0, depth, -50.0),
+        Vec3::new(50.0, depth, -50.0),
+        Vec3::new(50.0, depth, 100.0),
+        Vec3::new(-50.0, depth, 100.0),
+    ];
+    let section = BWWA {
+        bodies: vec![WaterBody {
+            bounds: [corners[0], corners[2]],
+            position: Vec3::new(0.0, depth, 25.0),
+            size: Vec2::new(100.0, 150.0),
+            tiles: 0..0,
+            vertices: 0..4,
+            indices: 0..6,
+        }],
+        tiles: Vec::new(),
+        vertices: corners.iter()
+            .map(|&position| WaterVertex { position, cell: [0, 0], depth })
+            .collect(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+    };
+
+    Space {
+        statics: Statics::from_triangles(triangles),
+        water: Water::new(&section, |_, _| Some(0.0)),
+        ..Space::default()
+    }
+
 }
 
 /// Ground 300 m square around the origin, sloping down along z by `degrees`, through

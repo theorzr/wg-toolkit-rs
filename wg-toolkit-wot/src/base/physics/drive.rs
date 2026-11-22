@@ -472,7 +472,7 @@ impl Side {
 /// How hard a hull's engine and brakes push it in a tick, and its steering turns it, see
 /// [`Hull::drive`]: forces, which its body's tracks pass on to the ground as they grip
 /// it, see [`Self::along`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DriveForces {
     /// The speed asked along its heading, in m/s, signed: on its handbrake, the speed it
     /// pivots at, else none.
