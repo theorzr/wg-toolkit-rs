@@ -7,10 +7,17 @@
 //! it, [`Turret::ballistic_direction`]) or fixed angles on the hull. It also keeps the
 //! gun's dispersion: it jumps up when the hull moves or turns or the turret turns, and
 //! shrinks back over the aiming time. Its shots gather toward the centre when the hull
-//! is stopped, and spread uniformly once it moves, see [`Dispersion`]. On its roof, the hull rests on its turret, which
-//! doesn't turn, nor its gun, until it is back on its tracks, see [`TURRET_UPRIGHT`].
+//! is stopped, and spread uniformly once it moves, see [`Dispersion`].
+//!
+//! It is locked, as the game locks a gun, on its roof, the hull resting on its turret
+//! (see [`TURRET_UPRIGHT`]), and under water, its ring under the surface (see
+//! [`Turret::under_water`]): it turns not, nor its gun, until it is back on its tracks or
+//! out, and it fires not, nor with its gun under water, see [`Turret::fires`]. Where it
+//! is in the water is found once a step, see [`Turret::step`].
 
 use glam::{Quat, Vec3};
+
+use wgtk::space::Space;
 
 use crate::game::item_defs::AimingDef;
 
@@ -53,6 +60,11 @@ pub struct Turret {
     /// The dispersion as a factor of the gun's base one, shrinking back to its ideal
     /// over the aiming time.
     dispersion_factor: f32,
+    /// Whether it was under water in its last step, its ring and its gun, and locked, see
+    /// [`Self::under_water`], [`Self::fires`] and [`Self::locked`].
+    under_water: bool,
+    gun_under_water: bool,
+    locked: bool,
 }
 
 /// What the turret turns toward.
@@ -77,6 +89,9 @@ impl Turret {
             marked: None,
             yaw_rate: 0.0,
             dispersion_factor: 1.0,
+            under_water: false,
+            gun_under_water: false,
+            locked: false,
         }
     }
 
@@ -98,22 +113,39 @@ impl Turret {
         self.marked
     }
 
-    /// Advance by `dt` seconds on the given hull, already advanced: turn toward the aim,
-    /// then update the dispersion.
-    pub fn step(&mut self, dt: f32, hull: &Hull) {
+    /// Advance by `dt` seconds on the given hull, already advanced, in its space: where it
+    /// is in the water, then, unless locked, turn toward the aim, then update the
+    /// dispersion.
+    pub fn step(&mut self, dt: f32, hull: &Hull, space: &Space) {
 
-        // On its roof, it lies on its turret: it keeps its aim for when it is back up.
-        if (hull.rotation() * Vec3::Y).y < TURRET_UPRIGHT {
+        // 1. Under water, its ring under the surface, as the client's water sensor says it
+        //    is, at the chassis' `hullPosition` plus the hull's `turretPositions`.
+        let ring = hull.position + hull.rotation() * self.aiming.turret_position;
+        self.under_water = under_surface(space, ring);
+
+        // 2. On its roof, it lies on its turret, and under water it is locked: it keeps
+        //    its aim for when it is back up, or out.
+        self.locked = (hull.rotation() * Vec3::Y).y < TURRET_UPRIGHT || self.under_water;
+        if self.locked {
             self.yaw_rate = 0.0;
-            self.step_dispersion(dt, hull);
-            return;
+        } else {
+            self.turn(dt, hull);
         }
 
-        // 1. The angles it aims at, on the hull.
+        // 3. Its gun, where it turned to, in the water or out, and its dispersion, after
+        //    how it and the hull moved.
+        self.gun_under_water = under_surface(space, gun_position(hull, self));
+        self.step_dispersion(dt, hull);
+
+    }
+
+    /// Turn toward the aim for `dt` seconds on the given hull: the turret toward its yaw
+    /// as fast as it turns, within its limits, never round the back, then the gun toward
+    /// its pitch, within its limits at the turret's new yaw.
+    fn turn(&mut self, dt: f32, hull: &Hull) {
+
         let (yaw, pitch) = self.aimed_angles(hull);
 
-        // 2. The turret turns toward the yaw, as fast as it turns. Within its limits it
-        //    only turns inside them, never round the back.
         let max_yaw_step = self.aiming.turret_rotation_speed * dt;
         let yaw_step = match self.aiming.yaw_limits {
             Some((min, max)) => wrap_angle(yaw).clamp(min, max) - self.yaw,
@@ -122,13 +154,9 @@ impl Turret {
         self.yaw = wrap_angle(self.yaw + yaw_step);
         self.yaw_rate = yaw_step.abs() / dt;
 
-        // 3. The gun toward the pitch, within its limits at the turret's new yaw.
         let pitch = pitch.clamp(self.aiming.min_pitch.at(self.yaw), self.aiming.max_pitch.at(self.yaw));
         let max_pitch_step = self.aiming.gun_rotation_speed * dt;
         self.pitch += (pitch - self.pitch).clamp(-max_pitch_step, max_pitch_step);
-
-        // 4. Its dispersion, after how it and the hull moved.
-        self.step_dispersion(dt, hull);
 
     }
 
@@ -152,6 +180,25 @@ impl Turret {
         } else {
             ideal + (self.dispersion_factor - ideal) * (-dt / self.aiming.aiming_time).exp()
         };
+    }
+
+    /// Whether it was under water in its last step, its ring under the surface: locked,
+    /// and its vehicle drowning.
+    pub fn under_water(&self) -> bool {
+        self.under_water
+    }
+
+    /// Whether it was locked in its last step, on its roof or under water, see the
+    /// module's documentation: the client is told, which locks its gun too.
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Whether its gun may fire, as of its last step: not locked, and its gun out of the
+    /// water, where it turns on the turret, as the client checks its barrel before it
+    /// fires.
+    pub fn fires(&self) -> bool {
+        !self.locked && !self.gun_under_water
     }
 
     /// How far its gun points off where it aims, in radians, see [`Self::aimed_angles`]:
@@ -235,6 +282,11 @@ impl Turret {
 
 }
 
+/// Whether a point is under the surface of a space's water.
+fn under_surface(space: &Space, point: Vec3) -> bool {
+    space.water.level_at(point.x, point.z).is_some_and(|level| level > point.y)
+}
+
 /// Where the gun fires from: its pivot on the turret, turned with it, on the hull.
 fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
     let aiming = &turret.aiming;
@@ -245,7 +297,7 @@ fn gun_position(hull: &Hull, turret: &Turret) -> Vec3 {
 #[cfg(test)]
 mod tests {
 
-    use super::super::fixtures::{chieftain, chieftain_aiming, GUN_HEIGHT};
+    use super::super::fixtures::{chieftain, chieftain_aiming, pond, GUN_HEIGHT};
     use super::*;
 
     #[test]
@@ -254,22 +306,22 @@ mod tests {
         let mut turret = Turret::new(chieftain_aiming());
         // Straight to the right of a hull facing +Z, level with the gun.
         turret.track(Vec3::new(100.0, GUN_HEIGHT, 0.0));
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert!((turret.yaw - 30f32.to_radians()).abs() < 1e-5);
         for _ in 0..10 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert!((turret.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
         // Raised a little for the shell to drop onto it.
         assert!(turret.pitch < 0.0 && turret.pitch > -0.01);
         // The point stays put in the world as the vehicle drives past it.
         hull.position = Vec3::new(0.0, 0.0, 200.0);
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert!(turret.yaw > std::f32::consts::FRAC_PI_2);
         // Yaw 0 and the middle of the pitch range, as `encodeGunAngles` packs them.
         turret.hold(0.0, -5f32.to_radians());
         for _ in 0..10 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert_eq!(turret.gun_angles_packed(), 512 << 6 | 32);
     }
@@ -282,7 +334,7 @@ mod tests {
         let point = Vec3::new(150.0, 5.0, 40.0);
         turret.track(point);
         for _ in 0..20 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         // The shell's arc goes through the point.
         let (position, velocity, _) = turret.gun_marker(&hull);
@@ -294,7 +346,7 @@ mod tests {
         // Locking sends back the same hull-relative angles, which change nothing.
         let (yaw, pitch) = (turret.yaw, turret.pitch);
         turret.hold(yaw, pitch);
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert_eq!(turret.gun_marker(&hull).1, velocity);
     }
 
@@ -303,13 +355,13 @@ mod tests {
         let mut hull = chieftain();
         let mut turret = Turret::new(chieftain_aiming());
         hull.speed = 10.0;
-        turret.step(0.1, &hull);
+        turret.step(0.1, &hull, &Space::default());
         let moving = turret.dispersion_factor;
         assert!(moving > 1.0);
         hull.speed = 0.0;
         // After one aiming time, the excess shrinks by e.
         for _ in 0..21 {
-            turret.step(0.1, &hull);
+            turret.step(0.1, &hull, &Space::default());
         }
         assert!(((turret.dispersion_factor - 1.0) - (moving - 1.0) / std::f32::consts::E).abs() < 1e-3);
         // Aimed straight ahead, the shell leaves at the shot speed.
@@ -345,20 +397,20 @@ mod tests {
         // Behind on the right: as far right as it goes.
         turret.track(Vec3::new(10.0, GUN_HEIGHT, -100.0));
         for _ in 0..10 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert!((turret.yaw - 12f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
         // Behind on the left: back across the front, not round the back.
         turret.track(Vec3::new(-10.0, GUN_HEIGHT, -100.0));
-        turret.step(0.5, &hull);
+        turret.step(0.5, &hull, &Space::default());
         assert!((turret.yaw - (12.0 - 15.0f32).to_radians()).abs() < 1e-5, "{}", turret.yaw);
         for _ in 0..10 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert!((turret.yaw + 10f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
         // The client's angles too.
         turret.hold(1.0, 0.0);
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert!((turret.yaw - 12f32.to_radians()).abs() < 1e-5, "{}", turret.yaw);
     }
 
@@ -369,14 +421,29 @@ mod tests {
         hull.set_direction(Vec3::new(std::f32::consts::PI, 0.0, 0.0));
         let mut turret = Turret::new(chieftain_aiming());
         turret.track(Vec3::new(100.0, GUN_HEIGHT, 0.0));
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         turret.hold(1.0, 0.1);
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert_eq!((turret.yaw, turret.pitch), (0.0, 0.0));
+        assert!(turret.locked() && !turret.fires());
         // On its side it still turns, and back on its tracks, toward its aim.
         hull.set_direction(Vec3::new(std::f32::consts::FRAC_PI_2 - 0.1, 0.0, 0.0));
-        turret.step(1.0, &hull);
+        turret.step(1.0, &hull, &Space::default());
         assert!(turret.yaw > 0.0, "{}", turret.yaw);
+    }
+
+    #[test]
+    fn turret_holds_under_water() {
+        // Its ring under 3 m of water, it turns to nothing; in 0.5 m, it turns.
+        let hull = chieftain();
+        let mut turret = Turret::new(chieftain_aiming());
+        turret.track(Vec3::new(100.0, GUN_HEIGHT, 0.0));
+        turret.step(1.0, &hull, &pond(3.0));
+        assert_eq!(turret.yaw, 0.0);
+        assert!(turret.under_water() && turret.locked() && !turret.fires());
+        turret.step(1.0, &hull, &pond(0.5));
+        assert!(turret.yaw > 0.0, "{}", turret.yaw);
+        assert!(!turret.under_water() && !turret.locked() && turret.fires());
     }
 
     #[test]
@@ -386,12 +453,12 @@ mod tests {
         // Far below, in front then behind.
         turret.track(Vec3::new(0.0, -100.0, 10.0));
         for _ in 0..10 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert!((turret.pitch - 10f32.to_radians()).abs() < 1e-5);
         turret.track(Vec3::new(0.0, -100.0, -10.0));
         for _ in 0..20 {
-            turret.step(1.0, &hull);
+            turret.step(1.0, &hull, &Space::default());
         }
         assert!((turret.pitch + 1f32.to_radians()).abs() < 1e-5);
     }

@@ -15,8 +15,8 @@ use wgtk::pickle::Value as PickleValue;
 
 use crate::game::schema::{
     self, Avatar, AvatarVehiclesInfo, BattleDogTag, DeathInfo, DogTag, DogTagComponent, Fire, GunMarker,
-    GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, SiegeStateStatus, VehicleInfo,
-    VehicleSyncAttrs,
+    DrownLevel, GunMarkerComponent, HitPoint, OwnVehicle, PerkEffects, PublicVehicleInfo, SiegeStateStatus,
+    VehicleInfo, VehicleSyncAttrs,
 };
 use crate::base::{
     ammo_list, gun_reload_time, targeting_info, vehicle_health_info, vehicle_settings, VehicleLoadout,
@@ -60,8 +60,16 @@ const DAMAGE_SPREAD: f32 = 0.25;
 /// How long a vehicle burns after its last hit, in seconds.
 const FIRE_DURATION: f64 = 5.0;
 
-/// `ATTACK_REASON.SHOT`'s index.
+/// How long a vehicle lasts under water, its turret's ring under the surface, before it
+/// drowns, in seconds. Our choice, as the game is said to: no capture has one drowning.
+const DROWN_TIME: f64 = 10.0;
+/// `DROWN_WARNING_LEVEL`: no countdown, and its countdown to drowning.
+const DROWN_SAFE: u8 = 0;
+const DROWN_DANGER: u8 = 2;
+
+/// `ATTACK_REASON.SHOT`'s and `ATTACK_REASON.DROWNING`'s indexes in `ATTACK_REASONS`.
 const ATTACK_REASON_SHOT: i8 = 0;
+const ATTACK_REASON_DROWNING: i8 = 5;
 
 /// The first shot id of the first bot, of the next one twice that, and so on, apart from
 /// the player's.
@@ -123,6 +131,12 @@ pub struct BattleVehicle {
     fire: Option<(ComponentKey<Fire>, f64)>,
     /// Its siege mode, if it has one, and where it is in switching it.
     siege: Option<Siege>,
+    /// The game time it went under water at, its turret's ring under the surface, see
+    /// [`Self::drowns`]: it drowns [`DROWN_TIME`] later.
+    under_water: Option<f64>,
+    /// Whether its turret was locked as last told to its client, see
+    /// [`Self::show_gun_lock`].
+    gun_locked: bool,
 }
 
 /// A vehicle's siege mode, see [`SiegeDef`], how it moves out of it, and where it is in
@@ -255,6 +269,8 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             siege: loadout.siege.map(|siege| Siege::new(siege, loadout.mobility)),
+            under_water: None,
+            gun_locked: false,
         })
 
     }
@@ -315,6 +331,8 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             siege: def.siege.map(|siege| Siege::new(siege, def.mobility)),
+            under_water: None,
+            gun_locked: false,
         })
 
     }
@@ -470,6 +488,80 @@ impl BattleVehicle {
             info!(battle, entity_id = %self.entity.id(), "Put out a vehicle's fire");
         }
         Ok(())
+    }
+
+    /// Tell its client, if a client drives it, once `driven`'s turret is locked, or free
+    /// again, see `Turret::locked`: the client locks its gun too.
+    pub fn show_gun_lock(&mut self, app: &mut base::App, driven: &Vehicle) -> io::Result<()> {
+
+        let locked = driven.turret.locked();
+        if locked == self.gun_locked {
+            return Ok(());
+        }
+
+        self.gun_locked = locked;
+        let Some(driver) = self.client_driver() else { return Ok(()) };
+        app.entity(driver.avatar)?.set_isGunLocked(locked)
+
+    }
+
+    /// Whether it drowns at game time `now`, `driven` in the world: once its turret is
+    /// under water, see `Turret::under_water`, it is counted down [`DROWN_TIME`], see
+    /// [`Self::show_water`]; out of it before, the countdown stops. It drowns once the
+    /// countdown ends, see [`Self::drown`].
+    pub fn drowns(&mut self, app: &mut base::App, battle: u32, driven: &Vehicle, now: f64) -> io::Result<bool> {
+
+        let under = driven.turret.under_water();
+        if under == self.under_water.is_some() {
+            return Ok(self.under_water.is_some_and(|since| now >= since + DROWN_TIME));
+        }
+
+        self.under_water = under.then_some(now);
+        info!(battle, entity_id = %self.entity.id(), "{} a vehicle", if under { "Submerged" } else { "Surfaced" });
+        self.show_water(app, now)?;
+        Ok(false)
+
+    }
+
+    /// Tell its client, if a client drives it, whether it is under water at game time
+    /// `now`: its countdown to drowning, or none.
+    fn show_water(&self, app: &mut base::App, now: f64) -> io::Result<()> {
+        let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) else { return Ok(()) };
+        let under = self.under_water.is_some();
+        let (level, end) = if under { (DROWN_DANGER, now + DROWN_TIME) } else { (DROWN_SAFE, now) };
+        app.component(own_vehicle)?.set_drownLevel(Some(DrownLevel { level, times: vec![now, end] }))
+    }
+
+    /// It drowns at game time `now`, in this battle: its health drops to none, by its own
+    /// doing, as the captured server shows a vehicle's fall, its fire put out and its
+    /// countdown gone, and every client lists it destroyed, drowned, on each of these.
+    pub fn drown(
+        &mut self,
+        app: &mut base::App,
+        battle: u32,
+        vehicles_infos: &[ComponentKey<AvatarVehiclesInfo>],
+        now: f64,
+    ) -> io::Result<()> {
+
+        let entity_id = self.entity.id();
+        let old_health = self.health;
+        self.health = 0;
+        if let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) {
+            app.component(own_vehicle)?.set_vehicleHealthInfo(vehicle_health_info(entity_id, 0))?;
+        }
+
+        let mut entity = app.entity(self.entity)?;
+        entity.set_health(0)?;
+        entity.onHealthChanged(0, old_health as i16, entity_id, ATTACK_REASON_DROWNING as u8, -1)?;
+        if let Some((fire, _)) = self.fire.take() {
+            app.remove_component(fire)?;
+        }
+        info!(battle, %entity_id, "Drowned a vehicle: {old_health} -> 0");
+
+        self.under_water = None;
+        self.show_water(app, now)?;
+        self.mark_destroyed(app, vehicles_infos, entity_id, ATTACK_REASON_DROWNING)
+
     }
 
     /// Its gun loaded at game time `now`, its magazine full again: its client is told,
@@ -692,14 +784,26 @@ impl BattleVehicle {
 
     }
 
-    /// Every client lists it destroyed, by whom, in its `vehiclesInfo` entry, on each
-    /// of these: the entry's changes apply once its generation changes too.
+    /// Every client lists it destroyed by a shot, by whom, see [`Self::mark_destroyed`].
     pub fn mark_killed(&mut self, app: &mut base::App, vehicles_infos: &[ComponentKey<AvatarVehiclesInfo>], killer: EntityId) -> io::Result<()> {
+        self.mark_destroyed(app, vehicles_infos, killer, ATTACK_REASON_SHOT)
+    }
+
+    /// Every client lists it destroyed, by whom and why, an `ATTACK_REASONS` index, in its
+    /// `vehiclesInfo` entry, on each of these: the entry's changes apply once its
+    /// generation changes too.
+    fn mark_destroyed(
+        &mut self,
+        app: &mut base::App,
+        vehicles_infos: &[ComponentKey<AvatarVehiclesInfo>],
+        killer: EntityId,
+        reason: i8,
+    ) -> io::Result<()> {
         let info = &mut self.info;
         let death = DeathInfo {
             victimID: info.vehicleID,
             killerID: killer,
-            reasonID: ATTACK_REASON_SHOT,
+            reasonID: reason,
             equipmentID: 0,
             numVehiclesAffected: 0,
         };

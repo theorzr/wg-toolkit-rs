@@ -527,6 +527,10 @@ impl Battle {
         let own = &mut vehicles[own];
         let driven = world.vehicle(own.id);
         let (position, velocity, dispersion) = driven.turret.gun_marker(&driven.hull);
+        if !driven.turret.fires() {
+            debug!(%client, "Refused a shot: its gun is locked or under water");
+            return Ok(());
+        }
         let Some(shot) = own.gun.fire(now, position, velocity, dispersion) else {
             debug!(%client, "Refused a shot: not loaded, or out of shells");
             return Ok(());
@@ -1073,6 +1077,7 @@ impl Battle {
         let fighting = self.period.fighting();
         let avatars = self.avatars();
         let Self { participants, vehicles, world, spotting, route, shells, .. } = self;
+        let vehicles_infos: Vec<_> = participants.iter().map(|participant| participant.vehicles_info).collect();
 
         for vehicle in vehicles.iter_mut() {
             vehicle.finish_switching(app, world.vehicle_mut(vehicle.id), now)?;
@@ -1145,13 +1150,19 @@ impl Battle {
             let vehicle = &mut vehicles[index];
             let driven = world.vehicle(vehicle.id);
 
+            if vehicle.drowns(app, id, driven, now)? {
+                vehicle.drown(app, id, &vehicles_infos, now)?;
+                continue;
+            }
+            vehicle.show_gun_lock(app, driven)?;
+
             vehicle.put_out_fire(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
             let marker = driven.turret.gun_marker(&driven.hull);
             let (position, velocity, dispersion) = marker;
             let mut shot = vehicle.gun.fire_burst(now, position, velocity, dispersion);
-            if let (None, Driver::Bot(bot), true) = (&shot, &mut vehicle.driver, fighting) {
+            if let (None, Driver::Bot(bot), true) = (&shot, &mut vehicle.driver, fighting && driven.turret.fires()) {
                 if bot.fires(driven, &allies) {
                     shot = vehicle.gun.fire(now, position, velocity, dispersion);
                     if shot.is_some() {

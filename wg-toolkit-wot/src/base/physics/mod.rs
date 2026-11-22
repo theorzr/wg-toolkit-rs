@@ -483,7 +483,7 @@ impl<S: Deref<Target = Space>> World<S> {
             if placed.moving {
                 placed.vehicle.hull.finish(self.bounds);
             }
-            placed.vehicle.turret.step(dt, &placed.vehicle.hull);
+            placed.vehicle.turret.step(dt, &placed.vehicle.hull, &self.space);
             placed.tick = None;
         }
 

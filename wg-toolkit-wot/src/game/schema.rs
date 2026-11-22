@@ -136,6 +136,9 @@ entity_schema! {
             // RPM.
             ownVehicleAuxPhysicsData: u64,
             ownVehicleGear: u8,
+            /// Whether its vehicle's gun is locked, under water say: the client neither
+            /// turns it nor fires it.
+            isGunLocked: bool,
         }
     }
 }
@@ -315,6 +318,8 @@ component_schema! {
             vehicleGunReloadTime: GunReloadTime,
             vehicleHealthInfo: VehicleHealthInfo,
             siegeStateStatus: Option<SiegeStateStatus>,
+            /// Its countdown to drowning, if any.
+            drownLevel: Option<DrownLevel>,
         }
     }
 }
@@ -392,6 +397,16 @@ script_dict! {
         pub circularVisionRadius: u16,
         pub gunPiercing: f32,
         pub gunShotsSpeed: f32,
+    }
+}
+
+script_dict! {
+    /// `DROWN_LEVEL`: how near its own vehicle is to drowning, a `DROWN_WARNING_LEVEL`,
+    /// and its countdown, the times it starts and ends at.
+    #[derive(Debug, Clone)]
+    pub struct DrownLevel {
+        pub level: u8,
+        pub times: Vec<f64>,
     }
 }
 
