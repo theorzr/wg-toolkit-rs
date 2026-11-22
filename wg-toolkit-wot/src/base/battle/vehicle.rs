@@ -456,29 +456,42 @@ impl BattleVehicle {
             view.set_isStrafing(strafing)?;
         }
 
-        if let Some(wheels) = &hull.mobility.general_wheels {
-            let (steering, scroll) = wheels_motion(hull, wheels);
-            if self.steering != steering {
-                view.set_steeringAngles(steering.clone())?;
-                self.steering = steering;
-            }
-            if self.scroll != scroll {
-                view.set_wheelsScroll(scroll.clone())?;
-                self.scroll = scroll;
-            }
+        self.show_wheels(app, hull)
+
+    }
+
+    /// Give the clients how its general wheels steer and roll, `hull` in the world, once
+    /// they change, see [`wheels_motion`].
+    fn show_wheels(&mut self, app: &mut base::App, hull: &Hull) -> io::Result<()> {
+
+        let Some(wheels) = &hull.mobility.general_wheels else { return Ok(()) };
+        let (steering, scroll) = wheels_motion(hull, wheels);
+        let mut view = app.entity(self.entity)?;
+
+        if self.steering != steering {
+            view.set_steeringAngles(steering.clone())?;
+            self.steering = steering;
+        }
+        if self.scroll != scroll {
+            view.set_wheelsScroll(scroll.clone())?;
+            self.scroll = scroll;
         }
 
         Ok(())
 
     }
 
-    /// Show a wreck where it is, `driven` in the world, once it was shoved.
-    pub fn show_wreck(&self, app: &mut base::App, driven: &Vehicle) -> io::Result<()> {
+    /// Show a wreck where it is, `driven` in the world, once it was shoved, and its general
+    /// wheels rolling as it moves, still once it stops.
+    pub fn show_wreck(&mut self, app: &mut base::App, driven: &Vehicle) -> io::Result<()> {
+
         let hull = &driven.hull;
         if app.position(self.entity) != Some((hull.position, hull.direction())) {
             app.set_position(self.entity, hull.position, hull.direction())?;
         }
-        Ok(())
+
+        self.show_wheels(app, hull)
+
     }
 
     /// Put out its fire at game time `now`, if it is due to go out, in this battle.

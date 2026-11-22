@@ -1231,7 +1231,8 @@ impl Battle {
             }
 
             if !vehicles[index].alive() {
-                vehicles[index].show_wreck(app, world.vehicle(vehicles[index].id))?;
+                let wreck = &mut vehicles[index];
+                wreck.show_wreck(app, world.vehicle(wreck.id))?;
                 continue;
             }
 
