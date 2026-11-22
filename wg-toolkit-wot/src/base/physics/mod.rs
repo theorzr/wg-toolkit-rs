@@ -189,7 +189,7 @@ use std::vec::Drain;
 use std::sync::Arc;
 use std::ops::Deref;
 
-use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles};
+use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles, Vec4};
 use tracing::{info, warn};
 
 use wgtk::space::statics::{BodyKind, StaticTriangle};
@@ -200,7 +200,7 @@ use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
 
 use crate::game::item_defs::{AimingDef, MobilityDef};
-use crate::base::debug::{self, DebugPlace};
+use crate::base::debug::{self, DebugChannel, DebugPlace};
 
 use self::body::{blocking, Step, Tick, CONTACT_MARGIN, CONTACT_PASSES, SUBSTEPS};
 use self::collision::{hold_apart, touching, Pose, Solid, Touching};
@@ -239,6 +239,14 @@ const REST_SPIN: f32 = 0.01;
 /// long ray would take in every terrain cell and model of its box. Our choice, the
 /// length found fast on Malinovka, about 12 µs a sight line.
 const SIGHT_PIECE: f32 = 8.0;
+/// How near a vehicle the water's shoreline is drawn, in metres, see
+/// [`World::debug_draw_water`]: the whole map's would overflow the client. Our choice.
+const DEBUG_WATER_RANGE: f32 = 80.0;
+/// The colour of the water's shoreline, and of the text over a vehicle in water.
+const DEBUG_SHORELINE: Vec4 = Vec4::new(60.0, 140.0, 255.0, 255.0);
+const DEBUG_WATER_TEXT: Vec4 = Vec4::new(120.0, 190.0, 255.0, 255.0);
+/// How high over a vehicle's hull the text of its water is, in metres.
+const DEBUG_WATER_TEXT_HEIGHT: f32 = 4.0;
 
 /// A vehicle of a [`World`]. It is stale once the vehicle is removed, even if another one
 /// takes its place.
@@ -679,6 +687,37 @@ impl<S: Deref<Target = Space>> World<S> {
     /// The destructibles broken since last taken, for the battle to tell its clients.
     pub fn take_breakages(&mut self) -> Drain<'_, Breakage> {
         self.rubble.take_breakages()
+    }
+
+    // -- Its debugging --
+
+    /// Draw its space's water to be debugged: its shoreline within [`DEBUG_WATER_RANGE`]
+    /// of a vehicle, and over each vehicle in water, how deep it is under the hull and how
+    /// far up the hull it reaches, from its bottom.
+    pub fn debug_draw_water(&self) {
+
+        if !debug::draws(DebugChannel::Water) {
+            return;
+        }
+
+        let positions: Vec<Vec3> = self.vehicles.iter()
+            .map(|(_, placed)| placed.vehicle.hull.position)
+            .collect();
+
+        for &[from, to] in self.space.water.shoreline() {
+            let near = positions.iter().any(|position| position.xz().distance(from.xz()) < DEBUG_WATER_RANGE);
+            if near {
+                debug::line(DebugChannel::Water, from, to, DEBUG_SHORELINE);
+            }
+        }
+
+        for &position in &positions {
+            let Some(level) = self.space.water_level(position.x, position.z) else { continue };
+            let ground = self.space.terrain.height_at(position.x, position.z).unwrap_or(level);
+            let text = format!("Water: {:.1} m deep, {:.1} m up the hull", level - ground, level - position.y);
+            debug::text(DebugChannel::Water, position + Vec3::Y * DEBUG_WATER_TEXT_HEIGHT, text, DEBUG_WATER_TEXT);
+        }
+
     }
 
 }

@@ -280,17 +280,21 @@ impl Terrain {
 
         let mut chunks = HashMap::new();
         for entry in fs.read_dir(space_dir)? {
+
             let entry = entry?;
             let Some(coords) = entry.name().strip_suffix("o.cdata_processed") else { continue };
+
             if coords.len() != 8 {
                 continue;
             }
+
             let (Ok(x), Ok(z)) = (u16::from_str_radix(&coords[..4], 16), u16::from_str_radix(&coords[4..], 16)) else {
                 continue;
             };
 
             let mut data = Vec::new();
             fs.read(entry.path())?.read_to_end(&mut data)?;
+            
             let mut archive = PackageReader::new(Cursor::new(data))?;
             let context = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", entry.path()));
             let heights = HeightMap::decode(archive.read_by_name("terrain2/heights")?).map_err(context)?;
@@ -299,7 +303,9 @@ impl Terrain {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => None,
                 Err(e) => return Err(context(e)),
             };
+            
             chunks.insert((x as i16, z as i16), Chunk { heights, grounds });
+
         }
 
         Ok(Self { chunk_size, chunks })

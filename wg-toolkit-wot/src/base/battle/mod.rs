@@ -1111,6 +1111,7 @@ impl Battle {
         if debug::draws(DebugChannel::Bots) {
             route.debug_draw();
         }
+        world.debug_draw_water();
 
         spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {

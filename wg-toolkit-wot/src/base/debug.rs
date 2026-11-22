@@ -92,6 +92,9 @@ pub enum DebugChannel {
     /// Over each bot, its orders, its way to its goal and its aim, see `Bot::debug_draw`,
     /// and the bots' route, see `BotRoute::debug_draw`.
     Bots,
+    /// The water's shoreline near the vehicles, and how deep the water is under those in
+    /// it, see `World::debug_draw_water`.
+    Water,
 }
 
 /// A set of [`DebugChannel`]s.
@@ -182,6 +185,7 @@ impl DebugChannel {
             DebugChannel::Contacts => "contacts",
             DebugChannel::Shells => "shells",
             DebugChannel::Bots => "bots",
+            DebugChannel::Water => "water",
         }
     }
 

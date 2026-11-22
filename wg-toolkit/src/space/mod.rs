@@ -103,6 +103,7 @@ pub mod terrain;
 pub mod statics;
 pub mod destructibles;
 pub mod foliage;
+pub mod water;
 
 use std::io;
 
@@ -116,16 +117,19 @@ use statics::{BodyKind, StaticTriangle, Statics};
 use destructibles::Destructibles;
 use foliage::Foliage;
 use terrain::Terrain;
+use water::Water;
 
 
-/// A space as what moves in it needs it: its terrain, its static models' collision, and
-/// its foliage. The default one is empty, with none of them.
+/// A space as what moves in it needs it: its terrain, its static models' collision, its
+/// foliage and its water. The default one is empty, with none of them.
 #[derive(Debug, Default)]
 pub struct Space {
     pub terrain: Terrain,
     pub statics: Statics,
     /// Its trees and bushes, as what they hide, see [`foliage`].
     pub foliage: Foliage,
+    /// Its bodies of water, see [`water`].
+    pub water: Water,
     /// What of the game's models is destructible, the space's or not: what the
     /// destructibles of [`Self::statics`] were read from, and the settings that apply to
     /// all of them.
@@ -136,16 +140,25 @@ impl Space {
 
     /// Load a space, `spaces/08_ruinberg` say, as a gameplay type has it, `ctf` say:
     /// only its static models visible in it, see [`visibility_mask`], what of them is
-    /// destructible as the game lists it.
+    /// destructible as the game lists it, its water's shoreline on its terrain.
     pub fn load(fs: &ResFilesystem, space_dir: &str, gameplay: &str) -> io::Result<Self> {
         let destructibles = Destructibles::load(fs)?;
         let mask = visibility_mask(fs, space_dir, gameplay)?;
+        let terrain = Terrain::load(fs, space_dir)?;
         Ok(Self {
-            terrain: Terrain::load(fs, space_dir)?,
+            water: Water::load(fs, space_dir, |x, z| terrain.height_at(x, z))?,
             statics: Statics::load(fs, space_dir, &destructibles, mask)?,
             foliage: Foliage::load(fs, space_dir, &destructibles)?,
+            terrain,
             destructibles,
         })
+    }
+
+    /// The height of its water's surface over this point of the ground plane, where its
+    /// terrain is under it, see [`water`].
+    pub fn water_level(&self, x: f32, z: f32) -> Option<f32> {
+        let level = self.water.level_at(x, z)?;
+        (self.terrain.height_at(x, z)? < level).then_some(level)
     }
 
 }

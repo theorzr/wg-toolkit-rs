@@ -12,8 +12,9 @@ mod bsmo;
 mod bsmi;
 mod wgde;
 mod sptr;
+mod bwwa;
 
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use crate::res::fs::{ResFilesystem, ResReadFile};
 use crate::util::io::WgReadExt;
@@ -24,6 +25,7 @@ pub use bwsg::{BWSG, ModelInfo, PositionInfo};
 pub use bsmi::{BSMI, StaticModelInstance};
 pub use bwal::{BWAL, AssetInfo, AssetType};
 pub use wgde::{WGDE, Destructible, TREE_INSTANCE};
+pub use bwwa::{BWWA, WaterBody, WaterVertex};
 pub use sptr::{SPTR, SpeedTree};
 pub use bsmo::{BSMO, StaticModel};
 pub use bwst::BWST;
@@ -32,7 +34,8 @@ pub use bwcs::BWCS;
 
 /// A compiled space, its sections decoded when asked for.
 pub struct SpaceBin<R> {
-    inner: R,
+    /// Its reader, buffered: each section is decoded from it, see [`Self::read_section`].
+    inner: BufReader<R>,
     sections: Vec<SpaceSectionHeader>,
 }
 
@@ -50,18 +53,18 @@ pub trait SpaceSection: Sized {
     /// Its identifier, `BWST` say.
     const ID: [u8; 4];
 
-    /// Decode it, at its start.
+    /// Decode it, from a reader at its start, seeking only from there.
     fn decode<R: Read + Seek>(read: &mut R) -> io::Result<Self>;
 
 }
 
-impl SpaceBin<io::BufReader<ResReadFile>> {
+impl SpaceBin<ResReadFile> {
 
     /// Open the compiled space of a space, its `space.bin`, `spaces/08_ruinberg` say.
     pub fn load(fs: &ResFilesystem, space_dir: &str) -> io::Result<Self> {
         let path = format!("{space_dir}/space.bin");
         let file = fs.read(&path).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
-        Self::from_reader(io::BufReader::new(file))
+        Self::from_reader(file)
             .map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
     }
 
@@ -69,9 +72,11 @@ impl SpaceBin<io::BufReader<ResReadFile>> {
 
 impl<R: Read + Seek> SpaceBin<R> {
 
-    /// Open a compiled space from a seekable reader: only its table of sections, `BWTB`,
-    /// is read.
-    pub fn from_reader(mut inner: R) -> io::Result<Self> {
+    /// Open a compiled space from a seekable reader, which it buffers: only its table of
+    /// sections, `BWTB`, is read.
+    pub fn from_reader(inner: R) -> io::Result<Self> {
+
+        let mut inner = BufReader::new(inner);
 
         let (root, count) = read_section_header(&mut inner)?;
         if &root.id != b"BWTB" {
@@ -95,21 +100,17 @@ impl<R: Read + Seek> SpaceBin<R> {
         self.sections.iter().find(|header| header.id == id).copied()
     }
 
-    /// A section's bytes, if it has it.
-    pub fn section_bytes(&mut self, id: [u8; 4]) -> io::Result<Option<Vec<u8>>> {
-        let Some(header) = self.section(id) else { return Ok(None) };
-        let mut bytes = vec![0; header.len];
-        self.inner.seek(SeekFrom::Start(header.offset as u64))?;
-        self.inner.read_exact(&mut bytes)?;
-        Ok(Some(bytes))
-    }
-
-    /// Decode a section, a not found error if it doesn't have it.
+    /// Decode a section, from its reader seeked to the section's start, a not found error
+    /// if it doesn't have it.
     pub fn read_section<S: SpaceSection>(&mut self) -> io::Result<S> {
+
         let id = String::from_utf8_lossy(&S::ID).into_owned();
-        let bytes = self.section_bytes(S::ID)?
+        let header = self.section(S::ID)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no {id} section")))?;
-        S::decode(&mut Cursor::new(bytes)).map_err(|e| io::Error::new(e.kind(), format!("{id} section: {e}")))
+
+        self.inner.seek(SeekFrom::Start(header.offset as u64))?;
+        S::decode(&mut self.inner).map_err(|e| io::Error::new(e.kind(), format!("{id} section: {e}")))
+
     }
 
 }

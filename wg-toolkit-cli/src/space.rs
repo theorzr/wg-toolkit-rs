@@ -12,7 +12,7 @@ use super::{read_input, CliOptions, CliResult, SpaceArgs, SpaceCommand, SpaceVec
 pub fn cmd_space(opts: CliOptions, args: SpaceArgs) -> CliResult<()> {
 
     let content = read_input(args.file.as_deref())?;
-    let mut space = SpaceBin::from_reader(Cursor::new(content))
+    let mut space = SpaceBin::from_reader(Cursor::new(&content[..]))
         .map_err(|e| format!("Failed to read compiled space: {e}"))?;
 
     match args.cmd {
@@ -50,7 +50,7 @@ pub fn cmd_space(opts: CliOptions, args: SpaceArgs) -> CliResult<()> {
                 println!("{hash:08x}{separator}{string}");
             }
         }
-        SpaceCommand::Vectors(args) => cmd_vectors(&opts, &mut space, args)?,
+        SpaceCommand::Vectors(args) => cmd_vectors(&opts, &mut space, &content, args)?,
         SpaceCommand::Models => cmd_models(&opts, &mut space)?,
     }
 
@@ -62,15 +62,16 @@ pub fn cmd_space(opts: CliOptions, args: SpaceArgs) -> CliResult<()> {
 /// element size), then an `element` record for each element shown (its vector's index,
 /// its own, then its words as hexadecimal, or its bytes), and a `rest` record for what
 /// follows the vectors (its offset and size). Human readable, the words as what they
-/// most likely are.
-fn cmd_vectors(opts: &CliOptions, space: &mut Bin, args: SpaceVectorsArgs) -> CliResult<()> {
+/// most likely are. The section's bytes are taken from the compiled space's, `content`.
+fn cmd_vectors(opts: &CliOptions, space: &mut Bin, content: &[u8], args: SpaceVectorsArgs) -> CliResult<()> {
 
     let strings = strings(space).ok();
     let id: [u8; 4] = args.section.as_bytes().try_into()
         .map_err(|_| format!("A section identifier has 4 characters, not '{}'", args.section))?;
-    let bytes = space.section_bytes(id)
-        .map_err(|e| format!("Failed to read section {}: {e}", args.section))?
+    let header = space.section(id)
         .ok_or_else(|| format!("No section {}", args.section))?;
+    let bytes = content.get(header.offset..header.offset + header.len)
+        .ok_or_else(|| format!("Section {} is past the end of the compiled space", args.section))?;
 
     // Vectors follow one another as long as their heads make sense.
     let mut pos = 0;
@@ -173,7 +174,7 @@ fn cmd_models(opts: &CliOptions, space: &mut Bin) -> CliResult<()> {
 }
 
 /// A compiled space read whole from the input.
-type Bin = SpaceBin<Cursor<Vec<u8>>>;
+type Bin<'a> = SpaceBin<Cursor<&'a [u8]>>;
 
 fn strings(space: &mut Bin) -> CliResult<BWST> {
     space.read_section().map_err(|e| format!("Failed to read the string table: {e}"))
