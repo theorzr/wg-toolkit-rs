@@ -482,6 +482,12 @@ impl Battle {
                 }
                 return;
             }
+            AvatarCell::AutoAim { target, .. } => {
+                if let Err(e) = self.auto_aim(app, client, target) {
+                    warn!(%client, "Failed to lock the auto-aim: {e}");
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -492,7 +498,8 @@ impl Battle {
 
         match call {
             AvatarCell::VehicleShoot {} |
-            AvatarCell::VehicleChangeSetting { .. } => unreachable!(),
+            AvatarCell::VehicleChangeSetting { .. } |
+            AvatarCell::AutoAim { .. } => unreachable!(),
             AvatarCell::VehicleMoveWith { flags } => {
                 info!(%client, "Changed the movement flags: {flags:#04x}");
                 driven.hull.flags = flags;
@@ -552,6 +559,15 @@ impl Battle {
 
         vehicle.change_setting(app, client, now, code, value)
         
+    }
+
+    /// A client locks its auto-aim on a vehicle, or unlocks it, see
+    /// [`Participant::auto_aim`].
+    fn auto_aim(&mut self, app: &mut base::App, client: ClientKey, target: EntityId) -> io::Result<()> {
+        let Some(participant) = self.participants.iter_mut().find(|participant| participant.client == client) else {
+            return Ok(());
+        };
+        participant.auto_aim(app, &self.vehicles, target)
     }
 
     /// A cell method of its vehicle a client called.
@@ -1099,6 +1115,7 @@ impl Battle {
         spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {
             participant.spot(app, vehicles, spotting, now)?;
+            participant.keep_lock(app, vehicles)?;
         }
         
         spotting.debug_draw(vehicles, world);
@@ -1281,9 +1298,10 @@ impl Battle {
 
     }
 
-    /// A vehicle of it alive takes a shell's damage, see [`BattleVehicle::take_damage`],
-    /// every client listing it destroyed once killed, and the client that fired it, if
-    /// any, learns the hit's result. The damage it took, if it was alive.
+    /// A vehicle of it takes a shell's damage, see [`BattleVehicle::take_damage`], every
+    /// client listing it destroyed once killed, and the client that fired it, if any,
+    /// learns the hit's result. A wreck takes none, its clients only see the hit. The
+    /// damage it took, if it was alive.
     fn hit(
         &mut self,
         app: &mut base::App,
@@ -1300,11 +1318,16 @@ impl Battle {
             .find(|vehicle| vehicle.entity.id() == shooter)
             .and_then(|vehicle| vehicle.client_driver())
             .map(|driver| driver.avatar());
-        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id && vehicle.alive()) else {
+        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id) else {
             return Ok(None);
         };
 
+        let alive = vehicle.alive();
         let dealt = vehicle.take_damage(app, id, shooter, shot, shell_hit, now)?;
+        if !alive {
+            return Ok(None);
+        }
+
         let killed = !vehicle.alive();
         if killed {
             vehicle.mark_killed(app, &vehicles_infos, shooter)?;
@@ -1429,13 +1452,11 @@ fn allies_of(vehicles: &[BattleVehicle], world: &World, index: usize) -> Vec<Bot
         .collect()
 }
 
-/// Replace `targets` with the vehicles shells can hit: every one alive, reusing its
-/// memory.
+/// Replace `targets` with the vehicles shells can hit, reusing its memory: every one,
+/// wrecks included, which stop them, see [`Battle::hit`].
 fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world: &World) {
     targets.clear();
-    targets.extend(vehicles.iter()
-        .filter(|vehicle| vehicle.alive())
-        .map(|vehicle| vehicle.shot_target(world)));
+    targets.extend(vehicles.iter().map(|vehicle| vehicle.shot_target(world)));
 }
 
 /// The entity id of the battle's vehicle of this id, if any, for its debug drawing.

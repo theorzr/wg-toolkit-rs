@@ -112,6 +112,9 @@ entity_schema! {
             /// A chat action of the server, `MESSENGER_ACTION_IDS`, for the client's
             /// request of this id, 0 for none, see the battle's `chat` module.
             fn messenger_onActionByServer_chat2(action_id: i16, request_id: u16, args: ChatArgs);
+            /// Its auto-aim's target is lost, why as `TARGET_LOST_FLAGS`: the client
+            /// unlocks it.
+            fn onAutoAimVehicleLost(flags: u8);
         }
         base {
             fn setClientReady();
@@ -126,6 +129,9 @@ entity_schema! {
             fn vehicle_stopTrackingWithGun(yaw: f32, pitch: f32);
             /// Change one of the vehicle's settings, by `VEHICLE_SETTING` code.
             fn vehicle_changeSetting(code: u8, value: i32);
+            /// Lock its auto-aim on a vehicle, or unlock it with 0; magnetic when the
+            /// client's magnetic aim picked it.
+            fn autoAim(target: EntityId, magnetic: bool);
             // What the client aims from, so it must turn with the hull, and the engine's
             // RPM.
             ownVehicleAuxPhysicsData: u64,

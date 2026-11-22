@@ -1,11 +1,11 @@
 //! A client in a battle: its avatar, its vehicle, its own arena info, what it sees of the
-//! others' vehicles, and whether it is done loading.
+//! others' vehicles, what its auto-aim is locked on, and whether it is done loading.
 
 use std::io;
 
 use tracing::info;
 
-use wgtk::app::entity::{ComponentKey, EntityKey};
+use wgtk::app::entity::{ComponentKey, EntityId, EntityKey};
 use wgtk::app::base::{self, ClientKey};
 
 use crate::game::schema::{Avatar, AvatarVehiclesInfo};
@@ -14,6 +14,18 @@ use crate::base::{VehicleLoadout, TICK};
 use super::vehicle::BattleVehicle;
 use super::spotting::Spotting;
 use super::period::ArenaPeriod;
+
+
+/// `TARGET_LOST_FLAGS.INVALID` in the client's constants.py: its auto-aim can't lock
+/// on that vehicle.
+const TARGET_LOST_INVALID: u8 = 1;
+/// `TARGET_LOST_FLAGS.KILLED_BY_ME`: its auto-aim's target was destroyed by its own
+/// vehicle.
+const TARGET_LOST_KILLED_BY_ME: u8 = 2;
+/// `TARGET_LOST_FLAGS.KILLED_BY_OTHERS`: its auto-aim's target was destroyed by another.
+const TARGET_LOST_KILLED_BY_OTHERS: u8 = 4;
+/// `TARGET_LOST_FLAGS.UNREACHABLE`: its auto-aim's target is no longer spotted.
+const TARGET_LOST_UNREACHABLE: u8 = 8;
 
 
 /// See the module's documentation.
@@ -31,6 +43,8 @@ pub struct Participant {
     pub vehicles_info: ComponentKey<AvatarVehiclesInfo>,
     /// Whether it sees each of the battle's vehicles, by index, see [`Self::spot`].
     spotted: Vec<bool>,
+    /// The vehicle its auto-aim is locked on, by index, see [`Self::auto_aim`].
+    locked: Option<usize>,
     /// Whether its client is done loading, ready for the countdown.
     pub ready: bool,
     /// Whether its player may use the server's dev commands, see `Player::dev`.
@@ -57,6 +71,7 @@ impl Participant {
             vehicle,
             vehicles_info,
             spotted: vec![false; vehicles],
+            locked: None,
             ready: false,
             dev,
         }
@@ -92,6 +107,58 @@ impl Participant {
 
         Ok(())
         
+    }
+
+    /// Its client locks its auto-aim on the vehicle of this entity id, or unlocks it
+    /// with 0. It locks only on an enemy alive that it sees, its client told otherwise
+    /// that it lost it, as invalid.
+    pub fn auto_aim(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], target: EntityId) -> io::Result<()> {
+
+        self.locked = None;
+        if target.0 == 0 {
+            info!(client = %self.client, "Unlocked the auto-aim");
+            return Ok(());
+        }
+
+        let team = vehicles[self.vehicle].team;
+        let locked = vehicles.iter()
+            .position(|vehicle| vehicle.entity.id() == target)
+            .filter(|&index| self.spotted[index] && vehicles[index].alive() && vehicles[index].team != team);
+        let Some(index) = locked else {
+            info!(client = %self.client, entity_id = %target, "Refused to lock the auto-aim: not an enemy alive in sight");
+            return app.entity(self.avatar)?.onAutoAimVehicleLost(TARGET_LOST_INVALID);
+        };
+
+        self.locked = Some(index);
+        info!(client = %self.client, entity_id = %target, "Locked the auto-aim");
+        Ok(())
+
+    }
+
+    /// Unlock its auto-aim once its target is destroyed, by its own vehicle or another,
+    /// or once it no longer sees it, see [`Self::spot`], its client told why.
+    pub fn keep_lock(&mut self, app: &mut base::App, vehicles: &[BattleVehicle]) -> io::Result<()> {
+
+        let Some(index) = self.locked else { return Ok(()) };
+        let target = &vehicles[index];
+        let own = vehicles[self.vehicle].entity.id();
+        let killer = target.info.deathInfo.as_ref().map(|death| death.killerID);
+
+        let flags = if !target.alive() && killer == Some(own) {
+            TARGET_LOST_KILLED_BY_ME
+        } else if !target.alive() {
+            TARGET_LOST_KILLED_BY_OTHERS
+        } else if !self.spotted[index] {
+            TARGET_LOST_UNREACHABLE
+        } else {
+            return Ok(());
+        };
+
+        self.locked = None;
+        app.entity(self.avatar)?.onAutoAimVehicleLost(flags)?;
+        info!(client = %self.client, entity_id = %target.entity.id(), flags, "Lost the auto-aim's target");
+        Ok(())
+
     }
 
     /// Tell its client the battle's period, as long as is left of it: its game time is
