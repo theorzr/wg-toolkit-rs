@@ -45,6 +45,7 @@ pub fn shot(kind: ShellKind, caliber: f32, pen: f32) -> ShotDef {
         ricochet_angle_cos: ricochets.then(|| 70f32.to_radians().cos()),
         jet_pen_loss: if kind == ShellKind::HollowCharge { 0.5 } else { 0.0 },
         explosion_radius: caliber * caliber / 5555.0,
+        stun: None,
     }
 
 }

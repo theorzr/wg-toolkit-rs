@@ -373,9 +373,34 @@ pub struct ShotDef {
     pub ricochet_angle_cos: Option<f32>,
     /// The share of its penetration a HEAT jet loses per metre once through a screen.
     pub jet_pen_loss: f32,
-    /// How far an HE shell's explosion damages, in metres, as the legacy HE mechanics
-    /// had it: `caliber² / 5555`.
+    /// How far an HE shell's explosion damages, in metres: its gun's shot's
+    /// `explosionRadius`, else its own, else `caliber² / 5555`, as the legacy HE
+    /// mechanics have it.
     pub explosion_radius: f32,
+    /// How it stuns the crews of the vehicles near where it explodes, if it does.
+    pub stun: Option<StunDef>,
+}
+
+/// How a shell stuns, as `gun_readers.readStunParams` reads it from the shell, its
+/// gun's shot overriding it, the rest from `common/stun.xml`. A vehicle within its
+/// radius is stunned for a share of its duration, at a share of its effect: each a
+/// guaranteed part, and a part that grows with the damage it took.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StunDef {
+    /// In metres: the shell's explosion radius unless set.
+    pub radius: f32,
+    /// Its longest, in seconds.
+    pub duration: f32,
+    /// Its shortest, in seconds, `minStunDuration`.
+    pub min_duration: f32,
+    /// How strong it is, of the full stun's effect, at most 1.
+    pub factor: f32,
+    /// The share of its duration any stun lasts, and the share the damage adds.
+    pub guaranteed_duration: f32,
+    pub damage_duration_coeff: f32,
+    /// The share of its effect any stun has, and the share the damage adds.
+    pub guaranteed_effect: f32,
+    pub damage_effect_coeff: f32,
 }
 
 /// `SHELL_TYPES`, by their index in `SHELL_TYPES_LIST`.
@@ -412,6 +437,55 @@ impl ShotDef {
     /// interpolates it.
     pub fn damage_at(&self, distance: f32) -> f32 {
         interpolate_by_distance([self.damage_near, self.damage_far], distance)
+    }
+
+}
+
+impl StunDef {
+
+    /// A shell's stun, if it has one: its `hasStun` and parameters, its gun's `shot`
+    /// overriding them, its other parameters from `defaults`, `common/stun.xml`, and
+    /// its radius, unless set, the explosion's of an HE shell, `explosion_radius`.
+    pub fn read(shell: &Element, shot: &Element, defaults: &Element, high_explosive: bool, explosion_radius: f32) -> Option<Self> {
+
+        let has_stun = shot.get_child_boolean("hasStun")
+            .or_else(|| shell.get_child_boolean("hasStun"))
+            .unwrap_or(false);
+        if !has_stun {
+            return None;
+        }
+
+        let sections = [shot, shell, defaults];
+        let radius = Self::param(&sections, "stunRadius")
+            .or_else(|| high_explosive.then_some(explosion_radius))?;
+
+        Some(Self {
+            radius,
+            duration: Self::param(&sections, "stunDuration").or_else(|| defaults.get_child_float("baseStunDuration"))?,
+            min_duration: defaults.get_child_float("minStunDuration")?,
+            factor: Self::param(&sections, "stunFactor").unwrap_or(1.0),
+            guaranteed_duration: Self::param(&sections, "guaranteedStunDuration")?,
+            damage_duration_coeff: Self::param(&sections, "damageDurationCoeff")?,
+            guaranteed_effect: Self::param(&sections, "guaranteedStunEffect")?,
+            damage_effect_coeff: Self::param(&sections, "damageEffectCoeff")?,
+        })
+
+    }
+
+    /// A stun parameter of the first of these sections that has it: the shot's, the
+    /// shell's, then the defaults'.
+    fn param(sections: &[&Element], name: &str) -> Option<f32> {
+        sections.iter().find_map(|section| section.get_child_float(name))
+    }
+
+    /// How long a vehicle that took this share of the shell's damage is stunned, in
+    /// seconds, and how strongly, of the full effect: the guaranteed parts, and the
+    /// damage's parts grown by its share, the duration no shorter than its shortest.
+    pub fn of_damage(&self, share: f32) -> (f32, f32) {
+        let share = share.clamp(0.0, 1.0);
+        let duration = self.duration * (self.guaranteed_duration + self.damage_duration_coeff * share);
+        let effect = self.factor * (self.guaranteed_effect + self.damage_effect_coeff * share);
+        (duration.max(self.min_duration), effect.min(1.0))
     }
 
 }
@@ -635,6 +709,7 @@ impl VehicleDef {
         let projectile_speed_factor = common
             .get_child_value_at(&["miscParams", "projectileSpeedFactor"]).and_then(pxml::Value::as_float)
             .ok_or_else(|| invalid("no projectile speed factor".to_string()))?;
+        let stun_defaults = read_xml(fs, "scripts/item_defs/vehicles/common/stun.xml")?;
         let shot_effects = read_xml(fs, "scripts/item_defs/vehicles/common/shot_effects.xml")?;
         let effects_index = |effects: &str| shot_effects.iter_children_all()
             .map(|(name, _)| name)
@@ -690,6 +765,11 @@ impl VehicleDef {
                 .filter(|_| SHELL_KINDS[kind as usize].starts_with("ARMOR_PIERCING"))
                 .unwrap_or(0.0)
                 .to_radians();
+            let high_explosive = SHELL_KINDS[kind as usize] == "HIGH_EXPLOSIVE";
+            let explosion_radius = shot.get_child_float("explosionRadius")
+                .or_else(|| shell.get_child_float("explosionRadius"))
+                .filter(|&radius| radius > 0.0)
+                .unwrap_or(caliber * caliber / 5555.0);
             shots.push(ShotDef {
                 compact_descr: cd,
                 kind_index: kind,
@@ -710,7 +790,8 @@ impl VehicleDef {
                 normalization_angle,
                 ricochet_angle_cos,
                 jet_pen_loss: 10.0 * shell.get_child_float("piercingPowerLossFactorByDistance").unwrap_or(0.0),
-                explosion_radius: caliber * caliber / 5555.0,
+                explosion_radius,
+                stun: StunDef::read(shell, shot, &stun_defaults, high_explosive, explosion_radius),
             });
         }
 
@@ -1334,6 +1415,44 @@ mod tests {
         assert_eq!(def.descr.type_id, 409);
         assert!((def.mobility.rotation_speed[0].to_degrees() - 38.0).abs() < 1e-3);
         assert_eq!(VehicleDef::load_by_id(&fs, def.descr.nation, 409).unwrap().name, "A1035_Pershing_SM_SCC");
+    }
+
+    /// With the game's `res` directory in `WGT_RES_PATH`: the Conqueror Gun Carriage's
+    /// 9.2 in shells: its HE Mk 18, id 99, exploding 11.6 m wide, its own and not
+    /// `caliber² / 5555`, and stunning as far, 33 s at most, 40% guaranteed, the
+    /// effect's shares from `stun.xml`; its HE Mk 19, id 103, 6 m wide, and its AP,
+    /// none.
+    #[test]
+    fn real_stun() {
+        let Ok(res) = std::env::var("WGT_RES_PATH") else { return };
+        let fs = ResFilesystem::new(res).unwrap();
+        let def = VehicleDef::load(&fs, "uk", "GB31_Conqueror_Gun").unwrap();
+
+        let stunning = shot_of(&def, 99);
+        assert_eq!(stunning.explosion_radius, 11.6);
+        let stun = stunning.stun.unwrap();
+        assert_eq!(stun, StunDef {
+            radius: 11.6,
+            duration: 33.0,
+            min_duration: 5.0,
+            factor: 1.0,
+            guaranteed_duration: 0.4,
+            damage_duration_coeff: 0.6,
+            guaranteed_effect: 0.75,
+            damage_effect_coeff: 0.25,
+        });
+        let (least, effect) = stun.of_damage(0.0);
+        assert!((least - 13.2).abs() < 1e-3 && effect == 0.75, "{least} {effect}");
+        let (most, effect) = stun.of_damage(1.0);
+        assert!((most - 33.0).abs() < 1e-3 && effect == 1.0, "{most} {effect}");
+
+        assert_eq!(shot_of(&def, 103).explosion_radius, 6.0);
+        assert!(shot_of(&def, 103).stun.is_none() && shot_of(&def, 9).stun.is_none());
+    }
+
+    /// A vehicle's shot of the shell of this id.
+    fn shot_of(def: &VehicleDef, id: u16) -> &ShotDef {
+        def.shots.iter().find(|shot| shot.compact_descr.id == id).unwrap()
     }
 
     /// With the game's `res` directory in `WGT_RES_PATH`: every vehicle's chassis and

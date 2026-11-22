@@ -191,6 +191,8 @@ entity_schema! {
             wheelsScroll: Vec<u8>,
             // `VEHICLE_SIEGE_STATE`: where it is in switching its siege mode.
             siegeState: u8,
+            // `STUN_INFO`: the game time its crew's stun ends at, 0 when not stunned.
+            stunInfo: f64,
             publicStateModifiers: Vec<u8>,
             dogTag: BattleDogTag,
             // Its `MY_VEHICLE` level of detail, which only its own client gets.

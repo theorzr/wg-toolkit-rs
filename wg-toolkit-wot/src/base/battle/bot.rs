@@ -216,9 +216,9 @@ impl Bot {
         if self.stopped || fire.mode == BotFireMode::Hold {
             return false;
         }
-        if vehicle.turret.aim_error(&vehicle.hull) >= AIM_TOLERANCE {
-            return false;
-        }
+        // if vehicle.turret.aim_error(&vehicle.hull) >= AIM_TOLERANCE {
+        //     return false;
+        // }
 
         let (position, _, dispersion) = vehicle.turret.gun_marker(&vehicle.hull);
         let aim = fire.aimed_at();

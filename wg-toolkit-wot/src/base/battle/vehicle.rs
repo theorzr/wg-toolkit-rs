@@ -129,6 +129,9 @@ pub struct BattleVehicle {
     damage_stickers: Vec<HitPoint>,
     /// Its fire, with the game time it goes out at, see [`FIRE_DURATION`].
     fire: Option<(ComponentKey<Fire>, f64)>,
+    /// Its crew's stun, see [`Self::stun`]: the game time it ends at, and its share of
+    /// the full stun's effect.
+    stun: Option<(f64, f32)>,
     /// Its siege mode, if it has one, and where it is in switching it.
     siege: Option<Siege>,
     /// The game time it went under water at, its turret's ring under the surface, see
@@ -268,6 +271,7 @@ impl BattleVehicle {
             scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
+            stun: None,
             siege: loadout.siege.map(|siege| Siege::new(siege, loadout.mobility)),
             under_water: None,
             gun_locked: false,
@@ -330,6 +334,7 @@ impl BattleVehicle {
             scroll: Vec::new(),
             damage_stickers: Vec::new(),
             fire: None,
+            stun: None,
             siege: def.siege.map(|siege| Siege::new(siege, def.mobility)),
             under_water: None,
             gun_locked: false,
@@ -397,7 +402,7 @@ impl BattleVehicle {
     pub fn shot_target(&self, world: &World) -> ShotTarget {
         let collision = self.collision.clone();
         ShotTarget {
-            entity_id: self.entity.id().0,
+            entity_id: self.entity.id(),
             transforms: world.vehicle(self.id).part_transforms(collision.hull_position),
             collision,
         }
@@ -499,6 +504,36 @@ impl BattleVehicle {
         if let Some((fire, _)) = self.fire.take_if(|&mut (_, until)| until <= now) {
             app.remove_component(fire)?;
             info!(battle, entity_id = %self.entity.id(), "Put out a vehicle's fire");
+        }
+        Ok(())
+    }
+
+    /// Stun its crew, alive, until game time `until`, at this share of the full stun's
+    /// effect, see `StunDef::of_damage`, a longer or stronger stun it is under kept: its
+    /// clients see when it ends.
+    pub fn stun(&mut self, app: &mut base::App, battle: u32, until: f64, effect: f32) -> io::Result<()> {
+
+        if !self.alive() {
+            return Ok(());
+        }
+
+        let (until, effect) = match self.stun {
+            Some((end, strength)) => (end.max(until), strength.max(effect)),
+            None => (until, effect),
+        };
+        self.stun = Some((until, effect));
+
+        app.entity(self.entity)?.set_stunInfo(until)?;
+        info!(battle, entity_id = %self.entity.id(), until, effect, "Stunned a vehicle's crew");
+        Ok(())
+
+    }
+
+    /// End its crew's stun at game time `now`, if it is due to end.
+    pub fn end_stun(&mut self, app: &mut base::App, battle: u32, now: f64) -> io::Result<()> {
+        if self.stun.take_if(|&mut (until, _)| until <= now).is_some() {
+            app.entity(self.entity)?.set_stunInfo(0.0)?;
+            info!(battle, entity_id = %self.entity.id(), "Ended a vehicle's stun");
         }
         Ok(())
     }
@@ -812,6 +847,7 @@ impl BattleVehicle {
         killer: EntityId,
         reason: i8,
     ) -> io::Result<()> {
+
         let info = &mut self.info;
         let death = DeathInfo {
             victimID: info.vehicleID,
@@ -830,7 +866,13 @@ impl BattleVehicle {
             vehicles_info.set_vehiclesInfo_at(info_path(index, "isAlive"), false)?;
             vehicles_info.set_vehiclesInfo_at(info_path(index, "__generation"), info.__generation)?;
         }
+
+        // A wreck's crew is no longer stunned.
+        if self.stun.take().is_some() {
+            app.entity(self.entity)?.set_stunInfo(0.0)?;
+        }
         Ok(())
+
     }
 
 }

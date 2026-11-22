@@ -173,6 +173,20 @@ Write degree constants as `25.0f32.to_radians()`, and convert for display with
   `base_app`, `real_login_app`. Where an app links to takes `_link`: `login_link`.
   Names from APIs we don't own (`peer_addr`, `local_addr`) stay.
 
+### Ids
+
+An id with a wrapper type travels as it: `EntityId`, `VehicleId`… in fields, arguments
+and return values, never a bare `u32`. Unwrap it (`.0`) only where it meets the wire, in
+an element's field say.
+
+```rust
+// Not this:
+fn splash(&mut self, …) -> io::Result<Vec<(u32, i64)>>
+
+// This:
+fn splash(&mut self, …) -> io::Result<Vec<(EntityId, i64)>>
+```
+
 ### Doc comments
 
 Doc comments (`///`, `//!`) describe what the code is and does now. They never mention

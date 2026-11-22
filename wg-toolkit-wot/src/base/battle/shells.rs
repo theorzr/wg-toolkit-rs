@@ -46,7 +46,7 @@ impl Shells {
 
             let (fired, shooter, shot) = &mut self.flying[index];
             let crossed = shot.through.len();
-            let landing = shot.fly((now - *fired) as f32, Some(obstacles), vehicles, shooter.0);
+            let landing = shot.fly((now - *fired) as f32, Some(obstacles), vehicles, *shooter);
 
             let yaw = shot.start_velocity.x.atan2(shot.start_velocity.z);
             through.extend(shot.through[crossed..].iter().map(|&piece| (piece, yaw)));

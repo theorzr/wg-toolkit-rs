@@ -288,7 +288,7 @@ impl App {
                 let (yaw, pitch, roll) = update.direction.unpack(true);
                 if let Some(client) = client {
                     self.events.push_back(Event::AvatarUpdate(AvatarUpdateEvent {
-                        client, vehicle_id: Some(update.vehicle_id), position: update.position, direction: Vec3::new(roll, pitch, yaw),
+                        client, vehicle_id: Some(EntityId(update.vehicle_id)), position: update.position, direction: Vec3::new(roll, pitch, yaw),
                     }));
                 }
                 Ok(())
@@ -1198,7 +1198,7 @@ impl App {
             unk_flag: 0,
             space_id: space.id,
             unk_short: 0,
-            vehicle_id: init.vehicle_id,
+            vehicle_id: init.vehicle_id.0,
             position: init.position,
             packed_xz_scale: init.packed_xz_scale,
             direction: init.direction,
@@ -1211,7 +1211,7 @@ impl App {
         self.leave_space(player.any());
         if let Some(state) = self.entities.get_mut(player.slot) {
             let mut cell = EntityCell::new(space, init.position, init.direction, true, None, Visibility::Interest);
-            cell.vehicle = Some(EntityId(init.vehicle_id)).filter(|vehicle| vehicle.0 != 0);
+            cell.vehicle = Some(init.vehicle_id).filter(|vehicle| vehicle.0 != 0);
             state.cell = Some(cell);
         }
         if let Some(space) = self.spaces.get_mut(space.slot) {
@@ -1454,7 +1454,7 @@ pub struct EntityInit {
 #[derive(Debug, Clone)]
 pub struct CellPlayerInit<D, C> {
     /// The entity the player is on, see [`client::element::CreateCellPlayer`].
-    pub vehicle_id: u32,
+    pub vehicle_id: EntityId,
     pub position: Vec3,
     /// Roll, pitch and yaw.
     pub direction: Vec3,
@@ -2110,7 +2110,7 @@ pub struct CellMethodEvent {
 pub struct AvatarUpdateEvent {
     pub client: ClientKey,
     /// The vehicle it says it is on, when explicit.
-    pub vehicle_id: Option<u32>,
+    pub vehicle_id: Option<EntityId>,
     pub position: Vec3,
     /// Roll, pitch and yaw.
     pub direction: Vec3,

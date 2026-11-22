@@ -49,7 +49,7 @@ use clap::ValueEnum;
 use glam::{Affine3A, Quat, Vec3, Vec4};
 
 use wgtk::app::base::{self, EntityInit, SpaceKey, Visibility};
-use wgtk::app::entity::EntityKey;
+use wgtk::app::entity::{EntityId, EntityKey};
 
 use crate::game::schema::{DebugDrawEntity, DebugDrawObject, DebugLine, DebugSphere, DebugText};
 use crate::base::physics::VehicleId;
@@ -169,7 +169,7 @@ enum Shape {
 #[derive(Debug, Clone, Copy)]
 struct Drawn {
     group: usize,
-    entity_id: Option<u32>,
+    entity_id: Option<EntityId>,
     name: u64,
     shapes: u64,
     version: u32,
@@ -330,7 +330,7 @@ impl DebugFrame {
     pub fn show(
         &mut self,
         app: &mut base::App,
-        entity_id: impl Fn(VehicleId) -> Option<u32>,
+        entity_id: impl Fn(VehicleId) -> Option<EntityId>,
     ) -> io::Result<()> {
 
         // What lasts, drawn again, until it is over, the oldest dropped past the most.

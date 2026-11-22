@@ -24,6 +24,7 @@ use std::sync::Arc;
 use glam::{Affine3A, Vec3, Vec4};
 
 use wgtk::space::statics::BodyKind;
+use wgtk::app::entity::EntityId;
 use wgtk::space::Space;
 
 use crate::game::collision::{segment_triangle, VehicleCollision, VehicleIntersection};
@@ -114,7 +115,7 @@ pub enum ShotLanding {
     /// A vehicle, see [`ShotTarget`].
     Vehicle {
         /// Its entity's id.
-        entity_id: u32,
+        entity_id: EntityId,
         /// Where on its collision models the shell hit it first.
         hit: VehicleIntersection,
         /// Each of its parts' transform as it got hit.
@@ -167,7 +168,7 @@ pub struct ShotObstacles<'a> {
 #[derive(Debug, Clone)]
 pub struct ShotTarget {
     /// Its entity's id.
-    pub entity_id: u32,
+    pub entity_id: EntityId,
     /// Its armour and modules, by part.
     pub collision: Arc<VehicleCollision>,
     /// Each part's transform, see
@@ -220,7 +221,7 @@ impl Shot {
         time: f32,
         obstacles: Option<ShotObstacles>,
         vehicles: &[ShotTarget],
-        shooter: u32,
+        shooter: EntityId,
     ) -> Option<ShotLanding> {
 
         debug::lasting(DEBUG_SHOT_SECONDS, || {
@@ -242,7 +243,7 @@ impl Shot {
         &mut self,
         obstacles: Option<ShotObstacles>,
         vehicles: &[ShotTarget],
-        shooter: u32,
+        shooter: EntityId,
     ) -> Option<ShotLanding> {
 
         // Its next segment, gravity bending its way.
@@ -301,7 +302,7 @@ impl Shot {
         &self,
         obstacles: Option<ShotObstacles>,
         vehicles: &[ShotTarget],
-        shooter: u32,
+        shooter: EntityId,
         from: Vec3,
         to: Vec3,
         crossed: &mut Vec<(f32, ShotPiece)>,
@@ -448,7 +449,7 @@ impl Shot {
 /// of this entity id, as a share of the segment.
 fn meet_vehicles(
     vehicles: &[ShotTarget],
-    shooter: u32,
+    shooter: EntityId,
     from: Vec3,
     to: Vec3,
 ) -> Option<(f32, ShotLanding)> {
@@ -594,7 +595,7 @@ mod tests {
     #[test]
     fn flies_its_range() {
         let mut shot = fired(shell());
-        assert_eq!(shot.fly(f32::INFINITY, None, &[], 0), Some(ShotLanding::Range));
+        assert_eq!(shot.fly(f32::INFINITY, None, &[], EntityId(0)), Some(ShotLanding::Range));
         assert!((shot.end.length() - 720.0).abs() < 5.0, "{}", shot.end);
     }
 
@@ -612,7 +613,7 @@ mod tests {
         assert!((off.start_velocity - Vec3::X * 600.0).length() < 1e-3, "{}", off.start_velocity);
         assert!((off.range - 620.0).abs() < 0.1, "{}", off.range);
         assert_eq!(off.speed_factor, 0.75);
-        assert_eq!(off.fly(f32::INFINITY, None, &[], 0), Some(ShotLanding::Range));
+        assert_eq!(off.fly(f32::INFINITY, None, &[], EntityId(0)), Some(ShotLanding::Range));
 
         // Out of range where it ends, else at most `MAX_RICOCHETS` times.
         assert!(off.ricochet(-Vec3::X * 600.0).is_none());
@@ -653,7 +654,7 @@ mod tests {
         };
         let hull = Affine3A::from_translation(Vec3::new(x, 0.0, 100.0));
         ShotTarget {
-            entity_id: 7,
+            entity_id: EntityId(7),
             collision: Arc::new(collision),
             transforms: [hull; 4],
         }
@@ -662,8 +663,8 @@ mod tests {
     #[test]
     fn hits_a_vehicle_in_its_way() {
         let mut shot = fired(shell());
-        let landing = shot.fly(f32::INFINITY, None, &[vehicle_at(0.0)], 0);
-        let Some(ShotLanding::Vehicle { entity_id: 7, hit, .. }) = landing else { panic!("missed: {landing:?}") };
+        let landing = shot.fly(f32::INFINITY, None, &[vehicle_at(0.0)], EntityId(0));
+        let Some(ShotLanding::Vehicle { entity_id: EntityId(7), hit, .. }) = landing else { panic!("missed: {landing:?}") };
         assert_eq!(hit.part, VehiclePart::Hull);
         assert_eq!(hit.material_kind, 1);
         assert_eq!(hit.normal, -Vec3::Z);
@@ -679,19 +680,19 @@ mod tests {
 
         // One that drove out of its way it misses.
         let mut shot = fired(shell());
-        assert_eq!(shot.fly(0.05, None, std::slice::from_ref(&ahead), 0), None);
+        assert_eq!(shot.fly(0.05, None, std::slice::from_ref(&ahead), EntityId(0)), None);
         assert!((shot.end.z - 40.0).abs() < 0.1, "{}", shot.end);
-        assert_eq!(shot.fly(f32::INFINITY, None, std::slice::from_ref(&away), 0), Some(ShotLanding::Range));
+        assert_eq!(shot.fly(f32::INFINITY, None, std::slice::from_ref(&away), EntityId(0)), Some(ShotLanding::Range));
 
         // One that drove into its way it hits.
         let mut shot = fired(shell());
-        assert_eq!(shot.fly(0.05, None, std::slice::from_ref(&away), 0), None);
-        let landing = shot.fly(f32::INFINITY, None, std::slice::from_ref(&ahead), 0);
-        assert!(matches!(landing, Some(ShotLanding::Vehicle { entity_id: 7, .. })), "{landing:?}");
+        assert_eq!(shot.fly(0.05, None, std::slice::from_ref(&away), EntityId(0)), None);
+        let landing = shot.fly(f32::INFINITY, None, std::slice::from_ref(&ahead), EntityId(0));
+        assert!(matches!(landing, Some(ShotLanding::Vehicle { entity_id: EntityId(7), .. })), "{landing:?}");
 
         // Its shooter's own it flies through.
         let mut shot = fired(shell());
-        assert_eq!(shot.fly(f32::INFINITY, None, &[ahead], 7), Some(ShotLanding::Range));
+        assert_eq!(shot.fly(f32::INFINITY, None, &[ahead], EntityId(7)), Some(ShotLanding::Range));
 
     }
 
@@ -700,7 +701,7 @@ mod tests {
 
         // 400 m on, its penetration from 250 down to 240 mm from 50 to 500 m.
         let mut shot = fired(shell());
-        assert_eq!(shot.fly(0.5, None, &[], 0), None);
+        assert_eq!(shot.fly(0.5, None, &[], EntityId(0)), None);
         let distance = shot.distance();
         let before = shot.end_velocity;
 
@@ -775,7 +776,7 @@ mod tests {
             rubble,
         };
         let mut shot = fired(def);
-        let landing = shot.fly(f32::INFINITY, Some(obstacles), &[], 0).unwrap();
+        let landing = shot.fly(f32::INFINITY, Some(obstacles), &[], EntityId(0)).unwrap();
         (shot, landing)
     }
 

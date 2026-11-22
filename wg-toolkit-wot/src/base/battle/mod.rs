@@ -271,7 +271,7 @@ impl Battle {
         for (vehicle, arrival) in vehicles.iter().zip(&arrivals) {
             let hull = &world.vehicle(vehicle.id).hull;
             app.create_cell_player(arrival.avatar, space, CellPlayerInit {
-                vehicle_id: vehicle.entity.id().0,
+                vehicle_id: vehicle.entity.id(),
                 position: hull.position,
                 direction: hull.direction(),
                 packed_xz_scale: PACKED_XZ_SCALE,
@@ -1247,6 +1247,7 @@ impl Battle {
             vehicle.show_gun_lock(app, driven)?;
 
             vehicle.put_out_fire(app, id, now)?;
+            vehicle.end_stun(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
             let marker = driven.turret.gun_marker(&driven.hull);
@@ -1328,14 +1329,14 @@ impl Battle {
         match landing {
             ShotLanding::Vehicle { entity_id, hit, transforms } => {
                 
-                let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id().0 == entity_id);
+                let vehicle = self.vehicles.iter().find(|vehicle| vehicle.entity.id() == entity_id);
                 let Some(collision) = vehicle.map(|vehicle| vehicle.collision.clone()) else { return Ok(()) };
                 let Some(impact) = impact::hit(def, shot.distance(), shot.speed_factor, shot.end, shot.end_velocity, &collision, &transforms, &mut rand::thread_rng()) else {
-                    debug!(battle = id, shot = shot.id, entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
+                    debug!(battle = id, shot = shot.id, %entity_id, "Hit a vehicle where it has no armour: {:?}", hit.part);
                     return Ok(());
                 };
 
-                info!(battle = id, shot = shot.id, entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
+                info!(battle = id, shot = shot.id, %entity_id, "Hit a vehicle: {:?}, {:?} {} mm at {:?}, {:.0} damage{}",
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 
@@ -1345,8 +1346,11 @@ impl Battle {
                 if impact.outcome == ImpactOutcome::Ricochet {
                     let velocity = ricochet::off_armor(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, velocity)?;
+                } else {
+                    let damaged: Vec<_> = dealt.map(|dealt| (entity_id, dealt)).into_iter().collect();
+                    self.stun(app, shooter, shot, &damaged)?;
                 }
-                
+
                 Ok(())
 
             }
@@ -1389,7 +1393,8 @@ impl Battle {
                 if let Some(velocity) = skims {
                     self.ricochet(app, at, shooter, shot, velocity)?;
                 } else if def.kind() == ShellKind::HighExplosive {
-                    self.splash(app, shooter, shot)?;
+                    let damaged = self.splash(app, shooter, shot)?;
+                    self.stun(app, shooter, shot, &damaged)?;
                 }
                 
                 Ok(())
@@ -1408,7 +1413,7 @@ impl Battle {
         &mut self,
         app: &mut base::App,
         shooter: EntityId,
-        entity_id: u32,
+        entity_id: EntityId,
         shot: &Shot,
         shell_hit: &ShellHit,
     ) -> io::Result<Option<i64>> {
@@ -1420,7 +1425,7 @@ impl Battle {
             .find(|vehicle| vehicle.entity.id() == shooter)
             .and_then(|vehicle| vehicle.client_driver())
             .map(|driver| driver.avatar());
-        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id().0 == entity_id) else {
+        let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id() == entity_id) else {
             return Ok(None);
         };
 
@@ -1477,8 +1482,8 @@ impl Battle {
     }
 
     /// An HE shell explodes on the ground: the vehicles in its reach take its damage,
-    /// but the shooter's own.
-    fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<()> {
+    /// but the shooter's own. The damage each alive took, by entity id.
+    fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<Vec<(EntityId, i64)>> {
 
         let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
             .filter_map(|target| {
@@ -1488,11 +1493,51 @@ impl Battle {
             })
             .collect();
 
+        let mut damaged = Vec::new();
         for (entity_id, explosion, reached) in explosions {
-            info!(battle = self.id, shot = shot.id, entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
+            info!(battle = self.id, shot = shot.id, %entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
             let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
             debug_hit(reached, &explosion.trace, "Splashed", explosion.damage, dealt);
+            damaged.extend(dealt.map(|dealt| (entity_id, dealt)));
         }
+        
+        Ok(damaged)
+
+    }
+
+    /// A stunning shell explodes where it ended, see
+    /// [`StunDef`](crate::game::item_defs::StunDef): the crews of the vehicles alive
+    /// with main armour within its stun's radius, but the shooter's own, are stunned,
+    /// each for the share of the shell's damage it took, `damaged`, by entity id, see
+    /// [`StunDef::of_damage`](crate::game::item_defs::StunDef::of_damage).
+    fn stun(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot, damaged: &[(EntityId, i64)]) -> io::Result<()> {
+
+        let Some(stun) = shot.def.stun else { return Ok(()) };
+        let now = self.game_time();
+        let id = self.id;
+
+        for vehicle in &mut self.vehicles {
+
+            if !vehicle.alive() || vehicle.entity.id() == shooter {
+                continue;
+            }
+
+            let target = vehicle.shot_target(&self.world);
+            let closest = target.collision.closest_point(&target.transforms, shot.end, |group| {
+                group.material.is_some_and(|material| material.is_main_armor())
+            });
+            if closest.is_none_or(|(_, distance)| distance > stun.radius) {
+                continue;
+            }
+
+            let took = damaged.iter()
+                .find(|&&(entity_id, _)| entity_id == target.entity_id)
+                .map_or(0, |&(_, dealt)| dealt);
+            let (duration, effect) = stun.of_damage(took as f32 / shot.def.damage_near);
+            vehicle.stun(app, id, now + duration as f64, effect)?;
+
+        }
+
         Ok(())
 
     }
@@ -1562,8 +1607,8 @@ fn fill_targets(targets: &mut Vec<ShotTarget>, vehicles: &[BattleVehicle], world
 }
 
 /// The entity id of the battle's vehicle of this id, if any, for its debug drawing.
-fn debug_entity_id(vehicles: &[BattleVehicle], id: VehicleId) -> Option<u32> {
+fn debug_entity_id(vehicles: &[BattleVehicle], id: VehicleId) -> Option<EntityId> {
     vehicles.iter()
         .find(|vehicle| vehicle.id == id)
-        .map(|vehicle| vehicle.entity.id().0)
+        .map(|vehicle| vehicle.entity.id())
 }
