@@ -64,11 +64,11 @@ use crate::base::physics::{ground_at, Vehicle, VehicleId, World};
 use crate::base::ballistics::ricochet::{self, GroundMaterial};
 use crate::base::ballistics::impact::{self, ImpactOutcome};
 use crate::game::item_defs::{ShellKind, VehicleDef};
-use crate::game::collision::VehicleIntersection;
+use crate::game::collision::{VehicleIntersection, VehiclePart};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
-use bot::{Bot, BotAlly, BotFire, BotFireMode, BotRoute, BotTravel};
+use bot::{Bot, BotAlly, BotFire, BotFireMode, BotRoute, BotSpot, BotTravel};
 use areas::{explosion_obstacle, DestructibleAreas};
 use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
@@ -488,6 +488,14 @@ impl Battle {
                 }
                 return;
             }
+            AvatarCell::SwitchViewPointOrBindToVehicle { .. } |
+            AvatarCell::BindToVehicle { .. } |
+            AvatarCell::MoveTo { .. } => {
+                if let Err(e) = self.watch(app, client, call) {
+                    warn!(%client, "Failed to switch the viewpoint: {e}");
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -499,7 +507,10 @@ impl Battle {
         match call {
             AvatarCell::VehicleShoot {} |
             AvatarCell::VehicleChangeSetting { .. } |
-            AvatarCell::AutoAim { .. } => unreachable!(),
+            AvatarCell::AutoAim { .. } |
+            AvatarCell::SwitchViewPointOrBindToVehicle { .. } |
+            AvatarCell::BindToVehicle { .. } |
+            AvatarCell::MoveTo { .. } => unreachable!(),
             AvatarCell::VehicleMoveWith { flags } => {
                 info!(%client, "Changed the movement flags: {flags:#04x}");
                 driven.hull.flags = flags;
@@ -563,6 +574,29 @@ impl Battle {
 
         vehicle.change_setting(app, client, now, code, value)
         
+    }
+
+    /// A client, its vehicle destroyed, watches another vehicle, see
+    /// [`Participant::watch`], or its avatar follows one, see [`Participant::bind`], or
+    /// its free camera, see [`Participant::move_to`]. Its viewpoints, none of which the
+    /// battle has, it is refused.
+    fn watch(&mut self, app: &mut base::App, client: ClientKey, call: AvatarCell) -> io::Result<()> {
+
+        let Some(participant) = self.participants.iter_mut().find(|participant| participant.client == client) else {
+            return Ok(());
+        };
+
+        match call {
+            AvatarCell::SwitchViewPointOrBindToVehicle { is_viewpoint: true, id } => {
+                info!(%client, viewpoint = id.0, "Refused to switch the viewpoint: no viewpoints");
+                Ok(())
+            }
+            AvatarCell::SwitchViewPointOrBindToVehicle { id, .. } => participant.watch(app, &self.vehicles, &self.world, id),
+            AvatarCell::BindToVehicle { vehicle } => participant.bind(app, &self.vehicles, &self.world, vehicle),
+            AvatarCell::MoveTo { position } => participant.move_to(app, &self.vehicles, position),
+            _ => Ok(()),
+        }
+
     }
 
     /// A client locks its auto-aim on a vehicle, or unlocks it, see
@@ -724,9 +758,11 @@ impl Battle {
     ///                              round
     ///       speed <km/h>|off       drive at most this fast, from now on, or as fast as
     ///                              it can: a speed after goto or follow sets it too
-    ///       fire [once|hold|off]   fire at the spot under its gun marker, on the vehicle
-    ///                              there, see `marked_spot`: each time loaded, once,
-    ///                              only aim at it, or no more
+    ///       fire [once|hold|off] [aimed|ground|me|<number>]
+    ///                              fire each time loaded, once, only aim, or no more,
+    ///                              at the spot under its gun marker, on the vehicle
+    ///                              there, the point under it, its own vehicle, or a
+    ///                              bot's, see `fire_spot`
     ///       shell <n>              load its gun's nth shell, from 1
     ///       stop                   stand still holding fire, its orders kept
     ///       start                  carry them out again
@@ -740,7 +776,8 @@ impl Battle {
         let Some(who) = words.next() else {
             return Err(
                 "/bot <number|aimed|all|allies|enemies> <goto [here] [km/h]|follow [loop] [km/h]|\
-                speed <km/h|off>|fire [once|hold|off]|shell <n>|stop|start|clear>".to_string(),
+                speed <km/h|off>|fire [once|hold|off] [aimed|ground|me|<number>]|shell <n>|stop|start|clear>"
+                    .to_string(),
             );
         };
         let bots = self.bots_named(from, who)?;
@@ -811,25 +848,26 @@ impl Battle {
                 }
             }
             "fire" => {
-                let mode = match words.next() {
-                    None => Some(BotFireMode::Repeat),
-                    Some("once") => Some(BotFireMode::Once),
-                    Some("hold") => Some(BotFireMode::Hold),
-                    Some("off") => None,
-                    Some(word) => return Err(format!("Unknown fire mode: {word}, of once, hold, off")),
-                };
-                let fire = match mode {
-                    Some(mode) => {
-                        let (target, hit, hull_position) = self.marked_spot(from)
-                            .ok_or("No vehicle under your gun marker")?;
-                        let target = self.vehicles[target].id;
-                        Some(BotFire::new(target, hit.part, hit.local_point, hull_position, mode))
+
+                // Its options, in any order: a mode, and a target.
+                let mut mode = Some(BotFireMode::Repeat);
+                let mut target = None;
+                for word in words {
+                    match word {
+                        "once" => mode = Some(BotFireMode::Once),
+                        "hold" => mode = Some(BotFireMode::Hold),
+                        "off" => mode = None,
+                        word => target = Some(word),
                     }
+                }
+
+                let fire = match mode {
+                    Some(mode) => Some(BotFire::new(self.fire_spot(from, target)?, mode)),
                     None => None,
                 };
                 for &index in &bots {
                     let vehicle = &mut self.vehicles[index];
-                    let own = fire.is_some_and(|fire| fire.vehicle == vehicle.id);
+                    let own = fire.is_some_and(|fire| fire.spot.vehicle() == Some(vehicle.id));
                     if let (Some(bot), false) = (vehicle.as_bot_mut(), own) {
                         bot.set_fire(fire);
                     }
@@ -940,6 +978,56 @@ impl Battle {
                 Some((index, hit, target.collision.hull_position))
             })
             .min_by(|(_, a, _), (_, b, _)| a.distance.total_cmp(&b.distance))
+
+    }
+
+    /// Where the `from`th participant's bots fire, at the `target` of its `/bot fire`
+    /// order, see [`Self::bot_command`]: by default, or `aimed`, the spot under its gun
+    /// marker, on the vehicle there, see [`Self::marked_spot`]; `ground`, the point
+    /// under it, staying there; `me`, its own vehicle, or a bot's number, that bot's, at
+    /// its hull's centre. Else what is wrong.
+    fn fire_spot(&self, from: usize, target: Option<&str>) -> Result<BotSpot, String> {
+
+        let own = self.participants[from].vehicle;
+        let index = match target {
+            None |
+            Some("aimed") => {
+                let (index, hit, hull_position) = self.marked_spot(from).ok_or("No vehicle under your gun marker")?;
+                return Ok(BotSpot::Vehicle {
+                    vehicle: self.vehicles[index].id,
+                    part: hit.part,
+                    local: hit.local_point,
+                    hull_position,
+                });
+            }
+            Some("ground") => {
+                let driven = self.world.vehicle(self.vehicles[own].id);
+                let point = driven.turret.marked().ok_or("No point under your gun marker")?;
+                return Ok(BotSpot::Point(point));
+            }
+            Some("me") => own,
+            Some(word) => {
+                let number = word.parse::<u32>()
+                    .map_err(|_| format!("Unknown target: {word}, of aimed, ground, me, a bot's number"))?;
+                let name = format!("Bot {number}");
+                self.vehicles.iter()
+                    .position(|vehicle| matches!(vehicle.driver, Driver::Bot(_)) && vehicle.info.name == name)
+                    .ok_or_else(|| format!("No bot {number}"))?
+            }
+        };
+
+        let vehicle = &self.vehicles[index];
+        if !vehicle.alive() {
+            return Err(format!("{} is destroyed", vehicle.info.name));
+        }
+
+        let [min, max] = vehicle.collision.parts[VehiclePart::Hull as usize].bounds;
+        Ok(BotSpot::Vehicle {
+            vehicle: vehicle.id,
+            part: VehiclePart::Hull,
+            local: (min + max) / 2.0,
+            hull_position: vehicle.collision.hull_position,
+        })
 
     }
 
@@ -1122,6 +1210,7 @@ impl Battle {
         for participant in participants.iter_mut() {
             participant.spot(app, vehicles, spotting, now)?;
             participant.keep_lock(app, vehicles)?;
+            participant.follow(app, vehicles, world)?;
         }
         
         spotting.debug_draw(vehicles, world);

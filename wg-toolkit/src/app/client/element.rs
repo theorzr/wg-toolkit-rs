@@ -1174,15 +1174,14 @@ crate::__struct_simple_codec! {
     pub struct ForcedPosition {
         pub entity_id: u32,
         pub space_id: u32,
-        pub vehicle_entity_id: u32,
         /// Two bytes WoT adds that the BigWorld 14.4.1 `forcedPosition` layout
         /// (`x.id >> x.spaceID >> x.vehicleID >> x.position >> x.direction`, 36 bytes)
         /// does not have; they make up the declared 38. Observed zero in all 27 samples
-        /// of a battle, so the meaning is unknown -- but the *position* is not: placing
-        /// them here rather than at the end is what makes the following `Vec3` read as
-        /// clean, smoothly drifting world coordinates (e.g. `(271.13, 60.88, 320.84)`)
-        /// instead of the denormal garbage a 2-byte-early read produced.
+        /// of a battle, so the meaning is unknown. They come before `position`, which
+        /// then reads as clean world coordinates (e.g. `(271.13, 60.88, 320.84)`), and
+        /// after `space_id`, as in [`CreateCellPlayer`], whose `unk_short` sits there.
         pub unk: u16,
+        pub vehicle_entity_id: u32,
         pub position: Vec3,
         pub direction: Vec3,
     }
@@ -3603,19 +3602,21 @@ mod tests {
 
     use super::*;
 
-    /// A real `forcedPosition` body, pinning the field
-    /// split: BigWorld's own layout accounts for only 36 of the declared 38 bytes, and
-    /// the two extra sit *between* `vehicle_entity_id` and `position`, not at the end.
-    /// Reading them at the end instead shifts `position` two bytes early and turns clean
-    /// world coordinates into denormal garbage, which is how the bug showed up.
+    /// A real `forcedPosition` body, pinning the field split: BigWorld's own layout
+    /// accounts for only 36 of the declared 38 bytes, and the two extra sit before
+    /// `position`, not at the end. Reading them at the end instead shifts `position` two
+    /// bytes early and turns clean world coordinates into denormal garbage. Their place
+    /// before `vehicle_entity_id` follows `CreateCellPlayer`, which this body's zeros
+    /// can't tell: with them after it, a client boarding its player on a vehicle took
+    /// it out of the world, as for a vehicle it doesn't know.
     #[test]
     fn forced_position_field_split() {
 
         let body = [
             0x7c, 0x3c, 0x48, 0x20, // entity_id  = 541604988
             0xe1, 0x0a, 0x00, 0x00, // space_id   = 2785
-            0x00, 0x00, 0x00, 0x00, // vehicle_id = 0
             0x00, 0x00,             // the two unaccounted bytes
+            0x00, 0x00, 0x00, 0x00, // vehicle_id = 0
             0x6a, 0x90, 0x87, 0x43, 0x30, 0x86, 0x73, 0x42, 0x69, 0x6b, 0xa0, 0x43, // position
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // direction
         ];

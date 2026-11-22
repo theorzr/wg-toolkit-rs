@@ -115,6 +115,9 @@ entity_schema! {
             /// Its auto-aim's target is lost, why as `TARGET_LOST_FLAGS`: the client
             /// unlocks it.
             fn onAutoAimVehicleLost(flags: u8);
+            /// Its camera switched to a vehicle, or with -1 to a viewpoint at this
+            /// position, as it asked, see `switchViewPointOrBindToVehicle`.
+            fn onSwitchViewpoint(vehicle: EntityId, position: Vec3);
         }
         base {
             fn setClientReady();
@@ -132,6 +135,14 @@ entity_schema! {
             /// Lock its auto-aim on a vehicle, or unlock it with 0; magnetic when the
             /// client's magnetic aim picked it.
             fn autoAim(target: EntityId, magnetic: bool);
+            /// Its vehicle destroyed, watch another, by its entity id, or a viewpoint,
+            /// by its index, or with vehicle 0 its free camera: answered with
+            /// `onSwitchViewpoint`.
+            fn switchViewPointOrBindToVehicle(is_viewpoint: bool, id: EntityId);
+            /// Bind its avatar to a vehicle, or with 0 to none, as its free camera does.
+            fn bindToVehicle(vehicle: EntityId);
+            /// Move its avatar to where its free camera is.
+            fn moveTo(position: Vec3);
             // What the client aims from, so it must turn with the hull, and the engine's
             // RPM.
             ownVehicleAuxPhysicsData: u64,

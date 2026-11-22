@@ -1054,6 +1054,7 @@ fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
     let extra_data = PickleValue::Dict([
         (PickleValue::Bytes(b"battleLevel".to_vec()), PickleValue::I64(BATTLE_LEVEL)),
         (PickleValue::Bytes(b"bonusCapsOverrides".to_vec()), PickleValue::Dict(Default::default())),
+        (PickleValue::Bytes(b"postmortemSettings".to_vec()), postmortem_settings()),
     ].into_iter().collect());
     AvatarData {
         name,
@@ -1079,6 +1080,24 @@ fn avatar_data(name: String, arena_type_id: i32) -> AvatarData {
         },
         goodiesSnapshot: Vec::new(),
     }
+}
+
+/// The arena's `postmortemSettings`, which the client reads from its extra data, see its
+/// `AvatarPostmortemComponent`: once its vehicle is destroyed, its free camera, its
+/// `deathfreecam`; no kill cam, which needs the server's replay of the kill, nor looking
+/// at the killer.
+fn postmortem_settings() -> PickleValue {
+    let features = [
+        ("deathfreecam", true),
+        ("killcam", false),
+        ("lookAtKiller", false),
+    ];
+    let game_mode = features.into_iter()
+        .map(|(name, enabled)| (PickleValue::Bytes(name.as_bytes().to_vec()), PickleValue::Bool(enabled)))
+        .collect();
+    PickleValue::Dict([
+        (PickleValue::Bytes(b"gamemode".to_vec()), PickleValue::Dict(game_mode)),
+    ].into_iter().collect())
 }
 
 /// The server's settings: only what the client reads without a default, every other

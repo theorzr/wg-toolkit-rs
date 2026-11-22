@@ -6,7 +6,7 @@
 //!   route traced by a dev, see [`BotRoute`];
 //! - how fast it drives at most, if limited;
 //! - what it fires at: a spot on a vehicle, which follows the vehicle as it moves and
-//!   turns, see [`BotFire`];
+//!   turns, or a point that stays where it is, see [`BotFire`];
 //! - whether it stands still, holding fire, its orders kept.
 //!
 //! It drives to its goal round its allies, see [`BotAlly`], getting unstuck, see
@@ -202,7 +202,7 @@ impl Bot {
 
     /// The vehicle it fires at, if any.
     pub fn target(&self) -> Option<VehicleId> {
-        self.fire.as_ref().map(|fire| fire.vehicle)
+        self.fire.as_ref().and_then(|fire| fire.spot.vehicle())
     }
 
     // -- Its gun --
@@ -323,22 +323,32 @@ impl fmt::Display for BotTravel {
 
 }
 
-/// A spot on a vehicle a bot fires at, as ordered: on a part of it, which moves and turns
-/// with it.
+/// What a bot fires at, as ordered, and when.
 #[derive(Debug, Clone, Copy)]
 pub struct BotFire {
-    /// The vehicle, in the world.
-    pub vehicle: VehicleId,
-    /// Its part the spot is on, and where on it, in the part's frame.
-    pub part: VehiclePart,
-    pub local: Vec3,
-    /// Where its hull sits on its chassis, see
-    /// [`Vehicle::part_transforms`](crate::base::physics::Vehicle::part_transforms).
-    pub hull_position: Vec3,
+    pub spot: BotSpot,
     /// When the bot fires at it.
     pub mode: BotFireMode,
     /// Where the bot aims, see [`Self::aim`].
     aim: Vec3,
+}
+
+/// Where a bot fires, see [`BotFire`].
+#[derive(Debug, Clone, Copy)]
+pub enum BotSpot {
+    /// A spot on a part of a vehicle, which moves and turns with it.
+    Vehicle {
+        /// The vehicle, in the world.
+        vehicle: VehicleId,
+        /// Its part the spot is on, and where on it, in the part's frame.
+        part: VehiclePart,
+        local: Vec3,
+        /// Where its hull sits on its chassis, see
+        /// [`Vehicle::part_transforms`](crate::base::physics::Vehicle::part_transforms).
+        hull_position: Vec3,
+    },
+    /// A point that stays where it is, on the ground say.
+    Point(Vec3),
 }
 
 /// When a bot fires at its [`BotFire`] spot.
@@ -354,29 +364,19 @@ pub enum BotFireMode {
 
 impl BotFire {
 
-    /// Fire at a spot on a vehicle's part, see the type's fields.
-    pub fn new(vehicle: VehicleId, part: VehiclePart, local: Vec3, hull_position: Vec3, mode: BotFireMode) -> Self {
-        Self {
-            vehicle,
-            part,
-            local,
-            hull_position,
-            mode,
-            aim: Vec3::ZERO,
-        }
+    /// Fire at a spot, as the mode says.
+    pub fn new(spot: BotSpot, mode: BotFireMode) -> Self {
+        Self { spot, mode, aim: Vec3::ZERO }
     }
 
     /// Aim where its spot will be once a shell the bot's vehicle of this id fires gets
-    /// there: the spot moved on at its vehicle's velocity for a tick, the battle firing
-    /// after its step, then for the shell's flight to there, worked out again from there
+    /// there: the spot moved on at its velocity for a tick, the battle firing after its
+    /// step, then for the shell's flight to there, worked out again from there
     /// [`LEAD_PASSES`] times. The flight is the distance at the shell's speed, as near as
     /// its low arc is to a line. Where it aims.
     pub fn aim(&mut self, world: &World, id: VehicleId) -> Vec3 {
 
-        let target = world.vehicle(self.vehicle);
-        let transforms = target.part_transforms(self.hull_position);
-        let spot = transforms[self.part as usize].transform_point3(self.local);
-        let velocity = target.hull.velocity();
+        let (spot, velocity) = self.spot.motion(world);
 
         let vehicle = world.vehicle(id);
         let (eye, _, _) = vehicle.turret.gun_marker(&vehicle.hull);
@@ -399,14 +399,51 @@ impl BotFire {
 
 impl fmt::Display for BotFire {
 
-    /// When it fires, and at which part.
+    /// When it fires, and where.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mode = match self.mode {
             BotFireMode::Repeat => "fire",
             BotFireMode::Once => "fire once",
             BotFireMode::Hold => "aim",
         };
-        write!(f, "{mode} at its target's {:?}", self.part)
+        write!(f, "{mode} at {}", self.spot)
+    }
+
+}
+
+impl BotSpot {
+
+    /// Where it is in the world now, and how fast it moves, in m/s: its vehicle's
+    /// velocity, or none for a point.
+    pub fn motion(&self, world: &World) -> (Vec3, Vec3) {
+        match *self {
+            Self::Vehicle { vehicle, part, local, hull_position } => {
+                let target = world.vehicle(vehicle);
+                let transforms = target.part_transforms(hull_position);
+                (transforms[part as usize].transform_point3(local), target.hull.velocity())
+            }
+            Self::Point(point) => (point, Vec3::ZERO),
+        }
+    }
+
+    /// The vehicle it is on, if any.
+    pub fn vehicle(&self) -> Option<VehicleId> {
+        match *self {
+            Self::Vehicle { vehicle, .. } => Some(vehicle),
+            Self::Point(_) => None,
+        }
+    }
+
+}
+
+impl fmt::Display for BotSpot {
+
+    /// Its vehicle's part, or the point, on the ground plane.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Vehicle { part, .. } => write!(f, "its target's {part:?}"),
+            Self::Point(point) => write!(f, "the point {:.0} {:.0}", point.x, point.z),
+        }
     }
 
 }

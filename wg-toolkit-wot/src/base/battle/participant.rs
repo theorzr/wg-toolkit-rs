@@ -1,15 +1,18 @@
 //! A client in a battle: its avatar, its vehicle, its own arena info, what it sees of the
-//! others' vehicles, what its auto-aim is locked on, and whether it is done loading.
+//! others' vehicles, what its auto-aim is locked on, what it watches once its vehicle is
+//! destroyed, and whether it is done loading.
 
 use std::io;
 
 use tracing::info;
+use glam::Vec3;
 
 use wgtk::app::entity::{ComponentKey, EntityId, EntityKey};
 use wgtk::app::base::{self, ClientKey};
 
 use crate::game::schema::{Avatar, AvatarVehiclesInfo};
 use crate::base::{VehicleLoadout, TICK};
+use crate::base::physics::World;
 
 use super::vehicle::BattleVehicle;
 use super::spotting::Spotting;
@@ -45,6 +48,10 @@ pub struct Participant {
     spotted: Vec<bool>,
     /// The vehicle its auto-aim is locked on, by index, see [`Self::auto_aim`].
     locked: Option<usize>,
+    /// What it watches once its vehicle is destroyed, see [`Self::watch`]: a vehicle, an
+    /// ally or its own wreck, by its index, its avatar riding and following it, or none,
+    /// its free camera, its avatar where the camera moves it, see [`Self::move_to`].
+    watched: Option<usize>,
     /// Whether its client is done loading, ready for the countdown.
     pub ready: bool,
     /// Whether its player may use the server's dev commands, see `Player::dev`.
@@ -72,6 +79,7 @@ impl Participant {
             vehicles_info,
             spotted: vec![false; vehicles],
             locked: None,
+            watched: None,
             ready: false,
             dev,
         }
@@ -159,6 +167,95 @@ impl Participant {
         info!(client = %self.client, entity_id = %target.entity.id(), flags, "Lost the auto-aim's target");
         Ok(())
 
+    }
+
+    /// Its client, its vehicle destroyed, watches the vehicle of this entity id, see
+    /// [`Self::watchable`], which it is told to switch to, then its avatar rides it, see
+    /// [`Self::board`]: the client binds its camera to the vehicle its avatar rides,
+    /// once switched to it.
+    pub fn watch(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], world: &World, target: EntityId) -> io::Result<()> {
+
+        let Some(watched) = self.watchable(vehicles, target) else { return Ok(()) };
+
+        if watched.is_some() {
+            app.entity(self.avatar)?.onSwitchViewpoint(target, Vec3::ZERO)?;
+            info!(client = %self.client, entity_id = %target, "Switched the viewpoint to a vehicle");
+        }
+
+        self.board(app, vehicles, world, watched)
+
+    }
+
+    /// Its avatar rides the vehicle of this entity id, its own destroyed, see
+    /// [`Self::watchable`], as its client binds it, or none, for its free camera.
+    pub fn bind(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], world: &World, target: EntityId) -> io::Result<()> {
+        let Some(watched) = self.watchable(vehicles, target) else { return Ok(()) };
+        self.board(app, vehicles, world, watched)
+    }
+
+    /// What it may watch of the vehicle of this entity id, its own destroyed: an ally's,
+    /// or its own wreck, by index; with 0, none, its free camera. None if refused.
+    fn watchable(&self, vehicles: &[BattleVehicle], target: EntityId) -> Option<Option<usize>> {
+
+        let own = &vehicles[self.vehicle];
+        if own.alive() {
+            info!(client = %self.client, entity_id = %target, "Refused to switch the viewpoint: its vehicle is alive");
+            return None;
+        }
+
+        if target.0 == 0 {
+            return Some(None);
+        }
+
+        let watched = vehicles.iter()
+            .position(|vehicle| vehicle.entity.id() == target)
+            .filter(|&index| vehicles[index].team == own.team);
+        if watched.is_none() {
+            info!(client = %self.client, entity_id = %target, "Refused to switch the viewpoint: not an ally");
+            return None;
+        }
+
+        Some(watched)
+
+    }
+
+    /// Its avatar rides the vehicle it now watches, by index, from where it is, see
+    /// [`Self::follow`], or none, staying where it is, see [`base::App::teleport`].
+    fn board(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], world: &World, watched: Option<usize>) -> io::Result<()> {
+
+        self.watched = watched;
+
+        let Some(index) = watched else {
+            let (position, _) = app.position(self.avatar).unwrap_or_default();
+            info!(client = %self.client, "Freed the camera");
+            return app.teleport(self.avatar, None, position, Vec3::ZERO);
+        };
+
+        let vehicle = &vehicles[index];
+        let position = world.vehicle(vehicle.id).hull.position;
+        app.teleport(self.avatar, Some(vehicle.entity.id()), position, Vec3::ZERO)
+
+    }
+
+    /// Its free camera moves to a position, its vehicle destroyed: its avatar, off any
+    /// vehicle, goes there, what it sees with it.
+    pub fn move_to(&mut self, app: &mut base::App, vehicles: &[BattleVehicle], position: Vec3) -> io::Result<()> {
+
+        if vehicles[self.vehicle].alive() {
+            return Ok(());
+        }
+
+        self.watched = None;
+        app.teleport(self.avatar, None, position, Vec3::ZERO)
+
+    }
+
+    /// Its avatar follows the vehicle it watches, its own destroyed, where it is in the
+    /// world, see [`Self::watch`].
+    pub fn follow(&self, app: &mut base::App, vehicles: &[BattleVehicle], world: &World) -> io::Result<()> {
+        let Some(index) = self.watched.filter(|_| !vehicles[self.vehicle].alive()) else { return Ok(()) };
+        let position = world.vehicle(vehicles[index].id).hull.position;
+        app.set_position(self.avatar, position, Vec3::ZERO)
     }
 
     /// Tell its client the battle's period, as long as is left of it: its game time is

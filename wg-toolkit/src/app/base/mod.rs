@@ -1043,6 +1043,8 @@ struct EntityCell {
     direction: Vec3,
     /// Whether it moved during the tick.
     moved: bool,
+    /// The entity it rides, a client's player only, see [`App::teleport`].
+    vehicle: Option<EntityId>,
     /// See [`EntityInit::alias`], [`EntityInit::controlled_by`] and
     /// [`EntityInit::visibility`].
     alias: bool,
@@ -1062,8 +1064,9 @@ impl EntityCell {
             space, 
             position, 
             direction, 
-            moved: false, 
-            alias, 
+            moved: false,
+            vehicle: None,
+            alias,
             controlled_by, 
             visibility, 
             components: Slots::default(), 
@@ -1075,6 +1078,13 @@ impl EntityCell {
     /// Whether the given entity controls it, whose client is then its own.
     fn is_controlled_by(&self, entity: EntityKey<AnyEntity>) -> bool {
         self.controlled_by == Some(entity)
+    }
+
+    /// Its position and direction relative to the vehicle it rides, BigWorld's
+    /// `localPosition_`, as its client is told them: its vehicle's origin, as the
+    /// captured server tells it, else where it is.
+    fn local_position(&self) -> (Vec3, Vec3) {
+        if self.vehicle.is_some() { (Vec3::ZERO, Vec3::ZERO) } else { (self.position, self.direction) }
     }
 
 }
@@ -1200,7 +1210,9 @@ impl App {
 
         self.leave_space(player.any());
         if let Some(state) = self.entities.get_mut(player.slot) {
-            state.cell = Some(EntityCell::new(space, init.position, init.direction, true, None, Visibility::Interest));
+            let mut cell = EntityCell::new(space, init.position, init.direction, true, None, Visibility::Interest);
+            cell.vehicle = Some(EntityId(init.vehicle_id)).filter(|vehicle| vehicle.0 != 0);
+            state.cell = Some(cell);
         }
         if let Some(space) = self.spaces.get_mut(space.slot) {
             space.entities.push(player.any());
@@ -1290,6 +1302,38 @@ impl App {
         cell.direction = direction;
         cell.moved = true;
         Ok(())
+
+    }
+
+    /// Move a client's player entity at once, as BigWorld's `teleport`, onto the vehicle
+    /// of this entity id or off any, with its direction (roll, pitch and yaw): its client
+    /// gets a forced position, relative to the vehicle, which it acknowledges, and from
+    /// then on its own position relative to it: the vehicle's origin, else where it is.
+    pub fn teleport<T>(&mut self, player: EntityKey<T>, vehicle: Option<EntityId>, position: Vec3, direction: Vec3) -> io::Result<()> {
+
+        let state = self.entities.get_mut(player.slot)
+            .ok_or_else(|| io_invalid_data(format_args!("no such entity: {player}")))?;
+        let client = state.client
+            .ok_or_else(|| io_invalid_data(format_args!("entity {player} has no client")))?;
+        let cell = state.cell.as_mut()
+            .ok_or_else(|| io_invalid_data(format_args!("entity {player} is in no space")))?;
+
+        cell.position = position;
+        cell.direction = direction;
+        cell.vehicle = vehicle;
+        cell.moved = true;
+        let (position, direction) = cell.local_position();
+        let space_id = cell.space.id;
+
+        let out = self.outbox.client(client.addr, &mut self.protocol, &self.socket)?;
+        out.write_simple(client::element::ForcedPosition {
+            entity_id: player.id,
+            space_id,
+            vehicle_entity_id: vehicle.map_or(0, |vehicle| vehicle.0),
+            unk: 0,
+            position,
+            direction,
+        })
 
     }
 
@@ -1825,15 +1869,18 @@ impl Witness {
     fn write_positions(&self, out: &mut ClientOutbox, view: &TickView) -> io::Result<()> {
 
         // The reference position after its player: the client sets its own to its
-        // player's detailed position, rounded (`detailedPositionReceived`), here the
-        // origin, which would offset every packed position by its player's.
+        // player's detailed position, rounded (`detailedPositionReceived`), relative to
+        // the vehicle it rides, here the origin, which would offset every packed
+        // position by its player's.
         if view.player.moved {
+            let (position, direction) = view.player.local_position();
             out.write_simple(client::element::AvatarUpdatePlayerDetailed {
                 ref_num: 0,
-                position: Vec3::ZERO,
-                direction: Vec3::ZERO,
+                position,
+                direction,
             })?;
         }
+        
         let reference = calculate_reference_position(view.player.position);
         out.write_simple(client::element::RelativePosition { position: reference })?;
 
