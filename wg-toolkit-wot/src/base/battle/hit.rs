@@ -1,7 +1,10 @@
 //! What a shell does to a vehicle, as the vehicle shows it and its shooter learns it:
-//! where it hits it, the effect there, and the hit's flags.
+//! where it hits it, the effect there, and the hit's flags, see [`ShellHit`], then what
+//! the vehicle took of it, see [`ShellHitResult`].
 
 use glam::Vec3;
+
+use wgtk::app::entity::EntityId;
 
 use crate::base::ballistics::impact::{Impact, Explosion, ImpactOutcome};
 use crate::game::collision::VehicleIntersection;
@@ -14,7 +17,8 @@ use crate::game::schema::HitPoint;
 const HIT_FLAGS_PIERCED: u32 = HIT_FLAG_DIRECT | 0x100 | 0x10;
 /// `VEHICLE_HIT_FLAGS`: a direct projectile, an explosion beside the vehicle, a
 /// ricochet, armour of the vehicle's own, then a screen, not pierced, a screen pierced,
-/// the vehicle's own armour pierced by an explosion, and the vehicle killed.
+/// the vehicle's own armour pierced by an explosion, the vehicle killed, and its crew's
+/// stun started.
 const HIT_FLAG_DIRECT: u32 = 0x100000;
 const HIT_FLAG_EXTERNAL_EXPLOSION: u32 = 0x200000;
 const HIT_FLAG_RICOCHET: u32 = 0x8;
@@ -23,6 +27,7 @@ const HIT_FLAG_SCREEN_NOT_PIERCED: u32 = 0x80;
 const HIT_FLAG_SCREEN_PIERCED: u32 = 0x40;
 const HIT_FLAG_ARMOR_PIERCED_BY_EXPLOSION: u32 = 0x2000;
 pub const HIT_FLAG_VEHICLE_KILLED: u32 = 1;
+pub const HIT_FLAG_STUN_STARTED: u32 = 0x400000;
 /// `VEHICLE_HIT_EFFECT`.
 const HIT_EFFECT_ARMOR_PIERCED_NO_DAMAGE: u8 = 0;
 const HIT_EFFECT_FINAL_RICOCHET: u8 = 2;
@@ -44,6 +49,30 @@ pub struct ShellHit {
     pub flags: u32,
     /// Its damage, before its spread.
     pub damage: f32,
+}
+
+/// What a vehicle alive took of a shell, and what its shooter's client learns of it, in
+/// one `ShotResult` per vehicle for each shell.
+#[derive(Debug, Clone, Copy)]
+pub struct ShellHitResult {
+    pub entity_id: EntityId,
+    /// The damage it took, after its spread.
+    pub dealt: i64,
+    /// Its `VEHICLE_HIT_FLAGS`, the kill and the stun included.
+    pub flags: u32,
+}
+
+impl ShellHitResult {
+
+    /// A vehicle the shell's explosion stunned without damaging it.
+    pub fn stunned(entity_id: EntityId) -> Self {
+        Self {
+            entity_id,
+            dealt: 0,
+            flags: HIT_FLAG_EXTERNAL_EXPLOSION | HIT_FLAG_STUN_STARTED,
+        }
+    }
+
 }
 
 impl ShellHit {

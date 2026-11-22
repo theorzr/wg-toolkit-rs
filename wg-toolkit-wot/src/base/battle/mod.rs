@@ -68,11 +68,11 @@ use crate::game::collision::{VehicleIntersection, VehiclePart};
 use crate::game::arena_defs::ArenaTypeDef;
 use crate::base::garage::player::Player;
 
+use hit::{ShellHit, ShellHitResult, HIT_FLAG_STUN_STARTED, HIT_FLAG_VEHICLE_KILLED};
 use bot::{Bot, BotAlly, BotFire, BotFireMode, BotRoute, BotSpot, BotTravel};
 use areas::{explosion_obstacle, DestructibleAreas};
 use vehicle::{hold_gun, BattleVehicle, Driver};
 use shells::{show_shot, show_tracer, Shells};
-use hit::{ShellHit, HIT_FLAG_VEHICLE_KILLED};
 use period::{ArenaPeriod, NO_WINNER};
 use participant::Participant;
 use spotting::Spotting;
@@ -1340,18 +1340,18 @@ impl Battle {
                     impact.outcome, impact.hit.part, impact.hit.material.map_or(0.0, |m| m.armor), impact.hit.local_point,
                     impact.damage, if impact.exploded { ", exploded" } else { "" });
                 
-                let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
-                debug_hit(shot.end, &impact.trace, debug_outcome(&impact), impact.damage, dealt);
-                
+                let result = self.hit(app, shooter, entity_id, shot, &ShellHit::of_impact(&impact))?;
+                debug_hit(shot.end, &impact.trace, debug_outcome(&impact), impact.damage, result.map(|result| result.dealt));
+
+                let mut results: Vec<_> = result.into_iter().collect();
                 if impact.outcome == ImpactOutcome::Ricochet {
                     let velocity = ricochet::off_armor(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, velocity)?;
                 } else {
-                    let damaged: Vec<_> = dealt.map(|dealt| (entity_id, dealt)).into_iter().collect();
-                    self.stun(app, shooter, shot, &damaged)?;
+                    self.stun(app, shooter, shot, &mut results)?;
                 }
 
-                Ok(())
+                self.show_shot_results(app, shooter, &results)
 
             }
             ShotLanding::Terrain |
@@ -1393,8 +1393,9 @@ impl Battle {
                 if let Some(velocity) = skims {
                     self.ricochet(app, at, shooter, shot, velocity)?;
                 } else if def.kind() == ShellKind::HighExplosive {
-                    let damaged = self.splash(app, shooter, shot)?;
-                    self.stun(app, shooter, shot, &damaged)?;
+                    let mut results = self.splash(app, shooter, shot)?;
+                    self.stun(app, shooter, shot, &mut results)?;
+                    self.show_shot_results(app, shooter, &results)?;
                 }
                 
                 Ok(())
@@ -1406,9 +1407,9 @@ impl Battle {
     }
 
     /// A vehicle of it takes a shell's damage, see [`BattleVehicle::take_damage`], every
-    /// client listing it destroyed once killed, and the client that fired it, if any,
-    /// learns the hit's result. A wreck takes none, its clients only see the hit. The
-    /// damage it took, if it was alive.
+    /// client listing it destroyed once killed. A wreck takes none, its clients only see
+    /// the hit. What it took, if it was alive, for its shooter's client, see
+    /// [`Self::show_shot_results`].
     fn hit(
         &mut self,
         app: &mut base::App,
@@ -1416,15 +1417,11 @@ impl Battle {
         entity_id: EntityId,
         shot: &Shot,
         shell_hit: &ShellHit,
-    ) -> io::Result<Option<i64>> {
+    ) -> io::Result<Option<ShellHitResult>> {
 
         let id = self.id;
         let now = self.game_time();
         let vehicles_infos: Vec<_> = self.participants.iter().map(|participant| participant.vehicles_info).collect();
-        let shooter_avatar = self.vehicles.iter()
-            .find(|vehicle| vehicle.entity.id() == shooter)
-            .and_then(|vehicle| vehicle.client_driver())
-            .map(|driver| driver.avatar());
         let Some(vehicle) = self.vehicles.iter_mut().find(|vehicle| vehicle.entity.id() == entity_id) else {
             return Ok(None);
         };
@@ -1435,22 +1432,13 @@ impl Battle {
             return Ok(None);
         }
 
-        let killed = !vehicle.alive();
-        if killed {
-            vehicle.mark_killed(app, &vehicles_infos, shooter)?;
-        }
-
-        let Some(shooter_avatar) = shooter_avatar else { return Ok(Some(dealt)) };
         let mut flags = shell_hit.flags;
-        if killed {
+        if !vehicle.alive() {
+            vehicle.mark_killed(app, &vehicles_infos, shooter)?;
             flags |= HIT_FLAG_VEHICLE_KILLED;
         }
-        app.entity(shooter_avatar)?.showShotResults(vec![ShotResult {
-            gunInstallationIndex: 0,
-            hitFlags: flags,
-            vehicleID: vehicle.entity.id(),
-        }])?;
-        Ok(Some(dealt))
+
+        Ok(Some(ShellHitResult { entity_id, dealt, flags }))
 
     }
 
@@ -1481,36 +1469,13 @@ impl Battle {
 
     }
 
-    /// An HE shell explodes on the ground: the vehicles in its reach take its damage,
-    /// but the shooter's own. The damage each alive took, by entity id.
-    fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<Vec<(EntityId, i64)>> {
-
-        let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
-            .filter_map(|target| {
-                let explosion = impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?;
-                let reached = target.transforms[explosion.hit.part as usize].transform_point3(explosion.hit.local_point);
-                Some((target.entity_id, explosion, reached))
-            })
-            .collect();
-
-        let mut damaged = Vec::new();
-        for (entity_id, explosion, reached) in explosions {
-            info!(battle = self.id, shot = shot.id, %entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
-            let dealt = self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
-            debug_hit(reached, &explosion.trace, "Splashed", explosion.damage, dealt);
-            damaged.extend(dealt.map(|dealt| (entity_id, dealt)));
-        }
-        
-        Ok(damaged)
-
-    }
-
     /// A stunning shell explodes where it ended, see
     /// [`StunDef`](crate::game::item_defs::StunDef): the crews of the vehicles alive
     /// with main armour within its stun's radius, but the shooter's own, are stunned,
-    /// each for the share of the shell's damage it took, `damaged`, by entity id, see
-    /// [`StunDef::of_damage`](crate::game::item_defs::StunDef::of_damage).
-    fn stun(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot, damaged: &[(EntityId, i64)]) -> io::Result<()> {
+    /// each for the share of the shell's damage it took, as `results` has it, see
+    /// [`StunDef::of_damage`](crate::game::item_defs::StunDef::of_damage). Each newly
+    /// stunned has its result flag the stun's start, a result of its own if undamaged.
+    fn stun(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot, results: &mut Vec<ShellHitResult>) -> io::Result<()> {
 
         let Some(stun) = shot.def.stun else { return Ok(()) };
         let now = self.game_time();
@@ -1530,15 +1495,66 @@ impl Battle {
                 continue;
             }
 
-            let took = damaged.iter()
-                .find(|&&(entity_id, _)| entity_id == target.entity_id)
-                .map_or(0, |&(_, dealt)| dealt);
+            let result = results.iter_mut().find(|result| result.entity_id == target.entity_id);
+            let took = result.as_ref().map_or(0, |result| result.dealt);
             let (duration, effect) = stun.of_damage(took as f32 / shot.def.damage_near);
-            vehicle.stun(app, id, now + duration as f64, effect)?;
+            if !vehicle.stun(app, id, now + duration as f64, effect)? {
+                continue;
+            }
+
+            match result {
+                Some(result) => result.flags |= HIT_FLAG_STUN_STARTED,
+                None => results.push(ShellHitResult::stunned(target.entity_id)),
+            }
 
         }
 
         Ok(())
+
+    }
+
+    /// The client that fired a shell, if any, learns what each vehicle took of it, in
+    /// one `showShotResults`.
+    fn show_shot_results(&self, app: &mut base::App, shooter: EntityId, results: &[ShellHitResult]) -> io::Result<()> {
+
+        let shooter_avatar = self.vehicles.iter()
+            .find(|vehicle| vehicle.entity.id() == shooter)
+            .and_then(|vehicle| vehicle.client_driver())
+            .map(|driver| driver.avatar());
+        let Some(shooter_avatar) = shooter_avatar.filter(|_| !results.is_empty()) else { return Ok(()) };
+
+        let results = results.iter()
+            .map(|result| ShotResult {
+                gunInstallationIndex: 0,
+                hitFlags: result.flags,
+                vehicleID: result.entity_id,
+            })
+            .collect();
+        app.entity(shooter_avatar)?.showShotResults(results)
+
+    }
+
+    /// An HE shell explodes on the ground: the vehicles in its reach take its damage,
+    /// but the shooter's own. What each alive took, see [`Self::hit`].
+    fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<Vec<ShellHitResult>> {
+
+        let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
+            .filter_map(|target| {
+                let explosion = impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?;
+                let reached = target.transforms[explosion.hit.part as usize].transform_point3(explosion.hit.local_point);
+                Some((target.entity_id, explosion, reached))
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for (entity_id, explosion, reached) in explosions {
+            info!(battle = self.id, shot = shot.id, %entity_id, "Exploded beside a vehicle: {:.1} m away, {:.0} damage", explosion.distance, explosion.damage);
+            let result = self.hit(app, shooter, entity_id, shot, &ShellHit::of_explosion(&explosion))?;
+            debug_hit(reached, &explosion.trace, "Splashed", explosion.damage, result.map(|result| result.dealt));
+            results.extend(result);
+        }
+
+        Ok(results)
 
     }
 

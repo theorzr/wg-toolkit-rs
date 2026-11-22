@@ -510,13 +510,14 @@ impl BattleVehicle {
 
     /// Stun its crew, alive, until game time `until`, at this share of the full stun's
     /// effect, see `StunDef::of_damage`, a longer or stronger stun it is under kept: its
-    /// clients see when it ends.
-    pub fn stun(&mut self, app: &mut base::App, battle: u32, until: f64, effect: f32) -> io::Result<()> {
+    /// clients see when it ends. Whether it started a stun, its crew not stunned before.
+    pub fn stun(&mut self, app: &mut base::App, battle: u32, until: f64, effect: f32) -> io::Result<bool> {
 
         if !self.alive() {
-            return Ok(());
+            return Ok(false);
         }
 
+        let started = self.stun.is_none();
         let (until, effect) = match self.stun {
             Some((end, strength)) => (end.max(until), strength.max(effect)),
             None => (until, effect),
@@ -525,7 +526,7 @@ impl BattleVehicle {
 
         app.entity(self.entity)?.set_stunInfo(until)?;
         info!(battle, entity_id = %self.entity.id(), until, effect, "Stunned a vehicle's crew");
-        Ok(())
+        Ok(started)
 
     }
 
