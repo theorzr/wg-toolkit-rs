@@ -1249,16 +1249,17 @@ fn avatar_cell_data(team: u8, vehicle_id: EntityId) -> AvatarCellData {
     }
 }
 
-/// The `targetingInfo` of a vehicle: turret and gun at rest, their speeds and
-/// dispersion factors from its definitions, without the crew's and equipment's bonuses.
-fn targeting_info(loadout: &VehicleLoadout) -> TargetingInfo {
-    let aiming = &loadout.aiming;
+/// The `targetingInfo` of a vehicle aiming as this: its turret's yaw and gun's pitch, in
+/// radians, their speeds and the dispersion factors, its gun's dispersion this many times
+/// its own, without the crew's and equipment's bonuses. A client given a slower turret
+/// takes its angles.
+fn targeting_info(aiming: &AimingDef, dispersion_factor: f32, yaw: f32, pitch: f32) -> TargetingInfo {
     TargetingInfo {
-        turretYaw: 0.0,
-        gunPitch: 0.0,
+        turretYaw: yaw,
+        gunPitch: pitch,
         maxTurretRotationSpeed: aiming.turret_rotation_speed,
         maxGunRotationSpeed: aiming.gun_rotation_speed,
-        shotDispMultiplierFactor: 1.0,
+        shotDispMultiplierFactor: dispersion_factor,
         gunShotDispersionFactorsTurretRotation: aiming.dispersion_turret_rotation,
         chassisShotDispersionFactorsMovement: aiming.dispersion_movement,
         chassisShotDispersionFactorsRotation: aiming.dispersion_rotation,

@@ -272,7 +272,7 @@ impl Spotting {
             // 4. Near an enemy alive, hull to hull, it is spotted, whatever is in the
             //    way: nothing else is looked at.
             let near = observers.clone()
-                .filter_map(|((observer, seen), _)| near(observer.vision.view_range, seen, &viewed[index], camouflage))
+                .filter_map(|((observer, seen), _)| near(observer.view_range(), seen, &viewed[index], camouflage))
                 .min_by(|a, b| a.distance.total_cmp(&b.distance));
 
             // 5. Else each enemy alive looks at its checkpoints from its port of this tick,
@@ -282,7 +282,7 @@ impl Spotting {
             let mut best = near;
             let looks = observers.clone()
                 .filter(|_| near.is_none())
-                .map(|((observer, seen), &port)| (observer.vision.view_range, seen.ports[port]));
+                .map(|((observer, seen), &port)| (observer.view_range(), seen.ports[port]));
             for (view_range, port) in looks {
                 let look = look_at(world, port, view_range, &viewed[index], camouflage, revealed);
                 if best.is_none_or(|best| better(&look, &best) == Ordering::Less) {

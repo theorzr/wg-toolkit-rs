@@ -23,7 +23,7 @@ use crate::base::{
     NO_PREFAB_EFFECTS, SETTING_AUTOROTATION, SETTING_CURRENT_SHELLS, SETTING_NEXT_SHELLS, SETTING_RELOAD_PARTIAL_CLIP,
     SETTING_RESET_FULL_CLIP,
 };
-use crate::game::item_defs::{GeneralWheels, MobilityDef, SiegeDef, VehicleDef, VisionDef};
+use crate::game::item_defs::{AimingDef, GeneralWheels, MobilityDef, SiegeDef, StunEffects, VehicleDef, VisionDef};
 use crate::base::physics::{Dispersion, Hull, Vehicle, VehicleId, World};
 use crate::base::ballistics::shot::{Shot, ShotTarget};
 use crate::base::ballistics::gun::GunLoader;
@@ -108,8 +108,12 @@ pub struct BattleVehicle {
     pub gun: GunLoader,
     /// Its parts' collision models and armour, which shells hit.
     pub collision: Arc<VehicleCollision>,
-    /// How far it sees and how hard it is to see.
+    /// How far it sees and how hard it is to see, unstunned, see [`Self::view_range`].
     pub vision: VisionDef,
+    /// How it moves and aims, unstunned, in its siege mode or out of it: what its
+    /// vehicle in the world does, stunned or not, see [`Self::apply_stun`].
+    mobility: MobilityDef,
+    aiming: AimingDef,
     /// The game time it last fired at, which makes it easier to see for a while, see
     /// [`Self::camouflage`].
     last_shot: Option<f64>,
@@ -129,9 +133,8 @@ pub struct BattleVehicle {
     damage_stickers: Vec<HitPoint>,
     /// Its fire, with the game time it goes out at, see [`FIRE_DURATION`].
     fire: Option<(ComponentKey<Fire>, f64)>,
-    /// Its crew's stun, see [`Self::stun`]: the game time it ends at, and its share of
-    /// the full stun's effect.
-    stun: Option<(f64, f32)>,
+    /// Its crew's stun, see [`Self::stun`].
+    stun: Option<CrewStun>,
     /// Its siege mode, if it has one, and where it is in switching it.
     siege: Option<Siege>,
     /// The game time it went under water at, its turret's ring under the surface, see
@@ -140,6 +143,17 @@ pub struct BattleVehicle {
     /// Whether its turret was locked as last told to its client, see
     /// [`Self::show_gun_lock`].
     gun_locked: bool,
+}
+
+/// A vehicle's crew's stun, see [`BattleVehicle::stun`].
+#[derive(Debug, Clone, Copy)]
+struct CrewStun {
+    /// The game time it ends at.
+    until: f64,
+    /// Its share of the full stun's effect.
+    effect: f32,
+    /// What the full stun does.
+    effects: StunEffects,
 }
 
 /// A vehicle's siege mode, see [`SiegeDef`], how it moves out of it, and where it is in
@@ -262,6 +276,8 @@ impl BattleVehicle {
                 .with_quick_change_factor(QUICK_SHELL_CHANGER_FACTOR),
             collision: loadout.collision.clone(),
             vision: loadout.vision,
+            mobility: loadout.mobility,
+            aiming: loadout.aiming.clone(),
             last_shot: None,
             health: loadout.max_health.into(),
             max_health: loadout.max_health.into(),
@@ -325,6 +341,8 @@ impl BattleVehicle {
             gun,
             collision: def.collision.clone(),
             vision: def.vision,
+            mobility: def.mobility,
+            aiming: def.aiming.clone(),
             last_shot: None,
             health: def.max_health.into(),
             max_health: def.max_health.into(),
@@ -423,7 +441,7 @@ impl BattleVehicle {
             gunPiercing: 1.0,
             gunShotsSpeed: 1.0,
         })?;
-        own_vehicle.set_targetingInfo(Some(targeting_info(loadout)))?;
+        own_vehicle.set_targetingInfo(Some(targeting_info(&loadout.aiming, 1.0, 0.0, 0.0)))?;
         // What the real server sends right after, as updates: the ammunition, the
         // shells loaded, the reload and the health.
         own_vehicle.set_vehicleAmmoList(gun_ammo_list(&self.gun))?;
@@ -509,9 +527,18 @@ impl BattleVehicle {
     }
 
     /// Stun its crew, alive, until game time `until`, at this share of the full stun's
-    /// effect, see `StunDef::of_damage`, a longer or stronger stun it is under kept: its
+    /// `effects`, see `StunDef::of_damage`, a longer or stronger stun it is under kept:
+    /// `driven` in the world moves and aims as stunned, see [`Self::apply_stun`], and its
     /// clients see when it ends. Whether it started a stun, its crew not stunned before.
-    pub fn stun(&mut self, app: &mut base::App, battle: u32, until: f64, effect: f32) -> io::Result<bool> {
+    pub fn stun(
+        &mut self,
+        app: &mut base::App,
+        battle: u32,
+        driven: &mut Vehicle,
+        until: f64,
+        effect: f32,
+        effects: StunEffects,
+    ) -> io::Result<bool> {
 
         if !self.alive() {
             return Ok(false);
@@ -519,24 +546,59 @@ impl BattleVehicle {
 
         let started = self.stun.is_none();
         let (until, effect) = match self.stun {
-            Some((end, strength)) => (end.max(until), strength.max(effect)),
+            Some(stun) => (stun.until.max(until), stun.effect.max(effect)),
             None => (until, effect),
         };
-        self.stun = Some((until, effect));
+        self.stun = Some(CrewStun { until, effect, effects });
 
         app.entity(self.entity)?.set_stunInfo(until)?;
         info!(battle, entity_id = %self.entity.id(), until, effect, "Stunned a vehicle's crew");
+        self.apply_stun(app, driven)?;
         Ok(started)
 
     }
 
-    /// End its crew's stun at game time `now`, if it is due to end.
-    pub fn end_stun(&mut self, app: &mut base::App, battle: u32, now: f64) -> io::Result<()> {
-        if self.stun.take_if(|&mut (until, _)| until <= now).is_some() {
-            app.entity(self.entity)?.set_stunInfo(0.0)?;
-            info!(battle, entity_id = %self.entity.id(), "Ended a vehicle's stun");
+    /// Have `driven` in the world move and aim as its crew's stun has it, or as it does
+    /// unstunned, see [`StunEffects`], its gun reload as long, and tell its client, if a
+    /// client drives it, how it aims and how far it sees now.
+    fn apply_stun(&mut self, app: &mut base::App, driven: &mut Vehicle) -> io::Result<()> {
+
+        let effects = self.stun.map(|stun| stun.effects.scaled(stun.effect));
+        driven.hull.mobility = effects.map_or(self.mobility, |effects| effects.mobility(&self.mobility));
+        driven.turret.aiming = effects.map_or_else(|| self.aiming.clone(), |effects| effects.aiming(&self.aiming));
+        self.gun.set_reload_factor(effects.map_or(1.0, |effects| effects.reload_time));
+
+        let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) else { return Ok(()) };
+        let turret = &driven.turret;
+        let dispersion_factor = effects.map_or(1.0, |effects| effects.min_dispersion);
+        let mut own_vehicle = app.component(own_vehicle)?;
+        own_vehicle.set_targetingInfo(Some(targeting_info(&turret.aiming, dispersion_factor, turret.yaw, turret.pitch)))?;
+        own_vehicle.set_syncVehicleAttrs(VehicleSyncAttrs {
+            circularVisionRadius: self.view_range() as u16,
+            gunPiercing: 1.0,
+            gunShotsSpeed: 1.0,
+        })
+
+    }
+
+    /// How far it sees, in metres, its crew's stun shortening it.
+    pub fn view_range(&self) -> f32 {
+        let factor = self.stun.map_or(1.0, |stun| stun.effects.scaled(stun.effect).view_distance);
+        self.vision.view_range * factor
+    }
+
+    /// End its crew's stun at game time `now`, if it is due to end: `driven` in the world
+    /// moves and aims unstunned again, see [`Self::apply_stun`].
+    pub fn end_stun(&mut self, app: &mut base::App, battle: u32, driven: &mut Vehicle, now: f64) -> io::Result<()> {
+
+        if self.stun.take_if(|stun| stun.until <= now).is_none() {
+            return Ok(());
         }
-        Ok(())
+
+        app.entity(self.entity)?.set_stunInfo(0.0)?;
+        info!(battle, entity_id = %self.entity.id(), "Ended a vehicle's stun");
+        self.apply_stun(app, driven)
+
     }
 
     /// Tell its client, if a client drives it, once `driven`'s turret is locked, or free
@@ -755,7 +817,8 @@ impl BattleVehicle {
     }
 
     /// Once its siege mode's switching ends, by game time `now`, `driven` in the world
-    /// moves as in its new mode, and the clients are told.
+    /// moves as in its new mode, as its crew's stun has it, see [`Self::apply_stun`], and
+    /// the clients are told.
     pub fn finish_switching(&mut self, app: &mut base::App, driven: &mut Vehicle, now: f64) -> io::Result<()> {
 
         let Some(siege) = &mut self.siege else { return Ok(()) };
@@ -769,7 +832,8 @@ impl BattleVehicle {
             _ => return Ok(()),
         };
         siege.state = state;
-        driven.hull.mobility = mobility;
+        self.mobility = mobility;
+        self.apply_stun(app, driven)?;
         self.show_siege(app, now)
 
     }

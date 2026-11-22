@@ -53,8 +53,11 @@ pub struct GunLoader {
     /// The burst going on: its shells left to fire, and the game time the next one fires
     /// at, see [`Self::fire_burst`].
     burst_shells: Option<(u32, f64)>,
-    /// The length of a whole reload: of the magazine, for a gun with one.
+    /// The length of a whole reload: of the magazine, for a gun with one, see
+    /// [`Self::reload_time`].
     reload_time: f32,
+    /// What its whole reloads take as long as, see [`Self::set_reload_factor`].
+    reload_factor: f32,
     /// How long changing the shell of a loaded gun takes, as a share of its whole
     /// reload; it takes a whole reload unless within 0 and 1.
     quick_change_factor: f32,
@@ -93,6 +96,7 @@ impl GunLoader {
             magazine_shells: 0,
             burst_shells: None,
             reload_time,
+            reload_factor: 1.0,
             quick_change_factor: 1.0,
             reload: None,
             next_shot_id: 1,
@@ -154,7 +158,7 @@ impl GunLoader {
         // once the burst empties it.
         if burst > 1 {
             let burst_time = (burst - 1) as f32 * self.magazine.burst_interval;
-            let wait = if self.magazine_shells > burst - 1 { self.magazine.interval } else { self.reload_time };
+            let wait = if self.magazine_shells > burst - 1 { self.magazine.interval } else { self.reload_time() };
             self.burst_shells = Some((burst - 1, now + f64::from(self.magazine.burst_interval)));
             self.start_reload(now, burst_time + wait);
         } else {
@@ -224,7 +228,7 @@ impl GunLoader {
             self.start_reload(now, self.magazine.interval);
         } else {
             self.load_next();
-            self.start_reload(now, self.reload_time);
+            self.start_reload(now, self.reload_time());
         }
     }
 
@@ -265,7 +269,7 @@ impl GunLoader {
         let full = self.magazine_shells > 0 && self.magazine_shells == self.full_magazine();
         let factor = self.quick_change_factor;
         let quick = full && self.is_loaded(now) && factor > 0.0 && factor < 1.0;
-        let time = if quick { self.reload_time * factor } else { self.reload_time };
+        let time = if quick { self.reload_time() * factor } else { self.reload_time() };
 
         self.loaded_shell = index;
         self.magazine_shells = 0;
@@ -290,7 +294,7 @@ impl GunLoader {
 
         self.magazine_shells = 0;
         self.load_next();
-        self.start_reload(now, self.reload_time);
+        self.start_reload(now, self.reload_time());
         true
 
     }
@@ -353,9 +357,15 @@ impl GunLoader {
         self.reload
     }
 
-    /// The length of a whole reload, in seconds.
+    /// The length of a whole reload, in seconds, as long as its factor has it.
     pub fn reload_time(&self) -> f32 {
-        self.reload_time
+        self.reload_time * self.reload_factor
+    }
+
+    /// Have its whole reloads from now on take as long as this factor of their own, a
+    /// stunned crew's longer, the one going on as it is.
+    pub fn set_reload_factor(&mut self, factor: f32) {
+        self.reload_factor = factor;
     }
 
     /// Fill the magazine again once its whole reload is over by game time `now`, before

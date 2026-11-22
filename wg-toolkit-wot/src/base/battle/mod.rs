@@ -422,10 +422,10 @@ impl Battle {
             .map(|participant| participant.vehicle)
     }
 
-    /// The vehicles the shells of `shooter` can hit: every one alive but its own.
-    fn shell_targets(&self, shooter: EntityId) -> Vec<ShotTarget> {
+    /// The vehicles an explosion can reach: every one alive, its shooter's own too.
+    fn explosion_targets(&self) -> Vec<ShotTarget> {
         self.vehicles.iter()
-            .filter(|vehicle| vehicle.alive() && vehicle.entity.id() != shooter)
+            .filter(|vehicle| vehicle.alive())
             .map(|vehicle| vehicle.shot_target(&self.world))
             .collect()
     }
@@ -1238,6 +1238,7 @@ impl Battle {
 
             let allies = allies_of(vehicles, world, index);
             let vehicle = &mut vehicles[index];
+            vehicle.end_stun(app, id, world.vehicle_mut(vehicle.id), now)?;
             let driven = world.vehicle(vehicle.id);
 
             if vehicle.drowns(app, id, driven, now)? {
@@ -1247,7 +1248,6 @@ impl Battle {
             vehicle.show_gun_lock(app, driven)?;
 
             vehicle.put_out_fire(app, id, now)?;
-            vehicle.end_stun(app, id, now)?;
             vehicle.show_loaded(app, now)?;
 
             let marker = driven.turret.gun_marker(&driven.hull);
@@ -1348,7 +1348,7 @@ impl Battle {
                     let velocity = ricochet::off_armor(shot.end_velocity, impact.hit.normal);
                     self.ricochet(app, at, shooter, shot, velocity)?;
                 } else {
-                    self.stun(app, shooter, shot, &mut results)?;
+                    self.stun(app, shot, &mut results)?;
                 }
 
                 self.show_shot_results(app, shooter, &results)
@@ -1394,7 +1394,7 @@ impl Battle {
                     self.ricochet(app, at, shooter, shot, velocity)?;
                 } else if def.kind() == ShellKind::HighExplosive {
                     let mut results = self.splash(app, shooter, shot)?;
-                    self.stun(app, shooter, shot, &mut results)?;
+                    self.stun(app, shot, &mut results)?;
                     self.show_shot_results(app, shooter, &results)?;
                 }
                 
@@ -1471,11 +1471,11 @@ impl Battle {
 
     /// A stunning shell explodes where it ended, see
     /// [`StunDef`](crate::game::item_defs::StunDef): the crews of the vehicles alive
-    /// with main armour within its stun's radius, but the shooter's own, are stunned,
+    /// with main armour within its stun's radius, the shooter's own too, are stunned,
     /// each for the share of the shell's damage it took, as `results` has it, see
     /// [`StunDef::of_damage`](crate::game::item_defs::StunDef::of_damage). Each newly
     /// stunned has its result flag the stun's start, a result of its own if undamaged.
-    fn stun(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot, results: &mut Vec<ShellHitResult>) -> io::Result<()> {
+    fn stun(&mut self, app: &mut base::App, shot: &Shot, results: &mut Vec<ShellHitResult>) -> io::Result<()> {
 
         let Some(stun) = shot.def.stun else { return Ok(()) };
         let now = self.game_time();
@@ -1483,7 +1483,7 @@ impl Battle {
 
         for vehicle in &mut self.vehicles {
 
-            if !vehicle.alive() || vehicle.entity.id() == shooter {
+            if !vehicle.alive() {
                 continue;
             }
 
@@ -1498,7 +1498,8 @@ impl Battle {
             let result = results.iter_mut().find(|result| result.entity_id == target.entity_id);
             let took = result.as_ref().map_or(0, |result| result.dealt);
             let (duration, effect) = stun.of_damage(took as f32 / shot.def.damage_near);
-            if !vehicle.stun(app, id, now + duration as f64, effect)? {
+            let driven = self.world.vehicle_mut(vehicle.id);
+            if !vehicle.stun(app, id, driven, now + duration as f64, effect, stun.effects)? {
                 continue;
             }
 
@@ -1535,10 +1536,10 @@ impl Battle {
     }
 
     /// An HE shell explodes on the ground: the vehicles in its reach take its damage,
-    /// but the shooter's own. What each alive took, see [`Self::hit`].
+    /// the shooter's own too. What each alive took, see [`Self::hit`].
     fn splash(&mut self, app: &mut base::App, shooter: EntityId, shot: &Shot) -> io::Result<Vec<ShellHitResult>> {
 
-        let explosions: Vec<_> = self.shell_targets(shooter).into_iter()
+        let explosions: Vec<_> = self.explosion_targets().into_iter()
             .filter_map(|target| {
                 let explosion = impact::explosion(&shot.def, shot.end, &target.collision, &target.transforms)?;
                 let reached = target.transforms[explosion.hit.part as usize].transform_point3(explosion.hit.local_point);

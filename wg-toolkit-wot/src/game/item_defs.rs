@@ -401,6 +401,28 @@ pub struct StunDef {
     /// The share of its effect any stun has, and the share the damage adds.
     pub guaranteed_effect: f32,
     pub damage_effect_coeff: f32,
+    /// What the full stun does to a vehicle, the same for every shell.
+    pub effects: StunEffects,
+}
+
+/// What a stun does to a vehicle, as `common/stun.xml` gives it in full: factors of its
+/// engine's power, its top speeds and how fast it turns, its turret's traverse, its view
+/// range, its reload and aiming times, and its gun's dispersion, at rest and as it moves,
+/// turns or turns its turret. A weaker stun has each factor that much nearer 1, see
+/// [`Self::scaled`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StunEffects {
+    pub engine_power: f32,
+    pub max_speed: f32,
+    pub rotation_speed: f32,
+    pub turret_traverse: f32,
+    pub view_distance: f32,
+    pub reload_time: f32,
+    pub aiming_time: f32,
+    pub min_dispersion: f32,
+    pub movement_dispersion: f32,
+    pub rotation_dispersion: f32,
+    pub turret_rotation_dispersion: f32,
 }
 
 /// `SHELL_TYPES`, by their index in `SHELL_TYPES_LIST`.
@@ -468,6 +490,7 @@ impl StunDef {
             damage_duration_coeff: Self::param(&sections, "damageDurationCoeff")?,
             guaranteed_effect: Self::param(&sections, "guaranteedStunEffect")?,
             damage_effect_coeff: Self::param(&sections, "damageEffectCoeff")?,
+            effects: StunEffects::read(defaults)?,
         })
 
     }
@@ -486,6 +509,77 @@ impl StunDef {
         let duration = self.duration * (self.guaranteed_duration + self.damage_duration_coeff * share);
         let effect = self.factor * (self.guaranteed_effect + self.damage_effect_coeff * share);
         (duration.max(self.min_duration), effect.min(1.0))
+    }
+
+}
+
+impl StunEffects {
+
+    /// The full stun's effects, from `common/stun.xml`, 1 for the factors it lacks.
+    pub fn read(config: &Element) -> Option<Self> {
+        Some(Self {
+            engine_power: config.get_child_float("stunFactorEnginePower")?,
+            max_speed: config.get_child_float("stunFactorMaxSpeed")?,
+            rotation_speed: config.get_child_float("stunFactorVehicleRotationSpeed")?,
+            turret_traverse: config.get_child_float("stunFactorTurretTraverse")?,
+            view_distance: config.get_child_float("stunFactorViewDistance")?,
+            reload_time: config.get_child_float("stunFactorReloadTime").unwrap_or(1.0),
+            aiming_time: config.get_child_float("stunFactorAimingTime").unwrap_or(1.0),
+            min_dispersion: config.get_child_float("stunFactorMinShotDispersion").unwrap_or(1.0),
+            movement_dispersion: config.get_child_float("stunFactorVehicleMovementShotDispersion").unwrap_or(1.0),
+            rotation_dispersion: config.get_child_float("stunFactorVehicleRotationShotDispersion").unwrap_or(1.0),
+            turret_rotation_dispersion: config.get_child_float("stunFactorTurretRotationShotDispersion").unwrap_or(1.0),
+        })
+    }
+
+    /// Those of a stun this strong, a share of the full stun's: each factor moved from 1
+    /// toward its full value by the share.
+    pub fn scaled(&self, effect: f32) -> Self {
+        Self {
+            engine_power: Self::toward(self.engine_power, effect),
+            max_speed: Self::toward(self.max_speed, effect),
+            rotation_speed: Self::toward(self.rotation_speed, effect),
+            turret_traverse: Self::toward(self.turret_traverse, effect),
+            view_distance: Self::toward(self.view_distance, effect),
+            reload_time: Self::toward(self.reload_time, effect),
+            aiming_time: Self::toward(self.aiming_time, effect),
+            min_dispersion: Self::toward(self.min_dispersion, effect),
+            movement_dispersion: Self::toward(self.movement_dispersion, effect),
+            rotation_dispersion: Self::toward(self.rotation_dispersion, effect),
+            turret_rotation_dispersion: Self::toward(self.turret_rotation_dispersion, effect),
+        }
+    }
+
+    /// A full stun's factor moved from 1 toward it by this share of the full effect.
+    fn toward(factor: f32, effect: f32) -> f32 {
+        1.0 + (factor - 1.0) * effect
+    }
+
+    /// How a stunned vehicle moves: its engine weaker, its top speeds lower, and its
+    /// hull turning slower.
+    pub fn mobility(&self, mobility: &MobilityDef) -> MobilityDef {
+        MobilityDef {
+            engine_power: mobility.engine_power * self.engine_power,
+            speed_forward: mobility.speed_forward * self.max_speed,
+            speed_backward: mobility.speed_backward * self.max_speed,
+            rotation_speed: mobility.rotation_speed.map(|speed| speed * self.rotation_speed),
+            ..*mobility
+        }
+    }
+
+    /// How a stunned vehicle aims: its turret slower, its aiming longer, its reload too,
+    /// and its gun more dispersed.
+    pub fn aiming(&self, aiming: &AimingDef) -> AimingDef {
+        AimingDef {
+            turret_rotation_speed: aiming.turret_rotation_speed * self.turret_traverse,
+            aiming_time: aiming.aiming_time * self.aiming_time,
+            reload_time: aiming.reload_time * self.reload_time,
+            dispersion_angle: aiming.dispersion_angle * self.min_dispersion,
+            dispersion_movement: aiming.dispersion_movement * self.movement_dispersion,
+            dispersion_rotation: aiming.dispersion_rotation * self.rotation_dispersion,
+            dispersion_turret_rotation: aiming.dispersion_turret_rotation * self.turret_rotation_dispersion,
+            ..aiming.clone()
+        }
     }
 
 }
@@ -1440,7 +1534,23 @@ mod tests {
             damage_duration_coeff: 0.6,
             guaranteed_effect: 0.75,
             damage_effect_coeff: 0.25,
+            effects: StunEffects {
+                engine_power: 0.7,
+                max_speed: 0.75,
+                rotation_speed: 0.8,
+                turret_traverse: 0.6,
+                view_distance: 0.75,
+                reload_time: 1.5,
+                aiming_time: 1.5,
+                min_dispersion: 1.75,
+                movement_dispersion: 1.5,
+                rotation_dispersion: 1.5,
+                turret_rotation_dispersion: 1.5,
+            },
         });
+        // Half as strong, each factor halfway from 1.
+        let half = stun.effects.scaled(0.5);
+        assert!((half.turret_traverse - 0.8).abs() < 1e-6 && (half.reload_time - 1.25).abs() < 1e-6, "{half:?}");
         let (least, effect) = stun.of_damage(0.0);
         assert!((least - 13.2).abs() < 1e-3 && effect == 0.75, "{least} {effect}");
         let (most, effect) = stun.of_damage(1.0);
