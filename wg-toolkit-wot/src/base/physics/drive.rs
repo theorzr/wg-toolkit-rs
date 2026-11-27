@@ -817,7 +817,7 @@ mod tests {
             rotation_speed: [56f32.to_radians(); 3],
             ..chieftain_mobility()
         };
-        let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, mobility);
+        let mut hull = Hull::new(Vec3::ZERO, Vec3::ZERO, mobility.clone());
         hull.speed = 15.0;
         hull.match_tracks();
         hull.flags = movement_flag::BLOCK_TRACKS | movement_flag::ROTATE_LEFT;

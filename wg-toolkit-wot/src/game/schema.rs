@@ -633,7 +633,7 @@ script_dict! {
         /// How many sessions the player had, the client telling new players by it.
         pub incarnationID: u64,
         /// The client version the server requires, refusing others.
-        pub requiredVersion_2410: String,
+        pub requiredVersion_2420: String,
         /// A dict of the server's settings, of every feature the client reads at login.
         pub initialServerSettings: Pickle,
     }

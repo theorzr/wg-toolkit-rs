@@ -570,6 +570,7 @@ impl BaseThread {
         let fs = ResFilesystem::new(self.game_dir.join("res"))?;
         let def = VehicleDef::load_by_id(&fs, vehicle.descr.nation, vehicle.descr.type_id)?;
         info!(vehicle_id, "Read the battle vehicle: {}, {} health", def.name, def.max_health);
+        let ammo = def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect();
         Ok(VehicleLoadout {
             descr: vehicle.descr.encode(),
             max_health: def.max_health,
@@ -577,7 +578,7 @@ impl BaseThread {
             setups: vehicle.setups(),
             setup_indexes: wgtk::pickle!({}),
             mobility: def.mobility,
-            ammo: def.default_ammo().into_iter().map(|(cd, count)| (cd.to_int(), count)).collect(),
+            ammo,
             shots: def.shots,
             aiming: def.aiming,
             magazine: def.magazine,
@@ -814,7 +815,7 @@ impl BaseThread {
         let data = schema::AccountData {
             name: player.name.clone(),
             incarnationID: ACCOUNT_SESSIONS,
-            requiredVersion_2410: self.required_version.clone(),
+            requiredVersion_2420: self.required_version.clone(),
             initialServerSettings: server_settings(),
         };
         let account = self.app.create_base_player::<Account>(client, data)?;
@@ -1010,10 +1011,10 @@ pub struct VehicleLoadout {
 /// default of the same property in its own `AccountVersion.def`, so it is the game's.
 fn required_version(fs: &ResFilesystem) -> io::Result<String> {
     let def = item_defs::read_xml(fs, "scripts/entity_defs/interfaces/AccountVersion.def")?;
-    def.get_child_value_at(&["Properties", "requiredVersion_2410", "Default"])
+    def.get_child_value_at(&["Properties", "requiredVersion_2420", "Default"])
         .and_then(pxml::Value::as_string)
         .map(str::to_string)
-        .ok_or_else(|| invalid_data("No requiredVersion_2410 in AccountVersion.def, the game is another version"))
+        .ok_or_else(|| invalid_data("No requiredVersion_2420 in AccountVersion.def, the game is another version"))
 }
 
 fn invalid_data(message: &str) -> io::Error {

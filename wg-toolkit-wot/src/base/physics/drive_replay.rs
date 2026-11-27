@@ -141,9 +141,9 @@ impl CapturedDrive {
 
     /// How its vehicle moves at `t`: as `siege` says in its siege mode, else as
     /// `mobility` does.
-    fn mobility_at(&self, t: f64, mobility: MobilityDef, siege: Option<MobilityDef>) -> MobilityDef {
+    fn mobility_at(&self, t: f64, mobility: &MobilityDef, siege: Option<&MobilityDef>) -> MobilityDef {
         let on = self.siege.iter().rev().find(|&&(at, _)| at <= t).is_some_and(|&(_, on)| on);
-        siege.filter(|_| on).unwrap_or(mobility)
+        siege.filter(|_| on).unwrap_or(mobility).clone()
     }
 
 }
@@ -173,7 +173,7 @@ impl Other<'_> {
         if t - at.t > OTHER_TIMEOUT {
             return None;
         }
-        let mut vehicle = Vehicle::new(at.position, at.direction, self.mobility, self.aiming.clone());
+        let mut vehicle = Vehicle::new(at.position, at.direction, self.mobility.clone(), self.aiming.clone());
         let velocity = (at.position - before.position).with_y(0.0) / (at.t - before.t).max(1e-3) as f32;
         // Faster than it drives, it jumped where the capture lost it: still.
         let velocity = if velocity.length() > 2.0 * self.mobility.speed_forward { Vec3::ZERO } else { velocity };
@@ -334,7 +334,7 @@ impl Errors {
 #[allow(clippy::too_many_arguments)]
 fn replay(
     drive: &CapturedDrive,
-    (mobility, siege): (MobilityDef, Option<MobilityDef>),
+    (mobility, siege): (&MobilityDef, Option<&MobilityDef>),
     aiming: &AimingDef,
     others: &[Other],
     space: &Arc<Space>,
@@ -430,11 +430,11 @@ fn rotation_of(direction: Vec3) -> Quat {
 /// How far the hull, left to rest on its suspension for [`REST_TIME`] where the real
 /// vehicle was, tilts from it: the median and 90th percentile pitch and roll errors, in
 /// degrees, over every tenth position, those on the ground.
-fn tilt_errors(drive: &CapturedDrive, mobility: MobilityDef, space: &Space) -> [(f32, f32); 2] {
+fn tilt_errors(drive: &CapturedDrive, mobility: &MobilityDef, space: &Space) -> [(f32, f32); 2] {
     let mut pitch = Vec::new();
     let mut roll = Vec::new();
     for update in drive.updates.iter().step_by(10) {
-        let mut hull = Hull::new(update.position, update.direction, mobility);
+        let mut hull = Hull::new(update.position, update.direction, mobility.clone());
         let mut rubble = Rubble::default();
         for _ in 0..(REST_TIME / 0.1) as usize {
             hull.advance(0.1, space, None, &mut rubble);
@@ -472,8 +472,9 @@ fn hull_follows_the_real_server() {
         println!("{name} ({}): {} controls, {} positions over {:.0} s, {:?}", def.name, drive.controls.len(),
             drive.updates.len(), drive.updates.last().unwrap().t - drive.updates[0].t, def.mobility);
 
-        let mobility = drive.setup.apply(def.mobility);
-        let mobilities = (mobility, def.siege.map(|siege| drive.setup.apply(siege.mobility)));
+        let mobility = drive.setup.apply(def.mobility.clone());
+        let siege = def.siege.clone().map(|siege| drive.setup.apply(siege.mobility));
+        let mobilities = (&mobility, siege.as_ref());
         let space = drive.space.as_ref()
             .map(|space| Space::load(&res, &format!("spaces/{space}"), STANDARD_GAMEPLAY).unwrap())
             .unwrap_or_default();
@@ -481,7 +482,7 @@ fn hull_follows_the_real_server() {
         let bounds = drive.space.as_ref()
             .map(|space| arena_defs::read_bounds(&*item_defs::read_xml(&res, &format!("scripts/arena_defs/{space}.xml")).unwrap(), space).unwrap());
         if drive.space.is_some() {
-            let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, mobility, &space);
+            let [(pitch, pitch_90), (roll, roll_90)] = tilt_errors(&drive, &mobility, &space);
             println!("  tilt settled: pitch {pitch:.2} / {pitch_90:.2}°, roll {roll:.2} / {roll_90:.2}° (median / 90%)");
         }
         let others = drive.others.iter()

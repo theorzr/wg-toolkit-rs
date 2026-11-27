@@ -146,7 +146,7 @@ pub struct BattleVehicle {
 }
 
 /// A vehicle's crew's stun, see [`BattleVehicle::stun`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CrewStun {
     /// The game time it ends at.
     until: f64,
@@ -158,7 +158,7 @@ struct CrewStun {
 
 /// A vehicle's siege mode, see [`SiegeDef`], how it moves out of it, and where it is in
 /// switching it: its `VEHICLE_SIEGE_STATE`, and the game time it ends switching at.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Siege {
     def: SiegeDef,
     default: MobilityDef,
@@ -238,7 +238,7 @@ impl BattleVehicle {
         })?;
         info!(%avatar, entity_id = %vehicle.id(), "Created the vehicle, at {:?}", start.position);
 
-        let driven = Vehicle::new(start.position, start.direction, loadout.mobility, loadout.aiming.clone());
+        let driven = Vehicle::new(start.position, start.direction, loadout.mobility.clone(), loadout.aiming.clone());
         let info = vehicle_info(vehicle.id(), &public, player.id);
         let mut entity = app.entity(vehicle)?;
         init_vehicle(&mut entity, avatar.id(), public, driven.turret.gun_angles_packed())?;
@@ -272,11 +272,11 @@ impl BattleVehicle {
             }),
             id: world.add(driven),
             gun: GunLoader::new(ammo, loadout.aiming.reload_time)
-                .with_magazine(loadout.magazine)
+                .with_magazine(loadout.magazine.clone())
                 .with_quick_change_factor(QUICK_SHELL_CHANGER_FACTOR),
             collision: loadout.collision.clone(),
-            vision: loadout.vision,
-            mobility: loadout.mobility,
+            vision: loadout.vision.clone(),
+            mobility: loadout.mobility.clone(),
             aiming: loadout.aiming.clone(),
             last_shot: None,
             health: loadout.max_health.into(),
@@ -288,7 +288,7 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             stun: None,
-            siege: loadout.siege.map(|siege| Siege::new(siege, loadout.mobility)),
+            siege: loadout.siege.clone().map(|siege| Siege::new(siege, loadout.mobility.clone())),
             under_water: None,
             gun_locked: false,
         })
@@ -314,8 +314,10 @@ impl BattleVehicle {
 
         let TeamStart { position, direction } = start;
         let ammo = def.shots.iter().cloned().zip(def.default_ammo().into_iter().map(|(_, count)| count)).collect();
-        let gun = GunLoader::new(ammo, def.aiming.reload_time).with_magazine(def.magazine).with_shot_ids_from(BOT_FIRST_SHOT_ID * (index + 1));
-        let driven = Vehicle::new(position, direction, def.mobility, def.aiming.clone());
+        let gun = GunLoader::new(ammo, def.aiming.reload_time)
+            .with_magazine(def.magazine.clone())
+            .with_shot_ids_from(BOT_FIRST_SHOT_ID * (index + 1));
+        let driven = Vehicle::new(position, direction, def.mobility.clone(), def.aiming.clone());
         let gun_angles = driven.turret.gun_angles_packed();
 
         let public = public_info(name, compact_descr, team, def.max_health as u16, def.crew_roles.len());
@@ -340,8 +342,8 @@ impl BattleVehicle {
             id: world.add(driven),
             gun,
             collision: def.collision.clone(),
-            vision: def.vision,
-            mobility: def.mobility,
+            vision: def.vision.clone(),
+            mobility: def.mobility.clone(),
             aiming: def.aiming.clone(),
             last_shot: None,
             health: def.max_health.into(),
@@ -353,7 +355,7 @@ impl BattleVehicle {
             damage_stickers: Vec::new(),
             fire: None,
             stun: None,
-            siege: def.siege.map(|siege| Siege::new(siege, def.mobility)),
+            siege: def.siege.clone().map(|siege| Siege::new(siege, def.mobility.clone())),
             under_water: None,
             gun_locked: false,
         })
@@ -545,7 +547,7 @@ impl BattleVehicle {
         }
 
         let started = self.stun.is_none();
-        let (until, effect) = match self.stun {
+        let (until, effect) = match &self.stun {
             Some(stun) => (stun.until.max(until), stun.effect.max(effect)),
             None => (until, effect),
         };
@@ -563,14 +565,20 @@ impl BattleVehicle {
     /// client drives it, how it aims and how far it sees now.
     fn apply_stun(&mut self, app: &mut base::App, driven: &mut Vehicle) -> io::Result<()> {
 
-        let effects = self.stun.map(|stun| stun.effects.scaled(stun.effect));
-        driven.hull.mobility = effects.map_or(self.mobility, |effects| effects.mobility(&self.mobility));
-        driven.turret.aiming = effects.map_or_else(|| self.aiming.clone(), |effects| effects.aiming(&self.aiming));
-        self.gun.set_reload_factor(effects.map_or(1.0, |effects| effects.reload_time));
+        let effects = self.stun.as_ref().map(|stun| stun.effects.scaled(stun.effect));
+        driven.hull.mobility = match &effects {
+            Some(effects) => effects.mobility(&self.mobility),
+            None => self.mobility.clone(),
+        };
+        driven.turret.aiming = match &effects {
+            Some(effects) => effects.aiming(&self.aiming),
+            None => self.aiming.clone(),
+        };
+        self.gun.set_reload_factor(effects.as_ref().map_or(1.0, |effects| effects.reload_time));
 
         let Some(own_vehicle) = self.client_driver().and_then(|driver| driver.own_vehicle) else { return Ok(()) };
         let turret = &driven.turret;
-        let dispersion_factor = effects.map_or(1.0, |effects| effects.min_dispersion);
+        let dispersion_factor = effects.as_ref().map_or(1.0, |effects| effects.min_dispersion);
         let mut own_vehicle = app.component(own_vehicle)?;
         own_vehicle.set_targetingInfo(Some(targeting_info(&turret.aiming, dispersion_factor, turret.yaw, turret.pitch)))?;
         own_vehicle.set_syncVehicleAttrs(VehicleSyncAttrs {
@@ -583,7 +591,7 @@ impl BattleVehicle {
 
     /// How far it sees, in metres, its crew's stun shortening it.
     pub fn view_range(&self) -> f32 {
-        let factor = self.stun.map_or(1.0, |stun| stun.effects.scaled(stun.effect).view_distance);
+        let factor = self.stun.as_ref().map_or(1.0, |stun| stun.effects.scaled(stun.effect).view_distance);
         self.vision.view_range * factor
     }
 
@@ -827,8 +835,8 @@ impl BattleVehicle {
         }
 
         let (state, mobility) = match siege.state {
-            SIEGE_SWITCHING_ON => (SIEGE_ENABLED, siege.def.mobility),
-            SIEGE_SWITCHING_OFF => (SIEGE_DISABLED, siege.default),
+            SIEGE_SWITCHING_ON => (SIEGE_ENABLED, siege.def.mobility.clone()),
+            SIEGE_SWITCHING_OFF => (SIEGE_DISABLED, siege.default.clone()),
             _ => return Ok(()),
         };
         siege.state = state;

@@ -187,6 +187,11 @@ fn splash(&mut self, …) -> io::Result<Vec<(u32, i64)>>
 fn splash(&mut self, …) -> io::Result<Vec<(EntityId, i64)>>
 ```
 
+### Definitions
+
+Definition types, the `…Def`s read from the game's files and what they hold, derive
+`Clone` but never `Copy`: copying one is always a visible `.clone()`.
+
 ### Doc comments
 
 Doc comments (`///`, `//!`) describe what the code is and does now. They never mention

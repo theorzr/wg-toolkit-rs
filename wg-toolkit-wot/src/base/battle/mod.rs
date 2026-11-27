@@ -1477,7 +1477,7 @@ impl Battle {
     /// stunned has its result flag the stun's start, a result of its own if undamaged.
     fn stun(&mut self, app: &mut base::App, shot: &Shot, results: &mut Vec<ShellHitResult>) -> io::Result<()> {
 
-        let Some(stun) = shot.def.stun else { return Ok(()) };
+        let Some(stun) = &shot.def.stun else { return Ok(()) };
         let now = self.game_time();
         let id = self.id;
 
@@ -1499,7 +1499,7 @@ impl Battle {
             let took = result.as_ref().map_or(0, |result| result.dealt);
             let (duration, effect) = stun.of_damage(took as f32 / shot.def.damage_near);
             let driven = self.world.vehicle_mut(vehicle.id);
-            if !vehicle.stun(app, id, driven, now + duration as f64, effect, stun.effects)? {
+            if !vehicle.stun(app, id, driven, now + duration as f64, effect, stun.effects.clone())? {
                 continue;
             }
 

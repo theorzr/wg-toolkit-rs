@@ -94,7 +94,7 @@ pub struct VehicleDef {
 /// moves in it, from its own definition, `<name>_siege_mode.xml`, and how long it takes
 /// to switch to it and back, in seconds, `siege_mode/switchOnTime` and `switchOffTime`.
 /// A wheeled vehicle's is its fast one: faster, steering less.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SiegeDef {
     pub mobility: MobilityDef,
     pub switch_on: f32,
@@ -103,7 +103,7 @@ pub struct SiegeDef {
 
 /// How a vehicle moves with its default modules: the values the game derives its
 /// physics from, see `VehicleDescriptor.physics`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MobilityDef {
     /// Top speeds forward and backward, in m/s.
     pub speed_forward: f32,
@@ -141,7 +141,7 @@ pub struct MobilityDef {
 }
 
 /// A wheel of a chassis: its centre, in the vehicle's frame, and its radius, in metres.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WheelDef {
     pub center: Vec3,
     pub radius: f32,
@@ -151,7 +151,7 @@ pub struct WheelDef {
 /// nodes place them (`<chassis>.visual_processed`): those its tracks rest on, the road
 /// wheels, and those its tracks turn around at their ends, the leading ones, its idlers
 /// and sprockets, `isLeading`. The return rollers, on top of its tracks, aren't kept.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Wheels {
     road: [WheelDef; MAX_ROAD_WHEELS],
     road_count: u8,
@@ -170,14 +170,14 @@ impl Wheels {
         let road = &road[..road.len().min(MAX_ROAD_WHEELS)];
         let ends = &ends[..ends.len().min(MAX_TRACK_ENDS)];
         let mut wheels = Self {
-            road: [WheelDef::default(); MAX_ROAD_WHEELS],
+            road: std::array::from_fn(|_| WheelDef::default()),
             road_count: road.len() as u8,
-            ends: [WheelDef::default(); MAX_TRACK_ENDS],
+            ends: std::array::from_fn(|_| WheelDef::default()),
             end_count: ends.len() as u8,
             track_thickness,
         };
-        wheels.road[..road.len()].copy_from_slice(road);
-        wheels.ends[..ends.len()].copy_from_slice(ends);
+        wheels.road[..road.len()].clone_from_slice(road);
+        wheels.ends[..ends.len()].clone_from_slice(ends);
         wheels
     }
 
@@ -385,7 +385,7 @@ pub struct ShotDef {
 /// gun's shot overriding it, the rest from `common/stun.xml`. A vehicle within its
 /// radius is stunned for a share of its duration, at a share of its effect: each a
 /// guaranteed part, and a part that grows with the damage it took.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StunDef {
     /// In metres: the shell's explosion radius unless set.
     pub radius: f32,
@@ -410,7 +410,7 @@ pub struct StunDef {
 /// range, its reload and aiming times, and its gun's dispersion, at rest and as it moves,
 /// turns or turns its turret. A weaker stun has each factor that much nearer 1, see
 /// [`Self::scaled`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StunEffects {
     pub engine_power: f32,
     pub max_speed: f32,
@@ -563,7 +563,7 @@ impl StunEffects {
             speed_forward: mobility.speed_forward * self.max_speed,
             speed_backward: mobility.speed_backward * self.max_speed,
             rotation_speed: mobility.rotation_speed.map(|speed| speed * self.rotation_speed),
-            ..*mobility
+            ..mobility.clone()
         }
     }
 
@@ -629,7 +629,7 @@ pub struct AimingDef {
 /// How far the vehicle sees with its default turret, and how hard it is to see, as the
 /// client's item loader reads them (`vehicles.py`): before crew, equipment and the
 /// camouflage paint's bonus.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VisionDef {
     /// How far its turret sees, in metres: its `circularVisionRadius`.
     pub view_range: f32,
@@ -645,7 +645,7 @@ pub struct VisionDef {
 /// How the default gun's shells come, beyond one per reload: from a magazine (`clip` to
 /// the game), in bursts, as `_readGunClip` and `_readGunBurst` read them, its own section for the vehicle if
 /// it has one, else the shared gun's.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MagazineDef {
     /// The shells in a full magazine, 1 without one: the gun reloads it whole once
     /// empty, in its reload time.
@@ -1354,7 +1354,7 @@ fn read_wheels(fs: &ResFilesystem, chassis: &Element) -> io::Result<Option<Wheel
 
     let road: Vec<WheelDef> = found.iter()
         .filter(|(wheel, leading)| !leading && wheel.center.y - wheel.radius <= lowest + ROAD_WHEEL_RISE)
-        .map(|(wheel, _)| *wheel)
+        .map(|(wheel, _)| wheel.clone())
         .collect();
     let bottoms = road.iter().map(|wheel| wheel.center.y - wheel.radius).sum::<f32>();
     let track_thickness = (bottoms / road.len() as f32).max(0.0);
@@ -1364,10 +1364,10 @@ fn read_wheels(fs: &ResFilesystem, chassis: &Element) -> io::Result<Option<Wheel
     for right in [true, false] {
         let side: Vec<WheelDef> = found.iter()
             .filter(|(wheel, leading)| *leading && (wheel.center.x > 0.0) == right)
-            .map(|(wheel, _)| *wheel)
+            .map(|(wheel, _)| wheel.clone())
             .collect();
-        let front = side.iter().copied().max_by(|a, b| a.center.z.total_cmp(&b.center.z));
-        let back = side.iter().copied().min_by(|a, b| a.center.z.total_cmp(&b.center.z));
+        let front = side.iter().cloned().max_by(|a, b| a.center.z.total_cmp(&b.center.z));
+        let back = side.iter().cloned().min_by(|a, b| a.center.z.total_cmp(&b.center.z));
         for wheel in [front, back].into_iter().flatten() {
             if !ends.contains(&wheel) {
                 ends.push(wheel);
@@ -1524,7 +1524,7 @@ mod tests {
 
         let stunning = shot_of(&def, 99);
         assert_eq!(stunning.explosion_radius, 11.6);
-        let stun = stunning.stun.unwrap();
+        let stun = stunning.stun.clone().unwrap();
         assert_eq!(stun, StunDef {
             radius: 11.6,
             duration: 33.0,
