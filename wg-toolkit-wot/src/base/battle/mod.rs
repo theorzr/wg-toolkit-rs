@@ -105,6 +105,10 @@ const MARKED_DEPTH: f32 = 2.0;
 const DEBUG_HIT_RISE: f32 = 1.0;
 const DEBUG_HIT_TEXT: Vec4 = Vec4::new(255.0, 255.0, 255.0, 255.0);
 
+/// How long a gun reloads after `/reload` without a time, in seconds, see
+/// [`Battle::reload_command`]. The user's choice.
+const FORCED_RELOAD: f32 = 0.1;
+
 
 /// A battle, with its clients, see the module's documentation.
 #[derive(Debug)]
@@ -697,7 +701,7 @@ impl Battle {
     ///   /debug off             none drawn
     ///   /bot ...               orders to bots, see `bot_command`
     ///   /route ...             the route bots follow, see `route_command`
-    ///   /reload [on|off]       its gun reloading instantly, its shells not counted, see
+    ///   /reload [<s>|on|off]   its gun reloading this fast, its shells not counted, see
     ///                          `reload_command`
     /// ```
     fn command(&mut self, app: &mut base::App, from: usize, line: &str) -> io::Result<()> {
@@ -1084,12 +1088,14 @@ impl Battle {
     }
 
     /// The `/reload` command of a participant, with the words after it, see
-    /// [`Self::command`], for devs only: whether its gun reloads instantly after it, its
-    /// shells fired not counted, see `GunLoader::set_instant`, else what is wrong.
+    /// [`Self::command`], for devs only: how long its gun reloads after it, its shells
+    /// fired not counted then, see `GunLoader::set_forced_reload`, else what is wrong.
     ///
     /// ```text
-    ///   /reload                instantly if it didn't, else as long as it should
-    ///   /reload on|off         instantly, or as long as it should
+    ///   /reload                in FORCED_RELOAD if it didn't, else as long as it should
+    ///   /reload on             in FORCED_RELOAD
+    ///   /reload <seconds>      in this many seconds
+    ///   /reload off            as long as it should
     /// ```
     fn reload_command<'a>(&mut self, from: usize, mut words: impl Iterator<Item = &'a str>) -> Result<String, String> {
 
@@ -1099,16 +1105,26 @@ impl Battle {
 
         let now = self.game_time();
         let vehicle = &mut self.vehicles[self.participants[from].vehicle];
-        let instant = match words.next() {
-            None => !vehicle.gun.is_instant(),
-            Some("on") => true,
-            Some("off") => false,
-            Some(word) => return Err(format!("Unknown reload option: {word}, of on, off")),
+        let time = match words.next() {
+            None if vehicle.gun.forced_reload().is_some() => None,
+            None |
+            Some("on") => Some(FORCED_RELOAD),
+            Some("off") => None,
+            Some(word) => {
+                let seconds = word.parse::<f32>()
+                    .ok()
+                    .filter(|&seconds| seconds >= 0.0)
+                    .ok_or_else(|| format!("Not a reload time: {word} s, or on, off"))?;
+                Some(seconds)
+            }
         };
 
-        vehicle.gun.set_instant(now, instant);
-        info!(battle = self.id, entity_id = %vehicle.entity.id(), instant, "Changed the gun's reload");
-        Ok(if instant { "Instant reload: on" } else { "Instant reload: off" }.to_string())
+        vehicle.gun.set_forced_reload(now, time);
+        info!(battle = self.id, entity_id = %vehicle.entity.id(), forced_reload = ?time, "Changed the gun's reload");
+        match time {
+            Some(seconds) => Ok(format!("Reload: {seconds} s, shells not counted")),
+            None => Ok("Reload: as long as it should".to_string()),
+        }
 
     }
 
