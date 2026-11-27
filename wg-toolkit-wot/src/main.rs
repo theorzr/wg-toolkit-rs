@@ -238,6 +238,10 @@ pub struct BaseArgs {
     /// each in turn, and bots fill the rest.
     #[arg(long, default_value_t = 1)]
     pub team_size: u32,
+    /// Put the players in the first team instead of splitting them, the second only
+    /// once the first is full.
+    #[arg(long)]
+    pub same_team: bool,
     /// A vehicle bots drive, as `--give-vehicle` takes it: each bot drives the next,
     /// round, else the player's own. Can be repeated.
     #[arg(long)]

@@ -257,6 +257,7 @@ impl BaseThread {
         let vehicles = args.give_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?;
         let battle_options = BattleOptions {
             team_size: args.team_size,
+            same_team: args.same_team,
             bot_vehicles: args.bot_vehicle.iter().map(load_vehicle).collect::<CliResult<Vec<_>>>()?,
             debug_draw: DebugChannels::of(&args.debug_draw),
             enemy_distance: args.enemy_distance,
@@ -265,6 +266,7 @@ impl BaseThread {
 
         info!(
             team_size = args.team_size,
+            same_team = args.same_team,
             bot_vehicles = ?args.bot_vehicle,
             debug_draw = ?args.debug_draw,
             enemy_distance = ?args.enemy_distance,

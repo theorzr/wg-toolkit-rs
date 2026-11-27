@@ -148,6 +148,9 @@ pub struct Battle {
 pub struct BattleOptions {
     /// How many vehicles each team has, its clients' then bots.
     pub team_size: u32,
+    /// Whether its clients fill the first team, the second only once it is full, instead
+    /// of going on either team in turn.
+    pub same_team: bool,
     /// The vehicles bots drive, each the next, round: the first client's own when none.
     pub bot_vehicles: Vec<VehicleDef>,
     /// What it draws to be debugged in its clients' world as it starts, see
@@ -219,7 +222,8 @@ impl Gathering {
 impl Battle {
 
     /// A battle in its own space, with its map, made for these clients entering it with
-    /// their avatars: their vehicles, on either team in turn, in rows from their team's
+    /// their avatars: their vehicles, on either team in turn, or on the first until full
+    /// if its options say so, in rows from their team's
     /// start, their avatars' cell sides on them, then the bots filling each team, and each
     /// client's arena info entity, which each client gets in that order. Each sees its
     /// allies and the enemies its team spots, see [`Participant::spot`].
@@ -229,9 +233,9 @@ impl Battle {
         let terrain = &map_space.terrain;
         let mut world = World::new(map_space.clone(), Some(map.bounds));
 
-        // The clients' vehicles, on either team in turn, from their team's start, where the
-        // first of the team stands then: the first team's where the options spawn it, the
-        // second's in front of it if the options say so.
+        // The clients' vehicles, on either team in turn, or the first until full, from
+        // their team's start, where the first of the team stands then: the first team's
+        // where the options spawn it, the second's in front of it if the options say so.
         let first_start = match options.spawn {
             Some((at, yaw)) => TeamStart::at(at, yaw, terrain),
             None => TeamStart::team(map, terrain, TEAMS[0]),
@@ -246,7 +250,7 @@ impl Battle {
         for (index, arrival) in arrivals.iter().enumerate() {
 
             let Arrival { client, avatar, player, loadout } = arrival;
-            let side = index % 2;
+            let side = if options.same_team { usize::from(index as u32 >= options.team_size) } else { index % 2 };
             let slot = team_sizes[side];
             let at = starts[side].slot(slot, terrain);
             let info_index = vehicles.len() as u32;
