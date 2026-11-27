@@ -58,8 +58,8 @@ pub struct GunLoader {
     reload_time: f32,
     /// What its whole reloads take as long as, see [`Self::set_reload_factor`].
     reload_factor: f32,
-    /// Whether its reloads and its magazine's intervals take no time, see
-    /// [`Self::set_instant`].
+    /// Whether its reloads and its magazine's intervals take no time, and its shells
+    /// fired are not counted, see [`Self::set_instant`].
     instant: bool,
     /// How long changing the shell of a loaded gun takes, as a share of its whole
     /// reload; it takes a whole reload unless within 0 and 1.
@@ -211,9 +211,11 @@ impl GunLoader {
             return None;
         }
 
-        // One shell fewer, of the magazine and of the ammunition.
+        // One shell fewer, of the magazine and of the ammunition, unless instant.
         let (def, count) = self.ammo.get_mut(self.loaded_shell).filter(|(_, count)| *count > 0)?;
-        *count -= 1;
+        if !self.instant {
+            *count -= 1;
+        }
         self.magazine_shells -= 1;
         let def = def.clone();
 
@@ -378,15 +380,15 @@ impl GunLoader {
         self.reload_factor = factor;
     }
 
-    /// Whether its reloads and its magazine's intervals take no time, see
-    /// [`Self::set_instant`].
+    /// Whether its reloads and its magazine's intervals take no time, and its shells
+    /// fired are not counted, see [`Self::set_instant`].
     pub fn is_instant(&self) -> bool {
         self.instant
     }
 
     /// Have its reloads and its magazine's intervals take no time from game time `now`
-    /// on, the one going on ending now, or as long as their own again. A burst's shells
-    /// keep their interval.
+    /// on, the one going on ending now, and its shells fired not counted, or as it
+    /// should again. A burst's shells keep their interval.
     pub fn set_instant(&mut self, now: f64, instant: bool) {
         self.instant = instant;
         if let Some(reload) = self.reload.as_mut().filter(|_| instant) {
@@ -740,6 +742,7 @@ mod tests {
         fire(&mut gun, 5.0).unwrap();
         assert!(gun.take_loaded(5.0));
         assert!(fire(&mut gun, 5.0).is_some());
+        assert_eq!(gun.ammo[0].1, 18);
 
         // As long as they should again, once its magazine is empty.
         gun.set_instant(5.0, false);

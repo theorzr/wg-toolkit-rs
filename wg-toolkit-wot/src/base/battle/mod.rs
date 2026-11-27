@@ -693,7 +693,8 @@ impl Battle {
     ///   /debug off             none drawn
     ///   /bot ...               orders to bots, see `bot_command`
     ///   /route ...             the route bots follow, see `route_command`
-    ///   /reload [on|off]       its gun reloading instantly, see `reload_command`
+    ///   /reload [on|off]       its gun reloading instantly, its shells not counted, see
+    ///                          `reload_command`
     /// ```
     fn command(&mut self, app: &mut base::App, from: usize, line: &str) -> io::Result<()> {
 
@@ -1079,8 +1080,8 @@ impl Battle {
     }
 
     /// The `/reload` command of a participant, with the words after it, see
-    /// [`Self::command`], for devs only: whether its gun reloads instantly after it, see
-    /// `GunLoader::set_instant`, else what is wrong.
+    /// [`Self::command`], for devs only: whether its gun reloads instantly after it, its
+    /// shells fired not counted, see `GunLoader::set_instant`, else what is wrong.
     ///
     /// ```text
     ///   /reload                instantly if it didn't, else as long as it should
