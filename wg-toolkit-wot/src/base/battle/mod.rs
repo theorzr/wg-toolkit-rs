@@ -693,6 +693,7 @@ impl Battle {
     ///   /debug off             none drawn
     ///   /bot ...               orders to bots, see `bot_command`
     ///   /route ...             the route bots follow, see `route_command`
+    ///   /reload [on|off]       its gun reloading instantly, see `reload_command`
     /// ```
     fn command(&mut self, app: &mut base::App, from: usize, line: &str) -> io::Result<()> {
 
@@ -701,6 +702,7 @@ impl Battle {
             Some("debug") => self.debug_command(from, words),
             Some("bot") => self.bot_command(from, words),
             Some("route") => self.route_command(from, words),
+            Some("reload") => self.reload_command(from, words),
             Some(name) => Err(format!("Unknown command: /{name}")),
             None => Err("No command after /".to_string()),
         };
@@ -1073,6 +1075,35 @@ impl Battle {
             "Changed the bots' route",
         );
         Ok(format!("{} points on the route{recording}", route.points.len()))
+
+    }
+
+    /// The `/reload` command of a participant, with the words after it, see
+    /// [`Self::command`], for devs only: whether its gun reloads instantly after it, see
+    /// `GunLoader::set_instant`, else what is wrong.
+    ///
+    /// ```text
+    ///   /reload                instantly if it didn't, else as long as it should
+    ///   /reload on|off         instantly, or as long as it should
+    /// ```
+    fn reload_command<'a>(&mut self, from: usize, mut words: impl Iterator<Item = &'a str>) -> Result<String, String> {
+
+        if !self.participants[from].dev {
+            return Err("Only devs may use /reload".to_string());
+        }
+
+        let now = self.game_time();
+        let vehicle = &mut self.vehicles[self.participants[from].vehicle];
+        let instant = match words.next() {
+            None => !vehicle.gun.is_instant(),
+            Some("on") => true,
+            Some("off") => false,
+            Some(word) => return Err(format!("Unknown reload option: {word}, of on, off")),
+        };
+
+        vehicle.gun.set_instant(now, instant);
+        info!(battle = self.id, entity_id = %vehicle.entity.id(), instant, "Changed the gun's reload");
+        Ok(if instant { "Instant reload: on" } else { "Instant reload: off" }.to_string())
 
     }
 

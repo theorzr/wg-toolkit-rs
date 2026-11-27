@@ -39,9 +39,9 @@ const BATTLE_LENGTH: Duration = Duration::from_secs(900);
 /// How long after a team is exterminated the battle is over, its clients told who won.
 /// The user's choice.
 const EXTERMINATION_DELAY: Duration = Duration::from_secs(5);
-/// How long a battle stays over before its clients are sent back to their garage. Our
-/// choice: enough to read who won.
-const AFTER_BATTLE_LENGTH: Duration = Duration::from_secs(10);
+/// How long a battle stays over, showing who won, before its clients are sent back to
+/// their garage. The user's choice.
+const AFTER_BATTLE_LENGTH: Duration = Duration::from_secs(3);
 /// How long a battle waits for its clients to be ready, done loading, before counting
 /// down anyway. Our choice: a slow machine loading a map.
 const READY_WAIT: Duration = Duration::from_secs(60);

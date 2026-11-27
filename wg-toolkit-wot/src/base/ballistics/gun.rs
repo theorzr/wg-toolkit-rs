@@ -58,6 +58,9 @@ pub struct GunLoader {
     reload_time: f32,
     /// What its whole reloads take as long as, see [`Self::set_reload_factor`].
     reload_factor: f32,
+    /// Whether its reloads and its magazine's intervals take no time, see
+    /// [`Self::set_instant`].
+    instant: bool,
     /// How long changing the shell of a loaded gun takes, as a share of its whole
     /// reload; it takes a whole reload unless within 0 and 1.
     quick_change_factor: f32,
@@ -97,6 +100,7 @@ impl GunLoader {
             burst_shells: None,
             reload_time,
             reload_factor: 1.0,
+            instant: false,
             quick_change_factor: 1.0,
             reload: None,
             next_shot_id: 1,
@@ -158,7 +162,7 @@ impl GunLoader {
         // once the burst empties it.
         if burst > 1 {
             let burst_time = (burst - 1) as f32 * self.magazine.burst_interval;
-            let wait = if self.magazine_shells > burst - 1 { self.magazine.interval } else { self.reload_time() };
+            let wait = if self.magazine_shells > burst - 1 { self.interval() } else { self.reload_time() };
             self.burst_shells = Some((burst - 1, now + f64::from(self.magazine.burst_interval)));
             self.start_reload(now, burst_time + wait);
         } else {
@@ -225,7 +229,7 @@ impl GunLoader {
     /// else reload whole with the next shell.
     fn after_shots(&mut self, now: f64) {
         if self.magazine_shells > 0 {
-            self.start_reload(now, self.magazine.interval);
+            self.start_reload(now, self.interval());
         } else {
             self.load_next();
             self.start_reload(now, self.reload_time());
@@ -357,15 +361,37 @@ impl GunLoader {
         self.reload
     }
 
-    /// The length of a whole reload, in seconds, as long as its factor has it.
+    /// The length of a whole reload, in seconds, as long as its factor has it, none if
+    /// instant.
     pub fn reload_time(&self) -> f32 {
-        self.reload_time * self.reload_factor
+        if self.instant { 0.0 } else { self.reload_time * self.reload_factor }
+    }
+
+    /// The wait between two shots of its magazine, in seconds, none if instant.
+    fn interval(&self) -> f32 {
+        if self.instant { 0.0 } else { self.magazine.interval }
     }
 
     /// Have its whole reloads from now on take as long as this factor of their own, a
     /// stunned crew's longer, the one going on as it is.
     pub fn set_reload_factor(&mut self, factor: f32) {
         self.reload_factor = factor;
+    }
+
+    /// Whether its reloads and its magazine's intervals take no time, see
+    /// [`Self::set_instant`].
+    pub fn is_instant(&self) -> bool {
+        self.instant
+    }
+
+    /// Have its reloads and its magazine's intervals take no time from game time `now`
+    /// on, the one going on ending now, or as long as their own again. A burst's shells
+    /// keep their interval.
+    pub fn set_instant(&mut self, now: f64, instant: bool) {
+        self.instant = instant;
+        if let Some(reload) = self.reload.as_mut().filter(|_| instant) {
+            reload.end = reload.end.min(now);
+        }
     }
 
     /// Fill the magazine again once its whole reload is over by game time `now`, before
@@ -696,6 +722,41 @@ mod tests {
         assert!(gun.change_loaded(12.0, shell_of(1).compact_descr.to_int()));
         assert_eq!(gun.reload(), reloading(2.5, 14.5));
 
+    }
+
+    #[test]
+    fn reloads_instantly_once_set() {
+
+        let mut gun = GunLoader::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(2, 1));
+        fire(&mut gun, 0.0).unwrap();
+        fire(&mut gun, 2.0).unwrap();
+        assert_eq!(gun.reload(), reloading(10.0, 12.0));
+
+        // The reload going on ends now, the next ones take no time.
+        gun.set_instant(5.0, true);
+        assert!(gun.take_loaded(5.0));
+        fire(&mut gun, 5.0).unwrap();
+        assert_eq!(gun.reload(), reloading(0.0, 5.0));
+        fire(&mut gun, 5.0).unwrap();
+        assert!(gun.take_loaded(5.0));
+        assert!(fire(&mut gun, 5.0).is_some());
+
+        // As long as they should again, once its magazine is empty.
+        gun.set_instant(5.0, false);
+        fire(&mut gun, 5.0).unwrap();
+        assert_eq!(gun.reload(), reloading(10.0, 15.0));
+        assert!(fire(&mut gun, 6.0).is_none());
+
+    }
+
+    #[test]
+    fn instant_reloads_keep_the_burst_interval() {
+        let mut gun = GunLoader::new(vec![(shell_of(1), 20)], 10.0).with_magazine(magazine(6, 3));
+        gun.set_instant(0.0, true);
+        fire(&mut gun, 0.0).unwrap();
+        assert_eq!(gun.reload(), reloading(1.0, 1.0));
+        assert!(fire_burst(&mut gun, 0.4).is_none());
+        fire_burst(&mut gun, 0.5).unwrap();
     }
 
     #[test]
