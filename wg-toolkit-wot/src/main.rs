@@ -247,7 +247,7 @@ pub struct BaseArgs {
     #[arg(long)]
     pub bot_vehicle: Vec<String>,
     /// What battles draw to be debugged in their clients' world, as a list of channels,
-    /// `spotting,spot-points`: how each vehicle is spotted, under it, and its checkpoints
+    /// `spotting,points`: how each vehicle is spotted, under it, and its checkpoints
     /// and its enemies' best line of sight to them. Alone, `spotting`.
     #[arg(long, value_enum, value_delimiter = ',', num_args = 0..=1, default_missing_value = "spotting")]
     pub debug_draw: Vec<DebugChannel>,

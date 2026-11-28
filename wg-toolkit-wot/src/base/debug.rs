@@ -82,7 +82,7 @@ pub enum DebugChannel {
     /// Under each vehicle, how its enemies best look at it, see `Spotting::debug_draw`.
     Spotting,
     /// Each vehicle's checkpoints, and its enemies' best line of sight to one of them.
-    SpotPoints,
+    Points,
     /// Where each vehicle touches the space and the others, as its body steps, see the
     /// physics' `body` and `collision` modules.
     Contacts,
@@ -95,6 +95,9 @@ pub enum DebugChannel {
     /// The water's shoreline near the vehicles, and how deep the water is under those in
     /// it, see `World::debug_draw_water`.
     Water,
+    /// The boxes of the plants near the players' vehicles, trees and bushes, which hide
+    /// what is behind them, see `World::debug_draw_foliage`.
+    Foliage,
 }
 
 /// A set of [`DebugChannel`]s.
@@ -181,11 +184,12 @@ impl DebugChannel {
     pub fn name(self) -> &'static str {
         match self {
             DebugChannel::Spotting => "spotting",
-            DebugChannel::SpotPoints => "spot-points",
+            DebugChannel::Points => "points",
             DebugChannel::Contacts => "contacts",
             DebugChannel::Shells => "shells",
             DebugChannel::Bots => "bots",
             DebugChannel::Water => "water",
+            DebugChannel::Foliage => "foliage",
         }
     }
 
@@ -512,6 +516,32 @@ pub fn cross(channel: DebugChannel, at: Vec3, color: Vec4) {
         let half = axis * CROSS_SIZE / 2.0;
         line(channel, at - half, at + half, color);
     }
+}
+
+/// A box's 12 edges, in this colour, see [`line`]: its corners, minimum then maximum,
+/// in a frame that `transform` places in the world.
+pub fn cuboid(channel: DebugChannel, transform: &Affine3A, bounds: [Vec3; 2], color: Vec4) {
+
+    // Each corner by its index's bits, x, y then z: the bounds' maximum where set.
+    let [low, high] = bounds;
+    let corners: [Vec3; 8] = std::array::from_fn(|index| {
+        let corner = Vec3::new(
+            if index & 1 == 0 { low.x } else { high.x },
+            if index & 2 == 0 { low.y } else { high.y },
+            if index & 4 == 0 { low.z } else { high.z },
+        );
+        transform.transform_point3(corner)
+    });
+
+    // Each edge joins two corners one bit apart.
+    for index in 0..8 {
+        for bit in [1, 2, 4] {
+            if index & bit == 0 {
+                line(channel, corners[index], corners[index | bit], color);
+            }
+        }
+    }
+
 }
 
 /// A text at `at`, in the world, of several lines, in this colour, red, green, blue and

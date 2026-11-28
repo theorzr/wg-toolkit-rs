@@ -193,8 +193,8 @@ use glam::{Affine3A, EulerRot, Quat, Vec2, Vec3, Vec3Swizzles, Vec4};
 use tracing::{info, warn};
 
 use wgtk::space::statics::{BodyKind, StaticTriangle};
+use wgtk::space::foliage::{FoliageCrossing, Plant};
 use wgtk::space::destructibles::DestructibleKind;
-use wgtk::space::foliage::FoliageCrossing;
 use wgtk::app::slots::{SlotKey, Slots};
 use wgtk::space::terrain::Ground;
 use wgtk::space::Space;
@@ -247,6 +247,16 @@ const DEBUG_SHORELINE: Vec4 = Vec4::new(60.0, 140.0, 255.0, 255.0);
 const DEBUG_WATER_TEXT: Vec4 = Vec4::new(120.0, 190.0, 255.0, 255.0);
 /// How high over a vehicle's hull the text of its water is, in metres.
 const DEBUG_WATER_TEXT_HEIGHT: f32 = 4.0;
+/// How wide the view a player's plants are drawn in is, on the ground plane, and how
+/// many of them at most, the nearest, see [`World::debug_draw_foliage`]. The user's
+/// choice.
+const DEBUG_FOLIAGE_VIEW: f32 = 30.0f32.to_radians();
+const DEBUG_FOLIAGE_PLANTS: usize = 30;
+/// The density at which a plant's box is drawn green, see [`debug_foliage_color`]: a
+/// tree's in leaf, as `destructibles.xml` gives it.
+const DEBUG_FOLIAGE_DENSE: f32 = 0.5;
+/// How bright the box of a tree knocked down is, of a standing one's.
+const DEBUG_FALLEN_SHADE: f32 = 0.5;
 
 /// A vehicle of a [`World`]. It is stale once the vehicle is removed, even if another one
 /// takes its place.
@@ -729,6 +739,53 @@ impl<S: Deref<Target = Space>> World<S> {
 
     }
 
+    /// Draw its space's foliage to be debugged, as [`Self::foliage`] sees it: the box of
+    /// each plant in these views, each an eye and the way it looks, the nearest
+    /// [`DEBUG_FOLIAGE_PLANTS`] within [`DEBUG_FOLIAGE_VIEW`] of each, on the ground
+    /// plane, however far, standing or knocked down, as far as it fell yet.
+    pub fn debug_draw_foliage(&self, views: &[(Vec3, Vec3)]) {
+
+        if !debug::draws(DebugChannel::Foliage) {
+            return;
+        }
+
+        // The plants in each view, the nearest first, each drawn once.
+        let mut drawn = Vec::new();
+        for &(eye, look) in views {
+
+            let look = look.xz().normalize_or_zero();
+            let mut seen = self.space.foliage.plants().iter()
+                .filter_map(|plant| {
+                    let to = Vec3::from(plant.transform.translation).xz() - eye.xz();
+                    let inside = to.angle_to(look).abs() <= DEBUG_FOLIAGE_VIEW / 2.0;
+                    inside.then_some((to.length(), plant))
+                })
+                .collect::<Vec<_>>();
+            seen.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+
+            for (_, plant) in seen.into_iter().take(DEBUG_FOLIAGE_PLANTS) {
+                if !drawn.iter().any(|drawn: &&Plant| drawn.tree == plant.tree) {
+                    drawn.push(plant);
+                }
+            }
+
+        }
+
+        for plant in drawn {
+            match self.falls.values().find(|fall| fall.tree == plant.tree) {
+                Some(fall) => {
+                    let color = debug_foliage_color(plant.density, DEBUG_FALLEN_SHADE);
+                    debug::cuboid(DebugChannel::Foliage, &fall.transform(), plant.bounds, color);
+                }
+                None => {
+                    let color = debug_foliage_color(plant.density, 1.0);
+                    debug::cuboid(DebugChannel::Foliage, &plant.transform, plant.bounds, color);
+                }
+            }
+        }
+
+    }
+
 }
 
 /// A live vehicle: its hull and its turret.
@@ -1014,6 +1071,16 @@ impl Footprint {
             .map(|(along, across)| self.middle + self.heading * along * self.half.y + self.right * across * self.half.x)
     }
 
+}
+
+/// The colour of a plant's box drawn to be debugged, by how much it hides, its
+/// `density`: red for none, yellow for half of [`DEBUG_FOLIAGE_DENSE`], a dry tree's,
+/// green from it on, as bright as `shade`, of 1.
+fn debug_foliage_color(density: f32, shade: f32) -> Vec4 {
+    let share = (density / DEBUG_FOLIAGE_DENSE).clamp(0.0, 1.0);
+    let red = (2.0 * (1.0 - share)).min(1.0);
+    let green = (2.0 * share).min(1.0);
+    Vec4::new(red * 255.0 * shade, green * 255.0 * shade, 0.0, 255.0)
 }
 
 /// A value moved toward a goal by at most `step`, without going past it.

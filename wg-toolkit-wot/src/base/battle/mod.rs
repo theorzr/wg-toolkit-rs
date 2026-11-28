@@ -1257,6 +1257,10 @@ impl Battle {
             route.debug_draw();
         }
         world.debug_draw_water();
+        let views = participants.iter()
+            .map(|participant| debug_view(world.vehicle(vehicles[participant.vehicle].id)))
+            .collect::<Vec<_>>();
+        world.debug_draw_foliage(&views);
 
         spotting.update(now, vehicles, world);
         for participant in participants.iter_mut() {
@@ -1611,6 +1615,18 @@ impl Battle {
 
     }
 
+}
+
+/// Where a player's vehicle looks, to draw the foliage in its view, see
+/// `World::debug_draw_foliage`: from its hull toward the point under its gun marker,
+/// else where its gun points.
+fn debug_view(driven: &Vehicle) -> (Vec3, Vec3) {
+    let eye = driven.hull.position;
+    let look = match driven.turret.marked() {
+        Some(marked) => marked - eye,
+        None => driven.turret.gun_marker(&driven.hull).1,
+    };
+    (eye, look)
 }
 
 /// Draw a shell's hit on a vehicle to be debugged, above `at`, for as long as its

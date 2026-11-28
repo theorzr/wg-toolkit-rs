@@ -336,7 +336,7 @@ impl Spotting {
     ///   ```
     ///
     ///   magenta if spotted, cyan if not, white if no enemy looks at it.
-    /// - [`DebugChannel::SpotPoints`]: its checkpoints, following it, its ports bigger,
+    /// - [`DebugChannel::Points`]: its checkpoints, following it, its ports bigger,
     ///   and the line of sight of that look, in the world, in its enemies' colour,
     ///   darker if it doesn't spot it, see [`DEBUG_TEAM_COLORS`].
     pub fn debug_draw(&self, vehicles: &[BattleVehicle], world: &World) {
@@ -353,14 +353,14 @@ impl Spotting {
                 }
                 for (number, &point) in self.points[index].iter().enumerate() {
                     let radius = if number < 2 { DEBUG_PORT_RADIUS } else { DEBUG_POINT_RADIUS };
-                    debug::sphere(DebugChannel::SpotPoints, point, radius);
+                    debug::sphere(DebugChannel::Points, point, radius);
                 }
             });
 
             if let Some(look) = look {
                 let enemies = if vehicle.team == TEAMS[0] { 1 } else { 0 };
                 let shade = if look.spots() { 1.0 } else { DEBUG_HIDDEN_SHADE };
-                debug::line(DebugChannel::SpotPoints, look.eye, look.at, DEBUG_TEAM_COLORS[enemies] * shade);
+                debug::line(DebugChannel::Points, look.eye, look.at, DEBUG_TEAM_COLORS[enemies] * shade);
             }
 
         }
